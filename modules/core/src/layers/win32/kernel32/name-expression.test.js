@@ -74,3 +74,16 @@ test('a long expression is matched without recursion', ()=>{
     assert.ok(isNameInExpression('*'.repeat(20000), 'name'));
     assert.ok(!isNameInExpression('?'.repeat(20000), 'name'));
 });
+
+test('a long expression against a long name costs two rows of the table, not the table', ()=>{
+    // A search pattern's last component of 32K characters against a name as
+    // long: the whole table is a gigabyte, a row of it a name long.
+    const long = 'A'.repeat(4096);
+    const before = process.memoryUsage().external + process.memoryUsage().heapUsed;
+    assert.ok(isNameInExpression(long, long.toLowerCase()));
+    assert.ok(!isNameInExpression(`${long}B`, long));
+    assert.ok(isNameInExpression(`${long.slice(1)}>`, long), 'a DOS_QM at the end');
+    assert.ok(isNameInExpression(`${long.slice(1)}>>>`, long), 'a run of them');
+    const grown = process.memoryUsage().external + process.memoryUsage().heapUsed - before;
+    assert.ok(grown < 4 * 2 ** 20, `${grown} bytes grown`);
+});
