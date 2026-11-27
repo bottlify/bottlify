@@ -80,6 +80,15 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
 
 ## Code
 
+- **One general solution, for everything at once.** The code reads as a clean project's would:
+  behaviour rests on standard forms and one mechanism per kind of thing, not on logic written
+  again where it is met. Before writing a case, find the general shape it is one instance of and
+  solve that, for every caller at once; a variant is the general form with a modifier, not a copy.
+  `GetModuleFileNameA` and `GetModuleFileNameW` are one implementation with a text width (ANSI
+  or UTF-16) as its modifier, and so is every A/W pair; a pointer is one canonical address made
+  once at the boundary, not normalized again at each use; a structure is one declaration laid
+  out at the process's width. Growing the code with logic that already exists elsewhere is
+  never the answer.
 - **Vanilla ES modules + JSDoc**, checked by `tsc --checkJs --noEmit`; a `.d.ts` only where JSDoc
   cannot say it. WASM only where it is already required (cork's output, the prebuilt FFmpeg
   decoder) or where a profile proves a hot path needs it.
