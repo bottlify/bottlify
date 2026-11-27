@@ -299,12 +299,12 @@ test('a glyph or the metrics of a font measured before make nothing: no key a ch
         const advance = glyph=>glyph.advance;
         /** @type {any} */
         let kept = null;
-        // A read of the run's cache makes one view of the body (Cellar's `with`, about
-        // 96 bytes): nothing of the engine's own.
+        // A read of the run's cache reads the body through the view it read it
+        // through before (Cellar's \`with\`): nothing made, as in plain memory.
         const at = space ? 'in the run\'s cache' : 'in plain memory';
         assert.ok(await bytesPerCall(()=>{
             kept = engine.glyph(0x41, selected, advance);
-        }) < (space ? 128 : 8), `a glyph of a font seen, ${at}`);
+        }) < 8, `a glyph of a font seen, ${at}`);
         assert.equal(kept, first?.advance);
         assert.ok(await bytesPerCall(()=>{
             kept = engine.metrics(selected);
