@@ -94,6 +94,7 @@
     "src/layers/win32/common/overlapped.js",
     "src/layers/win32/common/pointers.js",
     "src/layers/win32/common/refusal.js",
+    "src/layers/win32/common/run-tables.js",
     "src/layers/win32/common/utf16.js",
     "src/layers/win32/crypto/digest.js",
     "src/layers/win32/dsetup/functions.js",
