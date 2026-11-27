@@ -149,37 +149,13 @@ const pixelAt = (bytes, at, bpp)=>{
 
 /**
  * Where a blit keeps the source rectangle and builds each destination row:
- * kept, so a blit costs no allocation for its rows -- a sprite is dozens of
- * them and a screen hundreds. A blit that needs more grows it for itself and
- * lets the growth go when it returns (`snapshotLetGo`), so what stays between
- * blits is these 64 KiB, not the largest rectangle ever copied.
+ * grown when a blit needs more, and kept, so a blit costs no allocation for
+ * its rows -- a sprite is dozens of them and a screen hundreds.
  */
-const SNAPSHOT_KEPT = new Uint8Array(1 << 16);
-let snapshotBytes = SNAPSHOT_KEPT;
+let snapshotBytes = new Uint8Array(1 << 16);
 let rowBytes = new Uint8Array(1 << 12);
 /** A view of `rowBytes`' first bytes, kept while blits write rows of that length. */
 let rowView = rowBytes.subarray(0, 0);
-
-/**
- * A blit's call wrapped so that the room it grew the snapshot to goes with it.
- *
- * @template {any[]} A
- * @param {(...args: A) => number} call
- * @returns {(...args: A) => number}
- */
-const snapshotLetGo = call=>(...args)=>{
-    try
-    {
-        return call(...args);
-    }
-    finally
-    {
-        snapshotBytes = SNAPSHOT_KEPT;
-    }
-};
-
-/** The bytes the blits keep between calls: the snapshot and the row. */
-export const blitHeldBytes = ()=>snapshotBytes.length + rowBytes.length;
 
 /** @param {number} length */
 const rowOf = length=>{
@@ -600,7 +576,7 @@ const DECODED_AT = 2 ** 32;
  * texels as into any surface, and the blocks it touched encoded again; the
  * others keep their bytes (Wine's test_compressed_surface_stretch).
  *
- * @param {Parameters<typeof bltOnce>[0]} request
+ * @param {Parameters<typeof blt>[0]} request
  * @returns {number} HRESULT
  */
 function bltIntoBlocks(request){
@@ -625,7 +601,7 @@ function bltIntoBlocks(request){
     };
     const decoded = { ...DECODED, buffer: DECODED_AT, pitch: dest.width * 4, width: dest.width,
         height: dest.height };
-    const hr = bltOnce({ ...request, memory: both, dest: decoded });
+    const hr = blt({ ...request, memory: both, dest: decoded });
     if (hr !== DD_OK)
     {
         return hr;
@@ -657,7 +633,7 @@ function bltIntoBlocks(request){
  * @param {boolean} [request.fxGiven]  Whether the program passed a DDBLTFX at all.
  * @returns {number} HRESULT
  */
-function bltOnce(request){
+export function blt(request){
     const { memory, dest } = request;
     if (dest.bytesPerPixel === 3)
     {
@@ -834,7 +810,7 @@ function bltOnce(request){
  * @param {ColorKey} [request.destColorKey]
  * @returns {number} HRESULT
  */
-function bltFastOnce(request){
+export function bltFast(request){
     const { memory, dest } = request;
     const src = request.src ?? null;
     if (!src)
@@ -878,9 +854,3 @@ function bltFastOnce(request){
     });
     return DD_OK;
 }
-
-/** IDirectDrawSurface::Blt (`bltOnce`). */
-export const blt = snapshotLetGo(bltOnce);
-
-/** IDirectDrawSurface::BltFast (`bltFastOnce`). */
-export const bltFast = snapshotLetGo(bltFastOnce);
