@@ -386,7 +386,8 @@ test('a cloud file a session has not read yet is fetched before it is answered',
     // cloud file on every start after the one that wrote it.
     const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const folder = 'C:\\Program Files (x86)\\Steam\\userdata\\1\\620\\remote';
-    steamFilesOf(fs, createVolume(fs, null, { kept: freshSpace('reads') })).write(`${folder}\\modindex`, Uint8Array.of(7, 8, 9));
+    steamFilesOf(fs, createVolume(fs, null, { kept: freshSpace('reads') }))
+        .write(`${folder}\\modindex`, Uint8Array.of(7, 8, 9));
     let resident = false;
     const session = Object.create(fs);
     session.read = (/** @type {any} */ node, /** @type {number} */ length)=>{

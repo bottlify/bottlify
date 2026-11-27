@@ -33,6 +33,7 @@ test('a process across a link writes the run\'s registry, takes the run\'s ids, 
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set() },
         windows,
+        fileSecurity: new Map(),
     };
     const { a, b } = createLinkMemory();
     const link = openLink(a, systemHandlers(system));
@@ -102,6 +103,7 @@ test('what a process across a link lays as the machine\'s is furnished and annou
             volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
                 watchers: new Set() },
             windows: createWindowDirectory(),
+            fileSecurity: new Map(),
         };
         let announced = 0;
         system.registry.onChanged(()=>announced++);
@@ -157,6 +159,7 @@ test('two processes on one link (a child beside its parent in a worker) each ans
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set() },
         windows,
+        fileSecurity: new Map(),
     };
     /** @type {Record<string, any>} */
     const across = {};
@@ -195,6 +198,7 @@ test('the run keeps which processes answer for their windows across a link, to d
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set() },
         windows,
+        fileSecurity: new Map(),
     };
     /** @type {Set<number>} */
     const attached = new Set();

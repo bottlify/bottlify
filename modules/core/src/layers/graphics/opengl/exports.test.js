@@ -71,7 +71,8 @@ function machine(){
  * @param {{ present?: boolean, raster?: boolean,
  *     describeDrawable?: (hdc: number) => any,
  *     callGuest?: (call: { entry: number, args: number[] }) => Promise<number>,
- *     now?: () => number, waitUntil?: (deadline: number, result: any) => any }} [options]
+ *     now?: () => number, waitUntil?: (deadline: number, result: any) => any,
+ *     divergence?: (api: string, detail: string, severity?: 'loss') => void }} [options]
  */
 function library(options = {}){
     const box = machine();
@@ -239,8 +240,7 @@ test('glGetString answers with a pointer into guest memory', ()=>{
 test('an unimplemented export cleans its stack, answers zero, and is a loss each call', ()=>{
     /** @type {[string, string, string | undefined][]} */
     const said = [];
-    const { table } = library({ divergence: (/** @type {string} */ api,
-        /** @type {string} */ detail, /** @type {string | undefined} */ severity)=>
+    const { table } = library({ divergence: (api, detail, severity)=>
         said.push([api, detail, severity]) });
     startDrawing(table);
 

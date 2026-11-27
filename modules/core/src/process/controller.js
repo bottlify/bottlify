@@ -1420,7 +1420,8 @@ export function processController(deps){
         async report(){
             // A build without the graphics layer has no worker to wait for.
             const answeredByGraphics = async()=>{
-                if (core.modules.some(module=>module.name === 'graphics'))
+                if (core.modules.some((/** @type {{ name: string }} */ module)=>
+                    module.name === 'graphics'))
                 {
                     await core.api('graphics').answered();
                 }

@@ -69,7 +69,8 @@ async function fetchedAgain(operation, session){
 }
 
 test('a session source is made over a space of the run\'s cache, and none is an error', ()=>{
-    assert.throws(()=>createSessionSource(lazySession({ 'a.bin': pattern(1, 1) }).files),
+    const { files } = lazySession({ 'a.bin': pattern(1, 1) });
+    assert.throws(()=>createSessionSource(files, /** @type {any} */ (undefined)),
         /no space of the run's cache/);
 });
 

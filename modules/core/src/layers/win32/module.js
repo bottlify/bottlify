@@ -845,7 +845,8 @@ export function createWin32Module(){
             // its own. The one namespace a mutex, event, semaphore, timer and
             // file mapping all share is part of it.
             /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
-             *     objects?: any, fileSecurity?: Pick<Map<string, any>, 'get' | 'set'>,
+             *     objects?: any,
+             *     fileSecurity?: import('./advapi32/named-security.js').FileSecurity,
              *     processTables?: Map<number, any>,
              *     pipes?: import('./kernel32/pipes.js').PipesAcross,
              *     sharedViews?: ReturnType<typeof import('./kernel32/shared-views.js')

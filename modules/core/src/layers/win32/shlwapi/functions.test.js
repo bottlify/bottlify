@@ -482,7 +482,7 @@ function registryMachine(){
         free: ()=>{},
     };
     const registry = createRegistryFunctions({
-        ...base, hive: createRegistryService(createHive()) });
+        ...base, hive: createRegistryService(createHive()), security: new Map() });
     const fns = createShlwapiFunctions({ ...base, advapi32: ()=>registry });
     let argAt = 0x10100;
     /** @param {string} text */

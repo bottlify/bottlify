@@ -105,6 +105,7 @@ function setup(extra = {}){
     const memory = fakeMemory();
     const hive = createRegistryService(createHive());
     const fns = createRegistryFunctions({
+        security: new Map(),
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -1389,6 +1390,7 @@ test('a key saved to a file loads under a root, writes its changes back as it un
     const hive = createRegistryService(createHive());
     const files = fakeFiles();
     const fns = /** @type {any} */ (createRegistryFunctions({
+        security: new Map(),
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),

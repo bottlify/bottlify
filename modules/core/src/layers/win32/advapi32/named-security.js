@@ -189,6 +189,14 @@ const parentOf = path=>{
 };
 
 /**
+ * The run's store of the descriptors programs set on files, by path: a map, or
+ * the run's across a link (`system-link.js`), which answers these two.
+ *
+ * @typedef {Pick<Map<string, { owner?: Uint8Array, group?: Uint8Array,
+ *     dacl?: Uint8Array | null }>, 'get' | 'set'>} FileSecurity
+ */
+
+/**
  * @typedef {Object} NamedSecurityHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -199,8 +207,7 @@ const parentOf = path=>{
  *           [files]  The volume. Without it no file is found.
  * @property {{ root: (root: number) => number | null,
  *              open: (key: number, path?: string | null) => number | null }} hive
- * @property {Map<string, { owner?: Uint8Array, group?: Uint8Array,
- *              dacl?: Uint8Array | null }>} security
+ * @property {FileSecurity} security
  *           The run's store of the descriptors programs set on files, by path,
  *           shared by every process of the run.
  * @property {(path: string) => string} [resolvePath]  A path made absolute, to key the store by.

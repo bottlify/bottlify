@@ -194,7 +194,8 @@ export { USER_NAME };
  *           The volume a hive is saved to and loaded from. Without it a
  *           save is refused and a load finds no file.
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {Map<string, any>} [security]  The run's file-security store (named-security.js).
+ * @property {import('./named-security.js').FileSecurity} security  The run's file-security
+ *     store (named-security.js).
  * @property {() => any} [services]  A service's security by name (named-security.js).
  * @property {(path: string) => string} [resolvePath]  A path made absolute, to key the store by.
  * @property {{ set: (handle: number) => boolean, reset: (handle: number) => boolean }} [events]
