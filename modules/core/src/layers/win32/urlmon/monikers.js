@@ -247,7 +247,7 @@ export function createUrlMonikers(host){
     const makeBinding = ()=>{
         const state = { aborted: false };
         const object = createBinding(state);
-        return { state, pointer: host.vtables.publish(object, IID_IBINDING) >>> 0 };
+        return { state, pointer: host.vtables.publish(object, IID_IBINDING) };
     };
     /** @type {(state: { aborted: boolean }) => any} */
     let createBinding = ()=>null;
@@ -500,7 +500,7 @@ export function createUrlMonikers(host){
             ],
             destroy: ()=>urls.delete(pointer),
         });
-        pointer = host.vtables.publish(object, IID_IMONIKER) >>> 0;
+        pointer = host.vtables.publish(object, IID_IMONIKER);
         if (pointer !== 0)
         {
             urls.set(pointer, url);

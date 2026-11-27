@@ -271,7 +271,7 @@ export function createRenderToSurface(host, textures){
                 depthFormat: depthFormat >>> 0 },
             inScene: false, saved: null, surface: 0, ownTarget: 0, ownDepth: 0 },
             destroy: ()=>byPointer.delete(pointer) });
-        pointer = host.vtables.publish(object, IID_ID3DXRENDERTOSURFACE) >>> 0;
+        pointer = host.vtables.publish(object, IID_ID3DXRENDERTOSURFACE);
         if (pointer === 0)
         {
             object.release();

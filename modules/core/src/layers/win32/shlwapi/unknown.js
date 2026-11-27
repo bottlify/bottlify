@@ -242,7 +242,7 @@ export function createUnknownFunctions(host){
                         return readLong(at) <= 0;
                     },
                 };
-                const pointer = host.publish(object, IID_IUNKNOWN) >>> 0;
+                const pointer = host.publish(object, IID_IUNKNOWN);
                 host.writeMemory(wholeAddress(out), dword(pointer));
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             },

@@ -527,7 +527,7 @@ export function createTaskAllocator({ heap, registry, vtables, readMemory, write
                 // The process's own reference, never released: the creation
                 // reference is the one the guest was handed and will give back.
                 allocator.addRef();
-                pointer = vtables.publish(allocator, IID_IMALLOC) >>> 0;
+                pointer = vtables.publish(allocator, IID_IMALLOC);
             }
             else
             {
@@ -792,7 +792,7 @@ export function createOleFunctions(host){
                     invoke: ()=>body(host.callerThread?.()).then(()=>0) },
             ] }],
         });
-        const pointer = worker ? host.vtables.publish(worker, IID_APARTMENT_WORKER) >>> 0 : 0;
+        const pointer = worker ? host.vtables.publish(worker, IID_APARTMENT_WORKER) : 0;
         if (pointer === 0)
         {
             return false;
@@ -850,7 +850,7 @@ export function createOleFunctions(host){
             object.release();
             return E_NOINTERFACE;
         }
-        const pointer = host.vtables.publish(object, iid) >>> 0;
+        const pointer = host.vtables.publish(object, iid);
         if (pointer === 0)
         {
             object.release();
@@ -1256,7 +1256,7 @@ export function createOleFunctions(host){
             return E_NOINTERFACE;
         }
 
-        const pointer = host.vtables.publish(object, iid) >>> 0;
+        const pointer = host.vtables.publish(object, iid);
         if (pointer === 0)
         {
             object.release();
@@ -1746,7 +1746,7 @@ export function createOleFunctions(host){
         {
             return E_NOINTERFACE;
         }
-        const pointer = host.vtables.publish(context, iid) >>> 0;
+        const pointer = host.vtables.publish(context, iid);
         if (pointer === 0)
         {
             context.release();
@@ -3125,7 +3125,7 @@ export function createOleFunctions(host){
                     return whenContextReady(()=>E_POINTER);
                 }
                 return whenContextReady(()=>{
-                    const pointer = host.vtables.publish(context, IID_IOBJCONTEXT) >>> 0;
+                    const pointer = host.vtables.publish(context, IID_IOBJCONTEXT);
                     if (pointer === 0)
                     {
                         return E_OUTOFMEMORY;
@@ -3673,7 +3673,7 @@ export function createOleFunctions(host){
                         factory.release();
                         return E_NOINTERFACE;
                     }
-                    const pointer = host.vtables.publish(factory, iid) >>> 0;
+                    const pointer = host.vtables.publish(factory, iid);
                     factory.release();
                     if (pointer === 0)
                     {
@@ -4862,7 +4862,7 @@ export function createOleFunctions(host){
                         runningObjectTable());
                 }
                 const pointer = tableObject
-                    ? host.vtables.publish(tableObject, IID_IRUNNINGOBJECTTABLE) >>> 0 : 0;
+                    ? host.vtables.publish(tableObject, IID_IRUNNINGOBJECTTABLE) : 0;
                 if (pointer === 0)
                 {
                     return E_OUTOFMEMORY;

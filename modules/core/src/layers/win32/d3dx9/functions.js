@@ -282,7 +282,7 @@ export function createD3dxFunctions(host, options = {}){
         host.writeMemory(data, bytes);
         const object = createComObject(IID_ID3DXBUFFER, { interfaces: [buffer],
             state: { data, size }, destroy: ()=>heap.free(data) });
-        const pointer = vtables.publish(object, IID_ID3DXBUFFER) >>> 0;
+        const pointer = vtables.publish(object, IID_ID3DXBUFFER);
         if (pointer === 0)
         {
             object.release();

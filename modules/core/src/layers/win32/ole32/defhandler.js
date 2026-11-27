@@ -683,7 +683,7 @@ export function createDefaultHandlers(context){
             const asked = formatGuid(env.readMemory(wholeAddress(riid), 16));
             if (object.interfaceFor(asked))
             {
-                const pointer = env.publish(object, asked) >>> 0;
+                const pointer = env.publish(object, asked);
                 object.addRef();
                 writeU32(out, pointer);
                 return S_OK;
@@ -724,7 +724,7 @@ export function createDefaultHandlers(context){
                 return CLASS_E_NOAGGREGATION;
             }
             const cacheObject = caches.create(0, clsid);
-            const cache = cacheObject ? env.publish(cacheObject, caches.IID_IUNKNOWN) >>> 0 : 0;
+            const cache = cacheObject ? env.publish(cacheObject, caches.IID_IUNKNOWN) : 0;
             if (cache === 0)
             {
                 return E_OUTOFMEMORY;
@@ -812,7 +812,7 @@ export function createDefaultHandlers(context){
                 }
                 return passed.hr < 0 ? passed.hr : E_NOINTERFACE;
             }
-            writeU32(out, env.publish(object, iid) >>> 0);
+            writeU32(out, env.publish(object, iid));
             return S_OK;
         },
 

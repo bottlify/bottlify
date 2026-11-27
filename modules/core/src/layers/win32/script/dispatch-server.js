@@ -349,7 +349,7 @@ export function createDispatchServer(host){
                 });
                 live.set(key, object);
             }
-            const pointer = host.publish(object, iid) >>> 0;
+            const pointer = host.publish(object, iid);
             if (pointer === 0)
             {
                 object.release();

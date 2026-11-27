@@ -8283,3 +8283,28 @@ test('a 64-bit class whose name lies past 4 GiB is read where it lies, not at it
     assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
     assert.deepEqual(asked, [HIGH + CLASS_NAME]);
 });
+
+test('a 64-bit window made by a class name past 4 GiB reads that name where it lies', async()=>{
+    // An apartment's window is made by a name in memory the process holds past 4 GiB: read at its
+    // low dword, the class name is another's text, or nothing.
+    const context = setup({ pointerSize: 8 });
+    const { memory } = context;
+    const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        /** @type {unknown} */ (context.fns));
+    const HIGH = 2 ** 32;
+    memory.putString(CLASS_NAME, 'MainWnd');
+    memory.putU32s(CLASS_STRUCT, [0x0003, 0, WNDPROC, 0, 0, 0, HINSTANCE, 0, 0x11, 0, 0x22, 0,
+        0x33, 0, 0, 0, CLASS_NAME, 0]);
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    /** @type {number[]} */
+    const asked = [];
+    const readCString = memory.readCString.bind(memory);
+    memory.readCString = (address, limit)=>{
+        asked.push(address);
+        return readCString(address >= HIGH ? address - HIGH : address, limit);
+    };
+    const hwnd = await createWindow(fns, memory, { className: HIGH + CLASS_NAME });
+    assert.notEqual(hwnd, 0);
+    assert.ok(asked.includes(HIGH + CLASS_NAME), `read at ${asked.map(a=>a.toString(16))}`);
+    assert.ok(!asked.includes(CLASS_NAME), 'not at its low dword');
+});

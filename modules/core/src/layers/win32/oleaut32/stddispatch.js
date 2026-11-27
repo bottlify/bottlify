@@ -195,7 +195,7 @@ export function createStdDispatchObjects(host){
                     ? { id: asked, methods: INNER_UNKNOWN } : interfaceFor(asked));
             }
             return callMethod(typeInfo, TYPEINFO_ADDREF, [])
-                .then(()=>host.publish(adapter, IID_IUNKNOWN) >>> 0);
+                .then(()=>host.publish(adapter, IID_IUNKNOWN));
         },
     };
 }

@@ -1013,7 +1013,7 @@ export function createConstantTableObjects(host){
                 write: (/** @type {number} */ value)=>host.writeMemory(cellAt, dword(value)) } },
         });
         /** @type {any} */ (object).guestState = ()=>table.block;
-        const pointer = vtables.publish(object, IID_ID3DXCONSTANTTABLE) >>> 0;
+        const pointer = vtables.publish(object, IID_ID3DXCONSTANTTABLE);
         if (pointer === 0)
         {
             object.release();

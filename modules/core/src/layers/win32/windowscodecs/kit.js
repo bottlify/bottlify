@@ -251,7 +251,7 @@ export function createKit(host){
             object.release();
             return E_INVALIDARG;
         }
-        const pointer = host.vtables.publish(object, INTERFACES[name].iid) >>> 0;
+        const pointer = host.vtables.publish(object, INTERFACES[name].iid);
         putU32(out, pointer);
         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
     };

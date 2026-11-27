@@ -472,7 +472,7 @@ export function createAudioClients(host, endpoint){
             interfaces, state: stream,
             destroy: ()=>(parent ? parent.release() : close(stream)),
         });
-        const pointer = host.vtables.publish(object, interfaces[0].id) >>> 0;
+        const pointer = host.vtables.publish(object, interfaces[0].id);
         if (pointer === 0)
         {
             object.release();
@@ -1229,7 +1229,7 @@ export function createAudioClients(host, endpoint){
      */
     const handOutSession = (session, interfaces, out)=>{
         const object = createComObject(IID_IAUDIO_CLIENT, { interfaces, state: { session } });
-        const pointer = host.vtables.publish(object, interfaces[0].id) >>> 0;
+        const pointer = host.vtables.publish(object, interfaces[0].id);
         if (pointer === 0)
         {
             object.release();

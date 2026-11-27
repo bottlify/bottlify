@@ -377,7 +377,7 @@ export function createStorageFunctions(host){
         {
             return E_OUTOFMEMORY;
         }
-        const pointer = host.vtables.publish(object, iid) >>> 0;
+        const pointer = host.vtables.publish(object, iid);
         if (pointer === 0)
         {
             object.release();

@@ -157,7 +157,7 @@ export function createSecurityManager(host){
                 } },
             ] }],
         });
-        return host.vtables.publish(object, IID_IINTERNETSECURITYMANAGER) >>> 0;
+        return host.vtables.publish(object, IID_IINTERNETSECURITYMANAGER);
     };
 
     return {

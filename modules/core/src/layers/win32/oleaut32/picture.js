@@ -824,7 +824,7 @@ export function createPictureObjects(host){
             return E_NOINTERFACE;
         }
         const adapter = host.adapt(state, interfaces, ()=>destroy(state));
-        const pointer = host.publish(adapter, iid === IID_IUNKNOWN ? IID_IPICTURE : iid) >>> 0;
+        const pointer = host.publish(adapter, iid === IID_IUNKNOWN ? IID_IPICTURE : iid);
         writeU32(out, pointer);
         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
     };

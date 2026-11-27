@@ -361,7 +361,7 @@ export function createInfos(kit, host, makers){
         }, { clsid: CLSID_COMPONENT_ENUMERATOR, iid: IID_IENUMUNKNOWN, size: 4 }, {
             items: COMPONENTS.filter(c=>(c.type & types) !== 0),
             write: (at, c)=>{
-                const pointer = host.vtables.publish(infoOf(c), IID_IUNKNOWN) >>> 0;
+                const pointer = host.vtables.publish(infoOf(c), IID_IUNKNOWN);
                 putU32(at, pointer);
                 return pointer !== 0;
             },

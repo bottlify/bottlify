@@ -234,7 +234,7 @@ export function createImageListObjects(host){
                 forget(state.handle);
             },
         });
-        const pointer = host.publish(object, IID_IIMAGELIST2) >>> 0;
+        const pointer = host.publish(object, IID_IIMAGELIST2);
         if (pointer === 0)
         {
             object.release();

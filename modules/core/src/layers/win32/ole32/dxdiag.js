@@ -306,7 +306,7 @@ export function registerDxDiagClasses(host){
     const publishContainer = (node, out)=>{
         const object = createComObject(CLSID_DXDIAG_PROVIDER,
             { interfaces: [container], state: node });
-        const pointer = host.vtables.publish(object, IID_IDXDIAG_CONTAINER) >>> 0;
+        const pointer = host.vtables.publish(object, IID_IDXDIAG_CONTAINER);
         if (pointer === 0)
         {
             object.release();

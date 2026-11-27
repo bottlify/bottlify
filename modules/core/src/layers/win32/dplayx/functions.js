@@ -193,7 +193,7 @@ export function createDplayFunctions(host){
                 return DPERR_INVALIDPARAMS;
             }
             const object = createComObject(CLSID_DIRECTPLAY_LOBBY, lobbyDefinition());
-            const pointer = host.vtables.publish(object, LOBBY_INTERFACES[wide ? 0 : 1]) >>> 0;
+            const pointer = host.vtables.publish(object, LOBBY_INTERFACES[wide ? 0 : 1]);
             writeU32(out, pointer);
             return pointer === 0 ? 0x8007000e : DP_OK;
         },
@@ -236,7 +236,7 @@ export function createDplayFunctions(host){
                 }
                 const object = createComObject(CLSID_DIRECTPLAY,
                     sessionDefinition(host, PLAY_INTERFACES));
-                const pointer = host.vtables.publish(object, PLAY_INTERFACES[0].id) >>> 0;
+                const pointer = host.vtables.publish(object, PLAY_INTERFACES[0].id);
                 writeU32(out, pointer);
                 return pointer === 0 ? 0x8007000e : DP_OK;
             },

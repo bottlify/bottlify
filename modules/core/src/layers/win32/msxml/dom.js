@@ -433,7 +433,7 @@ export function registerMsxmlClasses(host){
             definitionOf(node));
             objects.set(node, object);
         }
-        const pointer = host.vtables.publish(object, iid) >>> 0;
+        const pointer = host.vtables.publish(object, iid);
         if (pointer === 0)
         {
             object.release();
@@ -597,7 +597,7 @@ export function registerMsxmlClasses(host){
         {
             return E_INVALIDARG;
         }
-        const pointer = host.vtables.publish(makeList(nodes), IID.NODE_LIST) >>> 0;
+        const pointer = host.vtables.publish(makeList(nodes), IID.NODE_LIST);
         writeU32(out, pointer);
         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
     };
@@ -712,7 +712,7 @@ export function registerMsxmlClasses(host){
                     writeU32(out, 0);
                     return S_FALSE;
                 }
-                const pointer = host.vtables.publish(makeMap(node), IID.NAMED_NODE_MAP) >>> 0;
+                const pointer = host.vtables.publish(makeMap(node), IID.NAMED_NODE_MAP);
                 writeU32(out, pointer);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             },
@@ -1227,7 +1227,7 @@ export function registerMsxmlClasses(host){
                 return S_OK;
             },
             get_parseError: (/** @type {number[]} */ [out])=>{
-                const pointer = host.vtables.publish(makeParseError(state), IID.PARSE_ERROR) >>> 0;
+                const pointer = host.vtables.publish(makeParseError(state), IID.PARSE_ERROR);
                 return answerPointer(out, pointer);
             },
             get_url: (/** @type {number[]} */ [out])=>{
@@ -1297,7 +1297,7 @@ export function registerMsxmlClasses(host){
                 diverge('IXMLDOMDocument2::validate', 'no schema is applied: the document is taken'
                     + ' as valid');
                 const pointer = host.vtables.publish(makeParseError({ ...state, error: NO_ERROR }),
-                    IID.PARSE_ERROR) >>> 0;
+                    IID.PARSE_ERROR);
                 return (out >>> 0) === 0 ? S_OK : answerPointer(out, pointer);
             },
             setProperty: (/** @type {number[]} */ [name, ...words])=>{

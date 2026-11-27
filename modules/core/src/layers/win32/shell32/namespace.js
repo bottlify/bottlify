@@ -374,7 +374,7 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
      * @param {string} iid @param {number} out
      */
     const handOut = (object, iid, out)=>{
-        const pointer = publish(object, iid) >>> 0;
+        const pointer = publish(object, iid);
         memory.writeMemory(out, dword(pointer));
         if (pointer !== 0 && iid === IID_ISHELLFOLDER)
         {

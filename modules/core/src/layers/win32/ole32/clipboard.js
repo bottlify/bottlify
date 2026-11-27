@@ -539,7 +539,7 @@ export function createClipboardFunctions(env){
                     }
                     board.reader = { object, version: board.version };
                 }
-                const pointer = env.publish(object, IID_IDATAOBJECT) >>> 0;
+                const pointer = env.publish(object, IID_IDATAOBJECT);
                 if (pointer === 0)
                 {
                     object.release();
