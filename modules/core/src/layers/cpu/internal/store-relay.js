@@ -163,8 +163,13 @@ export function storeClient(send){
      * @type {any}
      */
     let records = null;
-    /** How the records asked for came: from the cache unasked, from it once put there, or copied. */
-    const counts = { cacheHits: 0, cachePut: 0, copied: 0 };
+    /**
+     * How the records asked for came: from the cache unasked, from it once put there, or
+     * copied; and those whose place the store named and that did not read (`unreadable`), with
+     * why the first did not: a corrupt or cut records file, which the translator meets as a miss.
+     */
+    const counts = { cacheHits: 0, cachePut: 0, copied: 0, unreadable: 0,
+        unreadableWhy: /** @type {string | null} */ (null) };
     /** A record read from the cache, a copy of this thread's own (the translator keeps it).
      * @param {string} key */
     const fromCache = key=>cache?.space.with(key, body=>body.slice()) ?? null;
@@ -306,8 +311,11 @@ export function storeClient(send){
                     const framed = readPieces(records, data.pieces);
                     bytes = framed === null ? null : unframe(framed);
                 }
-                catch {
-                    // A read that fails is a miss: the region is formed here.
+                catch (e){
+                    // A miss to the translator, which forms the region again; the
+                    // store is not as it says it is, which the figures carry.
+                    counts.unreadable++;
+                    counts.unreadableWhy ??= `${asked?.key}: ${/** @type {any} */ (e)?.message ?? e}`;
                 }
                 answer?.(bytes);
                 return true;
