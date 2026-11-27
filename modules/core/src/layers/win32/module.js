@@ -4895,9 +4895,7 @@ export function createWin32Module(){
                     // After the runtime's own table: `terminate` is answered here,
                     // where the handler `set_terminate` installed is known.
                     ...createCxxExceptions({
-                        readMemory,
-                        writeMemory,
-                        readCString,
+                        guest,
                         isMapped,
                         registers: ()=>Object.fromEntries(
                             registerNames.map(name=>[name, cpuRegisters.read(name)])),

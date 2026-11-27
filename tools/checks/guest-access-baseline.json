@@ -687,11 +687,6 @@
    "string writeString": 1,
    "string writeWideString": 1
   },
-  "msvcrt/eh.js": {
-   "accessor readI32": 1,
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
   "msvcrt/environ.js": {
    "accessor writePointer": 1,
    "accessor writeU32": 1,

@@ -10,6 +10,7 @@ import {
     createCxxExceptions, EH_EXCEPTION_NUMBER, EH_FRAME, EH_MAGIC, UNIVERSAL_EH,
 } from './eh.js';
 import { Disposition, EH_UNWINDING, RECORD } from '../kernel32/seh.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /** The registration frame of the function being handled, and its body's stack. */
 const FRAME = 0x2f000;
@@ -69,19 +70,7 @@ function machine(options = {}){
     };
 
     const host = {
-        /** @param {number} at @param {number} length */
-        readMemory: (at, length)=>bytes.slice(at, at + length),
-        /** @param {number} at @param {Uint8Array} value */
-        writeMemory: (at, value)=>bytes.set(value, at),
-        /** @param {number} at @param {number} max */
-        readCString: (at, max)=>{
-            let text = '';
-            for (let i = 0; i < max && bytes[at + i] !== 0; i++)
-            {
-                text += String.fromCharCode(bytes[at + i]);
-            }
-            return text;
-        },
+        guest: guestWindow(bytes),
         /** @param {number} at */
         isMapped: at=>at > 0 && at < bytes.length,
         registers: ()=>({ ...registers }),
