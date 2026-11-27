@@ -1843,13 +1843,13 @@ export function createThreadingFunctions(host){
                 // timer, once per expiry, with the time it expired as a
                 // FILETIME; it runs when that thread next waits alertably.
                 const thread = host.currentThread();
-                const fired = (routine >>> 0) === 0 || !host.queueApc
+                const fired = wholeAddress(routine) === 0 || !host.queueApc
                     ? null
                     : ()=>{
                         const filetime = BigInt(Math.floor(
                             kernel.clock.wallClock() + FILETIME_EPOCH_MS)) * 10000n;
-                        host.queueApc?.(thread, routine >>> 0, [
-                            argument >>> 0,
+                        host.queueApc?.(thread, wholeAddress(routine), [
+                            wholeAddress(argument),
                             Number(filetime & 0xffffffffn),
                             Number(filetime >> 32n & 0xffffffffn),
                         ]);
