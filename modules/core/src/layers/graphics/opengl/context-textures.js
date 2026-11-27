@@ -237,9 +237,35 @@ const DEPTH_TEXTURE_MODES = new Set([GL.LUMINANCE, GL.INTENSITY, GL.ALPHA, GL.RE
 const environmentBase = sized=>(sized.base === GL.RED || sized.base === TEX.RG
     ? GL.RGB : sized.base);
 
-/** The RGBA bytes made from a sized level's data, while that data is unchanged. */
-/** @type {WeakMap<object, Uint8Array | null>} */
+/**
+ * The RGBA bytes the processor's rasteriser samples, made from a sized
+ * level's data or decoded from an S3TC level's blocks, kept while those are
+ * unchanged: memory held in the run's cache (`ContextKernel.holdTexels`),
+ * read in place by the sampler, let go of when the level is written
+ * (`forgetRgba`) or collected (`RGBA_HELD`). Null for a level with no RGBA;
+ * bytes handed in by a texture view (`set texels`) are held by nothing.
+ *
+ * @type {WeakMap<object, import('../../cache/scratch.js').Held | null>}
+ */
 const rgbaCache = new WeakMap();
+
+/**
+ * What lets go of a level's held RGBA once the level is collected: one for
+ * every context, since a level outlives the context that sampled it in its
+ * share group.
+ */
+const RGBA_HELD = new FinalizationRegistry((/** @type {() => void} */ release)=>release());
+
+/**
+ * `level`'s RGBA kept: in `held`, the level's from now on.
+ *
+ * @param {object} level @param {import('../../cache/scratch.js').Held} held
+ */
+function keepRgba(level, held){
+    rgbaCache.set(level, held);
+    RGBA_HELD.register(level, held.release, held);
+    return held.bytes;
+}
 
 /**
  * Forgets the RGBA kept of a level whose bytes were written, and of the
@@ -250,8 +276,19 @@ const rgbaCache = new WeakMap();
 function forgetRgba(level){
     for (let at = level; at; at = at.source)
     {
-        rgbaCache.delete(at);
+        dropRgba(at);
     }
+}
+
+/** @param {object} level  its RGBA forgotten, and the memory it was held in let go of */
+function dropRgba(level){
+    const held = rgbaCache.get(level);
+    if (held)
+    {
+        RGBA_HELD.unregister(held);
+        held.release();
+    }
+    rgbaCache.delete(level);
 }
 
 /**
@@ -1553,21 +1590,30 @@ export function installTextureCalls(context, kernel){
                 const cached = rgbaCache.get(level);
                 if (cached !== undefined)
                 {
-                    return cached;
+                    return cached && cached.bytes;
                 }
                 const made = level.data ? rgbaOf(level.data, kept, width, height, depth) : null;
                 // On a device the RGBA is read by a call (a read-back, a copy)
                 // and made again at the next: kept, every level read once would
                 // hold it beside its data for as long as the texture lives. The
-                // processor's rasteriser reads it every draw and keeps it.
-                if (!kernel.gpuBacked())
+                // processor's rasteriser reads it every draw and keeps it, in
+                // the run's cache.
+                if (kernel.gpuBacked())
                 {
-                    rgbaCache.set(level, made);
+                    return made;
                 }
-                return made;
+                if (!made)
+                {
+                    rgbaCache.set(level, null);
+                    return null;
+                }
+                const held = kernel.holdTexels(made.length);
+                held.bytes.set(made);
+                return keepRgba(level, held);
             },
             set texels(value){
-                rgbaCache.set(level, value);
+                dropRgba(level);
+                rgbaCache.set(level, value && { bytes: value, release: ()=>{} });
             },
         };
         return level;
@@ -2029,6 +2075,12 @@ export function installTextureCalls(context, kernel){
         // Read once: a compressed level decodes at each read on a device, and
         // from this write on the level is the texels it holds, not its blocks.
         const into = level.texels ?? new Uint8Array(level.width * level.height * 4);
+        // Decoded texels held in the run's cache become the level's own: no
+        // write forgets them now, and the memory goes when the level does.
+        if (rgbaCache.get(level)?.bytes === into)
+        {
+            rgbaCache.delete(level);
+        }
         for (let y = 0; y < height; y++)
         {
             into.set(
@@ -2587,27 +2639,37 @@ export function installTextureCalls(context, kernel){
         // device takes no blocks, and not kept: decoded, a level holds four to
         // eight times its blocks for as long as the texture lives (the Doom 3
         // demo's first level, 47 MB of blocks). A processor's rasteriser reads
-        // them every draw and keeps them. The blocks are read from the level,
-        // not held apart: the drawing side may move them into the run's cache
-        // while no draw needs them (`gpu.js` `spill`).
-        /** @type {Uint8Array | null | undefined} */
-        let decoded;
-        const decode = ()=>{
-            const blocks = level.compressed?.bytes;
-            return blocks && width > 0 && height > 0
-                ? decodeS3tc(blocks, internal, width, height) : null;
-        };
+        // them every draw and keeps them, decoded into memory held in the run's
+        // cache (`rgbaCache`). The blocks are read from the level, not held
+        // apart: the drawing side may move them into the run's cache while no
+        // draw needs them (`gpu.js` `spill`).
         /** @type {import('./objects.js').TextureLevel} */
         const level = {
             width, height, internalFormat: internal, border,
             baseFormat: /** @type {number} */ (baseFormatOf(internal)),
             get texels(){
+                const cached = rgbaCache.get(level);
+                if (cached !== undefined)
+                {
+                    return cached && cached.bytes;
+                }
+                const blocks = level.compressed?.bytes;
+                if (!blocks || width <= 0 || height <= 0)
+                {
+                    return null;
+                }
                 if (kernel.gpuBacked())
                 {
-                    return decoded ?? decode();
+                    return decodeS3tc(blocks, internal, width, height);
                 }
-                decoded ??= decode();
-                return decoded;
+                const held = kernel.holdTexels(width * height * 4);
+                if (!decodeS3tc(blocks, internal, width, height, held.bytes))
+                {
+                    held.release();
+                    rgbaCache.set(level, null);
+                    return null;
+                }
+                return keepRgba(level, held);
             },
             compressedFormat: internal,
             compressedBytes: compressedBytes(internal, width, height),

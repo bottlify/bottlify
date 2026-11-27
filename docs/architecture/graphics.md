@@ -112,7 +112,11 @@ flowchart TB
   GetGlyphOutline, DirectWrite's system faces and D3DX's font read its coverage inside the
   read, and D3DX's font reads it again when it writes its page of the device. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
-  it while the level is unchanged. A game loads
+  it, and an S3TC level's texels decoded from its blocks, while the level is unchanged, in memory
+  held in the run's cache (`opengl/context-textures.js` `rgbaCache`, the context's `holds`) that
+  it samples in place, let go of when the level is written or collected. A display list keeps an
+  S3TC rectangle's blocks, not its texels, and its own copy of every byte array a call hands it.
+  A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of
   2132 textures held 88.5 MB this way. Once uploaded, they are let go; a read of the level's
   image (`glGetTexImage`) by the context that draws copies it back from the device, once what

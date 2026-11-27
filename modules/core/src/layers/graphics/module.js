@@ -1010,6 +1010,8 @@ export function createGraphicsModule(){
                     // Made only where the contexts draw here: a root in the
                     // graphics worker is given names of its own there.
                     texelCache: device && !remote ? ownTexels() : null,
+                    // The RGBA a context drawn on the processor here samples.
+                    holds: remote ? undefined : holds,
                     presenter: ()=>state.shown,
                     frameQueued,
                     // The same per-draw account the Direct3D 8 device takes, on

@@ -84,6 +84,7 @@ import {
 } from './context-legacy.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { GL_COMMANDS } from './commands.js';
+import { plainScratches } from '../../cache/scratch.js';
 
 /**
  * What this implementation answers glGetString with, but for the versions,
@@ -305,6 +306,10 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  *           levels, only their shapes: a context whose twin elsewhere draws
  *           has the data sent there with each call and never reads it again.
  *           Such a context reads a level back (glGetTexImage) as black.
+ * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
+ *           Memory held in the run's cache for as long as what keeps it lives: the
+ *           RGBA a level's data or blocks make for the processor's rasteriser, which
+ *           it samples in place every draw. Plain memory if absent.
  * @property {boolean} [keepPrimitives]
  *           Every primitive drawn is kept, with its vertices, for
  *           `submittedPrimitives` to answer -- what a test reads back to see
@@ -582,6 +587,7 @@ export function createGlContext(options = {}){
         bufferDeleted: gpu ? buffer=>gpu.releaseBuffer(buffer) : null,
         gpuBacked: ()=>gpu !== null && attached,
         keepTexels: options.keepTexels !== false,
+        holdTexels: length=>(options.holds ?? plainScratches.hold)('gl/rgba', length),
         currentVertex,
         currentAttributes,
         side: {},
