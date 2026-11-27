@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHeapFunctions, LATER_HEAP } from './heap.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /**
  * An allocator with the same surface as the process heap, and a switch that
@@ -74,9 +75,7 @@ const build = ()=>{
             free: address=>allocator.free(address),
             block: address=>allocator.block(address),
             resize: (address, bytes)=>allocator.resize(address, bytes),
-            readMemory: memory.readMemory,
-            writeMemory: memory.writeMemory,
-            fillMemory: memory.fillMemory,
+            guest: memory.guest,
             errno: code=>errno.push(code),
         })),
     };
@@ -252,9 +251,7 @@ test('a failed operator new calls the new handler until it gives up or memory is
         free: address=>allocator.free(address),
         block: address=>allocator.block(address),
         resize: (address, bytes)=>allocator.resize(address, bytes),
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        fillMemory: memory.fillMemory,
+        guest: memory.guest,
         callGuest: async(entry, args)=>{
             calls.push([entry, ...args]);
             return /** @type {number} */ (answers.shift());
@@ -301,9 +298,7 @@ test('malloc calls the new handler only in new mode 1, and _callnewh calls it on
         free: address=>allocator.free(address),
         block: address=>allocator.block(address),
         resize: (address, bytes)=>allocator.resize(address, bytes),
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        fillMemory: memory.fillMemory,
+        guest: memory.guest,
         errno: code=>errno.push(code),
         callGuest: async()=>{
             called++;
@@ -379,6 +374,44 @@ test('_aligned_realloc and _aligned_offset_realloc move the bytes both blocks ho
     assert.notEqual(table._aligned_realloc.handler([0, 16, 8]), 0, 'no block allocates');
     assert.deepEqual([table._aligned_realloc.argBytes, table._aligned_offset_realloc.argBytes],
         [12, 16]);
+});
+
+test('at 64 bits past 4 GiB: an aligned block keeps a whole pointer, free and the new handler'
+    + ' take theirs whole', ()=>{
+    // msvcrt's x64 _aligned_malloc keeps the uintptr_t malloc gave in the
+    // pointer-aligned slot below the block, eight bytes of it.
+    const base = 0x100000000;
+    const bytes = new Uint8Array(0x2000);
+    const view = new DataView(bytes.buffer);
+    // The first block at the window's first byte: its low dword is zero.
+    let next = 0;
+    const allocator = fakeAllocator({ allocate: (/** @type {number} */ size)=>{
+        const at = base + next;
+        next += size + 15 & ~15;
+        return at;
+    } });
+    const table = /** @type {Record<string, any>} */ (createHeapFunctions({
+        allocate: size=>allocator.allocate(size),
+        free: address=>allocator.free(address),
+        block: address=>allocator.block(address),
+        resize: (address, size)=>allocator.resize(address, size),
+        guest: guestWindow(bytes, { base, pointerSize: 8 }),
+    }));
+    const plain = table.malloc.handler([16]);
+    assert.equal(plain, base);
+    table.free.handler([plain]);
+    assert.equal(allocator.block(plain), null, 'free took the block at 0x100000000');
+    const block = table._aligned_malloc.handler([64, 32]);
+    assert.equal(block % 32, 0);
+    const slot = block - base - 8;
+    const kept = view.getUint32(slot, true) + view.getUint32(slot + 4, true) * 2 ** 32;
+    assert.ok(allocator.block(kept), 'the slot holds malloc\'s block, whole');
+    table._aligned_free.handler([block]);
+    assert.equal(allocator.block(kept), null, '_aligned_free freed it');
+    const handler = 0x140001000;
+    table['?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z'].handler([handler]);
+    assert.equal(table['?_query_new_handler@@YAP6AHI@ZXZ'].handler([]), handler,
+        'the new handler, whole');
 });
 
 test('_set_sbh_threshold keeps a threshold rounded to sixteen, up to 1016', ()=>{
