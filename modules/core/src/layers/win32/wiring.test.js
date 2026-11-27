@@ -63,8 +63,20 @@ function hostOver(replace = {}){
                 }
                 return text;
             },
+            /** @param {number} at @param {number} length */
+            window: (at, length)=>bytes.subarray(at, at + length),
+            /** @param {number} at */
+            readU8: at=>bytes[at],
+            /** @param {number} at */
+            readU16: at=>view.getUint16(at, true),
             /** @param {number} at */
             readU32: at=>view.getUint32(at, true),
+            /** @param {number} at @param {number} value */
+            writeU8: (at, value)=>view.setUint8(at, value & 0xff),
+            /** @param {number} at @param {number} value */
+            writeU16: (at, value)=>view.setUint16(at, value & 0xffff, true),
+            /** @param {number} at @param {number} value */
+            writeU32: (at, value)=>view.setUint32(at, value >>> 0, true),
             find: ()=>null,
             scanCString: ()=>({ index: 0, byte: 0 }),
         },

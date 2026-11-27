@@ -102,6 +102,7 @@ const STUBLESS_ENTRY = 0xffffffff;
 
 /**
  * @typedef {Object} RuntimeHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bytes: number) => number} allocate  Task memory, as CoTaskMemAlloc.
@@ -186,8 +187,7 @@ export function createRuntime(host){
     // --- the format-string engine, over this process ---------------------------
 
     const ndr = createNdr({
-        readMemory: host.readMemory,
-        writeMemory: host.writeMemory,
+        guest: host.guest,
         // Through the stub descriptor's routines, which are the DLL's -- the
         // NdrOleAllocate it imported, as a rule, but not necessarily.
         allocate: (call, bytes)=>{

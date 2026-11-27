@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
 import { createOleFunctions } from '../ole32/functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 import { parseGuid } from '../../../system/guid.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
@@ -165,6 +166,7 @@ function setup(){
     const created = [];
     let nextVtable = 0x20000;
     const oleHost = {
+        guest: guestOver(bytes),
         readMemory,
         writeMemory,
         /** @param {number} address @param {number} value @param {number} length */

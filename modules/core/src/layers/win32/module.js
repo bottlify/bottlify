@@ -29,6 +29,7 @@ import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions, decodeAnsi, encodeAnsi } from './kernel32/locale.js';
+import { createGuest } from './common/guest.js';
 import { guestEntry, withLongCode } from './msvcrt/guest-code.js';
 import * as kernel32InGuest from './kernel32/inguest.js';
 import { COMPILED as KERNEL32_COMPILED } from './kernel32/inguest.x86.js';
@@ -1171,25 +1172,13 @@ export function createWin32Module(){
             // buffer to hold the pattern.
             const fillMemory = (/** @type {number} */ address, /** @type {number} */ value,
                 /** @type {number} */ length)=>memory.fillBytes(address, value, length);
-            // A handler's limit is the most of a string it reads -- a fixed
-            // char[32] field holds exactly that, terminated or not -- so a
-            // longer string is cut there, never refused out of the host. Only
-            // memory that is not there is a fault, as the processor's would be.
-            /** @param {unknown} e */
-            const unterminated = e=>/** @type {{ code?: unknown }} */ (e)?.code === 'UNTERMINATED';
-            const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
-                try
-                {
-                    return memory.readCString(address, maxLength);
-                }
-                catch (e){
-                    if (!unterminated(e))
-                    {
-                        throw e;
-                    }
-                    return decodeAnsi(memory.readBytes(address, maxLength));
-                }
-            };
+            /**
+             * The guest's memory as every handler reads and writes it, in place
+             * and at this process's pointer width (`common/guest.js`).
+             */
+            const guest = createGuest(/** @type {import('./common/guest.js').GuestMemory} */ (
+                /** @type {unknown} */ (memory)), pointerSize);
+            const readCString = guest.cstr;
             /** Where kernel32 put one of its routines that runs in the guest. @param {string} name */
             const kernel32Export = name=>modules.find('kernel32.dll')?.addressOf?.(name) ?? 0;
             /** The C runtime image the program loaded (`CRT_IMAGES`), or null before it has one. */
@@ -1255,21 +1244,7 @@ export function createWin32Module(){
                     cpuRegisters.write(name, value >>> 0);
                 }
             };
-            /** The same, the limit in bytes as memory takes it. */
-            const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
-                try
-                {
-                    return memory.readWideString(address, maxLength);
-                }
-                catch (e){
-                    if (!unterminated(e))
-                    {
-                        throw e;
-                    }
-                    return new TextDecoder('utf-16le').decode(
-                        memory.readBytes(address, maxLength & ~1));
-                }
-            };
+            const readWideString = guest.wstr;
 
             // The run's class table, which is also where RPC endpoints are
             // found: COM and RPC between processes meet in the one table, and
@@ -6708,6 +6683,7 @@ export function createWin32Module(){
                 'GDI32.dll': ()=>gdi.table,
 
                 'ole32.dll': ()=>createOleFunctions({
+                    guest,
                     readMemory,
                     writeMemory,
                     pointerSize,
@@ -6871,7 +6847,7 @@ export function createWin32Module(){
                 }),
 
                 'RPCRT4.dll': ()=>createRpcFunctions({
-                    writeMemory, readCString, readMemory,
+                    guest, writeMemory, readCString, readMemory,
                     readWideString: address=>readWideString(address, 1024 * 2),
                     divergence: config?.divergence,
                     /** @param {number} bytes */
@@ -6916,10 +6892,7 @@ export function createWin32Module(){
 
                 'OLEAUT32.dll': ()=>createAutomationFunctions({
                     errorSlots,
-                    pointerSize,
-                    readMemory,
-                    writeMemory,
-                    fillMemory,
+                    guest,
                     heap,
                     // A date written without a year is in this one.
                     systemTimeMs: ()=>kernel.clock.wallClock(),
@@ -7455,6 +7428,11 @@ export function createWin32Module(){
             };
 
             const api = {
+                /**
+                 * The guest's memory as the handlers read and write it, for a
+                 * layer beside this one (sound, input) to read and write the same.
+                 */
+                guest,
                 /** @returns {Record<string, Record<string, any>>} library name -> its exports */
                 libraries: ()=>{
                     standShim();

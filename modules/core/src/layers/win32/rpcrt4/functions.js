@@ -29,11 +29,13 @@ const UUID_STRING_LENGTH = 36;
  * @property {(address: number, maxLength: number) => string} [readCString]
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {import('../common/guest.js').Guest} [guest]  What the proxy/stub runtime
+ *           reads and writes guest memory through.
  * @property {(bytes: number) => number} [allocate]
  *           Where a string the library hands out lives, freed by RpcStringFree.
  * @property {(address: number) => void} [free]
  * @property {Omit<import('./runtime.js').RuntimeHost,
- *     'readMemory' | 'writeMemory' | 'allocate' | 'free' | 'divergence'>} [runtime]
+ *     'guest' | 'readMemory' | 'writeMemory' | 'allocate' | 'free' | 'divergence'>} [runtime]
  *           What the proxy/stub runtime needs besides memory: calls into the
  *           guest, raising on the calling thread, the registry and ole32's
  *           marshaler. Absent, a proxy/stub DLL's entry points are not bound.
@@ -117,9 +119,10 @@ export function createRpcFunctions(host){
     };
 
     /** @type {Partial<ReturnType<typeof createRuntime>>} */
-    const runtime = host.runtime && host.readMemory && host.allocate && host.free
+    const runtime = host.runtime && host.guest && host.readMemory && host.allocate && host.free
         ? createRuntime({
             ...host.runtime,
+            guest: host.guest,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             allocate: host.allocate,

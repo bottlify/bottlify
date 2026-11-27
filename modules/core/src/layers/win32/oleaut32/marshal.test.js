@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { HKEY_CLASSES_ROOT, createHive } from '../advapi32/registry.js';
 import { parseTypeLib } from './typelib.js';
 import { createAutomationFunctions } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 import {
     IID_IDISPATCH, PARAMFLAG_FIN, PARAMFLAG_FOUT, argumentBytes, argumentSlots,
     createInterfaceCatalog, describeType, layoutOf, marshalReply, marshalRequest, sizeOf,
@@ -610,9 +611,7 @@ test('a SAFEARRAY crosses between 64-bit processes in its 64-bit layout', async(
 function automatedSide(name){
     const self = longSide(name);
     const automation = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
-        createAutomationFunctions({ pointerSize: 8, readMemory: self.readMemory,
-            writeMemory: self.writeMemory,
-            fillMemory: (at, value, length)=>self.bytes.fill(value, at, at + length),
+        createAutomationFunctions({ guest: guestOver(self.bytes, 8),
             heap: { allocate: self.allocate, free: at=>{
                 self.free(at);
                 return true;

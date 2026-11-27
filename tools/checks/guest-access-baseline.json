@@ -1,0 +1,1474 @@
+{
+ "about": "Local guest memory accessors, string helpers and reads copied again in win32 today (check-guest-access.mjs). Only shrinks: move a file onto host.guest, then --write.",
+ "files": {
+  "advapi32/cred.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 1,
+   "string ansi": 1,
+   "string wideAt": 1
+  },
+  "advapi32/crypto.js": {
+   "accessor readBytes": 1,
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 1,
+   "string readAnsi": 1,
+   "string readWide": 1
+  },
+  "advapi32/descriptors.js": {
+   "accessor readDword": 1,
+   "accessor readWord": 1,
+   "copy readMemory().slice()": 2
+  },
+  "advapi32/eventlog.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 2
+  },
+  "advapi32/functions.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 4
+  },
+  "advapi32/lsa.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 2
+  },
+  "advapi32/named-security.js": {
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 2
+  },
+  "advapi32/perf.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 1,
+   "string wideAt": 1
+  },
+  "advapi32/providers.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1
+  },
+  "advapi32/registry.js": {
+   "accessor dword": 1
+  },
+  "advapi32/security.js": {
+   "accessor readDword": 1,
+   "accessor readWord": 1,
+   "accessor writeDword": 1,
+   "accessor writeWord": 1
+  },
+  "advapi32/services.js": {
+   "accessor dword": 1,
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 2,
+   "string ansiAt": 1,
+   "string wideAt": 1
+  },
+  "advapi32/tokens.js": {
+   "accessor readDword": 1,
+   "accessor readWord": 1,
+   "accessor writeDword": 1,
+   "accessor writeWord": 1,
+   "copy readMemory().slice()": 12
+  },
+  "advpack/functions.js": {
+   "copy readMemory().slice()": 3
+  },
+  "bcrypt/functions.js": {
+   "accessor putU32": 1,
+   "copy readMemory().slice()": 5
+  },
+  "cabinet/fci.js": {
+   "accessor readU16": 1,
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 5
+  },
+  "cabinet/functions.js": {
+   "accessor writeU32": 1,
+   "string string": 1
+  },
+  "cfgmgr32/functions.js": {
+   "accessor writeDword": 1
+  },
+  "combase/functions.js": {
+   "accessor dword": 1,
+   "accessor setDword": 1
+  },
+  "comctl32/comboex.js": {
+   "accessor i32": 1,
+   "accessor setI32": 1,
+   "accessor setPointer": 1
+  },
+  "comctl32/dpa.js": {
+   "accessor getPtr": 1,
+   "accessor read32": 1,
+   "accessor setPtr": 1,
+   "accessor write32": 1
+  },
+  "comctl32/functions.js": {
+   "accessor u32": 1
+  },
+  "comctl32/header.js": {
+   "accessor read32": 1,
+   "accessor write32": 1
+  },
+  "comctl32/helpers.js": {
+   "accessor i32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "comctl32/imagelist-stream.js": {
+   "accessor u32": 1,
+   "accessor word": 1
+  },
+  "comctl32/listview.js": {
+   "accessor read32": 1,
+   "accessor word": 1,
+   "accessor write32": 1
+  },
+  "comctl32/monthcal.js": {
+   "accessor readI32": 1,
+   "accessor writeI32": 1
+  },
+  "comctl32/pager.js": {
+   "accessor setPointer": 1,
+   "accessor setU32": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 7,
+   "string putWide": 1
+  },
+  "comctl32/propsheet.js": {
+   "accessor dword": 1,
+   "accessor putU32": 1,
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "accessor word": 1
+  },
+  "comctl32/rebar.js": {
+   "accessor setPointer": 1,
+   "accessor setU32": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "comctl32/tab.js": {
+   "accessor readU32": 1,
+   "string readWide": 1
+  },
+  "comctl32/toolbar.js": {
+   "accessor read32": 1,
+   "accessor write32": 1
+  },
+  "comctl32/tooltips.js": {
+   "accessor read32": 1,
+   "accessor write32": 1
+  },
+  "comctl32/treeview.js": {
+   "accessor readI32": 1,
+   "accessor readU32": 1,
+   "accessor u32": 1,
+   "accessor writeU32": 1
+  },
+  "comctl32/updown.js": {
+   "copy readMemory().slice()": 1
+  },
+  "comdlg32/functions.js": {
+   "accessor u32": 1
+  },
+  "comdlg32/itemdialog.js": {
+   "accessor read32": 1,
+   "accessor write32": 1,
+   "string wide": 1
+  },
+  "common/compound-writer.js": {
+   "accessor putWords": 1
+  },
+  "common/guest.js": {
+   "accessor set64": 1
+  },
+  "common/shell-link.js": {
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "string readAnsiZ": 1,
+   "string stringAt": 1
+  },
+  "crypt32/certificates.js": {
+   "accessor dword": 1,
+   "accessor setDword": 1,
+   "accessor setPointer": 1,
+   "accessor word": 1,
+   "copy readMemory().slice()": 8
+  },
+  "crypt32/encoding.js": {
+   "accessor dword": 1,
+   "accessor setDword": 1,
+   "copy readMemory().slice()": 5
+  },
+  "crypt32/functions.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 1
+  },
+  "crypto/der.js": {
+   "string readString": 1
+  },
+  "d3dx10/functions.js": {
+   "copy readMemory().slice()": 4
+  },
+  "d3dx10/loaders.js": {
+   "accessor writeU32": 1
+  },
+  "d3dx9/constants-setters.js": {
+   "accessor SetFloat": 1
+  },
+  "d3dx9/constants.js": {
+   "accessor dword": 1,
+   "accessor f32": 1,
+   "accessor u16": 1,
+   "accessor u32": 2,
+   "copy readMemory().slice()": 1,
+   "string readString": 1,
+   "string string": 1
+  },
+  "d3dx9/device.js": {
+   "accessor putPointer": 1,
+   "accessor putU32s": 1,
+   "string string": 1
+  },
+  "d3dx9/effect-binary.js": {
+   "accessor u32": 1
+  },
+  "d3dx9/effect-setters.js": {
+   "accessor SetFloat": 1,
+   "accessor SetInt": 1
+  },
+  "d3dx9/effect.js": {
+   "accessor putU32": 1,
+   "accessor writeWords": 1,
+   "copy readMemory().slice()": 3,
+   "string writeString": 1
+  },
+  "d3dx9/font.js": {
+   "copy readMemory().slice()": 1,
+   "string ansi": 1,
+   "string wide": 1
+  },
+  "d3dx9/functions.js": {
+   "accessor putPointer": 1,
+   "accessor putU32": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 1,
+   "string wideAt": 1
+  },
+  "d3dx9/fvf.js": {
+   "copy readMemory().slice()": 1
+  },
+  "d3dx9/hlsl-build.js": {
+   "accessor f32": 1
+  },
+  "d3dx9/hlsl-ctab.js": {
+   "string stringAt": 1
+  },
+  "d3dx9/line.js": {
+   "copy readMemory().slice()": 1
+  },
+  "d3dx9/mesh-object.js": {
+   "copy readMemory().slice()": 6
+  },
+  "d3dx9/mesh.js": {
+   "accessor putFloats": 1,
+   "copy readMemory().slice()": 6
+  },
+  "d3dx9/render-to-surface.js": {
+   "copy readMemory().slice()": 1
+  },
+  "d3dx9/save-texture.js": {
+   "copy readMemory().slice()": 1
+  },
+  "d3dx9/semantics.js": {
+   "accessor readU32": 1
+  },
+  "d3dx9/sprite.js": {
+   "copy readMemory().slice()": 1
+  },
+  "d3dx9/texture-tools.js": {
+   "copy readMemory().slice()": 2
+  },
+  "d3dx9/texture.js": {
+   "copy readMemory().slice()": 1,
+   "string stringAt": 1
+  },
+  "dbghelp/functions.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "string wide": 1
+  },
+  "dbghelp/image-certificates.js": {
+   "accessor dword": 1,
+   "accessor setDword": 1,
+   "copy readMemory().slice()": 1
+  },
+  "devenum/devenum.js": {
+   "accessor dword": 1
+  },
+  "display/functions.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 2
+  },
+  "dplayx/functions.js": {
+   "accessor writeU32": 1
+  },
+  "dplayx/session.js": {
+   "accessor put32": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 4,
+   "string readString": 1
+  },
+  "dsetup/functions.js": {
+   "accessor dword": 1
+  },
+  "dwrite/functions.js": {
+   "accessor f32": 1,
+   "accessor readU16s": 1,
+   "copy readMemory().slice()": 2,
+   "string putWide": 1
+  },
+  "dwrite/render-target.js": {
+   "copy readMemory().slice()": 1
+  },
+  "dwrite/sfnt.js": {
+   "accessor u16": 1,
+   "accessor u32": 1
+  },
+  "dxva2/functions.js": {
+   "accessor putU32": 1,
+   "accessor readU32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "gdi32/drawing.js": {
+   "accessor readI32s": 1,
+   "accessor readU32s": 1
+  },
+  "gdi32/emf.js": {
+   "accessor word": 1
+  },
+  "gdi32/faces.js": {
+   "accessor u16": 1,
+   "accessor u32": 1
+  },
+  "gdi32/functions.js": {
+   "accessor readU32s": 1,
+   "copy readMemory().slice()": 2
+  },
+  "gdi32/metafiles.js": {
+   "accessor dword": 1,
+   "accessor i32": 2,
+   "accessor u32": 2,
+   "copy readMemory().slice()": 4
+  },
+  "gdi32/structs.js": {
+   "accessor readI32": 1,
+   "accessor readU16": 1,
+   "accessor readU32": 1,
+   "accessor writeU32s": 1
+  },
+  "gdiplus/codecs.js": {
+   "accessor putPointer": 1,
+   "string wide": 1
+  },
+  "gdiplus/fonts.js": {
+   "accessor putFloat": 1,
+   "accessor putU16": 1,
+   "accessor putU32": 1,
+   "copy readMemory().slice()": 3
+  },
+  "gdiplus/functions.js": {
+   "copy readMemory().slice()": 1
+  },
+  "gdiplus/image.js": {
+   "copy readMemory().slice()": 8
+  },
+  "gdiplus/kit.js": {
+   "copy readMemory().slice()": 1
+  },
+  "gdiplus/region.js": {
+   "accessor dword": 1
+  },
+  "gdiplus/stream.js": {
+   "accessor u32": 1,
+   "copy readMemory().slice()": 2
+  },
+  "gdiplus/text.js": {
+   "string stringAt": 1
+  },
+  "httpapi/functions.js": {
+   "accessor dword": 1,
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 1,
+   "string wide": 1
+  },
+  "ieframe/browser.js": {
+   "accessor putU16": 1,
+   "accessor putU32s": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 2,
+   "string wideAt": 1
+  },
+  "ieframe/classinfo.js": {
+   "accessor putU32": 1
+  },
+  "iphlpapi/functions.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "iphlpapi/tables.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 8,
+   "string readAnsi": 1,
+   "string readWide": 1
+  },
+  "kernel32/actctx.js": {
+   "accessor pointer": 1,
+   "accessor readDword": 1,
+   "accessor readPointer": 1,
+   "accessor writeDword": 1,
+   "string readAnsi": 1,
+   "string readWide": 1
+  },
+  "kernel32/comm.js": {
+   "string ansi": 1,
+   "string wide": 1
+  },
+  "kernel32/critical.js": {
+   "accessor dword": 1,
+   "accessor readU32": 1
+  },
+  "kernel32/debug-events.js": {
+   "accessor writeU32": 1
+  },
+  "kernel32/drives.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1
+  },
+  "kernel32/environment.js": {
+   "string writeAnsi": 1,
+   "string writeWideString": 1
+  },
+  "kernel32/files.js": {
+   "accessor qword": 1,
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "accessor writeQword": 1
+  },
+  "kernel32/filetime.js": {
+   "accessor word": 2
+  },
+  "kernel32/fls.js": {
+   "accessor dword": 1
+  },
+  "kernel32/guest-heap-long.js": {
+   "accessor dword": 1
+  },
+  "kernel32/guest-heap.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 1
+  },
+  "kernel32/heap.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "accessor writeWord": 1
+  },
+  "kernel32/iocp.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1
+  },
+  "kernel32/locale.js": {
+   "accessor readLong": 1,
+   "accessor writeLong": 1,
+   "string readWide": 1,
+   "string writeWide": 1
+  },
+  "kernel32/lstr.js": {
+   "accessor dword": 1
+  },
+  "kernel32/mailslots.js": {
+   "accessor dword": 1
+  },
+  "kernel32/mapping.js": {
+   "accessor readDword": 1,
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "accessor writeDword": 1
+  },
+  "kernel32/modules.js": {
+   "string writeString": 1
+  },
+  "kernel32/moveable.js": {
+   "accessor writeWord": 1
+  },
+  "kernel32/object-attributes.js": {
+   "accessor word": 1
+  },
+  "kernel32/object-directories.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "string string": 1
+  },
+  "kernel32/pipes.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1
+  },
+  "kernel32/pool.js": {
+   "accessor dword": 3
+  },
+  "kernel32/process-policy.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "accessor writeQword": 1
+  },
+  "kernel32/process.js": {
+   "accessor dword": 1,
+   "accessor readU32": 1,
+   "accessor writeU64": 1
+  },
+  "kernel32/profile.js": {
+   "accessor getInt": 1,
+   "string getString": 1
+  },
+  "kernel32/resource-update.js": {
+   "accessor read32": 1,
+   "accessor write32": 1
+  },
+  "kernel32/seh.js": {
+   "accessor readU32": 1,
+   "accessor word": 1,
+   "accessor writeU32": 1
+  },
+  "kernel32/seh64.js": {
+   "accessor readU32": 1
+  },
+  "kernel32/slimsync.js": {
+   "accessor dword": 1,
+   "accessor readWord": 1,
+   "accessor writeWord": 1,
+   "string wide": 1
+  },
+  "kernel32/slist.js": {
+   "accessor read32": 1,
+   "accessor write32": 1
+  },
+  "kernel32/spawn.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1
+  },
+  "kernel32/startup-info.js": {
+   "accessor u32": 1
+  },
+  "kernel32/sync-natives.js": {
+   "accessor writeDword": 1
+  },
+  "kernel32/sync.js": {
+   "accessor readI32": 1,
+   "accessor writeI32": 1
+  },
+  "kernel32/system.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "string readAnsi": 1,
+   "string readWide": 1,
+   "string writeAnsi": 1
+  },
+  "kernel32/teb.js": {
+   "accessor writePointer": 1
+  },
+  "kernel32/thread-calls.js": {
+   "accessor dword": 1
+  },
+  "kernel32/thread-info.js": {
+   "accessor dword": 1
+  },
+  "kernel32/threading.js": {
+   "accessor readU32": 1
+  },
+  "kernel32/threadpool-api.js": {
+   "accessor read32": 1,
+   "accessor write32": 1
+  },
+  "kernel32/unwind.js": {
+   "accessor readU32": 1,
+   "accessor readU64": 1
+  },
+  "kernel32/wait-one.js": {
+   "accessor dword": 1
+  },
+  "kernel32/win9x.js": {
+   "accessor dword": 1
+  },
+  "libcef/functions.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 1
+  },
+  "libcef/objects.js": {
+   "accessor writeWords": 1
+  },
+  "libcef/strings.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 5
+  },
+  "mfplat/attributes.js": {
+   "copy readMemory().slice()": 2
+  },
+  "mfplat/bytestream.js": {
+   "accessor writeQword": 1
+  },
+  "mfplat/functions.js": {
+   "accessor putU32": 1
+  },
+  "mfplat/kit.js": {
+   "accessor f64": 1,
+   "accessor putF64": 1,
+   "accessor putU64": 1,
+   "accessor u64": 1,
+   "string wide": 1
+  },
+  "mfplat/objects.js": {
+   "accessor word": 2,
+   "copy readMemory().slice()": 1
+  },
+  "mfreadwrite/functions.js": {
+   "accessor putU32": 1,
+   "string wide": 1
+  },
+  "module.js": {
+   "accessor setPointer": 1,
+   "copy readMemory().slice()": 9,
+   "string wide": 1
+  },
+  "msacm32/functions.js": {
+   "accessor put32": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 6
+  },
+  "msdmo/functions.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 2
+  },
+  "msi/compound.js": {
+   "accessor u16": 1,
+   "accessor u32": 1
+  },
+  "msi/database.js": {
+   "accessor word": 1
+  },
+  "msi/functions.js": {
+   "accessor readU32": 1,
+   "accessor writeI32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 3,
+   "string putString": 1
+  },
+  "msi/record.js": {
+   "string getString": 1
+  },
+  "msi/registration.js": {
+   "accessor dword": 1
+  },
+  "msi/system.js": {
+   "accessor dword": 1
+  },
+  "mspatcha/functions.js": {
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 6,
+   "string ansi": 1,
+   "string wide": 1
+  },
+  "msvcirt/functions.js": {
+   "accessor i32": 1,
+   "accessor u32": 1
+  },
+  "msvcrt/classes.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "string readString": 1
+  },
+  "msvcrt/convert.js": {
+   "accessor writeInt": 1,
+   "string readString": 1,
+   "string writeString": 1,
+   "string writeWideString": 1
+  },
+  "msvcrt/cxx.js": {
+   "accessor readI32": 1,
+   "accessor readU32": 1
+  },
+  "msvcrt/eh.js": {
+   "accessor readI32": 1,
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "msvcrt/eh64.js": {
+   "accessor u32": 1
+  },
+  "msvcrt/environ.js": {
+   "accessor writePointer": 1,
+   "accessor writeU32": 1,
+   "string readWide": 1
+  },
+  "msvcrt/errors.js": {
+   "accessor writeInt": 1,
+   "string writeString": 1
+  },
+  "msvcrt/float.js": {
+   "accessor readDouble": 1
+  },
+  "msvcrt/format.js": {
+   "accessor word": 1
+  },
+  "msvcrt/functions.js": {
+   "string readString": 1,
+   "string readWide": 1,
+   "string writeString": 1
+  },
+  "msvcrt/guest-code.js": {
+   "accessor setU8": 1,
+   "accessor u8": 1
+  },
+  "msvcrt/inguest-string.js": {
+   "string stringAt": 1
+  },
+  "msvcrt/io.js": {
+   "string wide": 1
+  },
+  "msvcrt/locale.js": {
+   "accessor dword": 1
+  },
+  "msvcrt/mbcs.js": {
+   "accessor setU8": 1,
+   "accessor u8": 1
+  },
+  "msvcrt/mbstate.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "msvcrt/mbstring.js": {
+   "string readWide": 1,
+   "string writeWide": 1
+  },
+  "msvcrt/msvcp60-streams.js": {
+   "accessor i32": 1,
+   "accessor readWord": 1,
+   "accessor setU16": 1,
+   "accessor u16": 1
+  },
+  "msvcrt/msvcp60.js": {
+   "accessor ptr": 1,
+   "accessor setU32": 1,
+   "accessor setU8": 1,
+   "accessor u32": 1,
+   "accessor u8": 1,
+   "string cstr": 1
+  },
+  "msvcrt/msvcp80.js": {
+   "accessor f32": 1,
+   "accessor setU32": 1,
+   "accessor setWord": 1,
+   "accessor u32": 1
+  },
+  "msvcrt/msvcr80.js": {
+   "accessor readU32": 1,
+   "accessor setPointer": 1,
+   "accessor setU32": 1
+  },
+  "msvcrt/paths.js": {
+   "string readString": 1,
+   "string readWide": 1,
+   "string writeString": 1,
+   "string writeWide": 1
+  },
+  "msvcrt/scan.js": {
+   "accessor word": 1,
+   "string readString": 1,
+   "string readWide": 1
+  },
+  "msvcrt/seh.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "msvcrt/sort.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "msvcrt/startup.js": {
+   "accessor dword": 1,
+   "accessor readPointer": 1,
+   "accessor writePointer": 1,
+   "accessor writeU32": 1
+  },
+  "msvcrt/stdio.js": {
+   "accessor putByte": 1,
+   "accessor writeU32": 1,
+   "string readString": 1,
+   "string readWide": 1
+  },
+  "msvcrt/strings.js": {
+   "string readString": 1,
+   "string writeString": 1
+  },
+  "msvcrt/threads.js": {
+   "accessor writeU32": 1
+  },
+  "msvcrt/time.js": {
+   "accessor dword": 1,
+   "accessor readInt": 1,
+   "accessor writeInt": 1,
+   "string writeString": 1,
+   "string writeWide": 1
+  },
+  "msvcrt/ucrtbase.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "msvfw32/codecs.js": {
+   "copy readMemory().slice()": 9
+  },
+  "msvfw32/icm.js": {
+   "accessor getU32": 1,
+   "accessor setU32": 1,
+   "copy readMemory().slice()": 4
+  },
+  "msvfw32/video1.js": {
+   "accessor word": 1
+  },
+  "msxml/dom.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 4
+  },
+  "netapi32/workstation.js": {
+   "accessor writeU32": 1
+  },
+  "ntdll/atoms.js": {
+   "accessor readU32": 1,
+   "accessor u16": 1,
+   "accessor u32": 1
+  },
+  "ntdll/bitmap.js": {
+   "accessor putU32s": 1,
+   "accessor u32": 1
+  },
+  "ntdll/debug-buffer.js": {
+   "accessor writeU32": 1
+  },
+  "ntdll/debug.js": {
+   "accessor dword": 1,
+   "accessor writeU32": 1
+  },
+  "ntdll/environment.js": {
+   "accessor setU32": 1,
+   "accessor u32": 1
+  },
+  "ntdll/functions.js": {
+   "accessor readU32": 1,
+   "accessor word": 1,
+   "accessor writeU32": 1
+  },
+  "ntdll/image.js": {
+   "accessor u16": 1,
+   "accessor u32": 1
+  },
+  "ntdll/integer.js": {
+   "string wide": 1
+  },
+  "ntdll/ip-strings.js": {
+   "accessor dword": 1,
+   "accessor putDword": 1
+  },
+  "ntdll/loader.js": {
+   "accessor setU32": 1,
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "string wideAt": 1
+  },
+  "ntdll/lznt1.js": {
+   "accessor putDword": 1
+  },
+  "ntdll/memory.js": {
+   "accessor read32": 1,
+   "accessor write32": 1
+  },
+  "ntdll/pool.js": {
+   "accessor write32": 1
+  },
+  "ntdll/process.js": {
+   "accessor readU16": 1,
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "ntdll/query.js": {
+   "accessor readU32": 1
+  },
+  "ntdll/security.js": {
+   "accessor dword": 1,
+   "accessor putDword": 1,
+   "accessor word": 1
+  },
+  "ntdll/string-ops.js": {
+   "accessor readU32": 1,
+   "accessor u32": 1
+  },
+  "ntdll/strings.js": {
+   "string ansiAt": 1,
+   "string wideAt": 1,
+   "string writeWide": 1
+  },
+  "ntdll/time.js": {
+   "accessor writeU32": 1
+  },
+  "odbc32/functions.js": {
+   "accessor writeI16": 1,
+   "accessor writeU32": 1
+  },
+  "offline/functions.js": {
+   "accessor u32": 1
+  },
+  "ole32/audio-client.js": {
+   "accessor readFloat": 1,
+   "accessor writeFloat": 1,
+   "accessor writeU32": 1,
+   "accessor writeU64": 1,
+   "copy readMemory().slice()": 3
+  },
+  "ole32/clipboard.js": {
+   "copy readMemory().slice()": 2
+  },
+  "ole32/comcat.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 1,
+   "string readWide": 1
+  },
+  "ole32/datacache.js": {
+   "accessor readI32": 1,
+   "copy readMemory().slice()": 3
+  },
+  "ole32/dxdiag.js": {
+   "accessor i32": 1,
+   "accessor u32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 1,
+   "string writeWide": 1
+  },
+  "ole32/endpoint-volume.js": {
+   "accessor writeFloat": 1,
+   "accessor writeU32": 1
+  },
+  "ole32/enumerator.js": {
+   "accessor writeU32": 1
+  },
+  "ole32/functions.js": {
+   "accessor readU32": 1,
+   "accessor writePointer": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 6,
+   "string ansi": 1
+  },
+  "ole32/mmdevapi.js": {
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "ole32/monikers.js": {
+   "accessor readU32": 1,
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "accessor writeU32": 1,
+   "accessor writeU64": 1,
+   "copy readMemory().slice()": 5,
+   "string readWide": 1
+  },
+  "ole32/ole2.js": {
+   "accessor word": 2,
+   "copy readMemory().slice()": 1,
+   "string ansi": 1,
+   "string string": 1,
+   "string wide": 1
+  },
+  "ole32/oleutil.js": {
+   "accessor readU16": 1,
+   "accessor readU32": 1,
+   "accessor writeU16": 1,
+   "accessor writeU32": 1,
+   "accessor writeWords": 1,
+   "copy readMemory().slice()": 3,
+   "string readWide": 1
+  },
+  "ole32/propset.js": {
+   "accessor readU32": 1,
+   "accessor u32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 7,
+   "string readAnsiAt": 1,
+   "string readWideAt": 1,
+   "string writeWideAt": 1
+  },
+  "ole32/propvariant.js": {
+   "accessor get32": 1,
+   "accessor put32": 1,
+   "accessor readU16": 1,
+   "accessor readU32": 1,
+   "copy readMemory().slice()": 3
+  },
+  "ole32/remote.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 3
+  },
+  "ole32/storage.js": {
+   "accessor readU32": 1,
+   "accessor readU64": 1,
+   "accessor writeU32": 1,
+   "accessor writeU64": 1,
+   "copy readMemory().slice()": 6,
+   "string readWide": 1
+  },
+  "ole32/wbem.js": {
+   "accessor writeU32": 1,
+   "string readString": 1
+  },
+  "oleaut32/arithmetic.js": {
+   "string wide": 1
+  },
+  "oleaut32/errorinfo.js": {
+   "accessor writeU32": 1,
+   "string readWide": 1
+  },
+  "oleaut32/invoke.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "oleaut32/marshal.js": {
+   "accessor pointer": 1,
+   "accessor put32": 1,
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "accessor word": 1,
+   "copy readMemory().slice()": 2,
+   "string readString": 1
+  },
+  "oleaut32/objects.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "string readWide": 1
+  },
+  "oleaut32/picture.js": {
+   "accessor readU32": 1,
+   "accessor writeU16": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 8,
+   "string readWide": 1
+  },
+  "oleaut32/recordinfo.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 1,
+   "string readWide": 1
+  },
+  "oleaut32/sltg.js": {
+   "accessor u16": 1,
+   "accessor u32": 1
+  },
+  "oleaut32/stddispatch.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "oleaut32/stdole.js": {
+   "accessor pointer": 1
+  },
+  "oleaut32/typelib.js": {
+   "accessor word": 1,
+   "string stringAt": 1
+  },
+  "oledlg/functions.js": {
+   "accessor readU32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "power/functions.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 1
+  },
+  "programs/dxsetup.js": {
+   "accessor u32": 1
+  },
+  "programs/functions.js": {
+   "string wide": 1
+  },
+  "programs/reg.js": {
+   "accessor dword": 1
+  },
+  "programs/runonce.js": {
+   "accessor dword": 1,
+   "accessor u32": 1
+  },
+  "propsys/functions.js": {
+   "accessor putU32s": 1,
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 4
+  },
+  "quartz/acmwrapper.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 2
+  },
+  "quartz/allocator.js": {
+   "accessor dword": 1
+  },
+  "quartz/clock.js": {
+   "accessor dword": 1
+  },
+  "quartz/filesource.js": {
+   "accessor dword": 1
+  },
+  "quartz/filter.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 1
+  },
+  "quartz/graph.js": {
+   "accessor writeDouble": 1,
+   "accessor writeLong": 1
+  },
+  "quartz/mapper.js": {
+   "accessor dword": 1,
+   "accessor word": 1
+  },
+  "quartz/renderers.js": {
+   "accessor writeLong": 1
+  },
+  "quartz/splitters.js": {
+   "accessor writeDouble": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "quartz/stream.js": {
+   "accessor writeU32": 1,
+   "string wide": 1
+  },
+  "quartz/transforms.js": {
+   "copy readMemory().slice()": 2
+  },
+  "riched/richedit.js": {
+   "accessor readU32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "rpcrt4/functions.js": {
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "rpcrt4/midl.js": {
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 2
+  },
+  "rpcrt4/proxyfile.js": {
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "string ansi": 1
+  },
+  "rpcrt4/runtime.js": {
+   "accessor u32": 1
+  },
+  "script/active-script.js": {
+   "copy readMemory().slice()": 1
+  },
+  "script/variant.js": {
+   "accessor writeF32": 1,
+   "accessor writeI64": 1,
+   "copy readMemory().slice()": 1
+  },
+  "secur32/functions.js": {
+   "accessor dword": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "setupapi/devices.js": {
+   "accessor dword": 1
+  },
+  "setupapi/diskspace.js": {
+   "accessor writeI64": 1
+  },
+  "setupapi/functions.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 10,
+   "string ansi": 1
+  },
+  "setupapi/stringtable.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 6
+  },
+  "shell32/associations.js": {
+   "accessor u32": 1,
+   "string ansi": 1
+  },
+  "shell32/desktop.js": {
+   "accessor dword": 1,
+   "accessor readInt": 1,
+   "string wide": 1
+  },
+  "shell32/extras.js": {
+   "accessor dword": 1,
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 4,
+   "string wide": 1
+  },
+  "shell32/functions.js": {
+   "accessor dword": 1,
+   "accessor u32": 1
+  },
+  "shell32/icons.js": {
+   "accessor u16": 1,
+   "accessor u32": 1
+  },
+  "shell32/idlist.js": {
+   "copy readMemory().slice()": 2
+  },
+  "shell32/internet-shortcut.js": {
+   "accessor dword": 1
+  },
+  "shell32/namespace.js": {
+   "accessor dword": 1,
+   "string readWide": 1
+  },
+  "shell32/shellitem.js": {
+   "accessor dword": 1,
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 2
+  },
+  "shell32/shelllink.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 2
+  },
+  "shlwapi/characters.js": {
+   "copy readMemory().slice()": 1
+  },
+  "shlwapi/datablocks.js": {
+   "accessor readU32": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "shlwapi/functions.js": {
+   "accessor writeWord": 1,
+   "copy readMemory().slice()": 3
+  },
+  "shlwapi/ordinals.js": {
+   "accessor readBytes": 1,
+   "accessor readU32": 1,
+   "accessor word": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 6,
+   "string wideAt": 1
+  },
+  "shlwapi/registry.js": {
+   "copy readMemory().slice()": 1
+  },
+  "shlwapi/stream.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "shlwapi/strings.js": {
+   "copy readMemory().slice()": 1,
+   "string readString": 1,
+   "string readWideString": 1
+  },
+  "shlwapi/text.js": {
+   "accessor dword": 1,
+   "accessor u32": 1
+  },
+  "shlwapi/unknown.js": {
+   "accessor dword": 1,
+   "accessor readLong": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 2
+  },
+  "steamclient/functions.js": {
+   "accessor dword": 1,
+   "accessor writeDword": 1,
+   "string writeString": 1
+  },
+  "steamclient/objects.js": {
+   "accessor writeQword": 1
+  },
+  "steamclient/steam-start.js": {
+   "accessor u32": 1
+  },
+  "syssetup/functions.js": {
+   "accessor dword": 1,
+   "copy readMemory().slice()": 2
+  },
+  "uiautomationcore/functions.js": {
+   "accessor putU32": 1
+  },
+  "urlmon/monikers.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 1,
+   "string wide": 1
+  },
+  "urlmon/security.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "user32/button-v6.js": {
+   "string readWide": 1
+  },
+  "user32/controls.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1,
+   "string writeString": 1
+  },
+  "user32/desktops.js": {
+   "accessor readU32": 1,
+   "copy readMemory().slice()": 3
+  },
+  "user32/dialogs.js": {
+   "accessor u16": 1,
+   "string writeString": 1
+  },
+  "user32/msgbox.js": {
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 1,
+   "string wide": 1
+  },
+  "user32/objects.js": {
+   "accessor dword": 1,
+   "accessor readU32": 1,
+   "accessor writeU32s": 1,
+   "string writeString": 1
+  },
+  "user32/paint.js": {
+   "copy readMemory().slice()": 1
+  },
+  "user32/structs.js": {
+   "accessor readU32": 1,
+   "accessor writeU16": 1,
+   "accessor writeU32s": 1
+  },
+  "user32/system.js": {
+   "accessor readI32": 1,
+   "accessor readU16": 1,
+   "accessor readU32": 1,
+   "copy readMemory().slice()": 4,
+   "string readString": 4,
+   "string readWideString": 1,
+   "string writeString": 1,
+   "string writeWideString": 1
+  },
+  "user32/unicode.js": {
+   "string readWideString": 1
+  },
+  "user32/windows.js": {
+   "accessor readLong": 1,
+   "accessor setLong": 1,
+   "accessor writeLong": 1,
+   "copy readMemory().slice()": 7,
+   "string writeString": 1
+  },
+  "uxtheme/functions.js": {
+   "accessor readInts": 1,
+   "copy readMemory().slice()": 1
+  },
+  "version/functions.js": {
+   "accessor dword": 1,
+   "accessor u16": 1,
+   "string wide": 1
+  },
+  "windowscodecs/functions.js": {
+   "copy readMemory().slice()": 2
+  },
+  "windowscodecs/info.js": {
+   "copy readMemory().slice()": 1
+  },
+  "windowscodecs/kit.js": {
+   "accessor f64": 1,
+   "accessor i32": 1,
+   "accessor putF64": 1,
+   "accessor putU32": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 1
+  },
+  "windowscodecs/objects.js": {
+   "copy readMemory().slice()": 6
+  },
+  "windowscodecs/sources.js": {
+   "accessor u32": 1,
+   "copy readMemory().slice()": 2
+  },
+  "winhttp/functions.js": {
+   "accessor dword": 1,
+   "accessor setDword": 1,
+   "accessor setWord": 1,
+   "accessor word": 1,
+   "copy readMemory().slice()": 1,
+   "string readWide": 1,
+   "string writeWide": 1
+  },
+  "wininet/functions.js": {
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "accessor writeWord": 1,
+   "string readWide": 1,
+   "string writeAnsi": 1,
+   "string writeWide": 1
+  },
+  "winmm/functions.js": {
+   "accessor dword": 2,
+   "accessor u16": 1,
+   "accessor u32": 1,
+   "accessor word": 1,
+   "string ansiAt": 1,
+   "string wideAt": 1
+  },
+  "winmm/mmio.js": {
+   "accessor dword": 1,
+   "accessor u32": 1,
+   "copy readMemory().slice()": 7,
+   "string wideAt": 1
+  },
+  "winmm/thread.js": {
+   "accessor dword": 1
+  },
+  "winmm/timers.js": {
+   "accessor dword": 1
+  },
+  "winmm/wave.js": {
+   "accessor i16": 1,
+   "accessor u16": 1,
+   "accessor u32": 1
+  },
+  "winspool/functions.js": {
+   "accessor writeDword": 1,
+   "string readString": 1
+  },
+  "wintrust/catalog.js": {
+   "accessor dword": 1,
+   "accessor setDword": 1
+  },
+  "wintrust/functions.js": {
+   "accessor readU32": 1,
+   "accessor writeU32": 1
+  },
+  "wsock32/functions.js": {
+   "accessor putPointer": 1,
+   "accessor readDword": 1,
+   "accessor writeDword": 1,
+   "copy readMemory().slice()": 4,
+   "string wide": 1
+  }
+ }
+}

@@ -12,6 +12,7 @@ import { buildImage, buildResources } from '../../loader/internal/resources.test
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './functions.js';
 import { IID_ITYPELIB } from './objects.js';
 import * as types from './vartypes.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const S_OK = 0x00000000;
 const E_INVALIDARG = 0x80070057;
@@ -46,6 +47,7 @@ function fakeHost(){
 
     const host = {
         bytes,
+        guest: guestOver(bytes),
         live,
         said,
         exhausted: false,
@@ -64,12 +66,6 @@ function fakeHost(){
             /** @param {number} address */
             free: address=>live.delete(address),
         },
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-        /** @param {number} address @param {number} value @param {number} length */
-        fillMemory: (address, value, length)=>bytes.fill(value, address, address + length),
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),
         /** @param {number} address */
@@ -1156,8 +1152,8 @@ test('LoadTypeLib reads the file off the volume, and the library registers and l
             null, 'ISetupServiceProvider is not carried');
 
         // Loaded back by GUID and version, through a read that arrives later.
-        lib.writeMemory(0x3000, Uint8Array.from([0x47, 0x62, 0x63, 0x94, 0x39, 0xbc, 0x8b, 0x4b,
-            0xa7, 0x28, 0x2d, 0x1f, 0xbe, 0xbf, 0xa7, 0x6a]));
+        lib.bytes.set(Uint8Array.from([0x47, 0x62, 0x63, 0x94, 0x39, 0xbc, 0x8b, 0x4b,
+            0xa7, 0x28, 0x2d, 0x1f, 0xbe, 0xbf, 0xa7, 0x6a]), 0x3000);
         const loading = fns.LoadRegTypeLib.handler([0x3000, 1, 0, 0, SLOT]);
         assert.ok(loading instanceof Promise, 'parked on the bytes');
         assert.equal(await loading, 0);
@@ -1198,8 +1194,8 @@ test('a library registered from a path in the upper half of the ANSI page loads 
         assert.deepEqual([.../** @type {any} */ (lib.hive.getValue(win32, '')).data
             .subarray(6, 8)], [0x80, 0x5c]);
 
-        lib.writeMemory(0x3000, Uint8Array.from([0x47, 0x62, 0x63, 0x94, 0x39, 0xbc, 0x8b, 0x4b,
-            0xa7, 0x28, 0x2d, 0x1f, 0xbe, 0xbf, 0xa7, 0x6a]));
+        lib.bytes.set(Uint8Array.from([0x47, 0x62, 0x63, 0x94, 0x39, 0xbc, 0x8b, 0x4b,
+            0xa7, 0x28, 0x2d, 0x1f, 0xbe, 0xbf, 0xa7, 0x6a]), 0x3000);
         assert.equal(await fns.LoadRegTypeLib.handler([0x3000, 1, 0, 0, SLOT]), 0);
         assert.ok(lib.opened.at(-1)?.includes('\u20ac'), 'the file it was registered from');
     });
@@ -2151,7 +2147,7 @@ test('a 64-bit process\'s SAFEARRAY has its data at 16, its bounds at 24, and a 
     host = fakeHost();
     /** @type {[number, number[]][]} */
     const called = [];
-    fx = createAutomationFunctions({ ...host, pointerSize: 8,
+    fx = createAutomationFunctions({ ...host, guest: guestOver(host.bytes, 8),
         /** @param {number} entry @param {number[]} args */
         call: (entry, args)=>{
             called.push([entry, args]);

@@ -16,6 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FC, POINTER, RPC_STATUS, RpcException, STUB_DESC, STUB_MESSAGE, createNdr }
     from './ndr.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const MESSAGE = 0x100;
 const FORMAT = 0x400;
@@ -60,12 +61,7 @@ function harness({ client = true, end = 0, routines = undefined } = {}){
     /** @type {{ objref: number[], iid: number[] | null }[]} */
     const imported = [];
     const ndr = createNdr({
-        readMemory: (address, length)=>{
-            assert.ok(address >= end || address + length <= end, `read of ${length} bytes at`
-                + ` 0x${address.toString(16)} runs past the end of an allocation`);
-            return memory.subarray(address, address + length);
-        },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory, 4, [end]),
         allocate: (_call, bytes)=>{
             const at = (top + 7) & ~7;
             top = at + bytes;
