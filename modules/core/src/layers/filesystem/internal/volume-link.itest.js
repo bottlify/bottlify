@@ -17,9 +17,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { createFilesystemModule } from '../module.js';
 import { decodeValue, encodeValue } from '@bottlify/cellar';
-import { createMemoryStore } from './memory-store.js';
+import { createMemoryStore } from './memory-store.fixture.js';
 import { createSharingMemory, openSharedSharing } from './shared-sharing.js';
 import { CHUNK, remoteVolume, volumeHandlers } from './volume-link.js';
 
@@ -53,7 +54,8 @@ async function world(seed, kept){
     const next = random(seed);
     const memory = { revisions: new Int32Array(new SharedArrayBuffer(26 * 4)),
         sharing: createSharingMemory() };
-    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+    const run = { pageFile: await testPageFile(), drives: new Map(), volumes: new Map(),
+        writables: new Map(),
         watchers: new Set(), revisions: memory.revisions,
         ...kept ? { sharing: openSharedSharing(memory.sharing) } : {} };
     /** @type {Record<string, Uint8Array | null>} */
@@ -63,7 +65,8 @@ async function world(seed, kept){
     seeded['Data\\Maps\\one.map'] = bytesOf(next, 3000);
     seeded['readme.txt'] = bytesOf(next, 40);
     let clock = 0;
-    const here = await createFilesystemModule().create({ volume: run, now: ()=>clock,
+    const here = await createFilesystemModule().create({ pageFile: await testPageFile(),
+        volume: run, now: ()=>clock,
         drives: { C: { source: createMemoryStore(seeded) } } });
     const handlers = volumeHandlers(run).volume;
     /** @param {any} value */

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /**
  * A context whose renderer records the draws it is handed, so a test reads
@@ -35,6 +36,7 @@ function fixture(){
     };
     /** @type {any} */
     const context = createGlContext({
+        holds: roomy.api.hold,
         memory: {
             read: (/** @type {number} */ at, /** @type {number} */ length)=>
                 bytes.subarray(at, at + length),
@@ -167,6 +169,7 @@ test('a lit draw reaches the device as it is, with the lighting its shader light
     };
     /** @type {any} */
     const context = createGlContext({
+        holds: roomy.api.hold,
         memory: { read: ()=>new Uint8Array(64), write: ()=>{} }, gpu,
     });
     context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
@@ -207,6 +210,7 @@ test('a draw assembled vertex by vertex is counted, with why it was', ()=>{
     };
     /** @type {any} */
     const context = createGlContext({
+        holds: roomy.api.hold,
         memory: { read: ()=>new Uint8Array(64), write: ()=>{} }, gpu,
     });
     context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
@@ -237,6 +241,7 @@ test('an immediate vertex keeps the attributes current at its glVertex, whatever
     };
     /** @type {any} */
     const context = createGlContext({
+        holds: roomy.api.hold,
         memory: { read: ()=>new Uint8Array(0), write: ()=>{} }, gpu,
     });
     context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
@@ -272,6 +277,7 @@ test('a texture copied from the framebuffer reads as one blank image, not one a 
     };
     /** @type {any} */
     const context = createGlContext({
+        holds: roomy.api.hold,
         memory: { read: ()=>new Uint8Array(0), write: ()=>{} }, gpu,
     });
     context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });

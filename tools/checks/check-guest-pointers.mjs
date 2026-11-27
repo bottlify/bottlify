@@ -53,7 +53,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { isMain } from '../lib/common.mjs';
-import { noCache } from '../../modules/core/src/layers/cache/module.js';
+import { testCache } from '../../modules/core/src/layers/cache/testing.fixture.js';
+import { testPageFile } from '../../modules/core/src/process/page-file.fixture.js';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -358,7 +359,7 @@ async function build(){
         }
     };
     const filesystemModule = createFilesystemModule();
-    const filesystem = await filesystemModule.create({});
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
 
     const thread = { id: 1, tebAddress: 0 };
     /** @type {Map<number, { type: string, object: any }>} */
@@ -368,8 +369,8 @@ async function build(){
     const apis = {
         memory,
         filesystem,
-        // The run's cache as a machine built alone has it: none, every read a miss.
-        cache: noCache,
+        // The run's cache as a test makes it: a real Cellar in memory.
+        cache: (await testCache()).api,
         log: standIn('log', { enabled: ()=>false, Level: {}, write: ()=>{} }),
         kernel: standIn('kernel', {
             // Where the win32 layer lends the pool its thread stacks, at create.

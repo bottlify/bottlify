@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { freshSpace } from '../../cache/testing.fixture.js';
 import { createD3dxFunctions } from './functions.js';
 import { IID_ID3DXEFFECT, IID_ID3DXEFFECTCOMPILER, IID_ID3DXEFFECTPOOL, IID_ID3DXEFFECT_25,
     IID_ID3DXEFFECT_26, createEffects } from './effect.js';
@@ -235,7 +236,7 @@ function guest(options = {}){
     /** @type {Map<number, { object: any, iid: string }>} */
     const published = new Map();
     let nextPointer = 0x3000000;
-    const host = {
+    const host = { compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             memory.subarray(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>

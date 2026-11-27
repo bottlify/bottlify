@@ -324,7 +324,7 @@ export function createShellExtras(host, parts){
             const adapter = createAdapter({ size: IMAGE_SIZES[index] },
                 { [IID_IIMAGELIST]: imageListMethods, [IID_IIMAGELIST2]: imageListMethods });
             // The lists are the process's: one reference kept for as long as it runs.
-            imageLists[index] = { pointer: host.publish(adapter, IID_IIMAGELIST) >>> 0, adapter };
+            imageLists[index] = { pointer: host.publish(adapter, IID_IIMAGELIST), adapter };
         }
         const list = imageLists[index];
         if (list && owned)
@@ -757,7 +757,7 @@ export function createShellExtras(host, parts){
                 }
                 const adapter = createAdapter({ values: new Map() },
                     { [IID_IPROPERTYSTORE]: propertyStoreMethods });
-                const pointer = host.publish(adapter, IID_IPROPERTYSTORE) >>> 0;
+                const pointer = host.publish(adapter, IID_IPROPERTYSTORE);
                 writeU32(out, pointer);
                 return pointer ? S_OK : E_OUTOFMEMORY;
             },

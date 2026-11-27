@@ -171,7 +171,7 @@ export function createErrorInfoObjects(host){
             const state = {
                 guid: null, source: null, description: null, helpFile: null, helpContext: 0,
             };
-            return host.publish(host.adapt(state, interfaces), IID_ICREATEERRORINFO) >>> 0;
+            return host.publish(host.adapt(state, interfaces), IID_ICREATEERRORINFO);
         },
     };
 }

@@ -16,7 +16,6 @@ import { renderDate, renderTime } from './datetime-format.js';
 import { forwarded, wholeAddress } from '../common/pointers.js';
 import { compareText, isSymbol, sortKey } from './collation.js';
 import { isStringType, stringTypes } from './string-types.js';
-import { runTables } from '../common/run-tables.js';
 import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, validMapFlags }
     from './lcmap.js';
 import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
@@ -744,9 +743,8 @@ export const mapCaseAnsi = (bytes, upper)=>{
  *           string the callback reads; absent, enumerations do not call.
  * @property {(address: number) => void} [free]
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {import('../common/run-tables.js').RunTables} [tables]  The run's
- *           constant tables the code pages and string types are read from;
- *           absent, this machine's own.
+ * @property {import('../common/run-tables.js').RunTables} tables  The run's
+ *           constant tables the code pages and string types are read from.
  */
 
 /**
@@ -764,9 +762,8 @@ export function compareStrings(first, second, flags){
  * @param {LocaleHost} host
  */
 export function createLocaleFunctions(host){
-    const tables = host.tables ?? runTables(null);
-    const codePage = codePages(tables);
-    const stringType = stringTypes(tables);
+    const codePage = codePages(host.tables);
+    const stringType = stringTypes(host.tables);
     /**
      * The locale each thread set for itself, by thread; one slot where there
      * is no thread to tell them apart.

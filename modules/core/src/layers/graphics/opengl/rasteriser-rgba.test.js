@@ -11,10 +11,10 @@
  * levels made into RGBA from their data, S3TC levels decoded from their
  * blocks, RGTC levels converted - written whole and in part between draws
  * that sample them, deleted and made again, drawn on the processor with the
- * RGBA held in plain memory and in a cache too small for all of it, whose
- * blocks come back full of what an earlier holder left there and are taken by
- * other holders between draws. Every pixel each draw leaves and every level a
- * read-back answers must be the same.
+ * RGBA held in a roomy cache and in one too small for all of it, whose blocks
+ * come back full of what an earlier holder left there (another pattern than
+ * the roomy one's) and are taken by other holders between draws. Every pixel
+ * each draw leaves and every level a read-back answers must be the same.
  */
 
 import { test } from 'node:test';
@@ -23,7 +23,7 @@ import { GL } from './constants.js';
 import { TEX } from './formats.js';
 import { createGlContext } from './context.js';
 import { createScratches } from '../../cache/scratch.js';
-import { testCache } from '../../cache/testing.fixture.js';
+import { freshSpace, testCache } from '../../cache/testing.fixture.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -85,33 +85,40 @@ const KINDS = [
 ];
 
 /**
+ * Memory held through `space`, each block handed out full of `fill`: what a
+ * level reads of its RGBA before writing it shows in the pixels.
+ *
+ * @param {import('../../cache/module.js').CacheSpace} space @param {number} fill
+ * @returns {import('../../cache/scratch.js').Hold}
+ */
+const filled = (space, fill)=>(key, length)=>{
+    const got = space.hold?.(key, length) ?? null;
+    got?.bytes.fill(fill);
+    return got;
+};
+
+/**
  * One seeded program: every draw's pixels and every read-back, in order.
  *
- * @param {number} seed @param {'plain' | 'small'} where
+ * @param {number} seed @param {'roomy' | 'cramped'} where
  * @param {{ shared?: boolean }} [options]  `shared`: every level's RGBA in one room, which
  *     the gate must see
  */
 async function run(seed, where, { shared = false } = {}){
     const next = random(seed);
-    /** @type {import('../../cache/scratch.js').Hold | null} */
-    let hold = null;
+    let hold = filled(freshSpace('scratch'), 0x33);
     let others = ()=>{};
-    if (where === 'small')
+    if (where === 'cramped')
     {
         const small = await testCache({ budget: 128 << 10, segmentBytes: 64 << 10 });
-        const space = small.space('scratch');
-        hold = (key, length)=>{
-            const got = space.hold?.(key, length) ?? null;
-            got?.bytes.fill(0xcd);
-            return got;
-        };
+        hold = filled(small.space('scratch'), 0xcd);
         let other = 0;
         others = ()=>{
             small.keeper.sweep();
             const taken = [];
             for (let size = 4096; size <= 16384; size *= 2)
             {
-                const got = hold?.(`other/${++other}`, size);
+                const got = hold(`other/${++other}`, size);
                 if (got)
                 {
                     got.bytes.fill(0x5a);
@@ -201,33 +208,34 @@ async function run(seed, where, { shared = false } = {}){
     return { seen, heldMost, figures: rooms.figures() };
 }
 
-test('the processor\'s rasteriser samples RGBA held in the run\'s cache as RGBA in plain memory',
+test('the processor\'s rasteriser samples RGBA held in a cramped cache as in a roomy one',
     { timeout: 300_000 }, async()=>{
-        let held = 0;
+        let cramped = 0;
         for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
         {
-            const plain = await run(seed, 'plain');
-            const cached = await run(seed, 'small');
-            assert.equal(cached.seen.length, plain.seen.length, `seed ${seed}`);
-            for (let at = 0; at < plain.seen.length; at++)
+            const roomy = await run(seed, 'roomy');
+            const small = await run(seed, 'cramped');
+            assert.equal(small.seen.length, roomy.seen.length, `seed ${seed}`);
+            for (let at = 0; at < roomy.seen.length; at++)
             {
-                assert.equal(cached.seen[at], plain.seen[at], `seed ${seed}: answer ${at}`);
+                assert.equal(small.seen[at], roomy.seen[at], `seed ${seed}: answer ${at}`);
             }
-            assert.equal(plain.heldMost, 0);
-            assert.ok(new Set(plain.seen).size > plain.seen.length / 2,
+            assert.ok(roomy.heldMost > 0, `seed ${seed}: levels' RGBA held in the roomy cache`);
+            assert.equal(roomy.figures.refused, 0, `seed ${seed}`);
+            assert.ok(new Set(roomy.seen).size > roomy.seen.length / 2,
                 `seed ${seed}: draws differ`);
-            held += cached.heldMost;
+            cramped += small.heldMost;
         }
-        assert.ok(held > 0, 'levels\' RGBA held in the cache');
+        assert.ok(cramped > 0, 'levels\' RGBA held in the cramped cache');
     });
 
 test('the gate sees levels whose RGBA shares one room', { timeout: 300_000 }, async()=>{
     let differed = 0;
     for (const seed of [1, 2, 3])
     {
-        const plain = await run(seed, 'plain');
-        const shared = await run(seed, 'small', { shared: true });
-        differed += shared.seen.some((answer, at)=>answer !== plain.seen[at]) ? 1 : 0;
+        const roomy = await run(seed, 'roomy');
+        const shared = await run(seed, 'cramped', { shared: true });
+        differed += shared.seen.some((answer, at)=>answer !== roomy.seen[at]) ? 1 : 0;
     }
     assert.ok(differed > 0, 'a level sampled with another\'s RGBA');
 });

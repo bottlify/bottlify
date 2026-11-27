@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { constantBlocks, keptBlocks, vertexLayoutOf } from './programmable.js';
 import { vertexBuffersOf } from './pipeline.js';
 import { createUniformArena } from '../../d3d8/render.js';
+import { roomy } from '../../../cache/testing.fixture.js';
 import { CONSTANT_FILE, createConstantFile } from '../../d3d9/shader.js';
 
 /**
@@ -16,7 +17,7 @@ import { CONSTANT_FILE, createConstantFile } from '../../d3d9/shader.js';
  * has been reset: what a block does not write reads those, unless cleared.
  */
 const usedArena = ()=>{
-    const arena = createUniformArena(4096);
+    const arena = createUniformArena(4096, (name, length)=>roomy.api.hold(name, length));
     arena.take(4096).fill(9);
     arena.reset();
     return arena;

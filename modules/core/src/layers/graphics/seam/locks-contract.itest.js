@@ -23,6 +23,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createShadow, settledAfter } from './shadow.js';
@@ -179,7 +180,7 @@ function generate(seed, count){
 const VERSIONS = [
     {
         name: 'Direct3D 8',
-        create: services=>createDirect3D8(services),
+        create: services=>createDirect3D8({ ...deviceRooms(), ...services }),
         bind: (device, buffer)=>{
             assert.equal(device.SetStreamSource(0, buffer, STRIDE), D3D_OK);
             assert.equal(device.SetVertexShader(FVF), D3D_OK);
@@ -189,7 +190,7 @@ const VERSIONS = [
     },
     {
         name: 'Direct3D 9',
-        create: services=>createDirect3D9(services),
+        create: services=>createDirect3D9({ ...deviceRooms(), ...services }),
         bind: (device, buffer)=>{
             assert.equal(device.SetStreamSource(0, buffer, 0, STRIDE), D3D_OK);
             assert.equal(device.SetFVF(FVF), D3D_OK);

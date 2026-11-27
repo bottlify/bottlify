@@ -577,6 +577,15 @@
    "tests": []
   },
   {
+   "path": "tools/checks/check-cache-fallbacks.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "No site keeps a store of its own beside the run's cache for no cache or no room",
+   "command": "node tools/checks/check-cache-fallbacks.mjs",
+   "tests": []
+  },
+  {
    "path": "tools/checks/check-emit-options.mjs",
    "category": "checks",
    "kind": "check",

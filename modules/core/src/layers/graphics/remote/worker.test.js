@@ -6,6 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+
+/** Where a root served here holds its memory: a real cache of this thread's. */
+const roomyHold = roomy.api.space('worker-rooms').hold;
 import { serveGraphics } from './worker.js';
 import { createSender, sharedNow } from './channel.js';
 import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
@@ -41,7 +45,7 @@ async function openedWorker(){
     /** @type {any} */
     const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
         onmessage: null };
-    const served = serveGraphics(scope, {
+    const served = serveGraphics(scope, { hold: roomyHold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
             requestDevice: async()=>gpu.device }) },
         canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -60,7 +64,8 @@ async function openedWorker(){
 const deviceOn = (sender, services = {})=>{
     /** @type {{ device?: any }} */
     const out = {};
-    assert.equal(recordedDirect3D(createDirect3D9, services, sender).CreateDevice({
+    assert.equal(recordedDirect3D(createDirect3D9, { ...deviceRooms(), ...services },
+        sender).CreateDevice({
         swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: 8,
         backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out), D3D_OK);
     const device = out.device;
@@ -93,7 +98,7 @@ test('the worker sends one frame at a time, the newest, and counts those replace
         /** @type {any} */
         const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
             onmessage: null };
-        serveGraphics(scope, {
+        serveGraphics(scope, { hold: roomyHold,
             gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
                 requestDevice: async()=>gpu.device }) },
             canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -102,7 +107,7 @@ test('the worker sends one frame at a time, the newest, and counts those replace
         scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
         await settle();
         const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
-        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
         /** @type {{ device?: any }} */
         const out = {};
         assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -156,7 +161,7 @@ async function presentingWorker(){
     /** @type {any} */
     const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
         onmessage: null };
-    serveGraphics(scope, {
+    serveGraphics(scope, { hold: roomyHold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
             requestDevice: async()=>gpu.device }) },
         canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -165,7 +170,7 @@ async function presentingWorker(){
     scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
     await settle();
     const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
-    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -312,7 +317,7 @@ test('counting, the worker says every frame presented, without its picture', asy
     /** @type {any} */
     const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
         onmessage: null };
-    serveGraphics(scope, {
+    serveGraphics(scope, { hold: roomyHold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
             requestDevice: async()=>gpu.device }) },
         canvas: ()=>{
@@ -323,7 +328,7 @@ test('counting, the worker says every frame presented, without its picture', asy
     await settle();
     const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {},
         source: 7 });
-    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -400,7 +405,7 @@ test('on SwiftShader the worker sends its frames as bytes, asked for pictures or
         const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
             onmessage: null };
         let canvases = 0;
-        serveGraphics(scope, {
+        serveGraphics(scope, { hold: roomyHold,
             gpu: { requestAdapter: async()=>({ features: new Set(),
                 info: { vendor: 'google', architecture: 'swiftshader',
                     description: 'SwiftShader Device (Subzero)' },
@@ -415,7 +420,7 @@ test('on SwiftShader the worker sends its frames as bytes, asked for pictures or
         await settle();
         const keeper = await lentKeeper(scope);
         const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
-        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
         /** @type {{ device?: any }} */
         const out = {};
         d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -450,7 +455,7 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
     /** @type {any} */
     const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
         onmessage: null };
-    serveGraphics(scope, {
+    serveGraphics(scope, { hold: roomyHold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
             requestDevice: async()=>gpu.device }) },
         canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -460,7 +465,7 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
     await settle();
     const keeper = await lentKeeper(scope);
     const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
-    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
     /** @type {{ device?: any }} */
     const out = {};
     d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -511,7 +516,7 @@ test('asked for its diagnostics, the played device answers, and the asker can wa
         Object.assign(gpu.device, { queue: gpu.queue });
         /** @type {any} */
         const scope = { postMessage: ()=>{}, onmessage: null };
-        serveGraphics(scope, {
+        serveGraphics(scope, { hold: roomyHold,
             gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
                 requestDevice: async()=>gpu.device }) },
             canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -520,7 +525,7 @@ test('asked for its diagnostics, the played device answers, and the asker can wa
         scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
         await settle();
         const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
-        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
         /** @type {{ device?: any }} */
         const out = {};
         d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -557,7 +562,7 @@ async function presentedPastTheGpu(frameLatency){
     Object.assign(gpu.device, { queue: gpu.queue });
     /** @type {any} */
     const scope = { postMessage: ()=>{}, onmessage: null };
-    serveGraphics(scope, {
+    serveGraphics(scope, { hold: roomyHold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
             requestDevice: async()=>gpu.device }) },
         canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -567,7 +572,7 @@ async function presentedPastTheGpu(frameLatency){
     await settle();
     const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {},
         ...frameLatency === undefined ? {} : { frameLatency } });
-    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
     /** @type {{ device?: any }} */
     const out = {};
     d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -642,7 +647,7 @@ test('a client port takes roots as the worker does, and is told when the GPU goe
         /** @type {any} */
         const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
             onmessage: null };
-        serveGraphics(scope, {
+        serveGraphics(scope, { hold: roomyHold,
             gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
                 requestDevice: async()=>gpu.device }) },
             canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -657,7 +662,7 @@ test('a client port takes roots as the worker does, and is told when the GPU goe
         const told = [];
         client.port1.onmessage = event=>told.push(event.data);
         const sender = rootOn(data=>client.port1.postMessage(data), { api: 'd3d9', options: {} });
-        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
         /** @type {{ device?: any }} */
         const out = {};
         try
@@ -698,7 +703,7 @@ test('each process\'s frames keep a slot of their own, say whose they are, and a
         /** @type {any} */
         const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
             onmessage: null };
-        serveGraphics(scope, {
+        serveGraphics(scope, { hold: roomyHold,
             gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
                 requestDevice: async()=>gpu.device }) },
             canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -715,7 +720,7 @@ test('each process\'s frames keep a slot of their own, say whose they are, and a
             senders.push(sender);
             /** @type {{ device?: any }} */
             const out = {};
-            recordedDirect3D(createDirect3D9, {}, sender).CreateDevice({
+            recordedDirect3D(createDirect3D9, deviceRooms(), sender).CreateDevice({
                 swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: size,
                 backBufferHeight: size, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
             return out.device;
@@ -774,7 +779,7 @@ test('a validation error of the worker\'s GPU is sent on, once and then every 25
     /** @type {any} */
     const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
         onmessage: null };
-    serveGraphics(scope, {
+    serveGraphics(scope, { hold: roomyHold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
             requestDevice: async()=>gpu.device }) },
         canvas: ()=>gpu.canvas,
@@ -802,7 +807,7 @@ test('frozen on a shown frame, the worker sends what a message can carry', async
     /** @type {any} */
     const scope = { postMessage: (/** @type {any} */ message)=>posted.push(structuredClone(message)),
         onmessage: null };
-    serveGraphics(scope, {
+    serveGraphics(scope, { hold: roomyHold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
             requestDevice: async()=>gpu.device }) },
         canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -811,7 +816,7 @@ test('frozen on a shown frame, the worker sends what a message can carry', async
     scope.onmessage({ data: { type: 'open', frames: 'pixels' } });
     await settle();
     const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
-    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
     /** @type {{ device?: any }} */
     const out = {};
     d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -846,7 +851,7 @@ test('a client\'s process gone however it went takes every root made through it 
         /** @type {any} */
         const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
             onmessage: null };
-        const served = serveGraphics(scope, {
+        const served = serveGraphics(scope, { hold: roomyHold,
             gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
                 requestDevice: async()=>gpu.device }) },
             canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -863,7 +868,7 @@ test('a client\'s process gone however it went takes every root made through it 
             source: 0x2010 });
         /** @type {{ device?: any }} */
         const out = {};
-        recordedDirect3D(createDirect3D9, {}, sender).CreateDevice({
+        recordedDirect3D(createDirect3D9, deviceRooms(), sender).CreateDevice({
             swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: 8,
             backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
         out.device.BeginScene();
@@ -895,7 +900,7 @@ test('an occlusion count that lands in its query\'s block is not sent to the pro
     const words = new Int32Array(memory.buffer);
     /** @type {any} */
     const scope = { postMessage: ()=>{}, onmessage: null };
-    serveGraphics(scope, {
+    serveGraphics(scope, { hold: roomyHold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
             requestDevice: async()=>gpu.device }) },
         canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -908,7 +913,8 @@ test('an occlusion count that lands in its query\'s block is not sent to the pro
     /** @type {any[]} */
     const told = [];
     sender.hearCounts(counts=>told.push(counts));
-    const d3d = recordedDirect3D(createDirect3D9, { countsInGuest: true }, sender);
+    const d3d = recordedDirect3D(createDirect3D9, { ...deviceRooms(), countsInGuest: true },
+        sender);
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -1088,7 +1094,7 @@ test('the backend\'s scratches are held in the run\'s cache under names the run 
         await settle();
         const figures = served.scratch();
         assert.equal(figures.held, 1, 'the uniform ring\'s copy, in the run\'s cache');
-        assert.equal(figures.plain, 0);
+        assert.equal(figures.refused, 0);
         const { under: held, prefix } = await under();
         assert.match(prefix, /^scratch\/\d+\/$/, 'an owner of the run\'s, numbered there');
         assert.equal(held.bodies, 1);

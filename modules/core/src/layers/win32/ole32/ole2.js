@@ -2036,7 +2036,7 @@ export function createOle2Functions(env){
                     object.release();
                     return E_NOINTERFACE;
                 }
-                writeU32(out, env.publish(object, caches.primary(object, iid)) >>> 0);
+                writeU32(out, env.publish(object, caches.primary(object, iid)));
                 return S_OK;
             },
         },

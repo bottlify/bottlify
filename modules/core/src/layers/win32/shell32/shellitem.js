@@ -206,7 +206,7 @@ export function createShellItems(host, namespace){
             return E_NOINTERFACE;
         }
         const object = createAdapter(/** @type {ItemState} */ ({ list }), INTERFACES);
-        const pointer = host.publish(object, iid === IID_IUNKNOWN ? IID_ISHELLITEM : iid) >>> 0;
+        const pointer = host.publish(object, iid === IID_IUNKNOWN ? IID_ISHELLITEM : iid);
         if (!pointer)
         {
             return E_OUTOFMEMORY;

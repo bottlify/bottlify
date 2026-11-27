@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { freshSpace } from '../../cache/testing.fixture.js';
 import { createD3dxFunctions, d3dxVersionFunctions } from './functions.js';
 import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATRIX } from './inguest-matrix.x86.js';
@@ -18,7 +19,8 @@ function machine(){
     const memory = new Uint8Array(0x1000);
     /** @type {string[]} */
     const diverged = [];
-    const fns = createD3dxFunctions({
+    const fns = createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'),
+        images: freshSpace('d3dx-images'),
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         divergence: api=>diverged.push(api),
@@ -178,7 +180,7 @@ test('D3DXCreateBuffer hands over a zeroed block behind an ID3DXBuffer, freed wi
     const published = [];
     /** @type {number[]} */
     const freed = [];
-    const fns = /** @type {any} */ (createD3dxFunctions({
+    const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         heap: { allocate: ()=>0x800, free: address=>freed.push(address) },
@@ -319,7 +321,7 @@ function endingMemory(ends){
     /** @type {string[]} */
     const opened = [];
     let free = 0x100;
-    const fns = /** @type {any} */ (createD3dxFunctions({
+    const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
         readMemory: (address, length)=>{
             for (const end of ends)
             {

@@ -35,6 +35,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { createHash } from 'node:crypto';
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
@@ -169,7 +170,8 @@ const everyPage = (address, length)=>({
 });
 
 /** @param {any} gpu */
-const backendOf = gpu=>createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+const backendOf = gpu=>createBackend({ scratches: testScratch,
+    device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
     now: ()=>0 });
 
 /** @param {any} descriptor */
@@ -231,7 +233,7 @@ function rig(version, way, caps = {}){
     let d3d;
     if (way === 'direct')
     {
-        d3d = factory({ ...services, backend: backendOf(gpu), createSampler });
+        d3d = factory({ ...deviceRooms(), ...services, backend: backendOf(gpu), createSampler });
     }
     else
     {
@@ -245,8 +247,7 @@ function rig(version, way, caps = {}){
         let toSender = ()=>{};
         /** Told when the GPU has counted, as the worker tells its receiver. */
         let counted = ()=>{};
-        const played = playedDirect3D(factory, {
-            ...caps,
+        const played = playedDirect3D(factory, { ...deviceRooms(), ...caps,
             backend: backendOf(gpu),
             occlusionCounted: ()=>counted(),
             createSampler,
@@ -280,7 +281,8 @@ function rig(version, way, caps = {}){
                     }
                 }
             };
-            d3d = recordedDirect3D(factory, services, playedAtOnce(played));
+            d3d = recordedDirect3D(factory, { ...deviceRooms(), ...services },
+                playedAtOnce(played));
         }
         else if (way.startsWith('held'))
         {
@@ -309,7 +311,7 @@ function rig(version, way, caps = {}){
             close = carried.close;
             shipped = ()=>({ ...sender.shippedBytes(),
                 lent: sender.lender?.diagnostics().lentBytes ?? 0 });
-            d3d = recordedDirect3D(factory, services, sender);
+            d3d = recordedDirect3D(factory, { ...deviceRooms(), ...services }, sender);
         }
         else if (way.startsWith('ring'))
         {
@@ -349,7 +351,7 @@ function rig(version, way, caps = {}){
             };
             shipped = ()=>({ ...sender.shippedBytes(),
                 lent: sender.lender?.diagnostics().lentBytes ?? 0 });
-            d3d = recordedDirect3D(factory, services, sender);
+            d3d = recordedDirect3D(factory, { ...deviceRooms(), ...services }, sender);
         }
     }
     return { version, way, d3d, gpu, memory, settle, release, close, shipped, given };

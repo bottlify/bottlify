@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { HOST_MIRRORS, createCommandReader, createShadow } from './shadow.js';
 import {
     BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, LEVEL,
@@ -1056,7 +1057,7 @@ test('a Direct3D 9 device\'s render states, stage states and transforms are mirr
     // what its getters in the guest read is what the device holds.
     /** @type {{ device?: any }} */
     const out = {};
-    assert.equal(createDirect3D9({}).CreateDevice({
+    assert.equal(createDirect3D9(deviceRooms()).CreateDevice({
         swapEffect: D3DSWAPEFFECT9.DISCARD, backBufferCount: 1, backBufferWidth: 64,
         backBufferHeight: 64, backBufferFormat: D3DFMT9.X8R8G8B8,
     }, out), 0);

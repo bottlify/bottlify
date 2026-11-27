@@ -48,25 +48,20 @@ export const TRANSLATION_ZONE_BYTES = 256 * 1024 * 1024;
  * functions under `cork/`, bodies that stay however long idle - one is read
  * again only at a relink, long after it was written - and leave when their
  * room is wanted, never to a disk (one is made again by emitting it). None
- * without a run's cache (a machine built alone): the translator keeps its own.
+ * where the cache layer joins no one (no reader under it, a tool's machine).
  *
- * @param {any} cache  the cache layer's api, or null
+ * @param {any} cache  the cache layer's api
  * @returns {{ kept?: import('./engine.js').KeptStore }}
  */
 const keptStore = cache=>{
-    if (cache === null)
-    {
-        return {};
-    }
-    const space = cache.space(KEPT_SPACE, KEPT_OPTIONS);
-    // A cache layer with no reader under it keeps nothing and joins no one.
     const probe = cache.join(()=>{});
     if (probe === null)
     {
         return {};
     }
     probe.leave?.();
-    return { kept: { space, prefix: `${KEPT_SPACE}/`, join: cache.join } };
+    return { kept: { space: cache.space(KEPT_SPACE, KEPT_OPTIONS), prefix: `${KEPT_SPACE}/`,
+        join: cache.join } };
 };
 
 /**

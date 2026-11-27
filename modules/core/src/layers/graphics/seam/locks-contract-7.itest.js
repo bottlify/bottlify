@@ -24,6 +24,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createDirect3D7 } from '../d3d7/device.js';
@@ -183,7 +184,7 @@ function machine(){
     root.setCooperativeLevel(HWND, DDSCL_NORMAL);
     const target = root.createSurface({ flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
         caps: DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8 }).surface;
-    const d3d = createDirect3D7(root);
+    const d3d = createDirect3D7(root, deviceRooms());
     const made = d3d.createDevice(DEVICE_IDS.HAL, target);
     assert.equal(made.hr, D3D_OK);
     const device = made.device;

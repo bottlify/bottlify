@@ -12,6 +12,7 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /**
  * A fixed-function frame as an old title draws it - a mipmapped texture on a
@@ -21,12 +22,13 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
  */
 function scene(){
     const fake = createFakeDevice({ quiet: true });
-    const backend = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: testScratch,
+        device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const renderer = createGpuRenderer({ backend,
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
     const guest = new Uint8Array(0x80000);
     let free = 0x40000;
-    const gl = /** @type {any} */ (createGlContext({ gpu: renderer, memory: {
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, gpu: renderer, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>guest.subarray(at, at + n),
         window: (/** @type {number} */ at, /** @type {number} */ n)=>guest.subarray(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>guest.set(value, at),

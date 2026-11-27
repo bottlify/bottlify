@@ -73,9 +73,9 @@ const RT_RCDATA = 10;
  * @property {(module: number, name: string | number, type: number) =>
  *     Promise<Uint8Array | null> | Uint8Array | null} [resource]
  *     A module's resource, for the FromResource loaders.
- * @property {import('../../cache/module.js').CacheSpace} [images]
+ * @property {import('../../cache/module.js').CacheSpace} images
  *     Where the loaders keep the images they decoded: the run's cache, for every
- *     process of it (`image-cache.js`); none decodes a file again at every create.
+ *     process of it (`image-cache.js`).
  */
 
 /** @typedef {(object: number, slot: number, rest: number[]) => Promise<number>} GuestMethod */

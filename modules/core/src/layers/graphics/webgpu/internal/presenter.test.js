@@ -68,6 +68,7 @@ function harness(options = {}){
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: frame=>presented.push(frame),
@@ -90,7 +91,7 @@ function harness(options = {}){
             }
             : undefined,
         schedule: flush=>scheduled.push(flush),
-        scratches: options.scratches,
+        scratches: options.scratches ?? roomy.api.scratch,
     });
     return {
         reads,
@@ -240,6 +241,7 @@ test('recorded: with no GPU the change is noted and nothing is shown', ()=>{
     /** @type {(() => void)[]} */
     const scheduled = [];
     const presenter = createPresenter({
+        scratches: roomy.api.scratch,
         backend: ()=>{
             throw new Error('graphics: no GPU device was supplied to this build');
         },
@@ -258,6 +260,7 @@ test('recorded: a claimed address is shown by its owner and its bytes are never 
     let shown = 0;
     let read = 0;
     const presenter = createPresenter({
+        scratches: roomy.api.scratch,
         backend: ()=>{
             throw new Error('the owner shows it, not the backend');
         },
@@ -296,10 +299,12 @@ test('recorded: a presenter with no canvas hands every frame to the caller\'s ow
         /** @type {any[]} */
         const shown = [];
         const backend = createBackend({
+            scratches: roomy.api.scratch,
             device: gpu.device, queue: gpu.queue,
             presentTo: (/** @type {any} */ frame)=>presenter.show(frame), now: ()=>0,
         });
         const presenter = createPresenter({
+            scratches: roomy.api.scratch,
             backend: ()=>backend,
             readMemory: (address, length)=>ram.slice(address, address + length),
             presentTo: (/** @type {any} */ frame)=>shown.push(frame),
@@ -323,11 +328,13 @@ test('the run\'s presenter serves two machine lifetimes, configures the canvas o
         const gpu = createFakeDevice();
         const ram = new Uint8Array(0x10000);
         const presenter = createPresenter({
+            scratches: roomy.api.scratch,
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             now: ()=>0,
         });
         const presentFrom = ()=>{
             const backend = createBackend({
+                scratches: roomy.api.scratch,
                 device: gpu.device, queue: gpu.queue,
                 presentTo: frame=>presenter.show(frame), now: ()=>0,
             });
@@ -375,6 +382,7 @@ test('a machine that goes takes its pending frame and its claims with it', ()=>{
     // yet is dropped, since the address space it named has gone.
     const gpu = createFakeDevice();
     const presenter = createPresenter({
+        scratches: roomy.api.scratch,
         device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
         now: ()=>0,
     });
@@ -382,6 +390,7 @@ test('a machine that goes takes its pending frame and its claims with it', ()=>{
     const machine = ram=>{
         const reached = { backend: 0 };
         const backend = createBackend({
+            scratches: roomy.api.scratch,
             device: gpu.device, queue: gpu.queue,
             presentTo: frame=>presenter.show(frame), now: ()=>0,
         });
@@ -480,6 +489,7 @@ test('every machine attached to one presenter counts against one bound', async()
     // parent presents onto the queue its parent's frames are on.
     const gpu = createFakeDevice({ workDone: true });
     const presenter = createPresenter({
+        scratches: roomy.api.scratch,
         device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
         now: ()=>0, maxFrameLatency: 2,
     });
@@ -506,10 +516,12 @@ test('every canvas copy is recorded under the label of what was shown', ()=>{
     const gpu = createFakeDevice();
     const ram = new Uint8Array(0x1000);
     const presenter = createPresenter({
+        scratches: roomy.api.scratch,
         device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
         now: ()=>0,
     });
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device, queue: gpu.queue,
         presentTo: frame=>presenter.show(frame), now: ()=>0,
     });
@@ -550,10 +562,12 @@ function canvasHarness(){
     const gpu = createFakeDevice();
     const ram = new Uint8Array(0x1000);
     const presenter = createPresenter({
+        scratches: roomy.api.scratch,
         device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
         now: ()=>0,
     });
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device, queue: gpu.queue,
         presentTo: frame=>presenter.show(frame), now: ()=>0,
     });
@@ -749,6 +763,7 @@ test('gate: the bytes a presenter sends are the bytes it would upload, for every
         /** @type {(() => void)[]} */
         const scheduled = [];
         const sending = createPresenter({
+            scratches: roomy.api.scratch,
             readMemory: (address, length)=>h.ram.slice(address, address + length),
             windowMemory: windowed
                 ? (address, length)=>h.ram.subarray(address, address + length) : undefined,
@@ -786,6 +801,7 @@ test('a sending presenter writes each frame into memory of its own in the run\'s
     const cache = await testCache();
     const display = heldDisplay(cache.space('frames'), sent);
     const presenter = createPresenter({
+        scratches: roomy.api.scratch,
         readMemory: (address, length)=>ram.slice(address, address + length),
         schedule: flush=>scheduled.push(flush),
         display,
@@ -806,6 +822,7 @@ test('a sending presenter writes each frame into memory of its own in the run\'s
     cache.idle(0);
     assert.equal(cache.keeper.under('frames/').bodies, 0, 'shown, the memory is the cache\'s');
     const refused = createPresenter({
+        scratches: roomy.api.scratch,
         readMemory: (address, length)=>ram.slice(address, address + length),
         schedule: flush=>scheduled.push(flush),
         display: { bytes: ()=>null, send: ()=>assert.fail('nothing sent') },
@@ -836,6 +853,7 @@ async()=>{
             const sent = [];
             const display = heldDisplay(cache.space(`frames-${windowed}`), sent);
             const presenter = createPresenter({
+                scratches: roomy.api.scratch,
                 readMemory: (address, length)=>reference.ram.slice(address, address + length),
                 windowMemory: windowed ? (address, length)=>reference.ram.subarray(address,
                     address + length) : undefined,
@@ -911,7 +929,8 @@ test('with a GPU and no canvas the screen is still composed of every process\'s 
         { processId: 1, rect: { left: -32000, top: -32000, right: -31990, bottom: -31996 },
             visible: true },
     ];
-    const presenter = createPresenter({ device: gpu.device, queue: gpu.queue,
+    const presenter = createPresenter({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue,
         presentTo: frame=>handed.push(frame), windows: ()=>windows, foreground: ()=>1 });
     /** @param {string} label */
     const surfaceOf = label=>({ texture: gpu.device.createTexture({ label,
@@ -937,7 +956,8 @@ test('a frame counted with no picture, a process\'s, is handed on as it is, noth
     const gpu = createFakeDevice();
     /** @type {any[]} */
     const handed = [];
-    const presenter = createPresenter({ device: gpu.device, queue: gpu.queue,
+    const presenter = createPresenter({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue,
         presentTo: frame=>handed.push(frame), windows: ()=>[], foreground: ()=>1 });
     presenter.show({ surface: null, frameIndex: 1, source: 3 });
     assert.equal(handed.length, 1);
@@ -959,7 +979,8 @@ test('a process\'s windows over its GPU frame that has the screen are laid over 
         { processId: 1, rect: { left: 0, top: 0, right: 8, bottom: 4 }, visible: true },
     ];
     const ram = new Uint8Array(8 * 4 * 4).fill(0x22);
-    const presenter = createPresenter({ device: gpu.device, queue: gpu.queue,
+    const presenter = createPresenter({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue,
         presentTo: frame=>handed.push(frame), windows: ()=>windows, foreground: ()=>1 });
     const view = presenter.attach({ backend: ()=>null, source: 1,
         readMemory: (address, length)=>ram.slice(address, address + length) });
@@ -995,9 +1016,9 @@ test('a process\'s windows over its GPU frame that has the screen are laid over 
 
 test('gate: a surface converted in a room of the run\'s cache, in a dirty one and in bytes of '
     + 'its own reaches the queue as the same bytes, frame after frame', async()=>{
-    // A small cache: a picture past its segment is converted in plain memory.
-    const cache = await testCache({ budget: 1 << 14, segmentBytes: 1 << 13 });
-    const held = createScratches(cache.space('scratch').hold ?? null);
+    // A small cache, whose blocks a larger picture's room outgrows and is held anew in.
+    const cache = await testCache({ budget: 1 << 16, segmentBytes: 1 << 15 });
+    const held = createScratches(cache.space('scratch').hold);
     const dirty = createScratches((_key, length)=>({
         bytes: new Uint8Array(length + 4096).fill(0xcd).subarray(4096), release: ()=>{} }));
     let seed = 0xfeed;
@@ -1015,6 +1036,7 @@ test('gate: a surface converted in a room of the run\'s cache, in a dirty one an
         const scheduled = [];
         const ram = new Uint8Array(0x10000);
         const sending = createPresenter({
+            scratches: roomy.api.scratch,
             readMemory: (address, length)=>ram.slice(address, address + length),
             windowMemory: windowed ? (address, length)=>ram.subarray(address, address + length)
                 : undefined,
@@ -1051,7 +1073,6 @@ test('gate: a surface converted in a room of the run\'s cache, in a dirty one an
         }
     }
     const figures = held.figures();
-    assert.ok(figures.grows - figures.plainGrows > 0, 'rooms held in the run\'s cache');
-    assert.ok(figures.plainGrows > 0, 'and rooms that had none there');
+    assert.ok(figures.grows > 0 && figures.refused === 0, 'rooms held in the run\'s cache');
     assert.ok(figures.grows < 20, `grown a few times, not a frame (${figures.grows})`);
 });

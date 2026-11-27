@@ -17,6 +17,7 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** A guest address space the context reads its arrays and pixels from. */
 function machine(){
@@ -47,7 +48,8 @@ function machine(){
 function drawing(options = {}){
     const box = machine();
     /** @type {any} */
-    const context = createGlContext({ memory: box.memory, divergence: options.divergence,
+    const context = createGlContext({ holds: roomy.api.hold,
+        memory: box.memory, divergence: options.divergence,
         raster: options.raster, keepPrimitives: true });
     context.attach({ width: 8, height: 8, doubleBuffered: false, depthBits: 24 });
     context.glMatrixMode(GL.PROJECTION);
@@ -449,7 +451,8 @@ test('a context keeps no draw\'s vertices unless asked to: they are garbage once
             },
         };
         /** @type {any} */
-        const context = createGlContext({ memory: box.memory, gpu, keepPrimitives });
+        const context = createGlContext({ holds: roomy.api.hold,
+            memory: box.memory, gpu, keepPrimitives });
         context.attach({ width: 8, height: 8, doubleBuffered: false, depthBits: 24 });
         box.floats(0x100, [0, 0, 8, 0, 0, 8]);
         context.glVertexPointer(2, GL.FLOAT, 0, 0x100);
@@ -490,7 +493,7 @@ test('arrays, indices and buffer contents are read through the window, not copie
     let copies = 0;
     let windows = 0;
     /** @type {any} */
-    const context = createGlContext({ memory: {
+    const context = createGlContext({ holds: roomy.api.hold, memory: {
         ...box.memory,
         read: (/** @type {number} */ at, /** @type {number} */ length)=>{
             copies++;

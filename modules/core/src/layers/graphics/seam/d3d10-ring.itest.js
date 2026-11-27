@@ -26,6 +26,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { createHash } from 'node:crypto';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
@@ -211,13 +212,15 @@ function machine(guestCode, worker, eleven = false){
     const guest = { allocate, free: ()=>{}, readMemory: readBytes, writeMemory: writeBytes,
         watchWrites };
     const drawing = {
-        backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        backend: createBackend({ scratches: testScratch,
+            device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
             now: ()=>0 }),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',
             id: `sampler-${JSON.stringify(descriptor)}`, descriptor }),
         createTexture: gpu.device.createTexture,
     };
     const libraries = createGraphicsLibraries({
+        scratches: testScratch,
         graphics: {
             create: (/** @type {string} */ name, /** @type {any} */ caps)=>{
                 if (name !== 'd3d10')
@@ -225,10 +228,11 @@ function machine(guestCode, worker, eleven = false){
                     return null;
                 }
                 return worker
-                    ? recordedDirect3D10(createDirect3D10, { ...caps, guest },
-                        playedAtOnce(playedDirect3D10(createDirect3D10, { ...caps, ...drawing,
+                    ? recordedDirect3D10(createDirect3D10, { ...deviceRooms(), ...caps, guest },
+                        playedAtOnce(playedDirect3D10(createDirect3D10, { ...deviceRooms(),
+                            ...caps, ...drawing,
                             writeMemory: writeBytes })))
-                    : createDirect3D10({ ...caps, ...drawing, guest });
+                    : createDirect3D10({ ...deviceRooms(), ...caps, ...drawing, guest });
             },
             available: ()=>false,
             adapter: ()=>({ vendor: 'nvidia', architecture: 'ampere', description: '' }),

@@ -16,6 +16,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { runTables } from '../common/run-tables.js';
+import { roomy } from '../../cache/testing.fixture.js';
 import { COMPILED } from './inguest.x86.js';
 import * as sources from './inguest.js';
 import { createLocaleFunctions } from './locale.js';
@@ -115,7 +117,7 @@ const machine = guestCode=>{
     const writeMemory = (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>{
         bytes.set(data, at);
     };
-    const table = createLocaleFunctions(/** @type {any} */ ({
+    const table = createLocaleFunctions(/** @type {any} */ ({ tables: runTables(roomy.api.space('tables', { idle: 'stay' })),
         readMemory, writeMemory,
         stringLength: (/** @type {number} */ at, /** @type {number} */ unit)=>{
             let count = 0;

@@ -15,6 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @returns {{ gl: any, bytes: Uint8Array, held: Set<number> }} */
 function fixture(){
@@ -22,7 +23,7 @@ function fixture(){
     let next = 0x8000;
     /** The addresses a map holds. */
     const held = new Set();
-    const gl = createGlContext({ memory: {
+    const gl = createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
         allocate: (/** @type {number} */ size)=>{

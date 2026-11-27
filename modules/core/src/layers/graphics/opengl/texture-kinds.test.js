@@ -17,11 +17,13 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** A context on the fake device, with guest memory. */
 function rig(){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const divergences = [];
     const renderer = createGpuRenderer({
@@ -36,7 +38,8 @@ function rig(){
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const gl = createGlContext({ memory, gpu: renderer, divergence: d=>divergences.push(d) });
+    const gl = createGlContext({ holds: roomy.api.hold,
+        memory, gpu: renderer, divergence: d=>divergences.push(d) });
     gl.attach({ width: 16, height: 16, doubleBuffered: true, depthBits: 24 });
     const swap = async()=>{
         renderer.present(gl);
@@ -95,7 +98,7 @@ function texel(gl){
 // --- swizzle (3.3) ---
 
 test('a swizzle is texture state: four sources, set apart or at once, refused elsewhere', ()=>{
-    const gl = /** @type {any} */ (createGlContext({}));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     texel(gl);
     assert.deepEqual(gl.glGetTexParameteriv(GL.TEXTURE_2D, GL.TEXTURE_SWIZZLE_RGBA),
@@ -122,7 +125,7 @@ test('a swizzle is texture state: four sources, set apart or at once, refused el
 
 test('the processor reads a swizzled texel', ()=>{
     const bytes = new Uint8Array(0x100);
-    const gl = /** @type {any} */ (createGlContext({ memory: {
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.subarray(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
     } }));
@@ -195,7 +198,7 @@ function rectangle(gl){
 }
 
 test('a rectangle has one level, no mipmap filter, no repeat, and its own binding', ()=>{
-    const gl = /** @type {any} */ (createGlContext({}));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     const name = rectangle(gl);
     assert.equal(gl.glGetError(), GL.NO_ERROR);
@@ -231,7 +234,7 @@ test('a rectangle has one level, no mipmap filter, no repeat, and its own bindin
 test('the fixed stage reads a rectangle at texel coordinates, on the processor and the device',
     async()=>{
         const bytes = new Uint8Array(0x100);
-        const gl = /** @type {any} */ (createGlContext({ memory: {
+        const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, memory: {
             read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.subarray(at, at + n),
             write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
         } }));
@@ -310,7 +313,7 @@ test('a fragment program\'s RECT target samples the unit\'s rectangle', async()=
 // --- buffer textures (3.1) ---
 
 test('a buffer texture is a buffer\'s range in a format, with no sampling state', ()=>{
-    const gl = /** @type {any} */ (createGlContext({}));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     const [buffer] = gl.glGenBuffersARB(1);
     gl.glBindBufferARB(GL.TEXTURE_BUFFER, buffer);
@@ -396,7 +399,7 @@ void main() { c = texelFetch(table, 1) + vec4(float(textureSize(table))); }`);
 // --- multisample textures (3.2) ---
 
 test('a multisample texture is one level of samples, its count kept, its state none', ()=>{
-    const gl = /** @type {any} */ (createGlContext({}));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     const [name, layered] = gl.glGenTextures(2);
     gl.glBindTexture(GL.TEXTURE_2D_MULTISAMPLE, name);

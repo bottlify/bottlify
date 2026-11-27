@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createExecuteBuffer, executeBuffer } from './execute.js';
 import { createLegacyDirect3D, createTextureHandles } from './legacy.js';
 import { createDirect3D7 } from './device.js';
@@ -40,7 +41,7 @@ function fixture(){
     };
     const root = createDirectDraw({ version: 1, screenWidth: 64, screenHeight: 48 });
     root.setCooperativeLevel(HWND, DDSCL_NORMAL);
-    const d3d7 = createDirect3D7(root);
+    const d3d7 = createDirect3D7(root, deviceRooms());
     /** @type {any[][]} */
     const draws = [];
     const watched = {

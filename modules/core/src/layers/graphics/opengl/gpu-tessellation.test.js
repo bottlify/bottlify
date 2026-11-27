@@ -20,10 +20,12 @@ import { createGpuRenderer } from './gpu.js';
 import { TESS } from './context-tessellation.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 function rig(){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const divergences = [];
     const renderer = createGpuRenderer({
@@ -38,7 +40,8 @@ function rig(){
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const gl = createGlContext({ memory, gpu: renderer, divergence: d=>divergences.push(d) });
+    const gl = createGlContext({ holds: roomy.api.hold,
+        memory, gpu: renderer, divergence: d=>divergences.push(d) });
     gl.attach({ width: 64, height: 32, doubleBuffered: true, depthBits: 24 });
     const swap = async()=>{
         renderer.present(gl);

@@ -14,6 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @returns {{ gl: any, bytes: Uint8Array, view: DataView, freed: number[] }} */
 function fixture(){
@@ -21,7 +22,7 @@ function fixture(){
     /** @type {number[]} */
     const freed = [];
     let next = 0x8000;
-    const gl = createGlContext({ memory: {
+    const gl = createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
         allocate: (/** @type {number} */ size)=>{

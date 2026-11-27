@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { createHive, shellFolders } from '../advapi32/registry.js';
@@ -44,7 +45,7 @@ const HEAP = 0x20000;
 async function machine(extra = {}){
     const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const volume = /** @type {any} */ (createVolume(fs));
     for (const path of ['C:\\WINDOWS', 'C:\\WINDOWS\\inf', 'C:\\WINDOWS\\system32', 'C:\\src',
         'C:\\dst'])

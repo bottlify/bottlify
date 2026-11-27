@@ -4088,7 +4088,7 @@ export function createEffects(host, helpers, options = {}){
             state: effect, destroy: ()=>destroy(effect) });
         // The interface's state word, where the setters in the guest find the effect.
         /** @type {any} */ (object).guestState = ()=>effect.block;
-        const pointer = vtables.publish(object, effectInterface.id) >>> 0;
+        const pointer = vtables.publish(object, effectInterface.id);
         if (pointer === 0)
         {
             object.release();
@@ -4383,7 +4383,7 @@ export function createEffects(host, helpers, options = {}){
                 const vtables = /** @type {NonNullable<EffectHost['vtables']>} */ (host.vtables);
                 const object = createComObject(IID_ID3DXEFFECTCOMPILER, {
                     interfaces: [compilerInterface], state: effect, destroy: ()=>destroy(effect) });
-                const pointer = vtables.publish(object, IID_ID3DXEFFECTCOMPILER) >>> 0;
+                const pointer = vtables.publish(object, IID_ID3DXEFFECTCOMPILER);
                 if (pointer === 0)
                 {
                     object.release();
@@ -4537,7 +4537,7 @@ export function createEffects(host, helpers, options = {}){
             const holder = { pointer: 0 };
             const object = createComObject(IID_ID3DXEFFECTPOOL, { interfaces: [poolInterface],
                 state: { shared: [] }, destroy: ()=>pools.delete(holder.pointer) });
-            holder.pointer = host.vtables.publish(object, IID_ID3DXEFFECTPOOL) >>> 0;
+            holder.pointer = host.vtables.publish(object, IID_ID3DXEFFECTPOOL);
             if (holder.pointer === 0)
             {
                 object.release();

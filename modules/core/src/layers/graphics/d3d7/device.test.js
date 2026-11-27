@@ -14,6 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { bufferLockFlags, createDirect3D7, d3dFormatOf } from './device.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DERR_INBEGINSTATEBLOCK,
@@ -83,7 +84,7 @@ function surface(root, options = {}){
 /** A device on a fresh target, with everything needed to release it. */
 function fixture(){
     const root = ddrawObject();
-    const d3d = createDirect3D7(root);
+    const d3d = createDirect3D7(root, deviceRooms());
     const target = surface(root);
     const made = d3d.createDevice(DEVICE_IDS.HAL, target);
     assert.equal(made.hr, D3D_OK);
@@ -107,7 +108,7 @@ function releaseAll(f){
 
 test('three devices are offered, and only the T&L one transforms in hardware', ()=>{
     const root = ddrawObject();
-    const d3d = createDirect3D7(root);
+    const d3d = createDirect3D7(root, deviceRooms());
     const devices = d3d.enumDevices();
 
     assert.deepEqual(devices.map(device=>device.id),
@@ -128,7 +129,7 @@ test('three devices are offered, and only the T&L one transforms in hardware', (
 
 test('a device is created on a 3D surface in video memory, and on nothing else', ()=>{
     const root = ddrawObject();
-    const d3d = createDirect3D7(root);
+    const d3d = createDirect3D7(root, deviceRooms());
     const target = surface(root);
 
     assert.equal(d3d.createDevice(DEVICE_IDS.REF, target).hr, DDERR_NOTFOUND,
@@ -237,7 +238,7 @@ test('a 24-bit z-buffer is one the renderer takes, held in 32 bits', ()=>{
 
 test('a depth buffer attached at creation turns the depth test on', ()=>{
     const root = ddrawObject();
-    const d3d = createDirect3D7(root);
+    const d3d = createDirect3D7(root, deviceRooms());
     const target = surface(root);
     const depth = surface(root, { caps: DDSCAPS_ZBUFFER, zBufferBitDepth: 16 });
     assert.equal(target.addAttachedSurface(depth), D3D_OK);
@@ -616,7 +617,7 @@ test('a vertex buffer gives its guest memory back with its last reference', ()=>
             freed.push(address);
         },
     });
-    const d3d = createDirect3D7(root);
+    const d3d = createDirect3D7(root, deviceRooms());
     const made = d3d.createVertexBuffer({ caps: 0, fvf: FVF_TL, numVertices: 4 });
     assert.equal(made.hr, D3D_OK);
     assert.equal(made.buffer.base, 0x200000);
@@ -760,6 +761,7 @@ test('the material, clip status and clip planes read back as copies', ()=>{
 function recorded(options = {}){
     const gpu = createFakeDevice();
     const backend = createBackend({
+        scratches: testScratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: ()=>{},
@@ -785,8 +787,7 @@ function recorded(options = {}){
         },
         free: address=>given.push(address),
     });
-    const d3d = createDirect3D7(root, {
-        backend,
+    const d3d = createDirect3D7(root, { ...deviceRooms(), backend,
         readMemory: (address, length)=>ram.slice(address, address + length),
         ...(options.writable
             ? { writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
@@ -1622,7 +1623,7 @@ test('the earlier interfaces\' sampler render states are kept on IDirect3DDevice
 test('a device is made on no indexed surface, and its target moves to one in system memory or a'
     + ' depth buffer, not an indexed one (test_rt_caps)', ()=>{
     const root = ddrawObject();
-    const d3d = createDirect3D7(root);
+    const d3d = createDirect3D7(root, deviceRooms());
     const p8 = { size: 0x20, flags: 0x20 | 0x40, fourCC: 0, bitCount: 8, redMask: 0,
         greenMask: 0, blueMask: 0, alphaMask: 0 };
     const palette = /** @type {any} */ (root.createPalette(4 | 0x40, new Array(256).fill(0))

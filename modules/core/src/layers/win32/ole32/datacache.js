@@ -758,7 +758,7 @@ export function createDataCaches(context){
                 unsupported('OnClose', 4),
             ] }],
         });
-        state.sinkPointer = object ? env.publish(object, IID_IADVISESINK) >>> 0 : 0;
+        state.sinkPointer = object ? env.publish(object, IID_IADVISESINK) : 0;
         return state.sinkPointer;
     };
 

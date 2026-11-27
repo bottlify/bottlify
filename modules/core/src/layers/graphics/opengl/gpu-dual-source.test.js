@@ -19,11 +19,13 @@ import { GL_EXTENSIONS } from './extensions.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @param {string[]} features @returns {any} */
 function rig(features){
     const gpu = createFakeDevice({ features });
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const losses = [];
     const renderer = createGpuRenderer({ backend,
@@ -35,7 +37,8 @@ function rig(features){
             }
         } });
     /** @type {any} */
-    const gl = createGlContext({ memory: { read: ()=>new Uint8Array(0), write: ()=>{} },
+    const gl = createGlContext({ holds: roomy.api.hold,
+        memory: { read: ()=>new Uint8Array(0), write: ()=>{} },
         gpu: renderer });
     gl.attach({ width: 8, height: 8, doubleBuffered: true });
     const [vertices] = gl.glGenBuffersARB(1);

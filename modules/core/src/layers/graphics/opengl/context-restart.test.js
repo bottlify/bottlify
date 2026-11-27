@@ -13,12 +13,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @returns {{ gl: any, bytes: Uint8Array }} */
 function fixture(){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
-    const gl = /** @type {any} */ (createGlContext({ memory: {
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.subarray(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
     }, keepPrimitives: true }));

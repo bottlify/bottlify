@@ -26,9 +26,6 @@
  * Unicode data, a page of 256 units at a time as a page is first met.
  */
 
-/** Whether shared memory exists here: a browser's decoder refuses a view of it. */
-const SHARED = typeof SharedArrayBuffer === 'function';
-
 /**
  * Bytes a decoder takes: a view of shared memory is copied out first, as
  * every browser refuses to decode one in place.
@@ -36,7 +33,8 @@ const SHARED = typeof SharedArrayBuffer === 'function';
  * @param {ArrayBufferView | ArrayBuffer} bytes
  * @returns {ArrayBufferView | ArrayBuffer}
  */
-const decodable = bytes=>(SHARED && 'buffer' in bytes && bytes.buffer instanceof SharedArrayBuffer
+const decodable = bytes=>(typeof SharedArrayBuffer === 'function' && 'buffer' in bytes
+    && bytes.buffer instanceof SharedArrayBuffer
     ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).slice() : bytes);
 
 /**

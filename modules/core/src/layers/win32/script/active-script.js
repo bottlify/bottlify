@@ -399,7 +399,7 @@ export function activeScript(host, language){
         {
             const error = createComObject(language.clsid, { interfaces: [errorInterface],
                 state: failure });
-            const pointer = host.publish(error, IID_IACTIVESCRIPTERROR) >>> 0;
+            const pointer = host.publish(error, IID_IACTIVESCRIPTERROR);
             if (pointer !== 0)
             {
                 await callSite(SITE_ON_SCRIPT_ERROR, [pointer]);

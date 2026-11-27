@@ -360,7 +360,7 @@ export function createMeshObjects(host, buffers){
                 heap().free(state.attributes);
             } });
         state.pointer = /** @type {NonNullable<MeshHost['vtables']>} */ (host.vtables)
-            .publish(object, IID_ID3DXMESH) >>> 0;
+            .publish(object, IID_ID3DXMESH);
         if (state.pointer === 0)
         {
             object.release();

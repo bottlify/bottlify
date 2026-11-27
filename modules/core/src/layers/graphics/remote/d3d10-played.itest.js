@@ -22,6 +22,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { createDirect3D10 } from '../d3d10/root.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
@@ -51,7 +52,8 @@ const floatBytes = floats=>new Uint8Array(Float32Array.from(floats).buffer);
 async function run(seed, steps, recorded){
     const gpu = createFakeDevice();
     const reads = gpuReads(gpu);
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const guest = guestMemory();
     /** @type {string[]} */
@@ -64,10 +66,10 @@ async function run(seed, steps, recorded){
             divergences.push(`${api}: ${detail}`),
     };
     const root = recorded
-        ? recordedDirect3D10(createDirect3D10, { guest: guest.storage },
-            playedAtOnce(playedDirect3D10(createDirect3D10, { ...drawing,
+        ? recordedDirect3D10(createDirect3D10, { ...deviceRooms(), guest: guest.storage },
+            playedAtOnce(playedDirect3D10(createDirect3D10, { ...deviceRooms(), ...drawing,
                 writeMemory: guest.store })))
-        : createDirect3D10({ ...drawing, guest: guest.storage });
+        : createDirect3D10({ ...deviceRooms(), ...drawing, guest: guest.storage });
     const pick = random(seed);
     /** @type {any[]} */
     const answers = [];

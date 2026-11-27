@@ -12,7 +12,7 @@
  */
 
 import { createReader, openKeeper } from '@bottlify/cellar';
-import { cacheSpace } from './module.js';
+import { cacheSpace, createCacheModule } from './module.js';
 
 /**
  * @param {{ budget?: number, segmentBytes?: number, coldAfterMs?: number }} [made]
@@ -43,6 +43,11 @@ export async function testCache(made = {}){
     reader = opened;
     return {
         keeper, clock, reader: opened,
+        /**
+         * The cache layer's api over this cache, as a process's layers are
+         * handed it: its spaces, and the scratches and holds it keeps.
+         */
+        api: await createCacheModule().create({ reader: opened }),
         /** @param {string} name @param {{ onlyCopy?: boolean, idle?: 'go' | 'stay' }} [options] */
         space: (name, options)=>cacheSpace(opened, name, options),
         /**
@@ -61,3 +66,60 @@ export async function testCache(made = {}){
         },
     };
 }
+
+/**
+ * One roomy cache a test file's layers share, made when the file first imports
+ * this: what a layer built for a test is handed where the test is not about
+ * the cache itself, so that it runs over the real one, as in a run.
+ */
+export const roomy = await testCache({ budget: 2 ** 30, segmentBytes: 64 << 20 });
+
+let spaces = 0;
+
+/**
+ * A space of `roomy` no other made here shares, so that what one test keeps
+ * is not another's hit.
+ *
+ * @param {string} name @param {{ onlyCopy?: boolean, idle?: 'go' | 'stay' }} [options]
+ */
+export const freshSpace = (name, options)=>roomy.api.space(`${name}/${++spaces}`, options);
+
+/**
+ * The scratches `testScratch` handed out, oldest first: a test's backend
+ * lives for one test and keeps its scratch (a uniform ring's 4 MiB copy) for
+ * its life, and a file of them would otherwise fill `roomy`.
+ *
+ * @type {import('./scratch.js').Scratch[]}
+ */
+const scratchesOut = [];
+
+/** Scratches out at once, at most: past them the oldest is let go of. */
+const SCRATCHES_AT_ONCE = 64;
+
+/**
+ * A scratch of `roomy`'s, as a layer's are of the run's cache: the oldest
+ * of those out let go of past `SCRATCHES_AT_ONCE` (its next `bytes` holds
+ * anew), so a file of tests holds a bounded part of the cache.
+ *
+ * @param {string} name @returns {import('./scratch.js').Scratch}
+ */
+export const testScratch = name=>{
+    while (scratchesOut.length >= SCRATCHES_AT_ONCE)
+    {
+        scratchesOut.shift()?.release();
+    }
+    const one = roomy.api.scratch(name);
+    scratchesOut.push(one);
+    return one;
+};
+
+/**
+ * What a device that draws is handed from `roomy`: names of its own for the
+ * texels it keeps, and the cache's scratches and holds.
+ */
+export const deviceRooms = ()=>({
+    texelCache: /** @type {NonNullable<ReturnType<typeof roomy.api.owner>>} */ (
+        roomy.api.owner('texels')),
+    scratches: testScratch,
+    holds: (/** @type {string} */ name, /** @type {number} */ length)=>roomy.api.hold(name, length),
+});

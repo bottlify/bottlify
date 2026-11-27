@@ -15,6 +15,7 @@ import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { unpackWord } from './arrays.js';
 import { planLayout } from './gpu-layout.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** x, y, z in ten bits each from the low end, w in the top two. */
 const word = (/** @type {number} */ x, /** @type {number} */ y, /** @type {number} */ z,
@@ -45,7 +46,7 @@ test('a packed word unpacks into its four components, signed and normalised as a
 test('packed arrays take four components, and draw what their words hold', ()=>{
     const bytes = new Uint8Array(0x1000);
     const view = new DataView(bytes.buffer);
-    const gl = /** @type {any} */ (createGlContext({ memory: {
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.subarray(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
     }, keepPrimitives: true }));
@@ -71,7 +72,7 @@ test('packed arrays take four components, and draw what their words hold', ()=>{
 });
 
 test('the immediate packed forms set what their unpacked forms do', ()=>{
-    const gl = /** @type {any} */ (createGlContext({}));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
     gl.attach({ width: 8, height: 8, doubleBuffered: false });
     gl.packedAttribute('color', 0, GL.UNSIGNED_INT_2_10_10_10_REV, true, 4, word(1023, 0, 0, 0));
     assert.deepEqual(gl.glGetFloatv(GL.CURRENT_COLOR), [1, 0, 0, 0]);

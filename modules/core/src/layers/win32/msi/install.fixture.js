@@ -13,6 +13,9 @@
  */
 
 import { filesystemModule } from '../../filesystem/module.js';
+import { createPageFile } from '../../filesystem/internal/page-file.js';
+import { pieceSpace } from '../../filesystem/internal/page-space.fixture.js';
+import { cacheSpace } from '../../cache/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { createHive } from '../advapi32/registry.js';
 import { windowsVersion } from '../kernel32/versions.js';
@@ -85,7 +88,8 @@ export function typed(db){
  * @param {string[]} [folders] @param {Record<string, string | Uint8Array>} [files]
  */
 export async function machine(folders = [], files = {}){
-    const volume = /** @type {any} */ (createVolume(await filesystemModule.create({})));
+    const volume = /** @type {any} */ (createVolume(await filesystemModule.create({
+        pageFile: createPageFile((await pieceSpace(cacheSpace, { budget: 256 << 20 })).space) })));
     for (const path of ['C:\\Program Files', 'C:\\WINDOWS', ...folders])
     {
         volume.mkdir(path);

@@ -1363,7 +1363,7 @@ export function createRemoting(host){
         {
             return false;
         }
-        const outer = host.vtables.publish(proxy, IID_IUNKNOWN) >>> 0;
+        const outer = host.vtables.publish(proxy, IID_IUNKNOWN);
         // The proxy buffer's and the interface's out-pointers, then the IID.
         const block = outer === 0 ? 0 : host.heap.allocate(2 * POINTER + GUID_BYTES);
         if (block === 0)
@@ -1409,7 +1409,7 @@ export function createRemoting(host){
      * @param {Proxy} proxy @param {string} iid
      */
     const pointerFor = (proxy, iid)=>
-        proxy.midl.get(iid)?.pointer ?? (host.vtables.publish(proxy, iid) >>> 0);
+        proxy.midl.get(iid)?.pointer ?? (host.vtables.publish(proxy, iid));
 
     /**
      * Where a channel's call goes: to a proxy's exporter, for the channel a
@@ -1517,7 +1517,7 @@ export function createRemoting(host){
         };
         const record = Object.freeze({ object: channel, id: IID_IRPCCHANNELBUFFER,
             methods: channelMethods });
-        channel.pointer = host.vtables.publish(channel, IID_IRPCCHANNELBUFFER) >>> 0;
+        channel.pointer = host.vtables.publish(channel, IID_IRPCCHANNELBUFFER);
         return channel;
     };
 

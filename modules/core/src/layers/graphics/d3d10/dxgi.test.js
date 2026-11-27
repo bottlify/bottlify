@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3D10_BIND, D3D10_DRIVER_TYPE, D3D10_SDK_VERSION, DXGI_ERROR_INVALID_CALL,
     DXGI_ERROR_NOT_FOUND, DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, E_NOINTERFACE,
@@ -23,7 +24,7 @@ function createDevice(options = {}){
     const out = {};
     assert.equal(
         D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, D3D10_SDK_VERSION, out,
-            options),
+            { ...deviceRooms(), ...options }),
         S_OK);
     return out.device;
 }
@@ -740,7 +741,8 @@ test('the extended-range format is a swap chain format, kept without its bias'
         const said = [];
         /** @param {string} api @param {string} detail */
         const divergence = (api, detail)=>said.push(detail);
-        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, { divergence }), S_OK);
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, { ...deviceRooms(),
+            divergence }), S_OK);
         /** @type {{ swapChain?: any }} */
         const created = {};
         const desc = swapChainDesc();

@@ -43,8 +43,9 @@ flowchart TB
   (`runCache().spaces`), never taken back, cooled or moved. The engine writes it and the AudioWorklet
   reads it in place; the page, a rebuilt machine and a process in a worker are handed the table
   (`{ table }`, a view of that memory). A process that runs beside another with an output of its own
-  gives its table back as it goes. A machine with no cache around it (a layer built alone) makes a
-  buffer of its own and says so (`divergence`).
+  gives its table back as it goes; the run's own output, where the page hands it none, is held
+  the same way under `sound/run`. A machine whose cache has no room for the table (or no cache at
+  all) does not start: nothing stands in for the table both threads read.
 - **A voice** is a slot in the table: a header of 32 words (`RATE`, `CHANNELS`, `BITS`, `GAIN`, the
   left and right cut, `POSITION`, `LOOPING`, `PLAYING`, `LAPS` and others) plus a copy of the buffer
   in the arena. When the engine first sees a buffer playing, it copies it whole; after that, only

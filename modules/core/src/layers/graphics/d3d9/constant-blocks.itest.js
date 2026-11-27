@@ -22,6 +22,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { createHash } from 'node:crypto';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import { D3DPT, D3DSBT } from '../d3d8/constants.js';
@@ -169,7 +170,8 @@ function programOf(seed){
  */
 async function play(calls, keep){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     /** @type {string[]} */
     const drawn = [];
@@ -198,8 +200,7 @@ async function play(calls, keep){
     };
     const ram = new Uint8Array(1 << 20);
     let next = RAM_BASE;
-    const d3d = createDirect3D9({
-        backend,
+    const d3d = createDirect3D9({ ...deviceRooms(), backend,
         vertexShaderVersion: { major: 2, minor: 0 },
         pixelShaderVersion: { major: 2, minor: 0 },
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),

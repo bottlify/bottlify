@@ -32,6 +32,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
@@ -233,9 +234,10 @@ function machine(version, options){
     /** @param {string} api @param {string} detail */
     const divergence = (api, detail)=>divergences.push(`${api}: ${detail}`);
     const libraries = createGraphicsLibraries({
+        scratches: testScratch,
         graphics: {
             create: ()=>(options.recorded
-                ? loopbackDirect3D(version.factory, { divergence })
+                ? loopbackDirect3D(version.factory, { ...deviceRooms(), divergence })
                 : version.factory({ divergence })),
             available: ()=>false,
             adapter: ()=>({ vendor: 'nvidia', architecture: 'ampere', description: '' }),

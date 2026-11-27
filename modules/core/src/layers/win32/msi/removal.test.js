@@ -14,6 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, createHive } from '../advapi32/registry.js';
@@ -113,7 +114,7 @@ function packageDatabase(){
 
 /** A machine with the package's files beside it under C:\src. */
 async function machine(){
-    const files = /** @type {any} */ (createVolume(await filesystemModule.create({})));
+    const files = /** @type {any} */ (createVolume(await filesystemModule.create({ pageFile: await testPageFile() })));
     for (const path of ['C:\\src', 'C:\\src\\Test', 'C:\\src\\Test\\Data', 'C:\\Program Files'])
     {
         files.mkdir(path);

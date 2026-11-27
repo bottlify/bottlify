@@ -12,6 +12,7 @@ import {
 } from './depth.js';
 import { createBackend } from '../backend.js';
 import { createFakeDevice } from './fake-device.js';
+import { testScratch } from '../../../cache/testing.fixture.js';
 
 test('a read covers every texel, in rows of groups a grid takes', ()=>{
     assert.deepEqual(depthReadGrid(640 * 480), [4800, 1, 1]);
@@ -46,7 +47,8 @@ test('the words of a write are the width, the count, the depths and the stencils
 test('the backend reads a depth texture through its depth aspect, and its stencil through its'
     + ' own, and writes one by a pass over the depth alone, a bit of stencil a draw', async()=>{
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const surface = backend.createSurface({ width: 4, height: 2, format: 'depth24plus-stencil8',
         label: 'depth', usage: 0x10 | 0x04 });

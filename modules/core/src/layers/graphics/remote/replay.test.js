@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { loopbackDirect3D } from './loopback.js';
 import { SWEEP_SLICE, createMirror, createPlayer, withMirrored } from './replay.js';
 import { OP, SECTION, WAIT, createWriter } from './wire.js';
@@ -13,7 +14,7 @@ import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d
 import { createReceiver, createSender } from './channel.js';
 import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { carriedTo } from './ring-fixtures.js';
-import { LEND_LEAST, createBorrower, createLender, createLendingBuffers } from './lending.js';
+import { LEND, LEND_LEAST, createBorrower, createLender, createLendingBuffers } from './lending.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
@@ -154,8 +155,7 @@ function toyLoop(){
     const sides = [];
     const ram = new Uint8Array(1 << 16);
     let next = 0x100;
-    const root = loopbackDirect3D(toy(sides), {
-        backend: {},
+    const root = loopbackDirect3D(toy(sides), { ...deviceRooms(), backend: {},
         allocate: (/** @type {number} */ bytes)=>{
             const at = next;
             next += bytes;
@@ -193,7 +193,7 @@ function toyAcross(lend, least = 0){
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>ram.set(bytes, at),
     };
     const buffers = createLendingBuffers();
-    const played = playedDirect3D(toy(sides), { ...services,
+    const played = playedDirect3D(toy(sides), { ...deviceRooms(), ...services,
         borrow: createBorrower({ ...buffers, memory: ram }) });
     /** What the played side said back. @type {any[]} */
     const said = [];
@@ -212,7 +212,7 @@ function toyAcross(lend, least = 0){
     const { sender, pump } = carriedTo(reading, { later: ()=>{}, held: true,
         lending: lend ? { ...buffers, memory: ram, least } : null,
         on: { failed: message=>said.push({ type: 'failed', message }) } });
-    const root = recordedDirect3D(toy(sides), services, sender);
+    const root = recordedDirect3D(toy(sides), { ...deviceRooms(), ...services }, sender);
     return {
         root, ram, sender, said, swept,
         played: sides.find(side=>side.played),
@@ -223,6 +223,35 @@ function toyAcross(lend, least = 0){
         },
     };
 }
+
+test('a lend is read into the played memory alone: nothing of the root is reached while the'
+    + ' program\'s thread may wait on the read', ()=>{
+    // The program's thread waits on the played side only for a lend being
+    // read (`lending.js`), and the keeper may be on that thread: a read that
+    // reached the device - its scratches, its holds, its texels - could ask
+    // the keeper for room and wait on the thread waiting on it.
+    const ram = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    const buffers = createLendingBuffers();
+    const states = new Int32Array(buffers.slots);
+    const lender = createLender({ ...buffers, memory: ram });
+    ram.set([1, 2, 3, 4], 0x100);
+    const slot = lender.lend(0x100, 4);
+    const root = new Proxy({}, { get: (_, key)=>{
+        throw new Error(`the root reached for ${String(key)} while a lend was read`);
+    } });
+    /** @type {number[][]} */
+    const shipped = [];
+    const player = createPlayer({ root, read: ()=>new Uint8Array(0),
+        ship: (address, bytes)=>{
+            assert.equal(Atomics.load(states, slot * 2), LEND.READING);
+            shipped.push([address, ...bytes]);
+        },
+        borrow: createBorrower({ ...buffers, memory: ram }) });
+    player.play(/** @type {any} */ ({ op: OP.LENT, lentCount: 1,
+        lent: Uint32Array.of(0x100, 4, slot) }));
+    assert.deepEqual(shipped, [[0x100, 1, 2, 3, 4]]);
+    assert.equal(Atomics.load(states, slot * 2), LEND.DONE);
+});
 
 test('bytes lent to the played side are what the program wrote before the unlock, though it'
     + ' locks and writes them again before they are played', ()=>{
@@ -830,11 +859,12 @@ function plain(value, depth = 0){
  */
 async function framesThrough(make, late = false){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const ram = new Uint8Array(4 << 20);
     let next = RAM_BASE + (2 << 20);
-    const d3d = make({
+    const d3d = make({ ...deviceRooms(),
         backend,
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             ram.slice(at - RAM_BASE, at - RAM_BASE + length),
@@ -935,7 +965,8 @@ async function framesThrough(make, late = false){
 
 test('frames played from a record ask of the GPU what the device itself asked', async()=>{
     const direct = await framesThrough(createDirect3D9);
-    const played = await framesThrough(services=>loopbackDirect3D(createDirect3D9, services));
+    const played = await framesThrough(services=>loopbackDirect3D(createDirect3D9,
+        { ...deviceRooms(), ...services }));
     assert.equal(played.length, direct.length);
     played.forEach((frame, index)=>assert.ok(frame === direct[index],
         `frame ${index} asked the same`));
@@ -952,14 +983,13 @@ function acrossRings(services){
         replies: createRingMemory(REPLIES_BYTES) };
     /** @type {ReturnType<typeof createReceiver> | null} */
     let receiver = null;
-    const played = playedDirect3D(createDirect3D9, {
-        ...services,
+    const played = playedDirect3D(createDirect3D9, { ...deviceRooms(), ...services,
         writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
             receiver?.post({ type: 'wrote', writes: [{ address, bytes }] }),
     });
     receiver = createReceiver({ played, rings });
     const sender = createSender({ rings, on: { wrote: services.writeMemory } });
-    const root = recordedDirect3D(createDirect3D9, services, sender);
+    const root = recordedDirect3D(createDirect3D9, { ...deviceRooms(), ...services }, sender);
     return Object.assign(root, { close: ()=>{
         sender.close();
         receiver?.close();
@@ -979,7 +1009,8 @@ test('frames whose calls cross a root\'s rings ask of the GPU what the device as
 
 test('a texture written after its unlock, before a draw samples it, is drawn as written', async()=>{
     const direct = await framesThrough(createDirect3D9, true);
-    const played = await framesThrough(services=>loopbackDirect3D(createDirect3D9, services), true);
+    const played = await framesThrough(services=>loopbackDirect3D(createDirect3D9,
+        { ...deviceRooms(), ...services }), true);
     played.forEach((frame, index)=>assert.ok(frame === direct[index],
         `frame ${index} asked the same`));
 });
@@ -999,10 +1030,11 @@ test('a buffer locked a few bytes at a time sends those bytes at each unlock, no
                 return at;
             },
         };
-        const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
+        const played = playedDirect3D(createDirect3D9, { ...deviceRooms(), ...services,
+            readMemory: true });
         const { sender } = carriedTo(played);
         const sentBytes = ()=>sender.sent().bytes;
-        const d3d = recordedDirect3D(createDirect3D9, services, sender);
+        const d3d = recordedDirect3D(createDirect3D9, { ...deviceRooms(), ...services }, sender);
         /** @type {{ device?: any }} */
         const out = {};
         assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -1042,9 +1074,10 @@ test('a dynamic buffer unlocked and drawn from in one pause is compared once; ap
                 return at;
             },
         };
-        const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
+        const played = playedDirect3D(createDirect3D9, { ...deviceRooms(), ...services,
+            readMemory: true });
         const { sender } = carriedTo(played);
-        const d3d = recordedDirect3D(createDirect3D9, services, sender);
+        const d3d = recordedDirect3D(createDirect3D9, { ...deviceRooms(), ...services }, sender);
         /** @param {number} value */
         const ok = value=>assert.equal(value, D3D_OK);
         /** @type {{ device?: any }} */
@@ -1100,9 +1133,9 @@ test('an event query answers on the program\'s side; an occlusion query asks the
     // renderer signals it: a round trip only made the program wait for the
     // played side to catch up.
 
-    const played = playedDirect3D(createDirect3D9, {});
+    const played = playedDirect3D(createDirect3D9, deviceRooms());
     const { sender } = carriedTo(played);
-    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -1131,9 +1164,9 @@ test('objects are numbered alike when the recording has a diagnostic the played 
     // 3DMark2001 SE does, and every call on the device must reach the played one.
     for (const factory of [createDirect3D8, createDirect3D9])
     {
-        const played = playedDirect3D(factory, {});
+        const played = playedDirect3D(factory, deviceRooms());
         const { sender } = carriedTo(played);
-        const d3d = recordedDirect3D(factory, { checkDraws: ()=>0 }, sender);
+        const d3d = recordedDirect3D(factory, { ...deviceRooms(), checkDraws: ()=>0 }, sender);
         assert.equal(typeof d3d.caps, 'object');
         /** @type {{ device?: any }} */
         const out = {};
@@ -1149,10 +1182,10 @@ test('a getter of plain state answers on the program\'s side and sends nothing',
     // getter a state: each was recorded and played for an answer the recording
     // device already had.
 
-    const played = playedDirect3D(createDirect3D9, {});
+    const played = playedDirect3D(createDirect3D9, deviceRooms());
     const { sender } = carriedTo(played);
     const sentBytes = ()=>sender.sent().bytes;
-    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -1184,7 +1217,7 @@ test('a run of the command ring is one call recorded, and the played device make
         /** @type {any[]} */
         const playedDevices = [];
         const played = playedDirect3D((/** @type {any} */ services)=>{
-            const root = createDirect3D9(services);
+            const root = createDirect3D9({ ...deviceRooms(), ...services });
             const create = root.CreateDevice.bind(root);
             /** @param {any} parameters @param {{ device?: any }} out @param {any[]} rest */
             root.CreateDevice = (parameters, out, ...rest)=>{
@@ -1193,7 +1226,7 @@ test('a run of the command ring is one call recorded, and the played device make
                 return hr;
             };
             return root;
-        }, {});
+        }, deviceRooms());
         /** @type {string[]} */
         const names = [];
         const { sender } = carriedTo({ ...played,
@@ -1201,7 +1234,7 @@ test('a run of the command ring is one call recorded, and the played device make
                 names.push(String(call.m));
                 return each(call);
             }, length, start) });
-        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
         /** @type {{ device?: any }} */
         const out = {};
         assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
@@ -1404,7 +1437,8 @@ test('a surface a read-back is still filling keeps its memory until the pixels h
         const gpu = createFakeDevice();
         const services = {
             // A renderer that reads back, so the pixels come from the played side.
-            backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+            backend: createBackend({ scratches: testScratch,
+                device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
                 now: ()=>0 }),
             createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',
                 id: `sampler-${JSON.stringify(descriptor)}`, descriptor }),

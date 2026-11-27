@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3D10_BIND, D3D10_BLEND, D3D10_BLEND_OP, D3D10_COLOR_WRITE_ENABLE, D3D10_COMPARISON,
     D3D10_CPU_ACCESS, D3D10_CREATE_DEVICE, D3D10_CULL_MODE, D3D10_DEFAULTS,
@@ -30,7 +31,7 @@ function createDevice(options = {}){
     const out = {};
     assert.equal(
         D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, D3D10_SDK_VERSION, out,
-            options),
+            { ...deviceRooms(), ...options }),
         S_OK);
     return out.device;
 }
@@ -73,7 +74,8 @@ test('a device is refused for any SDK version but its own', ()=>{
     {
         /** @type {{ device?: any }} */
         const out = { device: 'untouched' };
-        const hr = D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, version, out);
+        const hr = D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, version, out,
+            deviceRooms());
         if (version === D3D10_SDK_VERSION)
         {
             assert.equal(hr, S_OK, `version ${version}`);
@@ -91,7 +93,8 @@ test('the driver type is an enumeration with a hole, not a range', ()=>{
         /** @type {{ device?: any }} */
         const out = {};
         const software = driverType === D3D10_DRIVER_TYPE.SOFTWARE ? { module: 1 } : null;
-        const hr = D3D10CreateDevice(null, driverType, software, 0, D3D10_SDK_VERSION, out);
+        const hr = D3D10CreateDevice(null, driverType, software, 0, D3D10_SDK_VERSION, out,
+            deviceRooms());
         // 4 is not a driver type; 6 is past the end of the enumeration.
         const expected = [0, 1, 2, 3, 5].includes(driverType) ? S_OK : E_INVALIDARG;
         assert.equal(hr, expected, `driver type ${driverType}`);
@@ -106,14 +109,15 @@ test('a software driver and a software module go together or not at all', ()=>{
     /** @type {{ device?: any }} */
     const missing = {};
     assert.equal(
-        D3D10CreateDevice(null, D3D10_DRIVER_TYPE.SOFTWARE, null, 0, D3D10_SDK_VERSION, missing),
+        D3D10CreateDevice(null, D3D10_DRIVER_TYPE.SOFTWARE, null, 0, D3D10_SDK_VERSION, missing,
+            deviceRooms()),
         E_INVALIDARG, 'a software driver needs the module that implements it');
 
     /** @type {{ device?: any }} */
     const spurious = {};
     assert.equal(
         D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, { module: 1 }, 0, D3D10_SDK_VERSION,
-            spurious),
+            spurious, deviceRooms()),
         E_INVALIDARG, 'no other driver type has anywhere to put one');
 });
 
@@ -122,7 +126,8 @@ test('an unknown creation flag is refused rather than ignored', ()=>{
     const known = {};
     const flags = D3D10_CREATE_DEVICE.SINGLETHREADED | D3D10_CREATE_DEVICE.BGRA_SUPPORT;
     assert.equal(
-        D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, flags, D3D10_SDK_VERSION, known),
+        D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, flags, D3D10_SDK_VERSION, known,
+            deviceRooms()),
         S_OK);
     assert.equal(known.device.GetCreationFlags(), flags);
     assertFullyReleased(known.device);
@@ -131,7 +136,7 @@ test('an unknown creation flag is refused rather than ignored', ()=>{
     const unknown = {};
     assert.equal(
         D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0x40000, D3D10_SDK_VERSION,
-            unknown),
+            unknown, deviceRooms()),
         E_INVALIDARG);
     assert.equal(unknown.device, null);
 });
@@ -169,7 +174,7 @@ test('the combined entry point produces both objects or neither', ()=>{
     const desc = { ...defaultSwapChainDesc(), outputWindow: 0x1234 };
     assert.equal(
         D3D10CreateDeviceAndSwapChain(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
-            D3D10_SDK_VERSION, desc, chainOut, deviceOut),
+            D3D10_SDK_VERSION, desc, chainOut, deviceOut, deviceRooms()),
         S_OK);
     assert.ok(deviceOut.device);
     assert.ok(chainOut.swapChain);
@@ -186,7 +191,8 @@ test('the combined entry point produces both objects or neither', ()=>{
     const failedChain = {};
     assert.equal(
         D3D10CreateDeviceAndSwapChain(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
-            D3D10_SDK_VERSION, { ...desc, outputWindow: 0 }, failedChain, failedDevice),
+            D3D10_SDK_VERSION, { ...desc, outputWindow: 0 }, failedChain, failedDevice,
+            deviceRooms()),
         DXGI_ERROR_INVALID_CALL);
     assert.equal(failedDevice.device, null);
     assert.equal(failedChain.swapChain, null);
@@ -198,7 +204,7 @@ test('the combined entry point produces both objects or neither', ()=>{
     const none = {};
     assert.equal(
         D3D10CreateDeviceAndSwapChain(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
-            D3D10_SDK_VERSION, null, none, alone),
+            D3D10_SDK_VERSION, null, none, alone, deviceRooms()),
         S_OK);
     assert.equal(none.swapChain, null);
     assertFullyReleased(alone.device);
@@ -1736,8 +1742,7 @@ test('a timestamp ends where it is issued, and its disjoint query says to discar
     /** @type {string[]} */
     const divergences = [];
     assert.equal(D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
-        D3D10_SDK_VERSION, out, {
-            now: ()=>clock,
+        D3D10_SDK_VERSION, out, { ...deviceRooms(), now: ()=>clock,
             divergence: (api, detail)=>divergences.push(detail),
         }), S_OK);
     const device = out.device;
@@ -1918,7 +1923,7 @@ test('a level 11 device answers support for a format as Wine test_format_support
     const device11 = level=>{
         /** @type {any} */
         const out = { wantDevice: true, wantContext: false };
-        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, deviceRooms()), S_OK);
         return out.device;
     };
     /** @param {any} device @param {number} format */
@@ -1949,7 +1954,7 @@ test('a multisampled texture may name the standard or centre pattern for its qua
     const made = (level, quality)=>{
         /** @type {any} */
         const out = { wantDevice: true, wantContext: false };
-        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, deviceRooms()), S_OK);
         /** @type {{ resource?: any }} */
         const texture = {};
         const hr = out.device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 1, ArraySize: 1,
@@ -2204,7 +2209,7 @@ test('Direct3D 11 refuses a null element array, and a slot fed both per vertex a
     + ' instance (test_create_input_layout)', ()=>{
     /** @type {any} */
     const out = { wantDevice: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, deviceRooms()), S_OK);
     const device = out.device;
     const vertexId = assemble({
         kind: SHADER_KIND.VERTEX,
@@ -2367,7 +2372,8 @@ test('the combined entry points answer with the swap chain\'s own failure and ha
         /** @type {{ device?: any }} */
         const device = { device: 'untouched' };
         assert.equal(D3D10CreateDeviceAndSwapChain(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
-            D3D10_SDK_VERSION, desc, chain, device), expected, `window ${window}, ${format}`);
+            D3D10_SDK_VERSION, desc, chain, device, deviceRooms()), expected,
+        `window ${window}, ${format}`);
         assert.deepEqual([chain.swapChain, device.device], [null, null]);
     }
 });
@@ -2473,13 +2479,13 @@ test('a device asked for video support is refused as one without it: no video de
     {
         /** @type {any} */
         const out = { wantDevice: true, wantContext: true };
-        assert.equal(D3D11CreateDevice(adapter, driverType, null, 0x800, null, out, {}),
+        assert.equal(D3D11CreateDevice(adapter, driverType, null, 0x800, null, out, deviceRooms()),
             0x887a0004);
         assert.equal(out.device, null);
     }
     /** @type {any} */
     const out = { wantDevice: true };
-    assert.equal(D3D11CreateDevice(null, 0, null, 0x800, null, out, {}), 0x80070057,
+    assert.equal(D3D11CreateDevice(null, 0, null, 0x800, null, out, deviceRooms()), 0x80070057,
         'an unknown driver with no adapter is a bad argument before anything else');
 });
 
@@ -2489,7 +2495,7 @@ test('from level 11 stream output may follow the domain shader: a stage of no sh
         StartComponent: 0, ComponentCount: 4, OutputSlot: 0 }];
     /** @type {any} */
     const eleven = { wantDevice: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, {}), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, deviceRooms()), S_OK);
     /** @type {{ shader?: any }} */
     const made = {};
     assert.equal(eleven.device.CreateGeometryShaderWithStreamOutput(quadDomainShader(), entries,
@@ -2499,7 +2505,7 @@ test('from level 11 stream output may follow the domain shader: a stage of no sh
     eleven.device.release();
     /** @type {any} */
     const ten = { wantDevice: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xa000], ten, {}), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xa000], ten, deviceRooms()), S_OK);
     assert.equal(ten.device.CreateGeometryShaderWithStreamOutput(quadDomainShader(), entries,
         [16], 0, made), 0x80070057, 'level 10 has no domain shader');
     ten.device.release();
@@ -2544,11 +2550,11 @@ test('a device asked for with the debug layer is refused as on a Windows without
     + ' Tools (decision A81)', ()=>{
     /** @type {any} */
     const eleven = { wantDevice: true, wantContext: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0x2, null, eleven, {}), 0x887a002d);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0x2, null, eleven, deviceRooms()), 0x887a002d);
     assert.equal(eleven.device, null);
     /** @type {any} */
     const ten = {};
-    assert.equal(D3D10CreateDevice(null, 0, null, 0x2, 29, ten, {}), 0x887a002d);
+    assert.equal(D3D10CreateDevice(null, 0, null, 0x2, 29, ten, deviceRooms()), 0x887a002d);
     assert.equal(ten.device, null);
 });
 
@@ -2556,7 +2562,7 @@ test('from level 10.1 a copy moves compressed blocks into texels as big, and bac
     + ' in its own format (test_compressed_format_compatibility, d3d11.c:29631)', ()=>{
     /** @type {any} */
     const made = { wantDevice: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], made, {}), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], made, deviceRooms()), S_OK);
     const device = made.device;
     /**
      * @param {number} format @param {number} width @param {number} height
@@ -2607,7 +2613,7 @@ test('a shader resource view over a subresource bound as a target is set as none
     + ' keeps read-only, stays (test_sample_attached_rtv, d3d11.c:32684)', ()=>{
     /** @type {any} */
     const out = { wantDevice: true, wantContext: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, deviceRooms()), S_OK);
     const { device, context } = out;
     /** @type {any} */
     const made = {};
@@ -2681,7 +2687,7 @@ test('an input element\'s offset is a whole number of its channels, up to a word
     + ' (test_input_layout_alignment, d3d11.c:19406)', ()=>{
     /** @type {any} */
     const out = { wantDevice: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, deviceRooms()), S_OK);
     /** @param {number} first @param {number} second @param {number} offset */
     const made = (first, second, offset)=>out.device.CreateInputLayout([
         { SemanticName: 'POSITION', SemanticIndex: 0, Format: first, InputSlot: 0,
@@ -2714,7 +2720,7 @@ test('a shader model 4 program that reads raw memory is refused below level 11, 
     const made = (level, code)=>{
         /** @type {any} */
         const out = { wantDevice: true };
-        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, deviceRooms()), S_OK);
         /** @type {{ shader?: any }} */
         const shader = {};
         const hr = out.device.CreatePixelShader(code, shader);
@@ -2724,7 +2730,7 @@ test('a shader model 4 program that reads raw memory is refused below level 11, 
     };
     /** @type {any} */
     const ten = { wantDevice: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xa000], ten, {}), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xa000], ten, deviceRooms()), S_OK);
     const answer = ten.device.CheckFeatureSupport(4, new Uint8Array(4));
     ten.device.release();
     assert.deepEqual([answer.hr, ...answer.data], [S_OK, 0, 0, 0, 0],
@@ -2741,7 +2747,7 @@ test('doubles are there at shader model 5: D3D11_FEATURE_DOUBLES is true at 11.0
         const doubles = level=>{
             /** @type {any} */
             const out = { wantDevice: true };
-            assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+            assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, deviceRooms()), S_OK);
             const answer = out.device.CheckFeatureSupport(1, new Uint8Array(4));
             out.device.release();
             return [answer.hr, answer.data[0]];
@@ -2752,7 +2758,7 @@ test('doubles are there at shader model 5: D3D11_FEATURE_DOUBLES is true at 11.0
         const extended = level=>{
             /** @type {any} */
             const out = { wantDevice: true };
-            assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+            assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, deviceRooms()), S_OK);
             const answer = out.device.CheckFeatureSupport(5, new Uint8Array(14 * 4));
             out.device.release();
             /** @type {number[]} */
@@ -2765,7 +2771,8 @@ test('doubles are there at shader model 5: D3D11_FEATURE_DOUBLES is true at 11.0
 
 test('a texture made shared is opened by another device of the same root over the same'
     + ' bytes, by the kind of handle it was made for (test_shared_resource)', async()=>{
-    const options = {};
+    // One options object: the devices made with it share their shared resources.
+    const options = deviceRooms();
     /** @param {number} [level] */
     const device11 = (level = 0xb000)=>{
         /** @type {any} */
@@ -2845,7 +2852,8 @@ test('a texture made shared is opened by another device of the same root over th
 
 test('a keyed mutex is held by one device at a time, taken with the key it was let go with,'
     + ' and abandoned with the object that held it (test_keyed_mutex)', async()=>{
-    const options = {};
+    // One options object: the devices made with it share their shared resources.
+    const options = deviceRooms();
     const device11 = ()=>{
         /** @type {any} */
         const out = { wantDevice: true };
@@ -2928,7 +2936,7 @@ test('a shared-exponent texture copies into a 32-bit family on Direct3D 11 and n
     };
     /** @type {any} */
     const eleven = { wantDevice: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, {}), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, deviceRooms()), S_OK);
     assert.equal(await copied(eleven.device), 'copied');
     assert.equal(await copied(createDevice()), 'left');
 });
@@ -3041,7 +3049,7 @@ test('Direct3D 10 copies into a depth-stencil texture only from another; 11 from
     };
     /** @type {any} */
     const eleven = { wantDevice: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, {}), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, deviceRooms()), S_OK);
     assert.equal(await copied(eleven.device), 'copied');
     assert.equal(await copied(createDevice()), 'left');
 });

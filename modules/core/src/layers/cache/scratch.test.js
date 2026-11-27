@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { bytesPerCall } from '../../../../../tools/fixtures/allocation.mjs';
 
 import { createCacheModule, noCache } from './module.js';
-import { createScratches, roomFor } from './scratch.js';
+import { NoRoom, createScratches, roomFor } from './scratch.js';
 import { testCache } from './testing.fixture.js';
 
 const MIB = 1 << 20;
@@ -29,7 +29,7 @@ test('a room is the cache\'s block for it: a power of two from a page', ()=>{
 
 test('a scratch reused call after call is held once in the run\'s cache, counted there', async()=>{
     const cache = await testCache();
-    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    const scratches = createScratches(cache.space('scratch').hold);
     const blit = scratches.scratch('blit');
     const first = blit.bytes(SCREEN);
     assert.equal(first.length, SCREEN);
@@ -45,7 +45,7 @@ test('a scratch reused call after call is held once in the run\'s cache, counted
     assert.equal(blit.bytes(SCREEN)[SCREEN - 1], 0x5a,
         'what was written stays while it did not grow');
     assert.deepEqual(scratches.figures(), { scratches: 1, holds: 0, held: 1, heldBytes: 4 * MIB,
-        plain: 0, plainBytes: 0, grows: 1, plainGrows: 0 });
+        grows: 1, refused: 0 });
     const under = cache.keeper.under('scratch/');
     assert.equal(under.bodies, 1);
     assert.equal(under.hotBytes, 4 * MIB, 'in the run\'s budget');
@@ -59,7 +59,7 @@ test('a scratch reused call after call is held once in the run\'s cache, counted
 
 test('a scratch that grows holds the larger room and lets the smaller go', async()=>{
     const cache = await testCache();
-    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    const scratches = createScratches(cache.space('scratch').hold);
     const scratch = scratches.scratch('room');
     scratch.bytes(1000);
     scratch.bytes(70_000);
@@ -75,28 +75,22 @@ test('a scratch that grows holds the larger room and lets the smaller go', async
     assert.equal(scratches.figures().heldBytes, 0);
 });
 
-test('without room in the cache a scratch is plain memory under the same contract, '
-    + 'counted', async()=>{
+test('a room the cache has none for is refused, counted: no memory stands in for it', async()=>{
     // One segment of 1 MiB: a room larger than a segment has no block to take.
     const cache = await testCache({ budget: MIB, segmentBytes: MIB });
-    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    const scratches = createScratches(cache.space('scratch').hold);
     const scratch = scratches.scratch('large');
-    const view = scratch.bytes(2 * MIB);
-    assert.equal(view.length, 2 * MIB);
-    assert.ok(!(view.buffer instanceof SharedArrayBuffer));
-    assert.equal(scratch.bytes(2 * MIB), view);
-    assert.deepEqual(scratches.figures(), { scratches: 1, holds: 0, held: 0, heldBytes: 0, plain: 1,
-        plainBytes: 2 * MIB, grows: 1, plainGrows: 1 });
-    // A room that fits is held again once it grows past the plain one: no
-    // room is kept twice.
-    scratch.release();
+    assert.throws(()=>scratch.bytes(2 * MIB), NoRoom);
+    assert.deepEqual(scratches.figures(), { scratches: 1, holds: 0, held: 0, heldBytes: 0,
+        grows: 1, refused: 1 });
+    // A room that fits is held once asked for.
     assert.equal(scratch.bytes(4096).buffer instanceof SharedArrayBuffer, true);
-    assert.equal(scratches.figures().plain, 0);
+    assert.equal(scratches.figures().held, 1);
 });
 
 test('a scratch reused across calls makes nothing a call', async()=>{
     const cache = await testCache();
-    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    const scratches = createScratches(cache.space('scratch').hold);
     const scratch = scratches.scratch('loop');
     scratch.bytes(SCREEN);
     /** @type {Uint8Array} */
@@ -108,33 +102,34 @@ test('a scratch reused across calls makes nothing a call', async()=>{
     assert.equal(scratches.figures().grows, 1, 'the counter of grows stays put');
 });
 
-test('the cache layer hands out scratches and reports them; without a reader they are '
-    + 'plain', async()=>{
-    const cache = await testCache();
-    const module = createCacheModule();
-    const api = await module.create({ reader: cache.reader });
-    const scratch = api.scratch('blit');
-    scratch.bytes(SCREEN);
-    const figures = /** @type {any} */ (module.diagnostics().metrics.scratch);
-    assert.equal(figures.held, 1);
-    assert.equal(figures.heldBytes, 4 * MIB);
-    assert.equal(cache.keeper.under('scratch/').hotBytes, 4 * MIB);
-    // A process that goes lets go of what its layers still held.
-    await module.dispose();
-    cache.idle(1);
-    assert.equal(cache.keeper.under('scratch/').bodies, 0);
+test('the cache layer hands out scratches and reports them; without a reader it refuses them',
+    async()=>{
+        const cache = await testCache();
+        const module = createCacheModule();
+        const api = await module.create({ reader: cache.reader });
+        const scratch = api.scratch('blit');
+        scratch.bytes(SCREEN);
+        const figures = /** @type {any} */ (module.diagnostics().metrics.scratch);
+        assert.equal(figures.held, 1);
+        assert.equal(figures.heldBytes, 4 * MIB);
+        assert.equal(cache.keeper.under('scratch/').hotBytes, 4 * MIB);
+        // A process that goes lets go of what its layers still held.
+        await module.dispose();
+        cache.idle(1);
+        assert.equal(cache.keeper.under('scratch/').bodies, 0);
 
-    const alone = createCacheModule();
-    const none = await alone.create(null);
-    none.scratch('blit').bytes(100);
-    assert.equal(/** @type {any} */ (alone.diagnostics().metrics.scratch).plain, 1);
-    assert.equal(noCache.scratch('tool').bytes(10).length, 10);
-});
+        const alone = createCacheModule();
+        const none = await alone.create(null);
+        assert.equal(none, noCache);
+        assert.throws(()=>none.scratch('blit').bytes(100), NoRoom);
+        assert.throws(()=>noCache.hold('tool', 10), NoRoom);
+        assert.match(String(alone.diagnostics().metrics.scratch), /no cache/);
+    });
 
 test('a hold is memory of its own length for an object\'s life: held in a block of the cache, '
     + 'zero though the block was used before, let go of once', async()=>{
     const cache = await testCache();
-    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    const scratches = createScratches(cache.space('scratch').hold);
     // A block used and let go: the next holder of it finds what was left.
     const before = scratches.hold('resource', 70_000);
     before.bytes.fill(0xee);
@@ -152,7 +147,7 @@ test('a hold is memory of its own length for an object\'s life: held in a block 
     cache.idle(10 * 60_000);
     assert.equal(held.bytes[69_999], 5);
     assert.deepEqual(scratches.figures(), { scratches: 0, holds: 3, held: 2,
-        heldBytes: 2 * 18 * 4096, plain: 0, plainBytes: 0, grows: 0, plainGrows: 0 });
+        heldBytes: 2 * 18 * 4096, grows: 0, refused: 0 });
     assert.equal(cache.keeper.under('scratch/').bodies, 2);
     held.release();
     held.release();
@@ -164,18 +159,10 @@ test('a hold is memory of its own length for an object\'s life: held in a block 
     assert.equal(scratches.figures().held, 0);
 });
 
-test('a hold with no room in the cache is plain memory of its own length, counted', async()=>{
+test('a hold with no room in the cache is refused, counted', async()=>{
     const cache = await testCache({ budget: MIB, segmentBytes: MIB });
-    const scratches = createScratches(cache.space('scratch').hold ?? null);
-    const large = scratches.hold('resource', 3 * MIB + 5);
-    assert.equal(large.bytes.length, 3 * MIB + 5);
-    assert.ok(!(large.bytes.buffer instanceof SharedArrayBuffer));
-    assert.equal(large.bytes.buffer.byteLength, 3 * MIB + 5, 'not rounded to a block');
+    const scratches = createScratches(cache.space('scratch').hold);
+    assert.throws(()=>scratches.hold('resource', 3 * MIB + 5), NoRoom);
     assert.deepEqual(scratches.figures(), { scratches: 0, holds: 1, held: 0, heldBytes: 0,
-        plain: 1, plainBytes: 3 * MIB + 5, grows: 0, plainGrows: 0 });
-    large.release();
-    large.release();
-    assert.equal(scratches.figures().plain, 0);
-    assert.equal(createScratches(null).hold('none', 0).bytes.length, 0);
-    assert.equal(noCache.hold('tool', 10).bytes.length, 10);
+        grows: 0, refused: 1 });
 });

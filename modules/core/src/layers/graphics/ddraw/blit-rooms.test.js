@@ -138,9 +138,9 @@ const dirtyRooms = ()=>blitRooms(createScratches((_key, length)=>({
 
 test('gate: a blit answers and writes the same in rooms of the run\'s cache, in rooms '
     + 'left dirty and in fresh ones', async()=>{
-    // A small cache: a room past its segment is plain memory, the rest held.
-    const cache = await testCache({ budget: 1 << 16, segmentBytes: 1 << 15 });
-    const heldScratches = createScratches(cache.space('scratch').hold ?? null);
+    // A small cache, whose blocks a larger room outgrows and is held anew in.
+    const cache = await testCache({ budget: 1 << 20, segmentBytes: 1 << 18 });
+    const heldScratches = createScratches(cache.space('scratch').hold);
     const arms = [
         { rooms: blitRooms(heldScratches.scratch), bytes: new Uint8Array(MEMORY) },
         { rooms: dirtyRooms(), bytes: new Uint8Array(MEMORY) },
@@ -168,14 +168,13 @@ test('gate: a blit answers and writes the same in rooms of the run\'s cache, in 
     }
     assert.ok(made > 200, `most of the blits are made (${made})`);
     const figures = heldScratches.figures();
-    assert.ok(figures.held > 0, 'some rooms are held in the cache');
-    assert.ok(figures.plainGrows > 0, 'and some had no room there');
+    assert.ok(figures.held > 0 && figures.refused === 0, 'the rooms are held in the cache');
 });
 
 test('a full-screen blit reused frame after frame grows its rooms once and makes '
     + 'none a frame', async()=>{
     const cache = await testCache();
-    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    const scratches = createScratches(cache.space('scratch').hold);
     const rooms = blitRooms(scratches.scratch);
     // A 640 by 480 back buffer at four bytes copied onto the primary.
     const width = 640;

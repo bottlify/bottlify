@@ -19,10 +19,11 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @returns {any} */
 function context(){
-    const gl = createGlContext({});
+    const gl = createGlContext({ holds: roomy.api.hold, });
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     return gl;
 }
@@ -155,7 +156,8 @@ test('texels written through the original are the view\'s, and the view\'s the o
 test('on the device a view samples its original\'s surface over the range it covers',
     async()=>{
         const gpu = createFakeDevice();
-        const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+        const backend = createBackend({ scratches: testScratch,
+            device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{} });
         /** @type {string[]} */
         const divergences = [];
@@ -170,7 +172,7 @@ test('on the device a view samples its original\'s surface over the range it cov
                 bytes.set(value, at),
         };
         /** @type {any} */
-        const gl = createGlContext({ memory, gpu: renderer,
+        const gl = createGlContext({ holds: roomy.api.hold, memory, gpu: renderer,
             divergence: d=>divergences.push(d) });
         gl.attach({ width: 16, height: 16, doubleBuffered: true });
         const array = stored(gl, TEX.TEXTURE_2D_ARRAY, 3, GL.RGBA8, 8, 8, 12);
@@ -240,7 +242,7 @@ test('a view takes its original\'s parameters; one whose bytes differ reads none
         /** @type {string[]} */
         const divergences = [];
         /** @type {any} */
-        const gl = createGlContext({ divergence: d=>divergences.push(d) });
+        const gl = createGlContext({ holds: roomy.api.hold, divergence: d=>divergences.push(d) });
         gl.attach({ width: 4, height: 4, doubleBuffered: true });
         const flat = stored(gl, GL.TEXTURE_2D, 1, GL.RGB8, 2, 2);
         gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
@@ -260,7 +262,7 @@ test('a view takes its original\'s parameters; one whose bytes differ reads none
         /** @type {string[]} */
         const again = [];
         /** @type {any} */
-        const other = createGlContext({ divergence: d=>again.push(d) });
+        const other = createGlContext({ holds: roomy.api.hold, divergence: d=>again.push(d) });
         other.attach({ width: 4, height: 4, doubleBuffered: true });
         const array = stored(other, TEX.TEXTURE_2D_ARRAY, 1, GL.RGB8, 2, 2, 2);
         const [layers] = other.glGenTextures(1);

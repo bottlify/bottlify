@@ -64,10 +64,10 @@ flowchart TB
   thread's reader as a body is put), let go of with the graphics layer. A process in a worker
   of its own is served names the same way, numbered by the keeper across its link, its roots in
   the graphics worker by a channel it sends the keeper's thread (`process/run-cache.js`
-  `remoteCacheOwners`). A body under 4 KiB (the cache's unit of room), one refused room, and
-  every body of a device the run serves no names (a layer built alone, with no cache) stay in
-  plain memory under the same contract. A body the
-  cache cannot give back is a `loss` and reads as zeros. An OpenGL level's texels are the
+  `remoteCacheOwners`). A body under 4 KiB (the cache's unit of room) stays as it was handed
+  over. A body the cache refused room for (none left), one with no
+  names under its store, or one the cache cannot give back is a `loss` and reads as zeros: no
+  copy is kept outside the cache. An OpenGL level's texels are the
   device's once a draw uploads them. Until then the graphics thread hands them, and the blocks of
   a level kept as S3TC, about once a second to the store (`opengl/gpu.js` `spill`); nothing on
   the graphics thread holds them once they moved. A draw's upload of a level reads them where
@@ -82,9 +82,9 @@ flowchart TB
   widened to the format the backend samples, or decoded from S3TC on a device without block
   compression in the renderer's rooms (`d3d8/render.js` `rooms`), scratches held in the run's
   cache and reused by the next level, so a texture written every frame grows them once; on a
-  root drawn in the graphics worker they are held under the root's names there, or plain
-  memory, kept the same way, on a root that lends guest memory (the program's thread may wait
-  on the worker then, and the worker waits for a hold on the program's thread). Direct3D 10's
+  root drawn in the graphics worker they are held under the root's names there, a root that
+  lends guest memory too (the program's thread waits on the worker only for a lend being read,
+  which asks the keeper nothing). A room the cache has none for is refused (`NoRoom`): the call fails. Direct3D 10's
   converted formats, each volume slice in its place, are bytes of the call, gone when it
   returns. A
   DirectDraw blit works in rooms kept between blits - its copy of the source rectangle, it
@@ -97,7 +97,7 @@ flowchart TB
   way, where the graphics layer made them; the run's presenter, which the run makes outside
   the layer, holds them under names of the run's own (`RunCache.scratch`), and the backend in
   the graphics worker under names the run hands it when the run starts (`remote/connect.js`
-  `lendBackend`), plain memory until then. A picture sent to another thread as bytes - a
+  `lendBackend`), refused until then. A picture sent to another thread as bytes - a
   process in a worker of its own (`host/process.worker.js` `sendFrames`), or the graphics
   worker's frames where the page cannot take a picture from it - is written into memory held in
   the run's cache, and the message carries the view of it, which the thread that shows it reads
@@ -112,8 +112,8 @@ flowchart TB
   the coverage of the glyphs drawn so far, a glyph drawn for the first time putting its page
   again with it added. Named by what they hold (a family a program added a face to is named by
   that face's bytes), they are shared by the run's processes; one the cache lets go of is drawn
-  again as it is asked for, and where the cache has no room a page is plain memory, let go of
-  all at once past 1 MiB. A glyph is read in place (`glyph(code, font, read, arg)`): TextOut,
+  again as it is asked for, and one it has no room for is read where it was built for that
+  read and drawn again at the next, counted (`pagesRefused`). A glyph is read in place (`glyph(code, font, read, arg)`): TextOut,
   GetGlyphOutline, DirectWrite's system faces and D3DX's font read its coverage inside the
   read, and D3DX's font reads it again when it writes its page of the device. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
@@ -157,7 +157,7 @@ flowchart TB
   zero when made, of its length rounded to a page (the cache places it in a block of a power of
   two, or past a quarter of a segment in a segment of its own), under the process's `scratch/<n>/`
   names on the program's thread (in a worker of its own too) and under the root's `resources/<n>/` names in the graphics
-  worker; plain memory of its own length where the cache has no room or there is no cache. It is let go of when the backing is collected - a
+  worker; refused (`NoRoom`, the call fails) where the cache has no room or there is no cache. It is let go of when the backing is collected - a
   view, a share's other device or a read-back in flight outlives the program's last
   reference - and the root or the process going takes back what is still held. A
   dynamic buffer's map and unmap run in the guest too: NO_OVERWRITE hands out the storage the

@@ -20,6 +20,7 @@ import { createGpuRenderer } from './gpu.js';
 import { VERTEX_PROGRAM_BINDING, samplerBinding, samplerIndex } from './arb-wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 const VS = `#version 460
 in vec4 position; out vec4 colour;
@@ -33,7 +34,8 @@ function rig(vertex){
     const gpu = createFakeDevice();
     /** @type {string[]} */
     const divergences = [];
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     const renderer = createGpuRenderer({ backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         divergence: d=>divergences.push(d) });
@@ -44,7 +46,8 @@ function rig(vertex){
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const gl = createGlContext({ memory, gpu: renderer, divergence: d=>divergences.push(d) });
+    const gl = createGlContext({ holds: roomy.api.hold,
+        memory, gpu: renderer, divergence: d=>divergences.push(d) });
     gl.attach({ width: 8, height: 8, doubleBuffered: true });
     const program = gl.glCreateProgram();
     for (const [type, text] of [[GL.VERTEX_SHADER, vertex], [GL.FRAGMENT_SHADER, FS]])
@@ -113,11 +116,13 @@ void main() { colour = position; gl_CullDistance[0] = -1.0; gl_Position = positi
 test('sixteen texture units: a program\'s ninth sampler on is bound past the other bindings, '
     + 'each reading its own unit', async()=>{
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     const renderer = createGpuRenderer({ backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }), divergence: ()=>{} });
     /** @type {any} */
-    const gl = createGlContext({ memory: { read: ()=>new Uint8Array(0), write: ()=>{} },
+    const gl = createGlContext({ holds: roomy.api.hold,
+        memory: { read: ()=>new Uint8Array(0), write: ()=>{} },
         gpu: renderer });
     gl.attach({ width: 8, height: 8, doubleBuffered: true });
     const samplers = Array.from({ length: 12 }, (_, k)=>`uniform sampler2D u${k};`).join(' ');
@@ -188,7 +193,8 @@ ${samplers} out vec4 c; void main() { c = ${sum}; }`]])
 test('a texture wrapped GL_CLAMP_TO_BORDER is sampled clamped to its edge, and that is said',
     async()=>{
         const gpu = createFakeDevice();
-        const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+        const backend = createBackend({ scratches: testScratch,
+            device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{} });
         /** @type {string[]} */
         const divergences = [];
@@ -201,7 +207,8 @@ test('a texture wrapped GL_CLAMP_TO_BORDER is sampled clamped to its edge, and t
             },
             divergence: d=>divergences.push(d) });
         /** @type {any} */
-        const gl = createGlContext({ memory: { read: ()=>new Uint8Array(0), write: ()=>{} },
+        const gl = createGlContext({ holds: roomy.api.hold,
+            memory: { read: ()=>new Uint8Array(0), write: ()=>{} },
             gpu: renderer, divergence: d=>divergences.push(d) });
         gl.attach({ width: 8, height: 8, doubleBuffered: true });
         const program = gl.glCreateProgram();

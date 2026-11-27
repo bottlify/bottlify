@@ -7,7 +7,7 @@
 import { createPacer } from './pacer.js';
 import { createFrameLatency } from './latency.js';
 import { baseOf, compositionPlan, needsComposing } from './compose.js';
-import { plainScratches } from '../../../cache/scratch.js';
+import { noScratches } from '../../../cache/scratch.js';
 
 /**
  * A surface in guest memory, put on the screen -- and the canvas itself.
@@ -398,8 +398,8 @@ export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt =
  *        `host/process.worker.js` `sendFrames`).
  * @param {(name: string) => import('../../../cache/scratch.js').Scratch} [options.scratches]
  *        Memory the presenter keeps between frames, held in the run's cache:
- *        where a surface in guest memory is converted on its way up. Plain
- *        memory if absent.
+ *        where a surface in guest memory is converted on its way up. Absent,
+ *        refused (`NoRoom`).
  */
 export function createPresenter(options = {}){
     const gpu = options.device ?? null;
@@ -484,7 +484,7 @@ export function createPresenter(options = {}){
      * Where a surface is converted on its way up, kept from frame to frame:
      * the upload copies it before it returns.
      */
-    const converted = (options.scratches ?? (name=>plainScratches.scratch(name)))(
+    const converted = (options.scratches ?? (name=>noScratches.scratch(name)))(
         'present/converted');
     const counters = {
         presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0, gammaShown: 0,

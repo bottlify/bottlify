@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import {
     D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
     D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER,
@@ -39,7 +40,8 @@ const D3D8_STATES = Object.values(D3DRS).map(Number);
  * @param {{ caps?: object, parameters?: object, behaviourFlags?: number }} [options]
  */
 function createDevice(options = {}){
-    const d3d = createDirect3D8({ maxPointSize: MAX_POINT_SIZE, ...options.caps });
+    const d3d = createDirect3D8({ ...deviceRooms(), maxPointSize: MAX_POINT_SIZE,
+        ...options.caps });
     /** @type {{ device?: any }} */
     const out = {};
     const parameters = {
@@ -1743,7 +1745,7 @@ test('an image surface of a depth format follows what the adapter reports', ()=>
 // --- what the device writes back into the parameters it was handed ---
 
 test('creating a device reports the back buffer count and nothing else', ()=>{
-    const d3d = createDirect3D8();
+    const d3d = createDirect3D8(deviceRooms());
     /** @type {{ device?: any }} */
     const out = {};
     const parameters = {
@@ -2249,6 +2251,7 @@ test('Clear takes the rectangle count at its word and the missing array as the w
         // target as it was, Clear(1, NULL) succeeds and clears all of it.
         const gpu = createFakeDevice();
         const backend = createBackend({
+            scratches: testScratch,
             device: gpu.device, queue: gpu.queue, presentTo: ()=>{}, now: ()=>0,
         });
         const device = createDevice({ caps: { backend, readMemory: ()=>new Uint8Array(0) } });
@@ -2426,7 +2429,7 @@ test('an image surface and a cube face check a lock rectangle in every pool, a l
 test('Direct3D 8 answers display formats, buffers and intervals as Windows does', ()=>{
     // Wine's d3d8 test_display_formats, test_check_device_format,
     // test_resource_access and test_swapchain_parameters.
-    const d3d = createDirect3D8();
+    const d3d = createDirect3D8(deviceRooms());
     assert.equal(d3d.CheckDeviceType(D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8, false), D3D_OK);
     assert.equal(d3d.CheckDeviceType(D3DFMT.R5G6B5, D3DFMT.X1R5G5B5, true), D3DERR_NOTAVAILABLE,
         'no conversion when a windowed chain presents');

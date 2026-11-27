@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 const VS = '#version 330\nuniform vec4 off; layout(location = 3) in vec4 p; out vec4 v;\n'
     + 'void main() { gl_Position = p + off; v = p; }';
@@ -21,7 +22,7 @@ const FS = '#version 330\nuniform vec4 tint; in vec4 v; layout(location = 0) out
 
 /** @returns {any} */
 function context(){
-    const gl = createGlContext({});
+    const gl = createGlContext({ holds: roomy.api.hold, });
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     return gl;
 }

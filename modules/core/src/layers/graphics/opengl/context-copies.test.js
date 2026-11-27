@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { TEX } from './formats.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** Legacy enums the constants table does not name. */
 const PIXEL_MAP_R_TO_R = 0x0c76;
@@ -28,7 +29,7 @@ function fixture(){
     let next = 0x8000;
     /** @type {Uint8Array[]} what the context handed guest memory's write */
     const writes = [];
-    const gl = createGlContext({ memory: {
+    const gl = createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>{
             writes.push(value);

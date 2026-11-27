@@ -158,7 +158,7 @@ export function createAdviseFunctions(env){
         {
             return E_OUTOFMEMORY;
         }
-        const pointer = env.publish(object, iid) >>> 0;
+        const pointer = env.publish(object, iid);
         if (pointer === 0)
         {
             object.release();

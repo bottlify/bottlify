@@ -5,7 +5,7 @@
  */
 
 import {
-    SLOT_BYTES, PCM_MASK, TABLE_BYTES,
+    SLOT_BYTES, PCM_MASK,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO, MIXED_FRAMES,
     LEFT_CUT, RIGHT_CUT, KIND, KIND_QUEUE, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
     LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_BYTES, DEVICE_LEAD_MS,
@@ -69,17 +69,16 @@ const sampleCodeOf = format=>format.bitsPerSample | (format.float ? FLOAT_SAMPLE
  * person's own sound card -- still holds it.
  *
  * `made` is memory made for a new output (`SoundMemory`, the run's cache
- * holds it); with neither, the mixer makes a buffer of its own, for a mixer
- * with no run around it.
+ * holds it); one of the two is given.
  *
- * @param {Object} [options]
+ * @param {Object} options
  * @param {number} [options.sampleRate]
  * @param {() => void} [options.fill]
  * @param {SoundMemory} [options.memory]
  * @param {SoundMemory} [options.made]
  * @param {{ arena: [number, number] | null }} [options.beside]
  */
-export function createMixer(options = {}){
+export function createMixer(options){
     return createSharedMixer(options);
 }
 
@@ -219,7 +218,7 @@ export function convert(pcm, format, rate, state){
  * ring inside one `SharedArrayBuffer`, and does no converting or mixing at
  * all -- `worklet.js` does both, on the audio thread, from the same table.
  *
- * @param {Object} [options]
+ * @param {Object} options
  * @param {number} [options.sampleRate]
  * @param {() => void} [options.fill]
  * @param {SoundMemory} [options.memory]
@@ -229,10 +228,13 @@ export function convert(pcm, format, rate, state){
  *     the other's slots are left as they are, and the arena this one mirrors
  *     its voices in is the span the other lent it, or none.
  */
-function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, made, beside } = {}){
+function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, made, beside }){
     const isFresh = !memory?.table;
-    /** @type {SoundMemory} */
-    const kept = memory?.table ? memory : made ?? { table: new Uint8Array(allocateTable()) };
+    const kept = memory?.table ? memory : made;
+    if (!kept)
+    {
+        throw new TypeError('a mixer is given its output\'s memory, held or made');
+    }
     const table = kept.table;
     /** What lets the memory go, where this mixer's output was made over it (`release`). */
     let owned = kept === made ? made.release : undefined;
@@ -865,9 +867,4 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, mad
         };
         return track;
     }
-}
-
-/** @returns {SharedArrayBuffer} a fresh, zeroed track table of a mixer's own. */
-function allocateTable(){
-    return new SharedArrayBuffer(TABLE_BYTES);
 }

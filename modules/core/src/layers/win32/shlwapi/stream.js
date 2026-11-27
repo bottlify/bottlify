@@ -518,7 +518,7 @@ export function createStreams(host){
             published.delete(pointer);
             void backing.close();
         });
-        pointer = host.publish(adapter, IID_ISTREAM) >>> 0;
+        pointer = host.publish(adapter, IID_ISTREAM);
         if (pointer)
         {
             published.set(pointer, state);

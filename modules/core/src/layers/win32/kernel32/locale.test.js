@@ -8,6 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLocaleFunctions } from './locale.js';
 import { UI_LANGUAGE } from '../../loader/internal/resources.js';
+import { runTables } from '../common/run-tables.js';
+import { roomy } from '../../cache/testing.fixture.js';
+
+/** The run's constant tables, in a real cache. */
+const tables = runTables(roomy.api.space('tables', { idle: 'stay' }));
 
 const CP_ACP = 0;
 const CP_UTF8 = 65001;
@@ -36,6 +41,7 @@ function fakeHost(){
     return {
         bytes,
         errors,
+        tables,
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {number} unit */

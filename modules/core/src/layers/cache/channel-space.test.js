@@ -264,8 +264,11 @@ test('an owner on the keeper\'s own thread - an in-thread root\'s texels - is nu
         assert.equal(owned.put('3', new Uint8Array(8192)), false);
         assert.equal(run.under(owned.prefix).bodies, 0, 'nothing left under its names');
         assert.deepEqual(tails, []);
+        // A reader the run numbers no owners for (a test's) numbers them itself.
         const alone = await createCacheModule().create({ reader: run.reader });
-        assert.equal(alone.owner('texels'), null, 'none where the run serves no names');
+        const first = alone.owner('texels');
+        assert.match(first?.prefix ?? '', /^texels\/\d+\/$/);
+        assert.notEqual(alone.owner('texels')?.prefix, first?.prefix, 'two owners, two prefixes');
     }
     finally
     {
@@ -407,7 +410,7 @@ test('a worker owner\'s scratches and holds are held under its names, one past a
         assert.equal(said.during.zero, true);
         const heldBytes = 512 * 1024 + 13 * 4096 + (20 << 20);
         assert.deepEqual(said.during.figures, { scratches: 1, holds: 2, held: 3, heldBytes,
-            plain: 0, plainBytes: 0, grows: 2, plainGrows: 0 });
+            grows: 2, refused: 0 });
         assert.deepEqual(said.during.holding, { holds: 3, bytes: heldBytes },
             'the owner counts what its scratches hold');
         assert.deepEqual(said.after, { holds: 0, bytes: 0 });

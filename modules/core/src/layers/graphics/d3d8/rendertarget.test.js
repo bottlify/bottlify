@@ -19,6 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import {
     D3DCLEAR, D3DFMT, D3DPOOL, D3DPT, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTSS, D3DUSAGE, D3D_OK,
 } from './constants.js';
@@ -58,6 +59,7 @@ function harness(version, options = {}){
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
+        scratches: testScratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: frame=>presented.push(frame),
@@ -108,14 +110,14 @@ function harness(version, options = {}){
     const out = {};
     if (version === 9)
     {
-        const d3d = createDirect3D9(services);
+        const d3d = createDirect3D9({ ...deviceRooms(), ...services });
         assert.equal(d3d.CreateDevice({
             ...parameters, lockableBackBuffer: options.lockableBackBuffer === true,
         }, out), D3D_OK);
     }
     else
     {
-        const d3d = createDirect3D8(services);
+        const d3d = createDirect3D8({ ...deviceRooms(), ...services });
         assert.equal(d3d.CreateDevice({ ...parameters, flags: options.lockableBackBuffer ? 1 : 0 },
             out), D3D_OK);
     }

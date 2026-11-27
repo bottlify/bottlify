@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
-import { testCache } from '../../cache/testing.fixture.js';
+import { freshSpace, testScratch } from '../../cache/testing.fixture.js';
 import { NONANTIALIASED_QUALITY, createFontEngine, familyOf } from './fonts.js';
 import { extTextOut, textExtent } from './text.js';
 import { createGdiDrawing } from './context.js';
@@ -117,13 +117,17 @@ const copied = (engine, code, request)=>engine.glyph(code, request, glyph=>({
     height: glyph.height,
     coverage: glyph.bytes.slice(glyph.offset, glyph.offset + glyph.width * glyph.height) }));
 
+/** Where an engine keeps its pages: names of its own in a real cache, and its scratch. */
+const glyphRooms = ()=>({ space: freshSpace('glyphs'),
+    scratch: testScratch('gdi/glyph-page') });
+
 /** @param {Partial<import('./fonts.js').FontRequest>} fields */
 const font = fields=>({
     height: -10, weight: 0, italic: 0, underline: 0, strikeOut: 0, faceName: 'Tahoma', ...fields,
 });
 
 test('without a canvas the engine says so and answers nothing', ()=>{
-    const engine = createFontEngine({});
+    const engine = createFontEngine(glyphRooms());
     assert.equal(engine.available, false);
     assert.equal(engine.metrics(font({})), null);
     assert.equal(copied(engine, 0x41, font({})), null);
@@ -140,7 +144,7 @@ test('a face name maps to a family stack with a generic family behind it', ()=>{
 });
 
 test('a negative height is the character height and a positive one the cell', ()=>{
-    const engine = createFontEngine({ canvas: fakeCanvas().canvas });
+    const engine = createFontEngine({ ...glyphRooms(), canvas: fakeCanvas().canvas });
     const character = engine.metrics(font({ height: -10 }));
     assert.deepEqual(character, {
         height: 12, ascent: 9, descent: 3, internalLeading: 2, externalLeading: 0,
@@ -155,7 +159,7 @@ test('a negative height is the character height and a positive one the cell', ()
 
 test('a glyph is the canvas coverage, placed against the pen and the cell top', ()=>{
     const fake = fakeCanvas();
-    const engine = createFontEngine({ canvas: fake.canvas });
+    const engine = createFontEngine({ ...glyphRooms(), canvas: fake.canvas });
     const glyph = copied(engine, 0x41, font({ height: -10 }));
     assert.ok(glyph);
     assert.equal(glyph.advance, 5);
@@ -176,7 +180,7 @@ test('a font asked for with NONANTIALIASED_QUALITY has no partly covered pixel',
     // LOGFONT's lfQuality: "Font is never antialiased." The fake paints the
     // glyph's first column half covered, which a smoothed glyph keeps.
     const fake = fakeCanvas();
-    const engine = createFontEngine({ canvas: fake.canvas });
+    const engine = createFontEngine({ ...glyphRooms(), canvas: fake.canvas });
     const smooth = copied(engine, 0x41, font({ height: -10 }));
     const sharp = copied(engine, 0x41, font({ height: -10, quality: NONANTIALIASED_QUALITY }));
     assert.ok(smooth && sharp);
@@ -191,7 +195,7 @@ test('a font asked for with NONANTIALIASED_QUALITY has no partly covered pixel',
 
 test('a glyph is rasterised once per font and served from the cache after', ()=>{
     const fake = fakeCanvas();
-    const engine = createFontEngine({ canvas: fake.canvas });
+    const engine = createFontEngine({ ...glyphRooms(), canvas: fake.canvas });
     const first = copied(engine, 0x41, font({}));
     const again = copied(engine, 0x41, font({}));
     assert.deepEqual(again, first);
@@ -204,7 +208,7 @@ test('a glyph is rasterised once per font and served from the cache after', ()=>
 
 test('the program\'s bytes are drawn as Windows-1252', ()=>{
     const fake = fakeCanvas();
-    const engine = createFontEngine({ canvas: fake.canvas });
+    const engine = createFontEngine({ ...glyphRooms(), canvas: fake.canvas });
     let drawn = '';
     const original = fake.context.fillText;
     fake.context.fillText = (text, x, y)=>{
@@ -220,7 +224,7 @@ const INK_COLOR = 0x000000ff;
 const INK = colorToPixel(INK_COLOR);
 
 test('text is composited from the glyph coverage in the text colour', ()=>{
-    const engine = createFontEngine({ canvas: fakeCanvas().canvas });
+    const engine = createFontEngine({ ...glyphRooms(), canvas: fakeCanvas().canvas });
     const request = font({ height: -10 });
     const measured = engine.metrics(request);
     assert.ok(measured);
@@ -261,12 +265,12 @@ test('a drawing with an engine that has no canvas draws exactly as one without',
         drawing.textOutA(1, 0, 0, 'Hi');
         return surface.bytes.slice();
     };
-    assert.deepEqual(paint(createFontEngine({})), paint(undefined));
+    assert.deepEqual(paint(createFontEngine(glyphRooms())), paint(undefined));
 });
 
 test('a drawing with an engine draws its glyphs for the selected font', ()=>{
     const fake = fakeCanvas();
-    const engine = createFontEngine({ canvas: fake.canvas });
+    const engine = createFontEngine({ ...glyphRooms(), canvas: fake.canvas });
     /** @type {import('./context.js').GdiObjectTable} */
     const objects = {
         get: handle=>(handle === 7
@@ -289,29 +293,24 @@ test('a drawing with an engine draws its glyphs for the selected font', ()=>{
 test('a glyph or the metrics of a font measured before make nothing: no key a character', async()=>{
     // Every character a control lays out or draws asks for its glyph: a key
     // string built from the request each time was garbage per character.
-    const cache = await testCache();
-    for (const space of [null, cache.space('glyphs')])
-    {
-        const engine = createFontEngine({ canvas: fakeCanvas().canvas, space });
-        const selected = font({ height: -10 });
-        const first = copied(engine, 0x41, selected);
-        /** @param {import('./fonts.js').Glyph} glyph */
-        const advance = glyph=>glyph.advance;
-        /** @type {any} */
-        let kept = null;
-        // A read of the run's cache reads the body through the view it read it
-        // through before (Cellar's \`with\`): nothing made, as in plain memory.
-        const at = space ? 'in the run\'s cache' : 'in plain memory';
-        assert.ok(await bytesPerCall(()=>{
-            kept = engine.glyph(0x41, selected, advance);
-        }) < 8, `a glyph of a font seen, ${at}`);
-        assert.equal(kept, first?.advance);
-        assert.ok(await bytesPerCall(()=>{
-            kept = engine.metrics(selected);
-        }) < 8, 'its metrics');
-        // The same font asked for by another object of the same fields is the
-        // same face and the same glyphs.
-        assert.deepEqual(copied(engine, 0x41, font({ height: -10 })), first);
-        assert.equal(engine.metrics(font({ height: -10 })), engine.metrics(selected));
-    }
+    const engine = createFontEngine({ ...glyphRooms(), canvas: fakeCanvas().canvas });
+    const selected = font({ height: -10 });
+    const first = copied(engine, 0x41, selected);
+    /** @param {import('./fonts.js').Glyph} glyph */
+    const advance = glyph=>glyph.advance;
+    /** @type {any} */
+    let kept = null;
+    // A read of the run's cache reads the body through the view it read it
+    // through before (Cellar's `with`): nothing made.
+    assert.ok(await bytesPerCall(()=>{
+        kept = engine.glyph(0x41, selected, advance);
+    }) < 8, 'a glyph of a font seen');
+    assert.equal(kept, first?.advance);
+    assert.ok(await bytesPerCall(()=>{
+        kept = engine.metrics(selected);
+    }) < 8, 'its metrics');
+    // The same font asked for by another object of the same fields is the
+    // same face and the same glyphs.
+    assert.deepEqual(copied(engine, 0x41, font({ height: -10 })), first);
+    assert.equal(engine.metrics(font({ height: -10 })), engine.metrics(selected));
 });

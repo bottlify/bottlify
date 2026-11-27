@@ -19,6 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createCountCells, createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
@@ -278,8 +279,7 @@ function seamed(options = {}){
     });
     // The device reports its own divergences: the assembling caller hands
     // the same sink to both, and so does this.
-    const root = createDirect3D9({
-        ...options.caps,
+    const root = createDirect3D9({ ...deviceRooms(), ...options.caps,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
     });

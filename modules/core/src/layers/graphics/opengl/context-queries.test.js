@@ -12,6 +12,7 @@ import { createGpuRenderer } from './gpu.js';
 import { QUERY } from './context-queries.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /**
  * @param {((slot: number) => number) | null} samples  what each occlusion slot counts, or
@@ -21,7 +22,8 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 function fixture(samples){
     const gpu = createFakeDevice(samples ? { occlusionSamples: samples } : {});
     const renderer = samples ? createGpuRenderer({
-        backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
+        backend: createBackend({ scratches: testScratch,
+            device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
     }) : null;
     const gl = /** @type {any} */ (createGlContext(renderer ? { gpu: renderer } : {}));
@@ -162,7 +164,7 @@ test('conditional rendering\'s errors', ()=>{
 
 test('a stream past the first counts nothing, and only the primitive counts have streams (4.0)',
     ()=>{
-        const gl = /** @type {any} */ (createGlContext({}));
+        const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
         gl.attach({ width: 4, height: 4, doubleBuffered: true });
         const [a, b] = gl.glGenQueries(2);
         gl.glBeginQueryIndexed(QUERY.PRIMITIVES_GENERATED, 2, a);
@@ -188,7 +190,7 @@ test('a stream past the first counts nothing, and only the primitive counts have
 
 test('a created query is an object with its result available, and a result goes into a query'
     + ' buffer', ()=>{
-    const gl = /** @type {any} */ (createGlContext({}));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     const [made] = gl.glCreateQueries(QUERY.TIME_ELAPSED, 1);
     assert.equal(gl.glIsQuery(made), GL.TRUE);

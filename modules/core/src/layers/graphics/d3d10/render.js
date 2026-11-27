@@ -72,7 +72,6 @@ import { textureBreach } from '../webgpu/features.js';
 import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import { SYSTEM_VALUE } from './dxbc.js';
-import { plainScratches } from '../../cache/scratch.js';
 
 /**
  * The shapes WGSL has a depth texture of, which a float texture over a depth
@@ -100,7 +99,7 @@ const DEPTH_DIMENSIONS = new Set([RESOURCE_DIMENSION.TEXTURE2D, RESOURCE_DIMENSI
  *     map hands out: guest memory, so a map is an address and no copy.
  * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
  *     Where each resource's bytes are held for its life (`backingOf`): the run's cache
- *     (`cache/scratch.js` `hold`); absent, plain memory under the same contract.
+ *     (`cache/scratch.js` `hold`). Required.
  * @property {number} [featureLevel]  The device's D3D_FEATURE_LEVEL (10_0 without one).
  * @property {{ dumpFrames: number, written?: (lines: string[], frame: number) => void }} [liveDump]
  *     Frames to write down from now on, on asking (`app.debug.dumpFrames`): each draw,
@@ -650,15 +649,19 @@ export function createRenderer(services){
     const backings = new WeakMap();
     /**
      * Where a resource's bytes are held: memory of the run's cache, zero as
-     * new memory is, or plain memory where there is no cache or no room in
-     * it. They are let go of when nothing can reach the backing any more -
+     * new memory is. They are let go of when nothing can reach the backing any more -
      * not at the program's last reference, which a view, a share's other
      * device, a copy or a read-back in flight outlive, and only the collector
      * knows when the last of those went; the owner's going (the root, the
      * process) takes back what is still held before then (`HELD_BYTES`).
      */
-    const holds = services.holds ?? ((/** @type {string} */ name, /** @type {number} */ length)=>
-        plainScratches.hold(name, length));
+    const holds = services.holds;
+    if (!holds)
+    {
+        // A device's options say none where the device draws nothing; one
+        // that draws is handed the run's.
+        throw new TypeError('a renderer is handed its holds in the run\'s cache');
+    }
     /** @type {WeakMap<object, any>} view -> GPU texture view */
     const views = new WeakMap();
     /**

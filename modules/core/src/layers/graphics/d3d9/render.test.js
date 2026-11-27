@@ -25,6 +25,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import {
     D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
 } from './constants.js';
@@ -72,6 +73,7 @@ function harness(options = {}){
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
+        scratches: testScratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: frame=>presented.push(frame),
@@ -83,8 +85,7 @@ function harness(options = {}){
     const reads = [];
     /** Every read in place, as [address, length]. @type {number[][]} */
     const windows = [];
-    const d3d = createDirect3D9({
-        backend,
+    const d3d = createDirect3D9({ ...deviceRooms(), backend,
         readMemory: (address, length)=>{
             reads.push([address, length]);
             return ram.slice(address - RAM_BASE, address - RAM_BASE + length);
@@ -1046,7 +1047,7 @@ test('a stream whose offset leaves part of a word past whole vertices is refused
 });
 
 test('a device with no backend answers every drawing call and records nothing', async()=>{
-    const d3d = createDirect3D9({});
+    const d3d = createDirect3D9(deviceRooms());
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({
@@ -1743,11 +1744,11 @@ test('a present moves the back buffers\' contents one place down', async()=>{
     // was, the first holding what the second held after a present and the
     // last what was presented.
     const gpu = createFakeDevice({});
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue,
         presentTo: ()=>{}, now: ()=>0 });
     let next = RAM_BASE;
-    const d3d = createDirect3D9({
-        backend,
+    const d3d = createDirect3D9({ ...deviceRooms(), backend,
         readMemory: (_address, length)=>new Uint8Array(length),
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         allocate: bytes=>{

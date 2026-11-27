@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { freshSpace } from '../../cache/testing.fixture.js';
 import { D3DX_DEFAULT, D3DX_FROM_FILE, createTextureLoader } from './texture.js';
 import { FMT } from './pixels.js';
 import { deviceRig } from './device.fixture.js';
@@ -167,7 +168,7 @@ function rig(){
     };
     /** @type {string[]} */
     const diverged = [];
-    const created = createTextureLoader({
+    const created = createTextureLoader({ images: freshSpace('d3dx-images'),
         readMemory: (at, length)=>memory.subarray(at, at + length),
         writeMemory: (at, bytes)=>memory.set(bytes, at),
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
@@ -441,7 +442,7 @@ function exported(given){
     const r = deviceRig();
     /** @type {any[][]} */
     const asked = [];
-    const loader = createTextureLoader({ ...r.host,
+    const loader = createTextureLoader({ images: freshSpace('d3dx-images'), ...r.host,
         readFile: async path=>{
             asked.push(['file', path]);
             const bytes = given.files?.[path];

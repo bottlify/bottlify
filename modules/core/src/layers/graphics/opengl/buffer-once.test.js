@@ -19,6 +19,7 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -68,7 +69,8 @@ async function run(seed, reference){
     const next = random(seed);
     const pick = (/** @type {number} */ n)=>next() % n;
     const fake = createFakeDevice({});
-    const plain = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
+    const plain = createBackend({ scratches: testScratch,
+        device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     /** @type {any[]} */
     const dynamic = [];
     const counted = Object.create(reference ? shadowed(plain) : plain);
@@ -86,7 +88,7 @@ async function run(seed, reference){
     });
     const guest = new Uint8Array(0x40000);
     let free = 0x1000;
-    const gl = /** @type {any} */ (createGlContext({ gpu: renderer, memory: {
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, gpu: renderer, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>guest.slice(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>guest.set(value, at),
         allocate: (/** @type {number} */ size)=>{

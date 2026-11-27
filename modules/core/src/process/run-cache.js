@@ -288,10 +288,11 @@ export async function openRunCache(opened = {}){
                  * @param {string} prefix @param {SharedArrayBuffer} channel
                  */
                 served(prefix, channel){
-                    if (!(channel instanceof SharedArrayBuffer) || !mine.delete(prefix)
-                        || !ownersOut.delete(prefix))
+                    const shared = typeof SharedArrayBuffer === 'function'
+                        && channel instanceof SharedArrayBuffer;
+                    if (!shared || !mine.delete(prefix) || !ownersOut.delete(prefix))
                     {
-                        if (channel instanceof SharedArrayBuffer)
+                        if (shared)
                         {
                             openServer(channel).close();
                         }
@@ -321,7 +322,7 @@ export async function openRunCache(opened = {}){
             if (runRooms === null)
             {
                 const owner = ownedSpace(reader, own('scratch'));
-                runRooms = { owner, rooms: createScratches(owner.space.hold ?? null) };
+                runRooms = { owner, rooms: createScratches(owner.space.hold) };
             }
             return runRooms.rooms.scratch(name);
         },

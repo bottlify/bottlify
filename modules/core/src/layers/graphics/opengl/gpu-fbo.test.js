@@ -19,6 +19,7 @@ import { createGpuRenderer } from './gpu.js';
 import { UNIFORM } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 const VS = `#version 120
 uniform mat4 projection;
@@ -59,7 +60,8 @@ const STRIDE = 24;
 
 function rig(){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const divergences = [];
     const renderer = createGpuRenderer({
@@ -73,7 +75,8 @@ function rig(){
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const gl = createGlContext({ memory, gpu: renderer, divergence: d=>divergences.push(d) });
+    const gl = createGlContext({ holds: roomy.api.hold,
+        memory, gpu: renderer, divergence: d=>divergences.push(d) });
     gl.attach({ width: 64, height: 32, doubleBuffered: true, depthBits: 24 });
     // A quad over the viewport, red, its corners' coordinates 0..1.
     const view = new DataView(bytes.buffer);

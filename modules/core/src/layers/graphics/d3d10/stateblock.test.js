@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3D10_BIND, D3D10_DRIVER_TYPE, D3D10_SDK_VERSION, D3D10_USAGE, DXGI_FORMAT, E_INVALIDARG, IID,
     S_OK,
@@ -118,7 +119,7 @@ test('a block captures what its mask selects and applies it back, and nothing el
     /** @type {{ device?: any }} */
     const made = {};
     assert.equal(D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, D3D10_SDK_VERSION,
-        made), S_OK);
+        made, deviceRooms()), S_OK);
     const device = made.device;
     /** @type {{ shader?: any }} */
     const vs = {};
@@ -179,7 +180,7 @@ test('a block holds what it captured until the next capture or its end', ()=>{
     /** @type {{ device?: any }} */
     const made = {};
     assert.equal(D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, D3D10_SDK_VERSION,
-        made), S_OK);
+        made, deviceRooms()), S_OK);
     const device = made.device;
     /** @type {{ shader?: any }} */
     const vs = {};

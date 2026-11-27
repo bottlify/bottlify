@@ -169,7 +169,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
         host.writeMemory(data, bytes);
         const object = createComObject(IID_ID3D10BLOB, { interfaces: [blob],
             state: { data, size: bytes.length }, destroy: ()=>heap.free(data) });
-        const pointer = host.vtables.publish(object, IID_ID3D10BLOB) >>> 0;
+        const pointer = host.vtables.publish(object, IID_ID3D10BLOB);
         if (pointer === 0)
         {
             object.release();
@@ -696,7 +696,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             /** HRESULT Close(LPCVOID pData) */
             { name: 'Close', argBytes: 8, invoke: close },
         ] });
-        const pointer = host.vtables.publish(object, 'ID3DInclude') >>> 0;
+        const pointer = host.vtables.publish(object, 'ID3DInclude');
         return pointer === 0 ? null : { pointer, end: ()=>{
             held.forEach(at=>heap.free(at));
             held.clear();

@@ -15,10 +15,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @returns {any} */
 function fixture(){
-    const context = createGlContext({});
+    const context = createGlContext({ holds: roomy.api.hold, });
     context.attach({ width: 64, height: 32, doubleBuffered: true, depthBits: 24 });
     return context;
 }

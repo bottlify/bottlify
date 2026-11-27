@@ -31,7 +31,7 @@ import {
     DDERR_NORASTEROPHW, DDERR_UNSUPPORTED, DD_OK, ROP,
 } from './constants.js';
 import { compressedBytes, decodeS3tc, encodeS3tc } from '../../media/internal/s3tc.js';
-import { plainScratches } from '../../cache/scratch.js';
+import { noScratches } from '../../cache/scratch.js';
 
 /**
  * @typedef {Object} BlitSurface
@@ -172,8 +172,8 @@ export const blitRooms = scratch=>({ snapshot: scratch('blit/snapshot'),
     converted: scratch('blit/converted'), decoded: scratch('blit/decoded'),
     row: scratch('blit/row') });
 
-/** What a blit handed no rooms works in: plain memory, kept the same way. */
-const PLAIN_ROOMS = blitRooms(name=>plainScratches.scratch(name));
+/** A blit handed no rooms: every room refused (`NoRoom`). */
+const NO_ROOMS = blitRooms(name=>noScratches.scratch(name));
 
 /**
  * @param {BlitMemory} memory
@@ -649,12 +649,12 @@ function bltIntoBlocks(request){
  *            destColorKey?: ColorKey, rop?: number, ddfx?: number }} [request.fx]
  * @param {Rect[]} [request.clipList]
  * @param {boolean} [request.fxGiven]  Whether the program passed a DDBLTFX at all.
- * @param {BlitRooms} [request.rooms]  Where it works (`blitRooms`); plain memory if absent.
+ * @param {BlitRooms} [request.rooms]  Where it works (`blitRooms`); absent, every room refused.
  * @returns {number} HRESULT
  */
 export function blt(request){
     const { memory, dest } = request;
-    const rooms = request.rooms ?? PLAIN_ROOMS;
+    const rooms = request.rooms ?? NO_ROOMS;
     if (dest.bytesPerPixel === 3)
     {
         return DDERR_UNSUPPORTED;
@@ -826,12 +826,12 @@ export function blt(request){
  * @param {number} request.flags   DDBLTFAST
  * @param {ColorKey} [request.srcColorKey]
  * @param {ColorKey} [request.destColorKey]
- * @param {BlitRooms} [request.rooms]  Where it works (`blitRooms`); plain memory if absent.
+ * @param {BlitRooms} [request.rooms]  Where it works (`blitRooms`); absent, every room refused.
  * @returns {number} HRESULT
  */
 export function bltFast(request){
     const { memory, dest } = request;
-    const rooms = request.rooms ?? PLAIN_ROOMS;
+    const rooms = request.rooms ?? NO_ROOMS;
     const src = request.src ?? null;
     if (!src)
     {

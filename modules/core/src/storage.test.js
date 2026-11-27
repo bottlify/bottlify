@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from './process/page-file.fixture.js';
 import { PIECE_SIZE, piecesOf } from './layers/filesystem/internal/memory-store.js';
 import {
     coalescedSaver, inflateRaw,
@@ -157,7 +158,7 @@ function fakeDirectory(){
 
 test('a file the volume keeps in pieces is saved a piece at a time and read back whole', async()=>{
     const { filesystemModule } = await import('./layers/filesystem/module.js');
-    const volume = /** @type {any} */ (await filesystemModule.create(undefined));
+    const volume = /** @type {any} */ (await filesystemModule.create({ pageFile: await testPageFile() }));
     const handle = volume.open('C:\\big.bin',
         { write: true, disposition: volume.Disposition.CREATE_NEW });
     // The first piece and the third written, the second never: zeros.

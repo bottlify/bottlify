@@ -187,7 +187,7 @@ function publishOver(env, kind, shared, start, out){
         return E_OUTOFMEMORY;
     }
     shared.users++;
-    const pointer = env.publish(object, kind.iid) >>> 0;
+    const pointer = env.publish(object, kind.iid);
     if (pointer === 0)
     {
         object.release();

@@ -17,6 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { clipVolumeMatrix, createLegacyDirect3D, createTextureHandles } from './legacy.js';
 import { createDirect3D7 } from './device.js';
 import {
@@ -79,7 +80,7 @@ function surface(root, options = {}){
 function fixture(version = 3){
     const root = createDirectDraw({ version: 4, screenWidth: 64, screenHeight: 48 });
     root.setCooperativeLevel(HWND, DDSCL_NORMAL);
-    const d3d7 = createDirect3D7(root);
+    const d3d7 = createDirect3D7(root, deviceRooms());
     /** @type {any[][]} */
     const calls = [];
     const watched = {
@@ -146,7 +147,7 @@ test('material and matrix handles are the process\'s: one DirectDraw object\'s n
     const f = fixture(1);
     const root = createDirectDraw({ version: 4, screenWidth: 64, screenHeight: 48 });
     root.setCooperativeLevel(HWND, DDSCL_NORMAL);
-    const other = createLegacyDirect3D(createDirect3D7(root), f.textures);
+    const other = createLegacyDirect3D(createDirect3D7(root, deviceRooms()), f.textures);
     const material = f.legacy.createMaterial();
     const handle = material.getHandle(f.device);
     assert.equal(other.createViewport().setBackground(handle), D3D_OK);

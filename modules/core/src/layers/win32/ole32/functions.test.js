@@ -2000,3 +2000,15 @@ test('CoFileTimeNow reads the machine\'s wall clock, as GetSystemTimeAsFileTime 
     const ticks = view.getBigUint64(0, true);
     assert.equal(ticks, (BigInt(Date.UTC(2026, 0, 1)) + 11644473600000n) * 10000n);
 });
+
+test('a 64-bit CoGetContextToken hands out the context\'s pointer whole, past 4 GiB too', async()=>{
+    // The token is the context's interface pointer; cut to its low dword, a program that
+    // calls through it reaches another address.
+    const { host, fns } = setup({ pointerSize: 8 });
+    const HIGH = 0x1_4000_2000;
+    const publish = host.vtables.publish;
+    host.vtables.publish = (object, interfaceId)=>(publish(object, interfaceId) === 0 ? 0 : HIGH);
+    initialize(fns, 2);
+    assert.equal(await fns.CoGetContextToken.handler([PPV]), S_OK);
+    assert.equal(host.u32(PPV) + host.u32(PPV + 4) * 2 ** 32, HIGH, 'all eight bytes');
+});

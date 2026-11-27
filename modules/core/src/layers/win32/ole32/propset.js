@@ -1303,7 +1303,7 @@ export function createPropertySetFunctions(env){
                 }
             },
         });
-        const pointer = object ? env.publish(object, IID_IPROPERTYSTORAGE) >>> 0 : 0;
+        const pointer = object ? env.publish(object, IID_IPROPERTYSTORAGE) : 0;
         if (pointer === 0)
         {
             await release(state.stream, thread);
@@ -1553,7 +1553,7 @@ export function createPropertySetFunctions(env){
     }, null);
 
     /** IPropertySetStorage as an IStorage of ours answers it: over itself. */
-    const ON_STORAGE = propertySetMethods(object=>env.publish(object, IID_ISTORAGE) >>> 0);
+    const ON_STORAGE = propertySetMethods(object=>env.publish(object, IID_ISTORAGE));
     /** IPropertySetStorage as StgCreatePropSetStg makes it: over the storage it holds. */
     const STANDALONE = propertySetMethods(object=>object.state.storage);
 
@@ -1611,7 +1611,7 @@ export function createPropertySetFunctions(env){
                         }
                     },
                 });
-                const pointer = object ? env.publish(object, IID_IPROPERTYSETSTORAGE) >>> 0 : 0;
+                const pointer = object ? env.publish(object, IID_IPROPERTYSETSTORAGE) : 0;
                 if (pointer === 0)
                 {
                     await release(held, thread);

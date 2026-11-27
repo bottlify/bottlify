@@ -31,13 +31,12 @@
  * canvas draws the same coverage for the same name, which is why a name is
  * the request's fields and, for a family a program added a face to, that
  * face's bytes, so two processes of a run share the glyphs of one face.
- * Where there is no cache, or no room in it, pages are plain memory under
- * the same contract, let go of all at once past `PLAIN_LIMIT`.
+ * A page the cache has no room for is read from where it was built for the
+ * call that drew it and drawn again at the next, as one it let go of is.
  */
 
 import { FACES, FF_MODERN, FF_ROMAN, windowsMetrics } from '../../win32/gdi32/faces.js';
 import { fnv1a } from '../../../system/hash.js';
-import { plainScratches } from '../../cache/scratch.js';
 
 /**
  * The LOGFONT fields the engine reads. The rest -- escapement, the
@@ -106,10 +105,8 @@ export const NONANTIALIASED_QUALITY = 3;
  * @property {(font: FontRequest | null) => FontMetrics | null} metrics
  * @property {GlyphReader} glyph
  *           `code` is a byte of the program's text.
- * @property {() => { drawn: number, pagesPut: number, pagesPlain: number,
- *     plainDropped: number, plainPages: number, plainBytes: number, cache: boolean }} [figures]
- *           Glyphs drawn, pages put into the cache and into plain memory, plain pages
- *           let go of at the limit, and what plain memory holds now.
+ * @property {() => { drawn: number, pagesPut: number, pagesRefused: number }} [figures]
+ *           Glyphs drawn, pages put into the cache, and pages it had no room for.
  * @property {(family: string, bytes: Uint8Array) => Promise<boolean>} addFace
  *           A program's own font, drawn under its family name from then on;
  *           false where the platform cannot take a font.
@@ -190,13 +187,6 @@ const RECORD = 16;
 const PAGE_HEAD = PAGE_CODES * RECORD;
 
 /**
- * Bytes of pages kept in plain memory, where the cache has no room or there
- * is none, before they are let go of all at once: about the 4096 glyphs of a
- * dialog face this engine kept before pages.
- */
-const PLAIN_LIMIT = 1 << 20;
-
-/**
  * The faces programs added in this realm (AddFontMemResourceEx), by family
  * in lower case, to a name of their bytes: the realm's font set is what the
  * canvas draws with, so it is the realm's, not one engine's.
@@ -273,16 +263,15 @@ function cssFont(font, em){
 
 /**
  * @param {{ canvas?: (width: number, height: number) => Canvas2D,
- *     space?: import('../../cache/module.js').CacheSpace | null,
- *     scratch?: import('../../cache/scratch.js').Scratch }} [options]
+ *     space: import('../../cache/module.js').CacheSpace,
+ *     scratch: import('../../cache/scratch.js').Scratch }} options
  *        `canvas`: where a canvas comes from; the platform's `OffscreenCanvas`
  *        when not given, and no engine at all when there is none. `space`:
- *        names of the run's cache the glyphs' pages are kept under, none for
- *        plain memory. `scratch`: where a page is built on its way into the
- *        cache, kept between glyphs.
+ *        names of the run's cache the glyphs' pages are kept under. `scratch`:
+ *        where a page is built on its way into the cache, kept between glyphs.
  * @returns {FontEngine}
  */
-export function createFontEngine(options = {}){
+export function createFontEngine(options){
     const Offscreen = /** @type {(new (w: number, h: number) => Canvas2D) | undefined} */ (
         /** @type {Record<string, unknown>} */ (globalThis).OffscreenCanvas);
     const makeCanvas = options.canvas
@@ -311,17 +300,8 @@ export function createFontEngine(options = {}){
      * @type {WeakMap<FontRequest, Face>}
      */
     let facesOf = new WeakMap();
-    const space = options.space ?? null;
-    const building = options.scratch ?? plainScratches.scratch('gdi/glyph-page');
-    /**
-     * Pages kept in plain memory: where there is no cache, or it had no room
-     * for one. A page the cache took later is dropped from here.
-     *
-     * @type {Map<string, Uint8Array>}
-     */
-    let plain = new Map();
-    let plainBytes = 0;
-    const counts = { drawn: 0, pagesPut: 0, pagesPlain: 0, plainDropped: 0 };
+    const { space, scratch: building } = options;
+    const counts = { drawn: 0, pagesPut: 0, pagesRefused: 0 };
 
     // ponytail: lfWidth is not honoured -- a face is drawn at its own
     // proportions; stretch the canvas horizontally if a program depends on it.
@@ -486,35 +466,6 @@ export function createFontEngine(options = {}){
         return page;
     };
 
-    /**
-     * A page built kept: in the cache where it has room, plain memory where
-     * not, let go of all at once past `PLAIN_LIMIT`.
-     *
-     * @param {string} name @param {Uint8Array} page
-     */
-    const keep = (name, page)=>{
-        const before = plain.get(name);
-        if (before)
-        {
-            plain.delete(name);
-            plainBytes -= before.length;
-        }
-        if (space?.put(name, page))
-        {
-            counts.pagesPut++;
-            return;
-        }
-        if (plainBytes + page.length > PLAIN_LIMIT)
-        {
-            counts.plainDropped += plain.size;
-            plain = new Map();
-            plainBytes = 0;
-        }
-        plain.set(name, page.slice());
-        plainBytes += page.length;
-        counts.pagesPlain++;
-    };
-
     // What the read in flight asks for, and whether its page had it: a page
     // is read through one function made once, so a glyph read makes nothing.
     let wantCode = 0;
@@ -582,8 +533,6 @@ export function createFontEngine(options = {}){
             addedFaces.set(family.toLowerCase(), `${fnv1a(bytes).toString(16)}.${bytes.length}`);
             faces.clear();
             facesOf = new WeakMap();
-            plain = new Map();
-            plainBytes = 0;
             return true;
         },
         metrics: font=>faceOf(font ?? DEFAULT_FONT).metrics,
@@ -605,35 +554,25 @@ export function createFontEngine(options = {}){
             depth++;
             try
             {
-                let value = space?.with(name, readPage);
+                const value = space.with(name, readPage);
                 if (found)
                 {
                     return value;
-                }
-                const kept = plain.get(name);
-                if (kept)
-                {
-                    value = readPage(kept);
-                    if (found)
-                    {
-                        return value;
-                    }
                 }
                 // Not drawn yet: the page built again with it, from what it
                 // held where it lies.
                 drawFont = request;
                 drawFace = face;
-                const page = kept ? drawInto(code, request, face, kept)
-                    : space?.with(name, growPage) ?? drawInto(code, request, face, null);
+                const page = space.with(name, growPage) ?? drawInto(code, request, face, null);
                 drawFace = null;
-                keep(name, page);
-                // Read where it is kept now, as every later read reads it.
-                value = space?.with(name, readPage);
-                if (!found)
+                if (!space.put(name, page))
                 {
-                    value = readPage(plain.get(name) ?? page);
+                    counts.pagesRefused++;
+                    return readPage(page);
                 }
-                return value;
+                counts.pagesPut++;
+                // Read where it is kept now, as every later read reads it.
+                return space.with(name, readPage);
             }
             finally
             {
@@ -644,6 +583,6 @@ export function createFontEngine(options = {}){
                 found = outerFound;
             }
         },
-        figures: ()=>({ ...counts, plainPages: plain.size, plainBytes, cache: space !== null }),
+        figures: ()=>({ ...counts }),
     };
 }

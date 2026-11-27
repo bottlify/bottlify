@@ -15,6 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import {
     D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DPT, D3DSWAPEFFECT, D3DTOP, D3DTSS, D3D_OK,
 } from './constants.js';
@@ -67,6 +68,7 @@ function harness(){
     /** @type {string[]} */
     const reports = [];
     const backend = createBackend({
+        scratches: testScratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: ()=>{},
@@ -74,8 +76,7 @@ function harness(){
     });
     const ram = new Uint8Array(RAM_SIZE);
     let next = RAM_BASE;
-    const d3d = createDirect3D8({
-        backend,
+    const d3d = createDirect3D8({ ...deviceRooms(), backend,
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         allocate: bytes=>{

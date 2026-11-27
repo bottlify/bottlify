@@ -40,30 +40,24 @@ test('a table is made once for the run: a second process reads it in place', asy
     const { makes, make } = counted();
     const first = runTables(cache.space('tables', { idle: 'stay' }));
     assert.equal(first.table('t', Uint16Array, make).read(table=>table[0x123]), 0x123 * 7);
-    assert.deepEqual(first.figures(), { made: 1, read: 0, local: 0 });
+    assert.deepEqual(first.figures(), { made: 1, read: 0, refused: 0 });
     assert.equal(cache.reader.look('tables/t'), 'hot', 'the body is the run\'s');
 
     const second = runTables(cacheSpace(secondProcess(cache), 'tables', { idle: 'stay' }));
     const read = second.table('t', Uint16Array, make).read(table=>[table.length, table[0xfff]]);
     assert.deepEqual(read, [0x1000, 0xfff * 7 & 0xffff]);
-    assert.deepEqual(second.figures(), { made: 0, read: 1, local: 0 }, 'not made again');
+    assert.deepEqual(second.figures(), { made: 0, read: 1, refused: 0 }, 'not made again');
     assert.equal(makes.count, 1);
 });
 
-test('without a cache, or with no room in it, a realm keeps the table it made', async()=>{
+test('a table the cache has no room for is made again at each read, kept by no realm', async()=>{
     const { makes, make } = counted();
-    const alone = runTables(null);
-    const table = alone.table('t', Uint16Array, make);
-    table.read(()=>0);
-    table.read(()=>0);
-    assert.deepEqual(alone.figures(), { made: 1, read: 0, local: 1 });
-
     const cramped = await testCache({ budget: 4096, segmentBytes: 4096 });
     const short = runTables(cramped.space('tables', { idle: 'stay' }));
     const big = short.table('big', Uint16Array, make);
-    big.read(()=>0);
-    big.read(()=>0);
-    assert.deepEqual(short.figures(), { made: 1, read: 0, local: 1 }, 'made once, kept here');
+    assert.equal(big.read(table=>table[0x123]), 0x123 * 7);
+    assert.equal(big.read(table=>table[0x124]), 0x124 * 7);
+    assert.deepEqual(short.figures(), { made: 2, read: 0, refused: 2 }, 'refused, counted');
     assert.equal(makes.count, 2);
 });
 
@@ -79,5 +73,5 @@ test('a table idle stays, and one taken back is made again by the next reader', 
     cache.idle(1);
     assert.equal(table.read(view=>view[1]), 7);
     assert.equal(makes.count, 2);
-    assert.deepEqual(tables.figures(), { made: 2, read: 0, local: 0 });
+    assert.deepEqual(tables.figures(), { made: 2, read: 0, refused: 0 });
 });

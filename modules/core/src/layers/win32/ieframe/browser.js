@@ -365,7 +365,7 @@ export function createBrowsers(host){
     };
 
     /** The control's IDispatch, as the events name the browser they come from. @param {any} object */
-    const selfDispatch = object=>host.vtables.publish(object, INTERFACES.IWebBrowser2.iid) >>> 0;
+    const selfDispatch = object=>host.vtables.publish(object, INTERFACES.IWebBrowser2.iid);
 
     /**
      * An address as IE keeps it: a path on a drive as a file URL; anything
@@ -1345,7 +1345,7 @@ export function createBrowsers(host){
                 {
                     return CONNECT_E_NOCONNECTION;
                 }
-                const pointer = host.vtables.publish(point, CONNECTION_POINT.iid) >>> 0;
+                const pointer = host.vtables.publish(point, CONNECTION_POINT.iid);
                 point.addRef();
                 putU32s(out, [pointer]);
                 return S_OK;

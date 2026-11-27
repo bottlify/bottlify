@@ -258,7 +258,7 @@ export function registerMmDevApiClasses(host){
      */
     const handOut = (interfaces, id, state, out)=>{
         const object = createComObject(CLSID_MMDEVICE_ENUMERATOR, { interfaces, state });
-        const pointer = host.vtables.publish(object, id) >>> 0;
+        const pointer = host.vtables.publish(object, id);
         if (pointer === 0)
         {
             object.release();

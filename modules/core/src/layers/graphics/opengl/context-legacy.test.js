@@ -19,11 +19,12 @@ import { LEGACY } from './legacy-state.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @returns {{ gl: any, bytes: Uint8Array, view: DataView }} */
 function fixture(){
     const bytes = new Uint8Array(0x10000);
-    const gl = createGlContext({ memory: {
+    const gl = createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     }, keepPrimitives: true });
@@ -157,7 +158,8 @@ test('the stipple through pixel buffers: an offset into each, a range past one r
 
 test('a stippled draw on the device discards by the pattern its key carries', async()=>{
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     const renderer = createGpuRenderer({ backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }) });
     const bytes = new Uint8Array(0x1000);
@@ -166,7 +168,7 @@ test('a stippled draw on the device discards by the pattern its key carries', as
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const gl = createGlContext({ memory, gpu: renderer });
+    const gl = createGlContext({ holds: roomy.api.hold, memory, gpu: renderer });
     gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
     putPattern(bytes, 0x100, CHECKER);
     gl.glPolygonStipple(0x100);

@@ -39,8 +39,6 @@
   "SHLWAPI.dll!GetLocaleInfoWrapW": "faults at one base only: argument 4 a pointer: threw GUEST_ACCESS low, nothing high",
   "SHLWAPI.dll!GetMenuStringWrapW": "faults at one base only: argument 4 a pointer: threw GUEST_ACCESS low, nothing high",
   "SHLWAPI.dll!LoadStringWrapW": "faults at one base only: argument 4 a pointer: threw GUEST_ACCESS low, nothing high",
-  "SHLWAPI.dll!SHRegisterClassA": "faults at one base only: argument 1 a pointer: threw nothing low, GUEST_ACCESS high",
-  "SHLWAPI.dll!SHRegisterClassW": "faults at one base only: argument 1 a pointer: threw nothing low, GUEST_ACCESS high",
   "USER32.dll!CharUpperA": "RAX sign-extended: argument 1 a pointer: RAX 0x110000 low, 0xffffffff90110000 high",
   "USER32.dll!CharUpperW": "RAX sign-extended: argument 1 a pointer: RAX 0x110000 low, 0xffffffff90110000 high",
   "WSOCK32.dll!gethostname": "faults at one base only: argument 2 a pointer: threw GUEST_ACCESS low, nothing high",

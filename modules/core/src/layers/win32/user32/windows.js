@@ -3211,7 +3211,7 @@ export function createWindowFunctions(host){
     const register = (fields, unicode = false)=>{
         // A name, or an integral atom, which is the class "#<number>"; a
         // string atom names the class its name does.
-        const given = fields.className >>> 0;
+        const given = fields.className;
         const asked = given > LAST_ATOM ? readText(host, given, unicode, MAX_CLASS_NAME)
             : given !== 0 && given < FIRST_STRING_ATOM ? `#${given}`
                 : directory.registeredName(given) ?? '';
@@ -4517,8 +4517,8 @@ export function createWindowFunctions(host){
         // class asked for by its base name under a context, or the reverse;
         // an atom, or the name itself, as the caller passed it.
         const registeredName = record.cls?.baseName;
-        const classBytes = (className >>> 0) > LAST_ATOM && registeredName !== undefined
-            && foldName(readText(host, className >>> 0, unicode, MAX_CLASS_NAME))
+        const classBytes = wholeAddress(className) > LAST_ATOM && registeredName !== undefined
+            && foldName(readText(host, wholeAddress(className), unicode, MAX_CLASS_NAME))
                 !== foldName(registeredName) ? nameIn(registeredName, unicode) : null;
         // Named once, before anything is awaited: a call made after the hook
         // has answered is answering a call the bridge has already let go of.

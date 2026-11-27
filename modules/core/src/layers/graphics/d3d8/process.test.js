@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3DFMT, D3DLIGHTTYPE, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3D_OK,
 } from './constants.js';
@@ -46,7 +47,8 @@ function harness(version){
     };
     /** @type {{ device?: any }} */
     const out = {};
-    assert.equal((version === 9 ? createDirect3D9(services) : createDirect3D8(services))
+    assert.equal((version === 9 ? createDirect3D9({ ...deviceRooms(),
+        ...services }) : createDirect3D8({ ...deviceRooms(), ...services }))
         .CreateDevice(parameters, out), D3D_OK);
     const device = out.device;
     /** @param {number} length @param {number} fvf */

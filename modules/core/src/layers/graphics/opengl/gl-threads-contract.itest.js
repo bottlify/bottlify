@@ -59,6 +59,7 @@ import { playedOpengl, recordedOpengl } from '../remote/opengl.js';
 import { GL_COMMANDS } from './commands.js';
 import { createOpengl } from './exports.js';
 import { GL } from './constants.js';
+import { testScratch } from '../../cache/testing.fixture.js';
 
 const ENTRY = 0x7000;
 const TRAP = 0x7800;
@@ -426,7 +427,8 @@ const pair = (processor, mode)=>{
         const presented = [];
         const gpu = mode === 'processor' ? null : createFakeDevice();
         const reads = gpu ? gpuReads(gpu) : [];
-        const backend = gpu ? createBackend({ device: gpu.device, queue: gpu.queue,
+        const backend = gpu ? createBackend({ scratches: testScratch,
+            device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{}, now: ()=>0 }) : null;
         const opengl = createOpengl({
             readMemory: (at, length)=>host.readPhysical(at >>> 0, length).slice(),

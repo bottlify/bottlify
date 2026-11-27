@@ -36,6 +36,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { soundMemory } from '../output/sound.fixture.js';
+import { testCache } from '../../cache/testing.fixture.js';
 import { createAudioModule } from '../module.js';
 import { createMixer } from '../output/mixer.js';
 import { DSBPLAY_LOOPING, DSBSTATUS_PLAYING, DSBSTATUS_LOOPING } from './buffers.js';
@@ -153,6 +155,8 @@ async function machine(){
         return pointer;
     };
 
+    // A cache of the machine's own, gone with it: a file of machines holds no table each.
+    const cache = (await testCache({ budget: 32 << 20, segmentBytes: 32 << 20 })).api;
     const api = await createAudioModule().create({
         now: ()=>ms,
         sampleRate: DEVICE_RATE,
@@ -169,7 +173,7 @@ async function machine(){
             {
                 return { callGuest: async()=>0 };
             }
-            return name === 'win32' ? {} : memory;
+            return name === 'win32' ? {} : name === 'cache' ? cache : memory;
         },
         provide: ()=>{},
     });
@@ -436,7 +440,7 @@ test('a voice that does not loop plays once, whichever block its end falls in', 
     // different frame of the sound for each; one of them is the last frame.
     // One table for all of them, as the device has one: each voice closed
     // and its slot freed by the device before the next is opened.
-    const mixer = createMixer({ sampleRate: DEVICE_RATE });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: DEVICE_RATE });
     const table = mixer.table;
     const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = [{

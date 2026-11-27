@@ -18,9 +18,18 @@ import {
     DDBLT_WAIT, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT, DDERR_UNSUPPORTED, DDBLT_ROP, DDBLT_DDFX,
     DDBLTFX_MIRRORLEFTRIGHT, DDBLTFX_MIRRORUPDOWN, DDERR_NORASTEROPHW, ROP,
 } from './constants.js';
-import { blt, bltFast, readPixel, writePixel } from './blit.js';
+import * as blit from './blit.js';
+import { readPixel, writePixel } from './blit.js';
+import { testScratch } from '../../cache/testing.fixture.js';
 
 const BASE = 0x100;
+
+/** The rooms a blit works in, held in a test's cache, as a DirectDraw seam hands them. */
+const rooms = blit.blitRooms(testScratch);
+/** @param {Parameters<typeof blit.blt>[0]} request */
+const blt = request=>blit.blt({ rooms, ...request });
+/** @param {Parameters<typeof blit.bltFast>[0]} request */
+const bltFast = request=>blit.bltFast({ rooms, ...request });
 
 /** A flat address space holding whatever surfaces a test lays out in it. */
 function ram(size = 0x800){

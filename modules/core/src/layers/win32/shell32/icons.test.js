@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { createShellFunctions } from './functions.js';
 import { programIcon } from './icons.js';
 import { filesystemModule } from '../../filesystem/module.js';
@@ -131,7 +132,7 @@ function iconFile(images){
  * @param {Record<string, any>} [extra]  More of the host, laid over the rest.
  */
 async function shellOver(files, extra = {}){
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const volume = /** @type {any} */ (createVolume(fs));
     for (const directory of ['C:\\WINDOWS', 'C:\\WINDOWS\\system32', 'C:\\work'])
     {
@@ -259,7 +260,7 @@ test('a bare name is found in the system directory, as the shell\'s own librarie
 });
 
 test('a file whose bytes are still arriving is answered when they have', async()=>{
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const base = /** @type {any} */ (createVolume(fs));
     const late = { ...base,
         /** @param {any} node @param {number} offset @param {number} length */

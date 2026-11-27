@@ -17,6 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { D3DFMT, D3DPOOL, D3DRS as D3DRS9, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import { D3DSAMP } from './samplerstates.js';
 import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
@@ -107,6 +108,7 @@ function harness(options = {}){
     /** What was said as lost. @type {string[]} */
     const losses = [];
     const backend = createBackend({
+        scratches: testScratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: ()=>{},
@@ -114,8 +116,7 @@ function harness(options = {}){
     });
     const ram = new Uint8Array(RAM_SIZE);
     let next = RAM_BASE;
-    const d3d = createDirect3D9({
-        backend,
+    const d3d = createDirect3D9({ ...deviceRooms(), backend,
         vertexShaderVersion: { major: options.model ?? 2, minor: 0 },
         pixelShaderVersion: { major: options.model ?? 2, minor: 0 },
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),

@@ -18,6 +18,7 @@ import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { SIZED_FORMATS, TEX } from './formats.js';
 import { blankStorage, copyBox, rgbaOf, storageBytes, uncompressedTwin } from './texture-levels.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 function gl(){
     const bytes = new Uint8Array(0x10000);
@@ -25,6 +26,7 @@ function gl(){
     const said = [];
     /** @type {any} */
     const context = createGlContext({
+        holds: roomy.api.hold,
         memory: {
             read: (/** @type {number} */ at, /** @type {number} */ length)=>
                 bytes.subarray(at, at + length),

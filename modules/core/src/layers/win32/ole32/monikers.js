@@ -766,7 +766,7 @@ export function createMonikerFunctions(env){
         const state = object.state;
         if (state.self === 0)
         {
-            state.self = env.vtables.publish(object, IID_IMONIKER) >>> 0;
+            state.self = env.vtables.publish(object, IID_IMONIKER);
             monikers.set(state.self, state);
             unseen = Math.max(0, unseen - 1);
         }
@@ -906,7 +906,7 @@ export function createMonikerFunctions(env){
             await releaseAll([...state.parts, state.target], thread);
             return 0;
         }
-        const pointer = env.vtables.publish(object, IID_IMONIKER) >>> 0;
+        const pointer = env.vtables.publish(object, IID_IMONIKER);
         if (pointer === 0)
         {
             object.release();
@@ -1105,7 +1105,7 @@ export function createMonikerFunctions(env){
         }
         await addRef(container, thread);
         const object = env.registry.create(CLSID_CONTAINER_LOCK);
-        const lock = object ? env.vtables.publish(object, IID_IUNKNOWN) >>> 0 : 0;
+        const lock = object ? env.vtables.publish(object, IID_IUNKNOWN) : 0;
         if (!object || lock === 0)
         {
             object?.release();
@@ -2295,7 +2295,7 @@ export function createMonikerFunctions(env){
         pendingEnum = { items, position: 0 };
         const object = env.registry.create(CLSID_MONIKER_ENUM);
         pendingEnum = null;
-        const pointer = object ? env.vtables.publish(object, IID_IENUMMONIKER) >>> 0 : 0;
+        const pointer = object ? env.vtables.publish(object, IID_IENUMMONIKER) : 0;
         if (pointer === 0)
         {
             object?.release();
@@ -3585,7 +3585,7 @@ export function createMonikerFunctions(env){
      */
     const makeBindContext = async()=>{
         const object = env.registry.create(CLSID_BIND_CONTEXT);
-        const pointer = object ? env.vtables.publish(object, IID_IBINDCTX) >>> 0 : 0;
+        const pointer = object ? env.vtables.publish(object, IID_IBINDCTX) : 0;
         if (object && pointer === 0)
         {
             object.release();

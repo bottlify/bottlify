@@ -16,6 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from './process/page-file.fixture.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { opfsSession, packSession, unpackSession } from './storage.js';
 
@@ -204,7 +205,7 @@ function play(fs, next, steps){
 
 /** @param {any} session */
 async function restored(session){
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     fs.apply(session.files);
     if (session.links)
     {
@@ -217,7 +218,7 @@ test('a volume rebuilt from its saved session is the volume that was saved', asy
     let linked = 0;
     for (let seed = 1; seed <= 60; seed++)
     {
-        const fs = await filesystemModule.create({});
+        const fs = await filesystemModule.create({ pageFile: await testPageFile() });
         play(fs, random(seed), 80);
         const session = { files: fs.export(), registry: null, links: fs.exportLinks() };
         linked += session.links.length;
@@ -247,7 +248,7 @@ test('a volume rebuilt from its saved session is the volume that was saved', asy
 });
 
 test('a session with no links is saved as it always was', async()=>{
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     play(fs, random(7), 0);
     const handle = fs.open('C:\\SAVE.DAT', { write: true, disposition: 'OPEN_ALWAYS' });
     fs.write(handle, Uint8Array.of(1, 2, 3));

@@ -19,6 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import {
@@ -204,6 +205,7 @@ function seamed(assembly = {}){
     /** @type {string[]} */
     const divergences = [];
     const backend = createBackend({
+        scratches: testScratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: frame=>presented.push(frame),
@@ -217,8 +219,7 @@ function seamed(assembly = {}){
         publisher,
         memory: box.services,
         allocate: box.allocate,
-        root: factoryOptions=>createDirect3D10({
-            factoryOptions,
+        root: factoryOptions=>createDirect3D10({ ...deviceRooms(), factoryOptions,
             backend,
             createSampler: descriptor=>({ kind: 'sampler', descriptor }),
             createTexture: gpu.device.createTexture,
@@ -2619,14 +2620,16 @@ test('the libraries hand DXGI the window\'s client area for a swap chain asked f
     ()=>{
         const box = machine();
         const gpu = createFakeDevice();
-        const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+        const backend = createBackend({ scratches: testScratch,
+            device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{}, now: ()=>0 });
         /** @type {number[]} */
         const measured = [];
         const { libraries } = createGraphicsLibraries({
+            scratches: testScratch,
             graphics: {
                 create: (/** @type {string} */ name, /** @type {any} */ caps)=>(name === 'd3d10'
-                    ? createDirect3D10({ ...caps, backend,
+                    ? createDirect3D10({ ...deviceRooms(), ...caps, backend,
                         createSampler: (/** @type {any} */ descriptor)=>({ descriptor }),
                         createTexture: gpu.device.createTexture })
                     : null),
@@ -2690,8 +2693,10 @@ test('DXGI names the adapter, the output and the monitor as user32 and Direct3D 
     const box = machine();
     let display = { width: 1280, height: 720, bitsPerPixel: 32 };
     const { libraries } = createGraphicsLibraries({
+        scratches: testScratch,
         graphics: { create: (/** @type {string} */ name, /** @type {any} */ caps)=>
-            createDirect3D10(caps), available: ()=>false, adapter: ()=>({ vendor: 'nvidia' }) },
+            createDirect3D10({ ...deviceRooms(), ...caps }), available: ()=>false,
+        adapter: ()=>({ vendor: 'nvidia' }) },
         only: ['D3D10.dll', 'DXGI.dll'],
         memory: box.services,
         publishInterface: box.publishInterface,

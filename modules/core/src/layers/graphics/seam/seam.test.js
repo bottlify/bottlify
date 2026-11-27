@@ -16,6 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
@@ -134,10 +135,11 @@ function seamed(){
     const box = machine();
     const graphics = {
         /** @param {string} name */
-        create: (/** @type {string} */ name)=>(name === 'd3d8' ? createDirect3D8() : null),
+        create: (/** @type {string} */ name)=>(name === 'd3d8' ? createDirect3D8(deviceRooms()) : null),
         available: ()=>false,
     };
     const libraries = createGraphicsLibraries({
+        scratches: testScratch,
         graphics,
         memory: box.services,
         publishInterface: box.publishInterface,
@@ -173,6 +175,7 @@ test('a bottle with one graphics API has that API\'s libraries and builds no oth
     };
     /** @param {readonly string[]} only */
     const build = only=>createGraphicsLibraries({
+        scratches: testScratch,
         graphics, only, memory: box.services, publishInterface: box.publishInterface,
         screen: ()=>({ width: 800, height: 600, bitsPerPixel: 32 }),
     });
@@ -199,9 +202,10 @@ test('Direct3DCreate9Ex hands its object back through a pointer, and says when t
         {
             const box = machine();
             const { libraries } = createGraphicsLibraries({
+                scratches: testScratch,
                 graphics: {
                     create: (/** @type {string} */ name)=>(made && name === 'd3d9'
-                        ? createDirect3D9()
+                        ? createDirect3D9(deviceRooms())
                         : null),
                     available: ()=>false,
                 },
@@ -427,6 +431,7 @@ test('OPENGL32 is bound entirely, and nothing is made until a program calls it',
     /** @type {string[]} */
     const made = [];
     const seam = createGraphicsLibraries({
+        scratches: testScratch,
         graphics: {
             /** @param {string} name */
             create: name=>{
@@ -466,6 +471,7 @@ test('GDI32 and OPENGL32 negotiate over one runtime, not two', ()=>{
     /** @type {string[]} */
     const made = [];
     const seam = createGraphicsLibraries({
+        scratches: testScratch,
         graphics: {
             /** @param {string} name */
             create: name=>{
@@ -507,6 +513,7 @@ test('a gl entry point declares that it never sets the last error of the thread'
     // has to say which ones cannot, the way a COM vtable already does.
     const box = machine();
     const seam = createGraphicsLibraries({
+        scratches: testScratch,
         graphics: {
             create: ()=>createOpengl({
                 readMemory: box.services.readMemory,
@@ -861,7 +868,7 @@ test('a Direct3D 8 Present is paced by the device presenting, not by the device 
             return hr;
         },
     });
-    const root = seam.publishRoot(createDirect3D8());
+    const root = seam.publishRoot(createDirect3D8(deviceRooms()));
     const fields = createFields(box.services);
     const COPY_VSYNC = 4;
     const DISCARD = 1;

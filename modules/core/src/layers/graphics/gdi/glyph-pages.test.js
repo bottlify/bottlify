@@ -9,10 +9,11 @@
  * seeded programs of strings in several faces, sizes, weights, styles and
  * qualities - codes of the program's ANSI bytes and wide ones, several pages
  * of a face - measured and drawn through an engine that keeps its pages in
- * the run's cache and through one that keeps them in plain memory. The cache
- * is now and then left idle long enough to let pages go, and one is too
- * small to take them all, so a page is drawn again glyph by glyph and kept in
- * plain memory beside it. Everything a program can observe must be the same:
+ * the run's cache and through one over a space that keeps nothing, which
+ * draws every page again at each read. The cache is now and then left idle
+ * long enough to let pages go, and one is too small to take them all, so a
+ * page is drawn again glyph by glyph and refused room. Everything a program can observe must be the
+ * same:
  * every glyph's advance, box and coverage (what GetGlyphOutline and
  * GetCharABCWidths answer from), each string's extent (what DrawText and
  * GetTextExtentPoint measure) and every pixel TextOut leaves on the DC.
@@ -25,7 +26,8 @@ import { extTextOut, textExtent } from './text.js';
 import { OPAQUE, TRANSPARENT } from './brush.js';
 import { createPainter } from './shapes.js';
 import { clearSurface, createSurface } from './surface.js';
-import { testCache } from '../../cache/testing.fixture.js';
+import { testCache, testScratch } from '../../cache/testing.fixture.js';
+import { noCache } from '../../cache/module.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -163,18 +165,17 @@ const taken = glyph=>[glyph.advance, glyph.left, glyph.top, glyph.width, glyph.h
 /**
  * One seeded program: everything it observed, in order.
  *
- * @param {number} seed @param {'plain' | 'cache' | 'small'} where  pages in plain memory, in
+ * @param {number} seed @param {'none' | 'cache' | 'small'} where  pages kept nowhere, in
  *     the run's cache, or in a cache too small for them
  * @param {{ mutate?: boolean }} [options]  `mutate`: the cache's read of a page is wrong in
  *     one byte of coverage, which the gate must see
  */
 async function run(seed, where, { mutate = false } = {}){
     const next = random(seed);
-    const cache = where === 'plain' ? null
+    const cache = where === 'none' ? null
         : await testCache(where === 'small' ? { budget: 8 << 10, segmentBytes: 4 << 10 } : {});
-    /** @type {import('../../cache/module.js').CacheSpace | null} */
-    let space = cache ? cache.space('glyphs') : null;
-    if (space && mutate)
+    let space = cache ? cache.space('glyphs') : noCache.space('glyphs');
+    if (cache && mutate)
     {
         const inner = space;
         space = { ...inner, with: (key, read, options)=>inner.with(key, page=>{
@@ -183,7 +184,8 @@ async function run(seed, where, { mutate = false } = {}){
             return read(wrong);
         }, options) };
     }
-    const engine = createFontEngine({ canvas: fakeCanvas(), space });
+    const engine = createFontEngine({ scratch: testScratch('gdi/glyph-page'),
+        canvas: fakeCanvas(), space });
     /** @type {string[]} */
     const seen = [];
     const fonts = Array.from({ length: 3 + next() % 3 }, ()=>({
@@ -239,16 +241,16 @@ async function run(seed, where, { mutate = false } = {}){
         engine.figures)() };
 }
 
-test('glyphs kept as pages of the run\'s cache answer and draw as glyphs in plain memory',
+test('glyphs kept as pages of the run\'s cache answer and draw as glyphs drawn afresh',
     { timeout: 300_000 }, async()=>{
         let put = 0;
         let drawnAgain = 0;
-        let plainBeside = 0;
+        let refused = 0;
         for (const where of /** @type {const} */ (['cache', 'small']))
         {
             for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
             {
-                const plain = await run(seed, 'plain');
+                const plain = await run(seed, 'none');
                 const cached = await run(seed, where);
                 const at = `${where}, seed ${seed}`;
                 assert.equal(cached.seen.length, plain.seen.length, at);
@@ -258,20 +260,20 @@ test('glyphs kept as pages of the run\'s cache answer and draw as glyphs in plai
                 }
                 assert.equal(plain.figures.pagesPut, 0, at);
                 put += cached.figures.pagesPut;
-                drawnAgain += cached.figures.drawn - plain.figures.drawn;
-                plainBeside += cached.figures.pagesPlain;
+                drawnAgain += plain.figures.drawn - cached.figures.drawn;
+                refused += cached.figures.pagesRefused;
             }
         }
         assert.ok(put > 0, 'pages went into the cache');
-        assert.ok(drawnAgain > 0, 'pages the cache let go of were drawn again');
-        assert.ok(plainBeside > 0, 'pages the cache had no room for were kept in plain memory');
+        assert.ok(drawnAgain > 0, 'pages the cache kept were not drawn again');
+        assert.ok(refused > 0, 'pages the cache had no room for were refused, counted');
     });
 
 test('the gate sees a wrong read of a page in the run\'s cache', { timeout: 300_000 }, async()=>{
     let differed = 0;
     for (const seed of [1, 2, 3])
     {
-        const plain = await run(seed, 'plain');
+        const plain = await run(seed, 'none');
         const wrong = await run(seed, 'cache', { mutate: true });
         differed += wrong.seen.some((answer, at)=>answer !== plain.seen[at]) ? 1 : 0;
     }

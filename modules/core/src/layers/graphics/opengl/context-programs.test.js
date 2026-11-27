@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { PROGRAM_LIMITS } from './arb-program.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 const VP = GL.VERTEX_PROGRAM_ARB;
 const FP = GL.FRAGMENT_PROGRAM_ARB;
@@ -23,7 +24,7 @@ function fixture(){
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const context = createGlContext({ memory });
+    const context = createGlContext({ holds: roomy.api.hold, memory });
     context.attach({ width: 64, height: 32, doubleBuffered: true, depthBits: 24 });
     /** @param {string} text */
     const put = text=>{
@@ -296,6 +297,7 @@ test('program objects are the share group\'s, and both contexts bind the same on
     const bytes = new Uint8Array(0x1000);
     /** @type {any} */
     const other = createGlContext({
+        holds: roomy.api.hold,
         shareGroup: context.shareGroup,
         memory: {
             read: (at, length)=>bytes.subarray(at, at + length),

@@ -287,7 +287,7 @@ export function createCodecs(host){
     const scratchPalette = async caller=>{
         void caller;
         const object = makePalette();
-        const pointer = host.vtables.publish(object, INTERFACES.IWICPalette.iid) >>> 0;
+        const pointer = host.vtables.publish(object, INTERFACES.IWICPalette.iid);
         return { pointer, colours: ()=>/** @type {PaletteState} */ (object.state).colours,
             done: ()=>void object.release() };
     };

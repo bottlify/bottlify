@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { createMsiFunctions } from './functions.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createHive } from '../advapi32/registry.js';
@@ -27,7 +28,7 @@ const VT_LPSTR = 30;
 async function setup(){
     const memory = new Uint8Array(0x100000);
     let next = 0x80000;
-    const files = /** @type {any} */ (createVolume(await filesystemModule.create({})));
+    const files = /** @type {any} */ (createVolume(await filesystemModule.create({ pageFile: await testPageFile() })));
     files.mkdir('C:\\work');
     const fns = /** @type {any} */ (createMsiFunctions(/** @type {any} */ ({
         readMemory: (/** @type {number} */ at, /** @type {number} */ n)=>memory.subarray(at, at + n),

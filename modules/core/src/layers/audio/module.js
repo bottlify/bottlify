@@ -149,27 +149,15 @@ export function createAudioModule(){
             let made;
             if (!config?.memory?.table)
             {
-                /** @type {{ bytes: Uint8Array, release: () => void } | null} */
-                let held = null;
-                try
+                const held = host.requireApi('cache').space('sound')
+                    .hold(`output/${++outputsHeld}`, TABLE_BYTES);
+                if (held === null)
                 {
-                    held = host.requireApi('cache').space('sound')
-                        .hold?.(`output/${++outputsHeld}`, TABLE_BYTES) ?? null;
+                    // The table is the state the engine and the worklet share:
+                    // without it there is no output to stand in for.
+                    throw new Error('audio: no room in the run\'s cache for the sound output');
                 }
-                catch {
-                    // A build with the cache switched off: its stub refuses the
-                    // call, and the output is a buffer of its own, said below.
-                }
-                if (held)
-                {
-                    made = { table: held.bytes, release: held.release };
-                }
-                else
-                {
-                    config?.divergence?.('audio', 'the sound output has no room in the run\'s cache'
-                        + ' (or there is none): its table is a buffer of its own, outside the'
-                        + ' run\'s budget');
-                }
+                made = { table: held.bytes, release: held.release };
             }
             const mixer = createMixer({
                 sampleRate: config?.sampleRate,

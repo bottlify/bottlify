@@ -8,6 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBindingCache, createUniformPool, dynamicOffsetsOf, resourceId } from './bindings.js';
 import { createFakeDevice } from './fake-device.js';
+import { freshSpace, testScratch } from '../../../cache/testing.fixture.js';
+import { createScratches } from '../../../cache/scratch.js';
+
+/** A staging room of the roomy cache's, one a pool. */
+const staging = ()=>testScratch('webgpu/uniforms');
 
 test('resource identity is stable per object and distinct between objects', ()=>{
     const a = {};
@@ -58,12 +63,28 @@ test('a layout is mandatory, so nothing can fall back to an automatic one', ()=>
     assert.throws(()=>cache.get('auto', [{ binding: 0, resource: {} }]), /explicit/);
 });
 
+test('a uniform pool let go of gives its copy\'s room back, and a later block makes the ring anew',
+    ()=>{
+        const gpu = createFakeDevice();
+        const rooms = createScratches(freshSpace('scratch').hold);
+        const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 512,
+            staging: rooms.scratch('webgpu/uniforms') });
+        const first = pool.allocate(new Uint8Array(64).fill(1));
+        assert.equal(rooms.figures().held, 1, 'the copy held in the cache');
+        pool.release();
+        assert.equal(rooms.figures().held, 0, 'and given back');
+        const again = pool.allocate(new Uint8Array(64).fill(2));
+        assert.notEqual(again.buffer, first.buffer, 'a ring made anew');
+        assert.equal(rooms.figures().held, 1);
+        assert.equal(pool.stats().created, 2);
+    });
+
 test('a uniform pool lays each block at its own offset of one ring, as bytes', ()=>{
     // Unit. One buffer rewritten per draw would show every draw in a pass the
     // last write; one buffer with a block per offset shows each draw its own,
     // and a group that names the buffer names nothing that changes per draw.
     const gpu = createFakeDevice();
-    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue });
+    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, staging: staging() });
 
     const first = pool.allocate(new Uint8Array(64).fill(1));
     const second = pool.allocate(new Uint8Array(64).fill(2));
@@ -104,7 +125,8 @@ test('dynamic offsets come in binding order whatever order the entries were give
 
 test('the ring wraps rather than growing, and a block larger than it gets a larger ring', ()=>{
     const gpu = createFakeDevice();
-    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 512 });
+    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, staging: staging(),
+        capacity: 512 });
 
     pool.allocate(new Uint8Array(64));
     pool.allocate(new Uint8Array(64));
@@ -131,7 +153,8 @@ test('a block handed twice in a frame keeps its slot; in the next frame, it is l
     // A shader draw's integer and boolean blocks are the last draw's while the
     // registers hold still: laid once a frame, not once a draw.
     const gpu = createFakeDevice();
-    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 1024 });
+    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, staging: staging(),
+        capacity: 1024 });
     const kept = new Uint8Array(64).fill(7);
     const first = { ...pool.allocate(kept) };
     pool.allocate(new Uint8Array(64).fill(1));
@@ -151,7 +174,8 @@ test('a block handed twice in a frame keeps its slot; in the next frame, it is l
 
     // A ring made larger mid-frame: what was laid in the old one is not bound
     // from the new.
-    const grown = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 256 });
+    const grown = createUniformPool({ device: gpu.device, queue: gpu.queue, staging: staging(),
+        capacity: 256 });
     const small = new Uint8Array(64).fill(5);
     grown.allocate(small);
     grown.allocate(new Uint8Array(512));
@@ -167,7 +191,8 @@ test('a frame whose blocks outgrow the ring gets a larger one, not a wrap onto i
     // a frame of more draws than the ring holds drew its first draws with the
     // uniforms of its last.
     const gpu = createFakeDevice();
-    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 1024 });
+    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, staging: staging(),
+        capacity: 1024 });
     /** @type {{ buffer: any, dynamicOffset: number }[]} */
     const blocks = [];
     for (let draw = 0; draw < 12; draw++)
@@ -204,7 +229,8 @@ test('a slot written into an object and offsets into an array of the caller\'s, 
         // it says rather than made; the bytes are the block's own, a
         // not-a-number's payload included.
         const gpu = createFakeDevice();
-        const pool = createUniformPool({ device: gpu.device, queue: gpu.queue });
+        const pool = createUniformPool({ device: gpu.device, queue: gpu.queue,
+            staging: staging() });
         const bits = new Uint32Array([0x7fa00001, 0xffc01234, 0x3f800000, 0x80000000]);
         /** @type {{ buffer: any, offset: number, size: number, dynamicOffset: number }} */
         const slot = { buffer: null, offset: 9, size: 0, dynamicOffset: 0 };

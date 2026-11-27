@@ -6,8 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../process/page-file.fixture.js';
 import { createFilesystemModule, filesystemModule } from './module.js';
-import { PIECE_SIZE, createMemoryStore } from './internal/memory-store.js';
+import { PIECE_SIZE } from './internal/memory-store.js';
+import { createMemoryStore } from './internal/memory-store.fixture.js';
 import { createPageFile } from './internal/page-file.js';
 import { pieceSpace } from './internal/page-space.fixture.js';
 import { cacheSpace } from '../cache/module.js';
@@ -22,8 +24,8 @@ const bytes = text=>Uint8Array.from([...text].map(character=>character.charCodeA
 const text = data=>[...data].map(byte=>String.fromCharCode(byte)).join('');
 
 /** An installation on C:, plus an empty D: for the per-drive rules. */
-function volume(){
-    return filesystemModule.create({
+async function volume(){
+    return filesystemModule.create({ pageFile: await testPageFile(),
         drives: {
             C: {
                 source: createMemoryStore({
@@ -39,7 +41,7 @@ function volume(){
 }
 
 test('a module with no configuration still comes up as a volume', async()=>{
-    const fs = await filesystemModule.create(undefined);
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
 
     assert.deepEqual(fs.drives(), ['C']);
     assert.equal(fs.currentDirectory(), 'C:\\');
@@ -57,7 +59,7 @@ test('an empty directory a program made is exported, one holding something is no
     // A list of files cannot say Settings\Profiles exists, and a program that
     // later creates Settings\Profiles\Default relies on it: CreateDirectory
     // does not make parents.
-    const fs = await filesystemModule.create(undefined);
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     fs.createDirectory('C:\\Game');
     fs.createDirectory('C:\\Game\\Settings');
     fs.createDirectory('C:\\Game\\Settings\\Profiles');
@@ -77,7 +79,7 @@ test('a junction\'s files are exported under its name for a reader that keeps no
     async()=>{
         // A bottle keeps no junctions: the .NET Framework's assembly cache,
         // whose GAC folder stands for a WinSxS one, goes into it as copies.
-        const fs = await filesystemModule.create(undefined);
+        const fs = await filesystemModule.create({ pageFile: await testPageFile() });
         fs.createDirectory('C:\\SxS');
         fs.createDirectory('C:\\SxS\\Lib');
         const handle = fs.open('C:\\SxS\\Lib\\a.dll',
@@ -199,7 +201,7 @@ test('a device is reported rather than opened as a file', async()=>{
 });
 
 test('a bundle mounted on a drive goes under what is already written there', async()=>{
-    const fs = await filesystemModule.create(undefined);
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     fs.createDirectory('C:\\WINDOWS');
     fs.mount('C', { source: createMemoryStore({ 'App\\Game.exe': 'binary' }) });
 
@@ -210,7 +212,8 @@ test('a bundle mounted on a drive goes under what is already written there', asy
 
 test('the source survives everything the program does to it', async()=>{
     const source = createMemoryStore({ 'Game\\Setup.EXE': 'binary' });
-    const fs = await filesystemModule.create({ drives: { C: { source } } });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile(),
+        drives: { C: { source } } });
 
     const handle = fs.open('C:\\Game\\Setup.EXE', { write: true });
     fs.seek(handle, 6, fs.SeekFrom.BEGIN);
@@ -244,7 +247,8 @@ test('a read asks the source for what was asked of it, once, and nothing more', 
             return held.read(path, offset, length);
         },
     };
-    const fs = await filesystemModule.create({ drives: { C: { source } } });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile(),
+        drives: { C: { source } } });
 
     const handle = fs.open('C:\\Game\\Art.mpq');
     fs.seek(handle, 4, fs.SeekFrom.BEGIN);
@@ -294,7 +298,7 @@ test('a second instance in one realm does not take the first one\'s volume', asy
     first.setCurrentDirectory('C:\\Game');
     first.createDirectory('C:\\FirstOnly');
 
-    const second = await filesystemModule.create(undefined);
+    const second = await filesystemModule.create({ pageFile: await testPageFile() });
 
     assert.equal(first.currentDirectory(), 'C:\\Game');
     assert.equal(first.stat('C:\\FirstOnly')?.directory, true);
@@ -355,7 +359,7 @@ test('a rename moves a file the program wrote, and copies one the source holds',
             writable.write(path, offset, data);
         },
     };
-    const fs = await filesystemModule.create({ drives: { C: {
+    const fs = await filesystemModule.create({ pageFile: await testPageFile(), drives: { C: {
         source: createMemoryStore({ 'Game\\Setup.EXE': 'binary' }),
         writable: counting,
     } } });
@@ -394,7 +398,7 @@ test('a file renamed while open is still the file its handles have', async()=>{
     // An NGen worker writes a native image, renames it into the cache while
     // its handle is open and asks that handle the image's size: Windows
     // answers the file's, under its new name.
-    const fs = await filesystemModule.create({ drives: { C: {
+    const fs = await filesystemModule.create({ pageFile: await testPageFile(), drives: { C: {
         source: createMemoryStore({}), writable: createMemoryStore() } } });
     fs.createDirectory('C:\\Temp');
     fs.createDirectory('C:\\Cache');
@@ -414,7 +418,8 @@ test('a file renamed while open is still the file its handles have', async()=>{
 });
 
 test('what one volume exports another takes as the same pieces, bytes made when read', async()=>{
-    const first = await filesystemModule.create({ drives: { C: {} } });
+    const first = await filesystemModule.create({ pageFile: await testPageFile(),
+        drives: { C: {} } });
     first.createDirectory('C:\\Steam');
     const handle = first.open('C:\\Steam\\content.gcf',
         { write: true, disposition: first.Disposition.CREATE_NEW });
@@ -433,7 +438,8 @@ test('what one volume exports another takes as the same pieces, bytes made when 
             writable.write(path, offset, data);
         },
     };
-    const second = await filesystemModule.create({ drives: { C: { writable: counting } } });
+    const second = await filesystemModule.create({ pageFile: await testPageFile(),
+        drives: { C: { writable: counting } } });
     assert.equal(second.apply(exported), 1);
     assert.equal(written, 0, 'not copied');
     assert.equal(second.stat('C:\\Steam\\content.gcf')?.size, (3 << 20) + 1);
@@ -446,7 +452,7 @@ test('what one volume exports another takes as the same pieces, bytes made when 
 
 test('diagnostics answers for the live instance', async()=>{
     await volume();
-    const second = await filesystemModule.create(undefined);
+    const second = await filesystemModule.create({ pageFile: await testPageFile() });
     second.setCurrentDirectory('C:\\');
 
     const report = /** @type {any} */ (filesystemModule.diagnostics());
@@ -470,7 +476,7 @@ async function withDisc(){
         hidden: ['Hidden.dat'],
     });
     const iso = await openIso((offset, length)=>image.subarray(offset, offset + length));
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     fs.mount('D', {
         source: createIsoSource(iso),
         readOnly: true,
@@ -596,7 +602,8 @@ test('what changed after a generation is named, and what a quiet apply put in is
 
 /** Two processes on one run's volume, each with its own instance of the layer. */
 async function twoProcesses(){
-    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+    const run = { pageFile: await testPageFile(), drives: new Map(), volumes: new Map(),
+        writables: new Map(),
         watchers: new Set() };
     const first = createFilesystemModule();
     const second = createFilesystemModule();
@@ -657,7 +664,8 @@ test('a name the tree lists and its store has nothing at is left out of an expor
     const host = { requireApi: (/** @type {string} */ name)=>(name === 'log'
         ? { warn: (/** @type {string} */ category, /** @type {string} */ message)=>
             warned.push(`${category}: ${message}`) } : null) };
-    const fs = await filesystemModule.create({ drives: { C: { writable } } }, host);
+    const fs = await filesystemModule.create({ pageFile: await testPageFile(),
+        drives: { C: { writable } } }, host);
     for (const name of ['kept.txt', 'gone.sys'])
     {
         const handle = fs.open(`C:\\${name}`, { write: true,
@@ -681,7 +689,7 @@ test('a bundle mounted over the machine\'s own directories under another spellin
     // A driver a system-information tool extracts to %TEMP% was refused by
     // the store, left a name the tree held as written, and threw at export.
     const layer = createFilesystemModule();
-    const fs = await layer.create({});
+    const fs = await layer.create({ pageFile: await testPageFile() });
     fs.createDirectory('C:\\WINDOWS');
     fs.createDirectory('C:\\WINDOWS\\TEMP');
     fs.mount('C', { source: createMemoryStore({ 'Windows\\system32\\kernel32.dll': 'MZ' }) });
@@ -710,7 +718,7 @@ test('a bundle mounted over the machine\'s own directories under another spellin
 });
 
 test('a directory is not moved into itself: refused, and left where it was', async()=>{
-    const fs = await createFilesystemModule().create({});
+    const fs = await createFilesystemModule().create({ pageFile: await testPageFile() });
     fs.createDirectory('C:\\Data');
     fs.createDirectory('C:\\Data\\Inner');
     fs.apply([{ path: 'C:\\Data\\save.dat', bytes: bytes('save') }]);
@@ -728,15 +736,8 @@ test('a directory is not moved into itself: refused, and left where it was', asy
 test('the writable layer says what it holds, and on a page file holds no more than its pool',
     async()=>{
         const at = (/** @type {string[]} */ ...parts)=>['C:', ...parts].join(String.fromCharCode(92));
-        const inMemory = createFilesystemModule();
-        const plain = await inMemory.create({});
-        const written = plain.open(at('setup.tmp'),
-            { write: true, disposition: plain.Disposition.CREATE_NEW });
-        plain.write(written, new Uint8Array(3 * PIECE_SIZE));
-        plain.close(written);
-        assert.deepEqual(/** @type {any} */ (inMemory.diagnostics()).metrics.bytesHeld,
-            { heaps: { writable: 3 * PIECE_SIZE } });
-        await inMemory.dispose();
+        await assert.rejects(createFilesystemModule().create({}), /no page file/,
+            'a volume handed no page file has nowhere to keep a write');
 
         const { keeper, space } = await pieceSpace(cacheSpace, { budget: 4 * PIECE_SIZE });
         const paged = createFilesystemModule();

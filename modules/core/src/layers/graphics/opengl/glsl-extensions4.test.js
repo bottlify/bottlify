@@ -20,6 +20,7 @@ import { createGlContext } from './context.js';
 import { GL } from './constants.js';
 import { GL_EXTENSIONS } from './extensions.js';
 import { GLSL_EXTENSIONS } from './glsl-versions.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @typedef {import('./context-glsl.js').ShaderStage} ShaderStage */
 
@@ -60,7 +61,7 @@ const TYPES = /** @type {Record<ShaderStage, number>} */ ({
  */
 function linked(shaders){
     /** @type {any} */
-    const gl = createGlContext({});
+    const gl = createGlContext({ holds: roomy.api.hold, });
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     const program = gl.glCreateProgram();
     for (const [stage, source] of shaders)

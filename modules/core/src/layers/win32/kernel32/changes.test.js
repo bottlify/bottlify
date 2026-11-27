@@ -14,6 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from './vfs.js';
 import {
@@ -60,7 +61,7 @@ function fakeKernel(){
 }
 
 async function setup(){
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const volume = /** @type {any} */ (createVolume(fs));
     volume.mkdir('C:\\Saves');
     volume.mkdir('C:\\Saves\\Old');

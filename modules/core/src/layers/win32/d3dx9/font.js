@@ -583,7 +583,7 @@ export function createFonts(host, sprites){
         const object = createComObject(IID_ID3DXFONT, { interfaces: [font],
             state: { device: device >>> 0, desc, logFont: logFontOf(desc), glyphs: new Map(),
                 pages: [] } });
-        const pointer = vtables.publish(object, IID_ID3DXFONT) >>> 0;
+        const pointer = vtables.publish(object, IID_ID3DXFONT);
         if (pointer === 0)
         {
             object.release();

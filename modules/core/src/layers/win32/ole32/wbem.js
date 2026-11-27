@@ -469,7 +469,7 @@ export function registerWbemClasses(host){
      */
     const publish = (clsid, definition, iid, out)=>{
         const object = createComObject(clsid, definition);
-        const pointer = host.vtables.publish(object, iid) >>> 0;
+        const pointer = host.vtables.publish(object, iid);
         if (pointer === 0)
         {
             object.release();

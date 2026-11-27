@@ -14,13 +14,14 @@
  * (`config.reader`). A layer asks for a space by name and keeps its keys
  * inside it, so two layers' names never meet.
  *
- * Without a reader -- a machine built alone, a test of one layer -- every
- * space answers a miss and keeps nothing: what a layer would have read from
- * the cache it makes again, as on its first read.
+ * Without a reader -- a layer built alone in a tool -- there is no cache and
+ * nothing stands in for one: every space answers a miss and keeps nothing,
+ * and every room (`scratch`, `hold`) is refused (`scratch.js` `NoRoom`). A
+ * test builds a layer over a real cache in memory (`testing.fixture.js`).
  */
 
 import { createReader, openClient } from '@bottlify/cellar';
-import { createScratches, plainScratches } from './scratch.js';
+import { createScratches, noScratches } from './scratch.js';
 
 /** @typedef {import('./scratch.js').Scratch} Scratch */
 /** @typedef {import('./scratch.js').Held} Held */
@@ -37,7 +38,7 @@ import { createScratches, plainScratches } from './scratch.js';
  *     was no room
  * @property {(key: string) => void} drop
  * @property {(key: string, length: number) => { bytes: Uint8Array, release: () => void } | null}
- *     [hold]  memory of `length` bytes this thread writes and reads in place for as long as it
+ *     hold  memory of `length` bytes this thread writes and reads in place for as long as it
  *     holds it, counted in the run's budget under the space; null where there is no room
  */
 
@@ -67,13 +68,16 @@ const NOTHING = Object.freeze({
 
 /**
  * The cache's api with no cache under it, as `create` answers without a
- * reader: for a test or a tool that builds a layer alone.
+ * reader: for a tool that builds a layer alone. It keeps nothing and refuses
+ * every room.
  */
-export const noCache = Object.freeze({ space: ()=>NOTHING, join: /** @type {Join} */ (()=>null),
+export const noCache = Object.freeze({
+    space: /** @type {(name: string, options?: object) => CacheSpace} */ (()=>NOTHING),
+    join: /** @type {Join} */ (()=>null),
     serve: /** @type {Serve} */ (()=>null), owner: /** @type {Owner} */ (()=>null),
-    scratch: /** @type {(name: string) => Scratch} */ (name=>plainScratches.scratch(name)),
+    scratch: /** @type {(name: string) => Scratch} */ (name=>noScratches.scratch(name)),
     hold: /** @type {(name: string, length: number) => Held} */ ((name, length)=>
-        plainScratches.hold(name, length)) });
+        noScratches.hold(name, length)) });
 
 /**
  * Names of the run's cache an owner on this thread holds alone (`ownedSpace`),
@@ -356,9 +360,10 @@ export function serveKeeper(server, keeper, { owner, onTail = ()=>{} }){
  * (`space.hold`: a played device's resource bytes, its scratches) is room the
  * worker waits for, as for a cold body: the keeper's thread answers it on its
  * event loop, so the wait ends as long as that thread never waits on the
- * worker. A page may not wait at all; a thread that may waits on a graphics
- * worker only for a Direct3D 8 or 9 lend it is reading, and a root that
- * lends holds nothing (`remote/worker.js`). The keeper never takes it back, cools it or
+ * worker for one. A page may not wait at all; a thread that may waits on a
+ * graphics worker only for a Direct3D 8 or 9 lend being read, which goes into
+ * the played memory alone and asks the keeper nothing (`remote/replay.js`
+ * `createPlayer`). The keeper never takes it back, cools it or
  * moves it; `release` lets go of it without a word across the channel (its
  * room the keeper's at its next sweep), and the owner's going takes back what
  * it still held (Cellar's `release`), counted in what it says it held, so it
@@ -563,7 +568,7 @@ function ownerNames(reader, prefix, out){
             look: names.look,
             with: names.with,
             hold: (key, length)=>{
-                const got = out() ? names.hold?.(key, length) ?? null : null;
+                const got = out() ? names.hold(key, length) : null;
                 if (got === null)
                 {
                     return null;
@@ -639,8 +644,7 @@ export function createCacheModule(){
     let made = false;
     /**
      * The scratches of this process's layers (`scratch.js`): held in the run's
-     * cache under names of the process's own (`scratch/<n>/...`), or plain
-     * memory where there is none.
+     * cache under names of the process's own (`scratch/<n>/...`).
      *
      * @type {ReturnType<typeof createScratches> | null}
      */
@@ -661,7 +665,7 @@ export function createCacheModule(){
          *     that writes the cache calls the keeper through (`channelSpace`);
          *     `own`: names an owner on this thread holds alone (`owner`, and the
          *     process's scratches), numbered by the keeper. A reader with no `own`
-         *     (a test of one layer) holds its scratches under `scratch/...` itself
+         *     (a test's cache) numbers its owners itself, their names left to the cache
          * @returns {Promise<{ space: (name: string, options?: { onlyCopy?: boolean,
          *     disk?: 'kept' | 'run' | 'never', idle?: 'go' | 'stay' }) => CacheSpace,
          *     join: Join,
@@ -677,24 +681,21 @@ export function createCacheModule(){
             reader = config?.reader ?? null;
             made = true;
             const given = reader;
-            const own = given ? config?.own ?? null : null;
-            /** @param {string} name */
-            const owner = name=>{
-                const owned = own?.(name) ?? null;
-                return given && owned ? ownedSpace(given, owned) : null;
-            };
-            scratchOwner = owner('scratch');
-            const rooms = createScratches(scratchOwner?.space.hold
-                ?? (given ? cacheSpace(given, 'scratch').hold ?? null : null));
-            scratches = rooms;
-            /** @param {string} name */
-            const scratch = name=>rooms.scratch(name);
-            /** @param {string} name @param {number} length */
-            const hold = (name, length)=>rooms.hold(name, length);
             if (given === null)
             {
-                return { ...noCache, scratch, hold };
+                return noCache;
             }
+            let owners = 0;
+            /** @type {Own} */
+            const own = config?.own ?? (name=>({ prefix: `${name}/${++owners}/`, release: ()=>null }));
+            /** @param {string} name */
+            const owner = name=>{
+                const owned = own(name);
+                return owned ? ownedSpace(given, owned) : null;
+            };
+            scratchOwner = owner('scratch');
+            const rooms = createScratches(scratchOwner?.space.hold ?? null);
+            scratches = rooms;
             const join = config?.join ?? null;
             const serve = config?.serve ?? null;
             return {
@@ -704,8 +705,10 @@ export function createCacheModule(){
                 join: post=>join?.(post) ?? null,
                 serve: name=>serve?.(name) ?? null,
                 owner,
-                scratch,
-                hold,
+                /** @param {string} name */
+                scratch: name=>rooms.scratch(name),
+                /** @param {string} name @param {number} length */
+                hold: (name, length)=>rooms.hold(name, length),
             };
         },
 
@@ -719,10 +722,9 @@ export function createCacheModule(){
                     // there; this process holds none of its own.
                     bytesHeld: {},
                     reader: reader?.figures() ?? 'no cache: every read is a miss',
-                    // What the layers keep between calls and for an object's life:
-                    // held in the run's cache, or plain memory where it had no room
-                    // or there is none.
-                    scratch: scratches?.figures() ?? 'not made',
+                    // What the layers keep between calls and for an object's life,
+                    // held in the run's cache; the rooms it refused counted.
+                    scratch: scratches?.figures() ?? 'no cache: every room is refused',
                 },
                 issues: [],
             };

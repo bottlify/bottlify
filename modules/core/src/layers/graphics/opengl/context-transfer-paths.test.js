@@ -22,13 +22,14 @@ import { LEGACY } from './legacy-state.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @returns {{ gl: any, divergences: string[] }} */
 function processor(){
     /** @type {string[]} */
     const divergences = [];
     const bytes = new Uint8Array(0x10000);
-    const gl = createGlContext({ memory: {
+    const gl = createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     }, divergence: d=>divergences.push(d) });
@@ -131,14 +132,16 @@ test('glGetTexImage of RGBA bytes takes the transfer; of a sized format says it 
 
 test('a copy the device makes says it skipped the transfer', ()=>{
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: testScratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const divergences = [];
     const renderer = createGpuRenderer({ backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         divergence: detail=>divergences.push(detail) });
     /** @type {any} */
-    const gl = createGlContext({ gpu: renderer, divergence: d=>divergences.push(d) });
+    const gl = createGlContext({ holds: roomy.api.hold,
+        gpu: renderer, divergence: d=>divergences.push(d) });
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     const [name] = gl.glGenTextures(1);
     gl.glBindTexture(GL.TEXTURE_2D, name);

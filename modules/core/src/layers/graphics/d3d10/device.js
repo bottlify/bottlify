@@ -150,7 +150,7 @@ const PREDICATE_QUERIES = new Set([
  *     the resources a program maps, which a map then hands out as they are.
  * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
  *     Where each resource's bytes are held for its life: the run's cache
- *     (`cache/scratch.js` `hold`); absent, plain memory under the same contract.
+ *     (`cache/scratch.js` `hold`).
  * @property {ReturnType<typeof createSharing>} [sharing]  The shared resources of every
  *     device made with the same options (`sharing.js`).
  */

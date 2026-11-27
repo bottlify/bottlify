@@ -134,7 +134,7 @@ export function createDwriteFunctions(host){
      *     whether the reference was taken for this pointer already
      */
     const give = (out, object, iid, taken = true)=>{
-        const pointer = host.vtables.publish(object, iid) >>> 0;
+        const pointer = host.vtables.publish(object, iid);
         if (pointer === 0)
         {
             putU32s(out, [0]);

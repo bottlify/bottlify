@@ -6,6 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+
+/** Where a root served here holds its memory: a real cache of this thread's. */
+const roomyHold = roomy.api.space('worker-rooms').hold;
 import { gunzipSync } from 'node:zlib';
 import { serveGraphics } from './worker.js';
 import { createSender } from './channel.js';
@@ -68,7 +72,7 @@ const worker = async capture=>{
      * @param {string} type @returns {Promise<any>}
      */
     const next = type=>new Promise(resolve=>waiting.set(type, resolve));
-    serveGraphics(scope, {
+    serveGraphics(scope, { hold: roomyHold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
             requestDevice: async()=>gpu.device }) },
         canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
@@ -100,16 +104,15 @@ test('a capture played again asks of the GPU what the run asked, with the progra
         const sender = createSender({ rings, framesAhead: 100 });
         const ram = new Uint8Array(4 << 20);
         let next = RAM_BASE + (1 << 20);
-        const d3d = recordedDirect3D(createDirect3D9, {
-            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-                ram.slice(at - RAM_BASE, at - RAM_BASE + length),
-            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-                ram.set(bytes, at - RAM_BASE),
-            allocate: (/** @type {number} */ bytes)=>{
-                const at = next;
-                next += bytes + 0x100;
-                return at;
-            },
+        const d3d = recordedDirect3D(createDirect3D9, { ...deviceRooms(), readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            ram.slice(at - RAM_BASE, at - RAM_BASE + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
+            ram.set(bytes, at - RAM_BASE),
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes + 0x100;
+            return at;
+        },
         }, sender);
         /** @param {number} value */
         const ok = value=>assert.equal(value, D3D_OK);

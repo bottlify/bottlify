@@ -315,7 +315,7 @@ export function createSprites(host){
         const object = createComObject(IID_ID3DXSPRITE, { interfaces: [sprite],
             state: { device: device >>> 0, transform: IDENTITY.slice(), queue: [], begun: false,
                 flags: 0, saved: 0 } });
-        const pointer = vtables.publish(object, IID_ID3DXSPRITE) >>> 0;
+        const pointer = vtables.publish(object, IID_ID3DXSPRITE);
         byPointer.set(pointer, object);
         return { pointer, object };
     };

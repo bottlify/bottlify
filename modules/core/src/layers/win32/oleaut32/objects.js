@@ -586,7 +586,7 @@ export function createTypeLibraryObjects(host){
         // A type keeps its library alive: a program may release the library
         // and go on reading the type.
         owner.object.addRef();
-        state.pointer = host.publish(state.object, IID_ITYPEINFO) >>> 0;
+        state.pointer = host.publish(state.object, IID_ITYPEINFO);
         if (state.pointer === 0)
         {
             owner.object.release();
@@ -1249,7 +1249,7 @@ export function createTypeLibraryObjects(host){
             state.object = adapter(state, TYPELIB_METHODS, IID_ITYPELIB, ()=>{
                 byPointer.delete(state.pointer);
             });
-            state.pointer = host.publish(state.object, IID_ITYPELIB) >>> 0;
+            state.pointer = host.publish(state.object, IID_ITYPELIB);
             if (state.pointer !== 0)
             {
                 byPointer.set(state.pointer, state);

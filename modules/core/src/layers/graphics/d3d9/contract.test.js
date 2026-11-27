@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT,
     D3DPOOL, D3DRS, D3DRTYPE, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
@@ -32,7 +33,7 @@ const FVF_XYZ_DIFFUSE = 0x042;
  * @param {{ caps?: object, parameters?: object, behaviour?: number, services?: object }} [options]
  */
 function make(options = {}){
-    const d3d = createDirect3D9({ ...options.caps, ...options.services });
+    const d3d = createDirect3D9({ ...deviceRooms(), ...options.caps, ...options.services });
     /** @type {{ device?: any }} */
     const out = {};
     const parameters = {

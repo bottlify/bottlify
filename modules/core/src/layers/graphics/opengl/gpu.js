@@ -530,7 +530,7 @@ export function createGpuRenderer(services){
     /**
      * Where texels and blocks no draw has needed yet wait (`spill`): the
      * device's texel store, over the run's cache where the root has its names
-     * there; without them a move is no move, and nothing is spilled.
+     * there; without them nothing is spilled, as it would be lost.
      */
     const texelStore = createTexelStore({ cache: services.texelCache ?? null,
         divergence: (detail, severity)=>services.divergence?.(`a texture's ${detail}: it draws`

@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { createHive } from '../advapi32/registry.js';
@@ -80,7 +81,7 @@ async function install(){
                 name: column, type: 0 })),
         });
     }
-    const files = /** @type {any} */ (createVolume(await filesystemModule.create({})));
+    const files = /** @type {any} */ (createVolume(await filesystemModule.create({ pageFile: await testPageFile() })));
     files.mkdir('C:\\src');
     files.mkdir('C:\\src\\App');
     for (const [name, text] of [['one.txt', 'first'], ['two.txt', 'two']])

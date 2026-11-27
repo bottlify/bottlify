@@ -14,8 +14,8 @@
  * held (rounded up to the cache's next block, a power of two from a page)
  * and the old one let go, and the room is kept for the next call, which then
  * makes nothing: a program that blits its whole screen every frame asks for
- * the same bytes every frame. Without a cache, or without room in it, the
- * room is plain memory under the same contract, counted as such.
+ * the same bytes every frame. A room the cache has none for is refused
+ * (`NoRoom`, counted): no memory of another kind stands in for it.
  *
  * The view `bytes` answers is valid until the next `bytes` of the same
  * scratch, or its `release`: a caller that holds two views at once holds two
@@ -25,9 +25,7 @@
  *
  * A hold (`hold`) is memory of one length kept for the life of what keeps
  * it - a Direct3D 10 resource's bytes - rather than between calls: held in
- * the cache at that length in whole pages, nothing to grow into, plain memory
- * of its own length where there is no room, and zero either way, as new
- * memory is, so that whoever keeps it cannot tell which it was given.
+ * the cache at that length in whole pages, and zero, as new memory is.
  */
 
 /** The smallest room: the cache's block, one page. */
@@ -60,7 +58,7 @@ export const roomFor = length=>{
 /**
  * @typedef {Object} Scratch
  * @property {(length: number) => Uint8Array} bytes  a view of `length` bytes, valid until the
- *     next `bytes` of this scratch or its `release`
+ *     next `bytes` of this scratch or its `release`; `NoRoom` thrown where the cache has none
  * @property {() => void} release  its room let go; a later `bytes` holds one anew
  */
 
@@ -77,23 +75,46 @@ export const roomFor = length=>{
  * @property {number} holds  holds made
  * @property {number} held  rooms held in the cache now
  * @property {number} heldBytes  their bytes
- * @property {number} plain  rooms of plain memory now: no cache, no room in it
- * @property {number} plainBytes  their bytes
- * @property {number} grows  rooms made larger, in the cache or not
- * @property {number} plainGrows  of them, those that took plain memory
+ * @property {number} grows  rooms made larger
+ * @property {number} refused  rooms the cache had no room for (`NoRoom`)
  */
 
 /**
+ * A room the run's cache could not give: the budget spent on memory held, or
+ * a process with no cache under it. Thrown where the room was asked for, so
+ * the call that needed it fails where it is seen, never handed memory of
+ * another kind.
+ */
+export class NoRoom extends RangeError {
+    /** @param {string} name @param {number} length */
+    constructor(name, length){
+        super(`no room in the run's cache for ${length} bytes of ${name}`);
+        this.name = 'NoRoom';
+    }
+}
+
+/**
  * The scratches of one holder of the run's cache, held through `hold`; with
- * none, every room is plain memory.
+ * none (no cache under the holder), every room refused.
  *
  * @param {Hold | null} hold
  */
 export function createScratches(hold){
-    const counts = { scratches: 0, holds: 0, held: 0, heldBytes: 0, plain: 0, plainBytes: 0,
-        grows: 0, plainGrows: 0 };
-    /** The scratches and holds holding a room of the cache now, for `releaseAll`. @type {Set<() => void>} */
+    const counts = { scratches: 0, holds: 0, held: 0, heldBytes: 0, grows: 0, refused: 0 };
+    /** The scratches and holds holding a room now, for `releaseAll`. @type {Set<() => void>} */
     const holding = new Set();
+    /** @param {string} key @param {number} size */
+    const take = (key, size)=>{
+        const got = hold?.(key, size) ?? null;
+        if (got === null)
+        {
+            counts.refused++;
+            throw new NoRoom(key, size);
+        }
+        counts.held++;
+        counts.heldBytes += size;
+        return got;
+    };
     return {
         /**
          * A scratch named `name` within this holder's names; two of one name
@@ -109,22 +130,15 @@ export function createScratches(hold){
             let view = room;
             /** @type {(() => void) | null} */
             let letGo = null;
-            let inCache = false;
             let grows = 0;
             const release = ()=>{
-                if (inCache)
+                if (letGo !== null)
                 {
                     counts.held--;
                     counts.heldBytes -= room.length;
+                    letGo();
                 }
-                else if (room.length > 0)
-                {
-                    counts.plain--;
-                    counts.plainBytes -= room.length;
-                }
-                letGo?.();
                 letGo = null;
-                inCache = false;
                 room = new Uint8Array(0);
                 view = room;
                 holding.delete(release);
@@ -134,32 +148,15 @@ export function createScratches(hold){
                     if (length > room.length)
                     {
                         const size = roomFor(length);
-                        // A name of its own each time: the cache lets a name's
-                        // earlier hold go when it is held anew, and the old
-                        // room is let go here, said in the figures.
-                        const got = hold?.(`${name}/${number}/${++grows}`, size) ?? null;
                         release();
                         counts.grows++;
-                        if (got)
-                        {
-                            room = got.bytes;
-                            letGo = got.release;
-                            inCache = true;
-                            counts.held++;
-                            counts.heldBytes += size;
-                            // Only the cache's room needs letting go: plain
-                            // memory goes with whoever stops referring to it,
-                            // and a set of it here would keep it for ever.
-                            holding.add(release);
-                        }
-                        else
-                        {
-                            room = new Uint8Array(size);
-                            counts.plain++;
-                            counts.plainBytes += size;
-                            counts.plainGrows++;
-                        }
+                        // A name of its own each time: the cache lets a name's
+                        // earlier hold go when it is held anew.
+                        const got = take(`${name}/${number}/${++grows}`, size);
+                        room = got.bytes;
                         view = room;
+                        letGo = got.release;
+                        holding.add(release);
                     }
                     if (view.length !== length)
                     {
@@ -173,35 +170,17 @@ export function createScratches(hold){
         /**
          * Memory of `length` bytes, zero, kept until `release`: held in the
          * cache under `name` (its pages, which the figures count, placed as
-         * the cache places any body), or plain memory of that length where
-         * there is no room. Every hold is one of its own, two of one name
-         * included.
+         * the cache places any body). Every hold is one of its own, two of
+         * one name included.
          *
          * @param {string} name @param {number} length @returns {Held}
          */
         hold(name, length){
             const number = ++counts.holds;
-            const size = Math.ceil(length / UNIT) * UNIT;
-            const got = length > 0 ? hold?.(`${name}/${number}`, size) ?? null : null;
-            if (got === null)
-            {
-                const bytes = new Uint8Array(length);
-                counts.plain++;
-                counts.plainBytes += length;
-                let out = true;
-                return { bytes, release: ()=>{
-                    if (out)
-                    {
-                        out = false;
-                        counts.plain--;
-                        counts.plainBytes -= length;
-                    }
-                } };
-            }
+            const size = Math.max(UNIT, Math.ceil(length / UNIT) * UNIT);
+            const got = take(`${name}/${number}`, size);
             // A block of the cache holds what its last holder left in it.
             const bytes = got.bytes.subarray(0, length).fill(0);
-            counts.held++;
-            counts.heldBytes += size;
             const release = ()=>{
                 if (holding.delete(release))
                 {
@@ -225,9 +204,5 @@ export function createScratches(hold){
     };
 }
 
-/**
- * Scratches of plain memory, for a holder with no cache at all (`noCache`'s,
- * a part built alone in a test): what a caller that was handed no scratch
- * takes, under the same contract.
- */
-export const plainScratches = createScratches(null);
+/** The scratches of a holder with no cache under it (`noCache`'s): every room refused. */
+export const noScratches = createScratches(null);

@@ -24,10 +24,10 @@ import { createLogReader } from '../log/reader.js';
 import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK } from './d3d9/constants.js';
 import { D3DLOCK, D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
 import { IID_IDirectDraw } from './seam/iids.js';
-import { noCache } from '../cache/module.js';
+import { testCache, testScratch } from '../cache/testing.fixture.js';
 
 /** A host that hands over only what the module declares it requires. */
-function hostWith(/** @type {any} */ memory){
+async function hostWith(/** @type {any} */ memory){
     /** @type {Record<string, any>} */
     const apis = {
         memory,
@@ -40,8 +40,8 @@ function hostWith(/** @type {any} */ memory){
             heap: ()=>({ allocate: ()=>0 }),
         },
         bridge: { callGuest: ()=>Promise.resolve(0) },
-        // No run's cache: what the layer would keep there it keeps nowhere.
-        cache: noCache,
+        // A run's cache in memory, as every run has: one a host, gone with it.
+        cache: (await testCache({ budget: 64 << 20, segmentBytes: 16 << 20 })).api,
         // A log with nowhere to publish: the layer's figures are another test's.
         log: {},
     };
@@ -66,7 +66,7 @@ test('a build with no GPU still comes up', async()=>{
     // test, or an inspection of the configuration should not pay for one, and a
     // machine without WebGPU has to reach a running engine rather than fail at
     // assembly.
-    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const api = await graphicsModule.create({}, await hostWith(fakeMemory()));
 
     assert.equal(api.available(), false);
     assert.ok(api.apis().length > 0, 'the APIs are still enumerable');
@@ -81,7 +81,7 @@ test('the layer publishes the figures a live view reads into the log, not on req
     // that keeps none is said as not measured rather than as zero draws.
     const logModule = createLogModule();
     const log = await logModule.create({ now: ()=>0 });
-    const host = hostWith(fakeMemory());
+    const host = await hostWith(fakeMemory());
     const apis = { log };
     const given = host.requireApi;
     host.requireApi = (/** @type {string} */ name)=>(name === 'log' ? apis.log : given(name));
@@ -108,7 +108,7 @@ test('the backend is built once, on first use', async()=>{
         },
     };
 
-    const api = await graphicsModule.create({ device }, hostWith(fakeMemory()));
+    const api = await graphicsModule.create({ device }, await hostWith(fakeMemory()));
     assert.equal(api.available(), true);
 
     const first = api.backend();
@@ -131,7 +131,7 @@ test('a Direct3D 9 object made by the module can write guest memory', async()=>{
         writeBytes: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
             writes.push({ address, bytes }),
     };
-    const api = await graphicsModule.create({ allocate: ()=>0x1000 }, hostWith(memory));
+    const api = await graphicsModule.create({ allocate: ()=>0x1000 }, await hostWith(memory));
     const d3d9 = api.create('d3d9');
     /** @type {{ device?: any }} */
     const out = {};
@@ -214,7 +214,7 @@ async function drawDxtTexture({ blocks, compressedTextures, createOptions }){
     {
         config.compressedTextures = compressedTextures;
     }
-    const api = await graphicsModule.create(config, hostWith(memory));
+    const api = await graphicsModule.create(config, await hostWith(memory));
     const d3d9 = api.create('d3d9', createOptions);
     const formatResult = d3d9.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1);
 
@@ -324,7 +324,7 @@ test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock an
             device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
             compressedTextures: true,
             guestNow: ()=>1234,
-        }, hostWith(fakeMemory()));
+        }, await hostWith(fakeMemory()));
         const { options } = api.create('d3d10');
         const granted = features.length > 0;
         assert.equal(options.compressedTextures, granted, 'block compression');
@@ -332,7 +332,7 @@ test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock an
         assert.equal(options.now(), 1234, 'the guest\'s milliseconds');
         await graphicsModule.dispose();
     }
-    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const api = await graphicsModule.create({}, await hostWith(fakeMemory()));
     const headless = api.create('d3d10').options;
     assert.equal(headless.compressedTextures, false);
     assert.equal(headless.depthClipControl, false);
@@ -340,29 +340,30 @@ test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock an
 });
 
 test('a bottle that names its DirectX gets every DirectX up to it, and nothing else', async()=>{
-    const directx8 = await graphicsModule.create({ choice: 'directx8' }, hostWith(fakeMemory()));
+    const directx8 = await graphicsModule.create({ choice: 'directx8' },
+        await hostWith(fakeMemory()));
     assert.deepEqual(directx8.apis(), ['ddraw', 'd3d8']);
     assert.deepEqual(Object.keys(directx8.libraries()).sort(), ['D3D8.dll', 'DDRAW.dll']);
     assert.throws(()=>directx8.create('d3d9'), /no such API/);
     assert.throws(()=>directx8.create('opengl'), /no such API/);
     await graphicsModule.dispose();
 
-    const opengl = await graphicsModule.create({ choice: 'opengl' }, hostWith(fakeMemory()));
+    const opengl = await graphicsModule.create({ choice: 'opengl' }, await hostWith(fakeMemory()));
     assert.deepEqual(opengl.apis(), ['opengl']);
     assert.deepEqual(Object.keys(opengl.libraries()).sort(), ['GLU32.dll', 'OPENGL32.dll']);
     await graphicsModule.dispose();
 
-    const every = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const every = await graphicsModule.create({}, await hostWith(fakeMemory()));
     assert.deepEqual(every.apis().sort(), ['d3d10', 'd3d8', 'd3d9', 'ddraw', 'opengl', 'vulkan'],
         'no choice is every API');
     await graphicsModule.dispose();
 
-    await assert.rejects(graphicsModule.create({ choice: 'glide' }, hostWith(fakeMemory())),
+    await assert.rejects(graphicsModule.create({ choice: 'glide' }, await hostWith(fakeMemory())),
         /unknown graphics choice "glide"/);
 });
 
 test('an API is made by name, and an unknown one says so', async()=>{
-    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const api = await graphicsModule.create({}, await hostWith(fakeMemory()));
 
     const ddraw = api.create('ddraw');
     assert.ok(ddraw, 'DirectDraw is one of them');
@@ -383,7 +384,7 @@ test('a DirectDraw surface\'s pixels are guest memory the configuration hands ou
         free: (/** @type {number} */ address)=>{
             freed.push(address);
         },
-    }, hostWith(fakeMemory()));
+    }, await hostWith(fakeMemory()));
     const ddraw = api.create('ddraw');
     ddraw.setCooperativeLevel(0, 8);
     const created = ddraw.createSurface({ flags: 7, caps: 0x40, width: 4, height: 4 });
@@ -396,7 +397,7 @@ test('a DirectDraw surface\'s pixels are guest memory the configuration hands ou
 });
 
 test('diagnostics report what a program asked for, not what was on offer', async()=>{
-    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const api = await graphicsModule.create({}, await hostWith(fakeMemory()));
     api.create('ddraw');
     api.create('d3d9');
     api.create('ddraw');
@@ -418,7 +419,7 @@ test('a caller outside the drawing libraries can show a surface', async()=>{
     // nothing else was. A film a filter graph decoded had nowhere to send its
     // pixels, and asking found nothing to call -- which reads exactly like a
     // decoder that produced nothing.
-    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const api = await graphicsModule.create({}, await hostWith(fakeMemory()));
     assert.equal(typeof api.present, 'function',
         'the layer that owns presentation offers it');
     await graphicsModule.dispose();
@@ -436,7 +437,7 @@ test('a frame is not delivered faster than the cap the caller set', async()=>{
         /** @param {() => void} tick */
         schedule: tick=>armed.push(tick),
         maxFps: 60,
-    }, hostWith(fakeMemory()));
+    }, await hostWith(fakeMemory()));
 
     const shown = [];
     api.present({ buffer: 0, width: 1, height: 1, pitch: 4, bitCount: 32, palette: null });
@@ -470,7 +471,7 @@ test('the display\'s raster runs on the guest\'s clock when the caller hands one
             published.push(object);
             return 0x100 + published.length * 4;
         },
-    }, hostWith({
+    }, await hostWith({
         readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
         writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>ram.set(bytes, at),
     }));
@@ -518,7 +519,7 @@ test('a Direct3D 8 and 9 device made by the module watches its buffers\' writes 
             free += (bytes + 0xfff) & ~0xfff;
             return at;
         },
-    }, hostWith(memory));
+    }, await hostWith(memory));
     for (const name of ['d3d8', 'd3d9'])
     {
         /** @type {{ device?: any }} */
@@ -593,7 +594,7 @@ test('a dynamic buffer moved onto another of its storages uploads what is writte
             free += (bytes + 0xfff) & ~0xfff;
             return at;
         },
-    }, hostWith(memory));
+    }, await hostWith(memory));
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(api.create('d3d9').CreateDevice({
@@ -645,7 +646,7 @@ test('a lost GPU loses every Direct3D 8 and 9 device made on it', async()=>{
     });
     const api = await graphicsModule.create({
         device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
-    }, hostWith(ramMemory()));
+    }, await hostWith(ramMemory()));
     const parameters = {
         swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
         backBufferFormat: D3DFMT.X8R8G8B8,
@@ -683,7 +684,7 @@ test('a GPU device the host destroys does not lose the program\'s devices', asyn
     gpuDevice.lost = Promise.resolve({ reason: 'destroyed', message: '' });
     const api = await graphicsModule.create({
         device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
-    }, hostWith(ramMemory()));
+    }, await hostWith(ramMemory()));
     await gpuDevice.lost;
     await Promise.resolve();
     /** @type {{ device?: any }} */
@@ -722,13 +723,13 @@ test('a machine gone from the run\'s GPU device leaves nothing of itself on the 
         const memory = ramMemory();
         memoryOfGone = new WeakRef(memory);
         await module.create({ device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} } },
-            hostWith(memory));
+            await hostWith(memory));
         await module.dispose();
     })();
     const staying = createGraphicsModule();
     const api = await staying.create({
         device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
-    }, hostWith(ramMemory()));
+    }, await hostWith(ramMemory()));
     await new Promise(done=>setImmediate(done));
     gc();
     assert.equal(memoryOfGone.deref(), undefined, 'the gone machine\'s memory is nobody\'s');
@@ -751,7 +752,7 @@ test('GDI drawing binds a memory context to the bytes of its bitmap in guest mem
     // pointer it was given, so the surface has to be the bytes themselves; a
     // context over a window has no pixels here and is refused, not faked.
     const ram = new Uint8Array(0x1000);
-    const api = await graphicsModule.create({}, hostWith({
+    const api = await graphicsModule.create({}, await hostWith({
         readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
         writeBytes: ()=>{},
         window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
@@ -791,8 +792,8 @@ test('GDI drawing binds a memory context to the bytes of its bitmap in guest mem
  * @param {Uint8Array} ram
  * @param {{ hwnd: number, rect: any, shown?: boolean }[]} tops  bottom to top
  */
-function composingHost(ram, tops){
-    const host = hostWith({
+async function composingHost(ram, tops){
+    const host = await hostWith({
         readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
         writeBytes: ()=>{},
         window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
@@ -825,7 +826,7 @@ test('a window context draws on its top-level window\'s own surface, and the scr
         { hwnd: 0x10, rect: { left: 1, top: 0, right: 7, bottom: 4 }, shown: true },
         { hwnd: 0x20, rect: { left: 4, top: 1, right: 8, bottom: 3 }, shown: true },
     ];
-    const host = composingHost(ram, tops);
+    const host = await composingHost(ram, tops);
     /** @type {(() => void)[]} */
     const armed = [];
     const api = await graphicsModule.create({
@@ -889,7 +890,7 @@ test('a window\'s surface follows its size, keeping what it showed at its corner
     const ram = new Uint8Array(0x4000);
     const tops = [{ hwnd: 0x10, rect: { left: 0, top: 0, right: 2, bottom: 2 }, shown: true }];
     const api = await graphicsModule.create(
-        { screen: { width: 8, height: 4, bitsPerPixel: 32 } }, composingHost(ram, tops));
+        { screen: { width: 8, height: 4, bitsPerPixel: 32 } }, await composingHost(ram, tops));
     const gdi = api.gdiDrawing();
     const bitmap = { width: 8, height: 4, bitCount: 32 };
     const small = gdi.surfaceFor({ kind: 'window', window: 0x10, bounds: tops[0].rect }, bitmap);
@@ -921,7 +922,7 @@ test('a primary is its window\'s client area windowed, and the screen with the w
         parent: '0x10' };
     const tops = [{ hwnd: 0x10, rect: screen, shown: true },
         { hwnd: 0x20, rect: dialog.rect, shown: true }];
-    const host = composingHost(ram, tops);
+    const host = await composingHost(ram, tops);
     let windows = [game, dialog];
     host.requireApi('win32').windows = ()=>windows;
     /** @type {(() => void)[]} */
@@ -1006,7 +1007,7 @@ test('a window\'s surface survives guest memory growing under it', async()=>{
     const memory = new WebAssembly.Memory({ initial: 1 });
     let ram = new Uint8Array(memory.buffer);
     const tops = [{ hwnd: 0x10, rect: { left: 0, top: 0, right: 8, bottom: 4 }, shown: true }];
-    const host = composingHost(ram, tops);
+    const host = await composingHost(ram, tops);
     host.requireApi('memory').window = (/** @type {number} */ at, /** @type {number} */ n)=>
         ram.subarray(at, at + n);
     const api = await graphicsModule.create(
@@ -1040,6 +1041,7 @@ test('dispose releases this machine\'s backend and leaves the run\'s presenter u
         const gpu = createFakeDevice();
         const ram = new Uint8Array(0x10000);
         const presenter = createPresenter({
+            scratches: testScratch,
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             now: ()=>0,
         });
@@ -1050,7 +1052,7 @@ test('dispose releases this machine\'s backend and leaves the run\'s presenter u
             canvas: gpu.canvas,
             presentTo: (/** @type {any} */ frame)=>presenter.show(frame),
         };
-        const host = hostWith({
+        const host = await hostWith({
             readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
             writeBytes: ()=>{},
             window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
@@ -1081,6 +1083,7 @@ test('a child\'s machine that goes leaves its parent drawing from its own memory
     // through the parent's backend; the child's went with the child.
     const gpu = createFakeDevice();
     const presenter = createPresenter({
+        scratches: testScratch,
         device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
         now: ()=>0,
     });
@@ -1102,9 +1105,9 @@ test('a child\'s machine that goes leaves its parent drawing from its own memory
     const settled = ()=>new Promise(resolve=>setImmediate(resolve));
 
     const parent = await graphicsModule.create({ presenter, device },
-        hostWith(memoryOf(parentRam)));
+        await hostWith(memoryOf(parentRam)));
     const child = await graphicsModule.create({ presenter, device },
-        hostWith(memoryOf(childRam)));
+        await hostWith(memoryOf(childRam)));
     child.present(pixel);
     await settled();
     assert.deepEqual([...gpu.of('writeTexture').at(-1).bytes], [0x11, 0x22, 0x33, 0xff],
@@ -1135,8 +1138,8 @@ test('a second instance in one realm does not take the first one\'s backend', as
         queue: { submit(){}, writeBuffer(){} },
         presentTo: ()=>{},
     };
-    const first = await graphicsModule.create({ device: gpu }, hostWith(fakeMemory()));
-    const second = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const first = await graphicsModule.create({ device: gpu }, await hostWith(fakeMemory()));
+    const second = await graphicsModule.create({}, await hostWith(fakeMemory()));
 
     assert.ok(first.backend(), 'the first builds its own backend');
     assert.throws(()=>second.backend(), /no GPU device/,
@@ -1150,7 +1153,7 @@ test('a disposed machine answers as a build with graphics disabled', async()=>{
     // afterwards and reaches this layer. A build with `graphics: null` is the
     // stub, and a disposed machine is the same absence: every method refuses
     // the way the stub does rather than dereferencing what disposal took away.
-    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+    const api = await graphicsModule.create({}, await hostWith(fakeMemory()));
 
     await graphicsModule.dispose();
 
@@ -1164,8 +1167,8 @@ test('a disposed machine answers as a build with graphics disabled', async()=>{
 });
 
 test('diagnostics answers for the live instance', async()=>{
-    await graphicsModule.create({}, hostWith(fakeMemory()));
-    const second = await graphicsModule.create({}, hostWith(fakeMemory()));
+    await graphicsModule.create({}, await hostWith(fakeMemory()));
+    const second = await graphicsModule.create({}, await hostWith(fakeMemory()));
     second.create('ddraw');
 
     const diagnostics = graphicsModule.diagnostics();
@@ -1183,6 +1186,7 @@ test('the display\'s gamma ramp is the run\'s: a device\'s goes with the machine
         gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler',
             descriptor });
         const presenter = createPresenter({
+            scratches: testScratch,
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             now: ()=>0,
         });
@@ -1190,7 +1194,7 @@ test('the display\'s gamma ramp is the run\'s: a device\'s goes with the machine
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             presentTo: (/** @type {any} */ frame)=>presenter.show(frame),
         };
-        const api = await graphicsModule.create({ presenter, device }, hostWith(ramMemory()));
+        const api = await graphicsModule.create({ presenter, device }, await hostWith(ramMemory()));
         /** @param {(index: number) => number} entry */
         const rampOf = entry=>{
             const channel = Uint16Array.from({ length: 256 }, (_, index)=>entry(index));
@@ -1220,7 +1224,7 @@ test('the display\'s gamma ramp is the run\'s: a device\'s goes with the machine
         assert.deepEqual([...(presenter.gammaRamp()?.red ?? [])], [...dim.red],
             'the machine\'s device went with it, and the display keeps its own ramp');
 
-        const headless = await graphicsModule.create({}, hostWith(fakeMemory()));
+        const headless = await graphicsModule.create({}, await hostWith(fakeMemory()));
         assert.equal(headless.create('d3d9').caps.fullscreenGamma, false,
             'without a canvas no ramp is shown, and none is claimed');
         await graphicsModule.dispose();
@@ -1263,7 +1267,7 @@ test('the card\'s memory is the choice\'s era, and a configured figure overrides
     const MB = 1024 * 1024;
     /** @param {any} config */
     const reported = async config=>{
-        const api = await graphicsModule.create(config, hostWith(fakeMemory()));
+        const api = await graphicsModule.create(config, await hostWith(fakeMemory()));
         const figures = { module: api.videoMemory() };
         await graphicsModule.dispose();
         return figures;
