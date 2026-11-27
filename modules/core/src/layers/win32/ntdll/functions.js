@@ -594,8 +594,7 @@ export function createNtdllFunctions(host){
         ...createAtomTableFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
             readWideString: host.readWideString, allocate, free }),
 
-        ...createBitmapFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
-            guest: host.guest }),
+        ...createBitmapFunctions({ guest: host.guest }),
 
         ...time.table,
 

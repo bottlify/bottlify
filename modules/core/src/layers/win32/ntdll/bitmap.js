@@ -4,13 +4,14 @@
  * See LICENSE for details
  */
 
-import { wholeAddress } from '../common/pointers.js';
+import { pointerArg } from '../common/pointers.js';
 
 /**
  * The RTL_BITMAP routines: a bitmap is { ULONG SizeOfBitMap; PULONG Buffer; },
- * bit n the (n % 8)th of byte n / 8 of the buffer. A program's allocator of
- * slots (WPF's renderer keeps its handles in one) sets, clears and finds runs
- * through these.
+ * Buffer pointer-wide and aligned to it (at 8 in a 64-bit process, after four
+ * bytes of padding nobody writes), bit n the (n % 8)th of byte n / 8 of the
+ * buffer. A program's allocator of slots (WPF's renderer keeps its handles in
+ * one) sets, clears and finds runs through these.
  *
  * The contract is Wine's rtlbitmap test (what Windows answers): setting or
  * clearing all bits takes the size up to whole ULONGs and no further; a
@@ -23,24 +24,11 @@ import { wholeAddress } from '../common/pointers.js';
 const NOT_FOUND = 0xffffffff;
 
 /**
- * @typedef {Object} BitmapHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {import('../common/guest.js').Guest} guest
+ * @param {{ guest: import('../common/guest.js').Guest }} host
  */
-
-/**
- * @param {BitmapHost} host
- */
-export function createBitmapFunctions(host){
-    /** @param {number} at */
-    const u32 = at=>{
-        const b = host.readMemory(wholeAddress(at), 4);
-        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
-    };
-    /** @param {number} at @param {number[]} values */
-    const putU32s = (at, values)=>host.writeMemory(wholeAddress(at),
-        new Uint8Array(new Uint32Array(values.map(v=>v >>> 0)).buffer));
+export function createBitmapFunctions({ guest }){
+    /** @param {number} header */
+    const bufferOf = header=>guest.ptr(header + guest.pointerSize);
 
     /**
      * A bitmap's bits as bytes, and how to write the ones changed back.
@@ -48,9 +36,9 @@ export function createBitmapFunctions(host){
      * @param {number} header
      */
     const open = header=>{
-        const size = u32(header);
-        const buffer = u32(header + 4);
-        const bytes = host.readMemory(buffer, Math.ceil(size / 8));
+        const size = guest.u32(header);
+        const buffer = bufferOf(header);
+        const bytes = guest.bytes(buffer, Math.ceil(size / 8));
         return {
             size, bytes,
             /** @param {number} n */
@@ -62,7 +50,7 @@ export function createBitmapFunctions(host){
                     bytes[n >> 3] = on ? bytes[n >> 3] | 1 << (n & 7)
                         : bytes[n >> 3] & ~(1 << (n & 7));
                 }
-                host.writeMemory(buffer + (start >> 3),
+                guest.setBytes(buffer + (start >> 3),
                     bytes.subarray(start >> 3, ((start + count - 1) >> 3) + 1));
             },
             buffer,
@@ -73,11 +61,12 @@ export function createBitmapFunctions(host){
     const all = on=>({
         argBytes: 4,
         /** @param {number[]} args */
-        handler: ([header])=>{
+        handler: args=>{
+            const header = pointerArg(args, 0);
             // Whole ULONGs, as the buffer is laid out in them, filled where
             // they lie: a size the buffer does not have faults where it ends.
-            const bytes = Math.ceil(u32(header) / 32) * 4;
-            host.guest.fill(u32(header + 4), on ? 0xff : 0, bytes);
+            const bytes = Math.ceil(guest.u32(header) / 32) * 4;
+            guest.fill(bufferOf(header), on ? 0xff : 0, bytes);
             return 0;
         },
     });
@@ -86,7 +75,9 @@ export function createBitmapFunctions(host){
     const range = on=>({
         argBytes: 12,
         /** @param {number[]} args */
-        handler: ([header, start, count])=>{
+        handler: args=>{
+            const [, start, count] = args;
+            const header = pointerArg(args, 0);
             if ((count >>> 0) !== 0)
             {
                 open(header).fill(start >>> 0, count >>> 0, on);
@@ -99,7 +90,9 @@ export function createBitmapFunctions(host){
     const are = on=>({
         argBytes: 12,
         /** @param {number[]} args */
-        handler: ([header, start, count])=>{
+        handler: args=>{
+            const [, start, count] = args;
+            const header = pointerArg(args, 0);
             const map = open(header);
             const [from, n] = [start >>> 0, count >>> 0];
             if (from + n > map.size)
@@ -121,7 +114,8 @@ export function createBitmapFunctions(host){
     const number = on=>({
         argBytes: 4,
         /** @param {number[]} args */
-        handler: ([header])=>{
+        handler: args=>{
+            const header = pointerArg(args, 0);
             const map = open(header);
             let count = 0;
             for (let n = 0; n < map.size; n++)
@@ -164,7 +158,9 @@ export function createBitmapFunctions(host){
     const finder = (on, flip)=>({
         argBytes: 12,
         /** @param {number[]} args */
-        handler: ([header, count, hint])=>{
+        handler: args=>{
+            const [, count, hint] = args;
+            const header = pointerArg(args, 0);
             const map = open(header);
             const at = find(map, count >>> 0, hint >>> 0, on);
             if (flip && at !== NOT_FOUND && (count >>> 0) !== 0)
@@ -204,14 +200,17 @@ export function createBitmapFunctions(host){
     const findRuns = on=>({
         argBytes: 16,
         /** @param {number[]} args */
-        handler: ([header, out, most, longest])=>{
+        handler: args=>{
+            const [, , most, longest] = args;
+            const out = pointerArg(args, 1);
+            const header = pointerArg(args, 0);
             let runs = runsOf(open(header), on);
             if (longest & 0xff)
             {
                 runs = [...runs].sort((a, b)=>b[1] - a[1]);
             }
             runs = runs.slice(0, most >>> 0);
-            putU32s(out, runs.flat());
+            guest.set32s(out, runs.flat());
             return runs.length;
         },
     });
@@ -220,9 +219,12 @@ export function createBitmapFunctions(host){
     const nextRun = on=>({
         argBytes: 12,
         /** @param {number[]} args */
-        handler: ([header, from, startOut])=>{
+        handler: args=>{
+            const from = args[1];
+            const startOut = pointerArg(args, 2);
+            const header = pointerArg(args, 0);
             const [run] = runsOf(open(header), on, from >>> 0);
-            putU32s(startOut, [run ? run[0] : 0]);
+            guest.set32(startOut, run ? run[0] : 0);
             return run ? run[1] : 0;
         },
     });
@@ -231,12 +233,14 @@ export function createBitmapFunctions(host){
     const longestRun = on=>({
         argBytes: 8,
         /** @param {number[]} args */
-        handler: ([header, startOut])=>{
+        handler: args=>{
+            const startOut = pointerArg(args, 1);
+            const header = pointerArg(args, 0);
             const runs = runsOf(open(header), on);
             const best = runs.reduce((a, b)=>(b[1] > a[1] ? b : a), [0, 0]);
             if (runs.length > 0)
             {
-                putU32s(startOut, [best[0]]);
+                guest.set32(startOut, best[0]);
             }
             return best[1];
         },
@@ -271,8 +275,9 @@ export function createBitmapFunctions(host){
         RtlInitializeBitMap: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([header, buffer, size])=>{
-                putU32s(header, [size, buffer]);
+            handler: args=>{
+                guest.set32(pointerArg(args, 0), args[2]);
+                guest.setPtr(pointerArg(args, 0) + guest.pointerSize, pointerArg(args, 1));
                 return 0;
             },
         },
@@ -288,7 +293,7 @@ export function createBitmapFunctions(host){
         RtlCheckBit: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([header, at])=>(open(header).get(at >>> 0) ? 1 : 0),
+            handler: args=>(open(pointerArg(args, 0)).get(args[1] >>> 0) ? 1 : 0),
         },
         RtlNumberOfSetBits: number(true),
         RtlNumberOfClearBits: number(false),

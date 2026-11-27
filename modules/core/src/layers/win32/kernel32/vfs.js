@@ -163,6 +163,22 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
     };
 
     /**
+     * The operation, its refusal's code kept as `refused` on the way out.
+     *
+     * @template T @param {() => T} operation @returns {T}
+     */
+    const refusing = operation=>{
+        try
+        {
+            return operation();
+        }
+        catch (e){
+            refused = /** @type {any} */ (e)?.code ?? null;
+            throw e;
+        }
+    };
+
+    /**
      * An operation done again after its miss: the blocks the miss named
      * fetched, then the operation again, and again fetched while it misses
      * blocks it never fetched, or up to `MISS_FETCHES` fetches of blocks it
@@ -362,9 +378,12 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
      */
     const watches = new Set();
 
-    /** Why the last open was refused, for the surface to answer with: `openRefusal`. */
+    /**
+     * Why the last open, directory made or rename was refused - the
+     * filesystem's code - for the surface to answer with: `refusal`.
+     */
     /** @type {string | null} */
-    let refusedOpen = null;
+    let refused = null;
 
     /**
      * Where each open file is, so a write through it can be told to the
@@ -720,7 +739,9 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
          *
          * @returns {string | null}
          */
-        openRefusal: ()=>refusedOpen,
+        refusal: ()=>refused,
+        /** The same, by the name the surfaces that only open ask it. */
+        openRefusal: ()=>refused,
 
 
         /**
@@ -731,29 +752,20 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
         open(path, mode){
             const existed = watches.size > 0 && (mode.create || mode.truncate)
                 ? attempt(()=>fs.stat(path), null) !== null : null;
-            refusedOpen = null;
-            const node = attempt(()=>{
-                try
-                {
-                    return fs.open(path, {
-                        read: mode.read !== false,
-                        write: Boolean(mode.write),
-                        shareRead: mode.shareRead !== false,
-                        shareWrite: mode.shareWrite === true,
-                        delete: mode.delete === true,
-                        // Only CreateFile says how it shares deletion; a layer's own
-                        // reader (an installer's database, a library a DLL loads) does
-                        // not stand in the way of the program deleting the file.
-                        shareDelete: mode.shareDelete !== false,
-                        disposition: dispositionOf(mode),
-                        inherited: mode.inherited === true,
-                    });
-                }
-                catch (e){
-                    refusedOpen = /** @type {any} */ (e)?.code ?? null;
-                    throw e;
-                }
-            }, null);
+            refused = null;
+            const node = attempt(()=>refusing(()=>fs.open(path, {
+                read: mode.read !== false,
+                write: Boolean(mode.write),
+                shareRead: mode.shareRead !== false,
+                shareWrite: mode.shareWrite === true,
+                delete: mode.delete === true,
+                // Only CreateFile says how it shares deletion; a layer's own
+                // reader (an installer's database, a library a DLL loads) does
+                // not stand in the way of the program deleting the file.
+                shareDelete: mode.shareDelete !== false,
+                disposition: dispositionOf(mode),
+                inherited: mode.inherited === true,
+            })), null);
             if (node)
             {
                 pathOf.set(node, path);
@@ -1063,7 +1075,8 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
 
         /** @param {string} path @returns {boolean} */
         mkdir: path=>{
-            const made = attempt(()=>fs.createDirectory(path), false);
+            refused = null;
+            const made = attempt(()=>refusing(()=>fs.createDirectory(path)), false);
             if (made !== false)
             {
                 changed(path, CHANGE_DIR_NAME, FILE_ACTION_ADDED);
@@ -1159,11 +1172,14 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
          * @param {{ held?: boolean }} [options]  as `renameOrFetch`'s
          * @returns {boolean}
          */
-        rename: (from, to, options = {})=>attempt(()=>{
-            fs.rename(from, to, options);
-            moved(from, to);
-            return true;
-        }, false),
+        rename: (from, to, options = {})=>{
+            refused = null;
+            return attempt(()=>{
+                refusing(()=>fs.rename(from, to, options));
+                moved(from, to);
+                return true;
+            }, false);
+        },
 
         /**
          * Tells `notify` when a name under a directory changes in a way

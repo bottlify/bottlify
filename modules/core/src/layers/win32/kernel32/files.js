@@ -550,6 +550,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string) => boolean} [isOpen]  whether any process holds the file open
  * @property {(path: string) => string | null} [deviceOf]  the device a path names, upper case
  * @property {() => string | null} [openRefusal]  why the last `open` answered null
+ * @property {() => string | null} [refusal]
+ *           The volume's code for why the last open, `mkdir` or rename was refused.
  * @property {(path: string) => string | null} [mappedAs]  how a section maps the file
  * @property {(path: string, existing: string) => string | null} [link]
  *           Gives a file one more name: null, or the volume's code for why not.
@@ -1242,6 +1244,13 @@ export function createFileFunctions(host){
     };
 
     /**
+     * Whether the volume refused the last open, directory or rename for a
+     * name no volume holds (a component past 255 units): ERROR_INVALID_NAME,
+     * whatever is or is not there to guess another answer from.
+     */
+    const refusedName = ()=>files.refusal?.() === 'INVALID_PATH';
+
+    /**
      * Which of the two "it isn't there" codes applies. Windows distinguishes
      * them by where the walk stopped, and callers do act on the difference: a
      * missing file is often expected, a missing directory rarely is.
@@ -1797,7 +1806,8 @@ export function createFileFunctions(host){
         const answer = done=>{
             if (!done)
             {
-                return denied(onReadOnlyMedia(source) ? source : destination);
+                return refusedName() ? ERROR_INVALID_NAME
+                    : denied(onReadOnlyMedia(source) ? source : destination);
             }
             follow(source, destination);
             return 0;
@@ -2466,7 +2476,8 @@ export function createFileFunctions(host){
         // failure, not something to create on the way past.
         if (!files.mkdir(path))
         {
-            return fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_PATH_NOT_FOUND);
+            return fail(refusedName() ? ERROR_INVALID_NAME
+                : onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_PATH_NOT_FOUND);
         }
         host.recordFileSecurity?.(path, securityDescriptorOf(attributes));
         return 1;
@@ -2951,6 +2962,10 @@ export function createFileFunctions(host){
             {
                 return { error: ERROR_SHARING_VIOLATION };
             }
+            if (refusedName())
+            {
+                return { error: ERROR_INVALID_NAME };
+            }
             return { error: onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT
                 : exists ? ERROR_ACCESS_DENIED : missing(path) };
         }
@@ -3396,7 +3411,7 @@ export function createFileFunctions(host){
             }
             if (!files.mkdir(landed.path))
             {
-                return onReadOnlyMedia(path)
+                return refusedName() ? STATUS_OBJECT_NAME_INVALID : onReadOnlyMedia(path)
                     ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_OBJECT_PATH_NOT_FOUND;
             }
             const hold = holdFolder(landed.path, access >>> 0, share >>> 0);

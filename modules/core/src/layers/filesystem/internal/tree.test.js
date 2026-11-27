@@ -35,6 +35,31 @@ function mounted(){
 const MOUNT_POINT = 0xa0000003;
 const SYMLINK = 0xa000000c;
 
+test('a name past 255 UTF-16 units is made by no create, and 255 is a name', ()=>{
+    // NTFS holds a component of at most 255 units (MS-FSCC 2.1.5.2): a file,
+    // a directory, a move's or a link's target longer is INVALID_PATH, with
+    // nothing in either layer.
+    const { tree, writable } = mounted();
+    const long = 'n'.repeat(256);
+    const longest = 'n'.repeat(255);
+    const refused = (/** @type {() => unknown} */ make, /** @type {string} */ what)=>
+        assert.throws(make, { code: 'INVALID_PATH' }, what);
+    tree.createFile(['Game', 'Saved.DAT']);
+    refused(()=>tree.createFile(['Game', long]), 'a file');
+    refused(()=>tree.createDirectory(['Game', long]), 'a directory');
+    refused(()=>tree.createDirectory([long, 'Inner']), 'one under it');
+    refused(()=>tree.moveFile(['Game', 'Saved.DAT'], ['Game', long]), 'a move');
+    refused(()=>tree.link(['Game', 'Saved.DAT'], ['Game', long]), 'a link');
+    assert.ok(tree.stat(['Game', 'Saved.DAT']), 'the file where it was');
+    assert.ok(writable.list().every(({ path })=>path.split('\\').every(name=>name.length < 256)),
+        'nothing made');
+
+    tree.createFile(['Game', longest]);
+    assert.equal(tree.createDirectory(['Game', `d${longest.slice(1)}`]), true);
+    assert.equal(tree.moveFile(['Game', 'Saved.DAT'], ['Game', `m${longest.slice(1)}`]), true);
+    assert.equal(tree.link(['Game', longest], ['Game', `l${longest.slice(1)}`]).links, 2);
+});
+
 test('both layers are one volume, and case is no obstacle to finding a file', ()=>{
     const { tree } = mounted();
 

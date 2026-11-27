@@ -723,10 +723,6 @@
    "accessor u16": 1,
    "accessor u32": 1
   },
-  "ntdll/bitmap.js": {
-   "accessor putU32s": 1,
-   "accessor u32": 1
-  },
   "ntdll/debug-buffer.js": {
    "accessor writeU32": 1
   },
