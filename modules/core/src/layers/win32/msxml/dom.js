@@ -31,6 +31,7 @@ import {
 } from './xml.js';
 import { selectNodes, XPathError } from './xpath.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf8 } from '../../../system/text.js';
 
 /** @typedef {import('./xml.js').XmlNode} XmlNode */
 /** @typedef {import('../ole32/objects.js').ComMethod} ComMethod */
@@ -1256,7 +1257,7 @@ export function registerMsxmlClasses(host){
                     return E_INVALIDARG;
                 }
                 const text = serializeXml(root);
-                const bytes = new TextEncoder().encode(text);
+                const bytes = utf8.encode(text);
                 return await host.writeFile(target.value, bytes) ? S_OK : E_FAIL;
             },
             get_validateOnParse: (/** @type {number[]} */ [out])=>{

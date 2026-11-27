@@ -29,6 +29,7 @@ import { createCefStrings } from './strings.js';
 import { commandLineMethods, emptyCommandLine, parseCommandLine, splitCommandLine }
     from './command-line.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf8 } from '../../../system/text.js';
 
 /** cef_app_t's methods after its base. */
 const APP = Object.freeze({ getBrowserProcessHandler: BASE_SIZE + 12 });
@@ -127,7 +128,7 @@ export function createLibcefFunctions(host){
         fillMap: strings.fillMap,
         copy: newLine,
         // argv as main received it: char* each, the system's code page.
-        argv: (count, at)=>Array.from({ length: count }, (_, i)=>new TextDecoder()
+        argv: (count, at)=>Array.from({ length: count }, (_, i)=>utf8
             .decode(strings.bytesAt(dword(at + i * 4), -1))),
     }));
 
@@ -139,7 +140,7 @@ export function createLibcefFunctions(host){
         {
             const text = API_HASHES[entry] ?? '';
             const at = host.allocate(text.length + 1);
-            host.writeMemory(at, new TextEncoder().encode(`${text}\0`));
+            host.writeMemory(at, utf8.encode(`${text}\0`));
             hashes.set(entry, at);
         }
         return hashes.get(entry);
@@ -265,7 +266,7 @@ export function createLibcefFunctions(host){
         /** void cef_log(const char* file, int line, int severity, const char* message) */
         cef_log: { convention: 'cdecl', argBytes: 16,
             handler: (/** @type {number[]} */ [file, line, severity, message])=>{
-                const text = (/** @type {number} */ at)=>new TextDecoder()
+                const text = (/** @type {number} */ at)=>utf8
                     .decode(strings.bytesAt(at, -1));
                 host.log?.(`[${severity | 0}] ${text(file)}(${line | 0}): ${text(message)}`);
                 return 0;

@@ -26,6 +26,7 @@
  */
 
 import { id3Length, parseFrameHeader, scanFrames } from './mp3.js';
+import { utf8 } from '../../../system/text.js';
 
 /** The provider's file name, which is how the library finds it. */
 export const PROVIDER_LIBRARY = 'Mp3dec.asi';
@@ -201,7 +202,6 @@ const STREAM_TABLE = [
  */
 export function createMp3Provider(host){
     const { readMemory, writeMemory, allocate, callGuest, currentThread, resolveImport } = host;
-    const encoder = new TextEncoder();
 
     /** Where the strings and tables live, once something needed them. */
     /** @type {{ codec: number, stream: number, names: Map<string, number> } | null} */
@@ -263,7 +263,7 @@ export function createMp3Provider(host){
         for (const text of texts)
         {
             names.set(text, base + cursor);
-            bytes.set(encoder.encode(text), cursor);
+            bytes.set(utf8.encode(text), cursor);
             cursor += text.length + 1;
         }
 
@@ -649,7 +649,7 @@ export function createMp3Provider(host){
                     }
                     if (errorAt === 0)
                     {
-                        const bytes = encoder.encode(`${lastError}\0`);
+                        const bytes = utf8.encode(`${lastError}\0`);
                         errorAt = allocate(bytes.length);
                         writeMemory(errorAt, bytes);
                     }

@@ -23,6 +23,7 @@
 import { encodeAnsi } from './locale.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16, utf16z } from '../common/utf16.js';
+import { foldName } from '../../../system/text.js';
 
 /** Atoms a caller allocates start here; below it are the integer atoms. */
 const FIRST_ATOM = 0xc000;
@@ -113,7 +114,7 @@ export function createAtomFunctions(host){
         {
             return name.integer;
         }
-        const key = name.text.toLowerCase();
+        const key = foldName(name.text);
         const known = byName.get(key);
         if (known)
         {
@@ -141,7 +142,7 @@ export function createAtomFunctions(host){
         {
             return name.integer;
         }
-        return byName.get(name.text.toLowerCase())?.atom ?? 0;
+        return byName.get(foldName(name.text))?.atom ?? 0;
     };
 
     /** @param {number} atom @returns {number} zero on success, the atom on failure */
@@ -157,7 +158,7 @@ export function createAtomFunctions(host){
         {
             return value;
         }
-        const key = text.toLowerCase();
+        const key = foldName(text);
         const entry = /** @type {{ atom: number, count: number }} */ (byName.get(key));
         entry.count--;
         if (entry.count <= 0)

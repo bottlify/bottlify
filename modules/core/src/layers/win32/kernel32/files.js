@@ -52,6 +52,7 @@ import { pointerArg, pointerWidth, wholeAddress } from '../common/pointers.js';
 import { readSecurityAttributes } from '../common/security-attributes.js';
 import { writeZeros } from '../common/guest.js';
 import { utf16 } from '../common/utf16.js';
+import { foldName } from '../../../system/text.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -800,23 +801,24 @@ const SYSTEM_LIBRARY_SIZE = 0x10000;
  * @returns {T & { standInImage?: (node: any) => Uint8Array | null }}
  */
 export function withSystemLibraries(real, libraries, where = {}){
-    const WOW64_FOLDER = 'c:\\windows\\syswow64';
+    const WOW64_FOLDER = 'C:\\WINDOWS\\SYSWOW64';
     if (!libraries)
     {
         return real;
     }
-    const system = SYSTEM_DIRECTORY.toLowerCase();
+    const system = foldName(SYSTEM_DIRECTORY);
     /** @param {string} path @returns {string | null} the library's own spelling */
     const libraryAt = path=>{
-        const lower = path.toLowerCase();
+        const lower = foldName(path);
         const cut = lower.lastIndexOf('\\');
         const name = lower.slice(cut + 1);
-        const library = libraries().find(each=>each.toLowerCase() === name);
+        const library = libraries().find(each=>foldName(each) === name);
         if (library === undefined)
         {
             return null;
         }
-        const home = where.homeOf?.(library)?.toLowerCase() ?? system;
+        const homeOf = where.homeOf?.(library);
+        const home = homeOf ? foldName(homeOf) : system;
         // A 64-bit machine keeps the 32-bit system libraries in SysWOW64 too.
         const homes = home === system && where.wow64 ? [system, WOW64_FOLDER] : [home];
         return homes.includes(lower.slice(0, cut)) ? library : null;
@@ -1759,7 +1761,7 @@ export function createFileFunctions(host){
         }
         // Its own name, in any case: nothing is replaced, and only the
         // spelling may change.
-        if (source.toLowerCase() === destination.toLowerCase())
+        if (foldName(source) === foldName(destination))
         {
             return files.rename(source, destination, { held }) ? 0 : denied(source);
         }
@@ -1835,11 +1837,11 @@ export function createFileFunctions(host){
      * @param {string} source @param {string} destination
      */
     const follow = (source, destination)=>{
-        const from = source.toLowerCase();
+        const from = foldName(source);
         for (const { type, object: open } of host.handles.list?.() ?? [])
         {
             const path = type === 'file' && typeof open?.path === 'string' ? open.path : null;
-            const lower = path?.toLowerCase();
+            const lower = path === null ? null : foldName(path);
             if (path !== null && (lower === from || lower?.startsWith(`${from}\\`)))
             {
                 open.path = `${destination}${path.slice(source.length)}`;
@@ -2193,7 +2195,7 @@ export function createFileFunctions(host){
         {
             return fail(entry?.isDirectory ? ERROR_ACCESS_DENIED : missing(source));
         }
-        if (named.toLowerCase() === destinationNamed.toLowerCase())
+        if (foldName(named) === foldName(destinationNamed))
         {
             return fail(ERROR_SHARING_VIOLATION);
         }
@@ -2208,7 +2210,7 @@ export function createFileFunctions(host){
             return fail(to.error);
         }
         const destination = to.path;
-        if (source.toLowerCase() === destination.toLowerCase())
+        if (foldName(source) === foldName(destination))
         {
             return fail(ERROR_SHARING_VIOLATION);
         }
@@ -2651,7 +2653,7 @@ export function createFileFunctions(host){
             try
             {
                 const found = files.list(fullPath(prefix === '' ? '.' : prefix), part)
-                    .find(entry=>entry.name.toLowerCase() === part.toLowerCase());
+                    .find(entry=>foldName(entry.name) === foldName(part));
                 return found ? found.name : part;
             }
             catch {
@@ -2880,7 +2882,7 @@ export function createFileFunctions(host){
         const existing = named;
         const exists = Boolean(existing && existing.exists);
         // A file whose deletion is pending opens no more, whatever is asked.
-        if (exists && deletePending.has(path.toLowerCase()))
+        if (exists && deletePending.has(foldName(path)))
         {
             return { error: ERROR_ACCESS_DENIED, deletePending: true };
         }
@@ -3382,7 +3384,7 @@ export function createFileFunctions(host){
             {
                 return STATUS_ACCESS_DENIED;
             }
-            if (deletePending.has(path.toLowerCase()))
+            if (deletePending.has(foldName(path)))
             {
                 return STATUS_DELETE_PENDING;
             }
@@ -3537,7 +3539,7 @@ export function createFileFunctions(host){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const key = file.path.toLowerCase();
+        const key = foldName(file.path);
         const held = locks.get(key) ?? [];
         const collides = held.some(lock=>overlaps(start, length, lock.start, lock.length)
             && (exclusive || (lock.exclusive && lock.handle !== handle)));
@@ -3563,7 +3565,7 @@ export function createFileFunctions(host){
         {
             return ERROR_INVALID_HANDLE;
         }
-        const held = locks.get(file.path.toLowerCase()) ?? [];
+        const held = locks.get(foldName(file.path)) ?? [];
         const same = (/** @type {{ handle: number, start: bigint, length: bigint }} */ lock)=>
             lock.handle === handle && lock.start === start && lock.length === length;
         let at = held.findIndex(lock=>same(lock) && lock.exclusive);
@@ -3624,7 +3626,7 @@ export function createFileFunctions(host){
             }
             if (type === 'file' && closed?.path)
             {
-                const key = closed.path.toLowerCase();
+                const key = foldName(closed.path);
                 const kept = (locks.get(key) ?? []).filter(lock=>lock.handle !== handle);
                 if (kept.length === 0)
                 {
@@ -3652,9 +3654,9 @@ export function createFileFunctions(host){
             if (closed?.deleteOnClose && closed.path !== undefined
                 && !host.handles.holds?.(closed))
             {
-                deletePending.set(String(closed.path).toLowerCase(), String(closed.path));
+                deletePending.set(foldName(String(closed.path)), String(closed.path));
             }
-            const own = String(closed?.path ?? '').toLowerCase();
+            const own = foldName(String(closed?.path ?? ''));
             if (closed && (closed.node || deletePending.has(own)) && !host.handles.holds?.(closed))
             {
                 for (const [key, path] of [...deletePending])
@@ -3821,7 +3823,7 @@ export function createFileFunctions(host){
                     view.setUint32(16, entry?.links ?? 1, true);
                     // A name deleted under the open leaves the open's file pending too.
                     view.setUint8(20, file.deleteOnClose
-                        || deletePending.has(String(file.path).toLowerCase())
+                        || deletePending.has(foldName(String(file.path)))
                         || !files.stat(file.path) ? 1 : 0);
                     view.setUint8(21, file.directory ? 1 : 0);
                 });
@@ -4965,7 +4967,7 @@ export function createFileFunctions(host){
             return NATIVE_FAILURES[missing(named.path)];
         }
         // A file whose deletion is pending is there, and answers nothing.
-        if (deletePending.has(named.path.toLowerCase()))
+        if (deletePending.has(foldName(named.path)))
         {
             return STATUS_DELETE_PENDING;
         }
@@ -5228,7 +5230,7 @@ export function createFileFunctions(host){
                 }
                 // Pending, the file opens no more, and goes with the last
                 // handle onto it; cleared through any handle, it stays.
-                const key = String(file.path).toLowerCase();
+                const key = foldName(String(file.path));
                 // FILE_DISPOSITION_ON_CLOSE sets or clears the open's
                 // delete-on-close itself, as FILE_FLAG_DELETE_ON_CLOSE set it.
                 if (type === FILE_INFO.DISPOSITION_EX
@@ -5351,7 +5353,7 @@ export function createFileFunctions(host){
             }
             // Its own name, perhaps spelt otherwise: the link it is takes the
             // spelling asked.
-            if (path.toLowerCase() === String(file.path).toLowerCase())
+            if (foldName(path) === foldName(String(file.path)))
             {
                 if (path !== file.path && files.rename(file.path, path, { held: true }))
                 {

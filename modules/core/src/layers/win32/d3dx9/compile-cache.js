@@ -25,6 +25,7 @@
  */
 
 import { contentName } from '../../../system/hash.js';
+import { utf8 } from '../../../system/text.js';
 
 /** @typedef {import('../../cache/module.js').CacheSpace} CacheSpace */
 
@@ -36,9 +37,6 @@ import { contentName } from '../../../system/hash.js';
  * @typedef {{ ok: boolean, messages: string, tokens: Uint32Array | null,
  *     constantTable: Uint8Array | null }} KeptResult
  */
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 /**
  * A compile's name in the cache, by its key's text: the body's key is what
@@ -59,7 +57,7 @@ function encodeCompile(key, included, result){
         ? new Uint8Array(result.tokens.buffer, result.tokens.byteOffset, result.tokens.byteLength)
         : null;
     const table = result.constantTable;
-    const header = encoder.encode(JSON.stringify({ key, included, ok: result.ok,
+    const header = utf8.encode(JSON.stringify({ key, included, ok: result.ok,
         messages: result.messages, tokens: tokens?.length ?? null, table: table?.length ?? null }));
     const body = new Uint8Array(4 + header.length + (tokens?.length ?? 0) + (table?.length ?? 0));
     new DataView(body.buffer).setUint32(0, header.length, true);
@@ -95,7 +93,7 @@ function decodeCompile(body, key){
         return null;
     }
     // The body is the cache's shared memory, which TextDecoder will not read.
-    const header = JSON.parse(decoder.decode(body.slice(4, 4 + length)));
+    const header = JSON.parse(utf8.decode(body.slice(4, 4 + length)));
     if (header.key !== key)
     {
         return null;

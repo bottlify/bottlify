@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf8 as UTF8 } from '../../../system/text.js';
+
 /**
  * The URL functions that take a URL apart or put a scheme on one: UrlEscape,
  * UrlGetPart, UrlApplyScheme and ParseURL, each a string in and a string or
@@ -91,7 +93,7 @@ const escaped = (char, utf8)=>{
         return `%${code.toString(16).toUpperCase().padStart(2, '0')}`;
     }
     const lone = code >= 0xd800 && code <= 0xdfff;
-    return Array.from(new TextEncoder().encode(lone ? '�' : char),
+    return Array.from(UTF8.encode(lone ? '�' : char),
         byte=>`%${byte.toString(16).toUpperCase().padStart(2, '0')}`).join('');
 };
 

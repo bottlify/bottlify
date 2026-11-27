@@ -28,6 +28,7 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { decoderFor as labelDecoder, utf8 } from '../../../system/text.js';
 
 /** The bits of a column's type. */
 export const MSITYPE = Object.freeze({
@@ -151,8 +152,7 @@ export function decoderFor(codepage){
     }
     try
     {
-        const decoder = new TextDecoder(encodingLabel(codepage));
-        return bytes=>decoder.decode(bytes);
+        return labelDecoder(encodingLabel(codepage)).decode;
     }
     catch {
         return decodeAnsi;
@@ -186,8 +186,7 @@ export function encoderFor(codepage){
     }
     if (codepage === 65001)
     {
-        const encoder = new TextEncoder();
-        return text=>encoder.encode(text);
+        return utf8.encode;
     }
     let table = encoderTables.get(codepage);
     if (!table)
@@ -195,7 +194,7 @@ export function encoderFor(codepage){
         let decoder;
         try
         {
-            decoder = new TextDecoder(encodingLabel(codepage), { fatal: true });
+            decoder = labelDecoder(encodingLabel(codepage), { fatal: true });
         }
         catch {
             return encodeAnsi;

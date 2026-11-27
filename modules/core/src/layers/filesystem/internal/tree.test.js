@@ -71,6 +71,24 @@ test('both layers are one volume, and case is no obstacle to finding a file', ()
     assert.equal(tree.stat(['Game', 'Missing']), null);
 });
 
+test('a name is one name as Windows\' case table folds it, and no other', ()=>{
+    // NTFS compares through the upcase table: ÿ and Ÿ are one name, but the
+    // Kelvin sign is not k (JavaScript's lower case makes them one), nor the
+    // dotless i i, nor final sigma sigma.
+    const { tree } = mounted();
+    for (const name of ['ÿ.txt', 'k.txt', 'i.txt', 'σ.txt'])
+    {
+        tree.createFile(['Game', name]);
+    }
+    assert.ok(tree.stat(['Game', 'Ÿ.TXT']));
+    for (const name of ['\u212a.txt', 'ı.txt', 'ς.txt'])
+    {
+        assert.equal(tree.stat(['Game', name]), null, name);
+        tree.createFile(['Game', name]);
+    }
+    assert.equal(tree.list(['Game']).length, 9, 'seven names of the session, two of the source');
+});
+
 test('enumeration reports the case a name was created with', ()=>{
     const { tree } = mounted();
 

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf8 } from '../system/text.js';
+
 /**
  * Protocol buffers, as far as Steam's messages use them.
  *
@@ -37,8 +39,6 @@ const wireOf = type=>{
     }
 };
 
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 /**
  * Encodes a message.
@@ -109,7 +109,7 @@ export function encode(schema, message){
                 }
                 default:
                 {
-                    const bytes = type === 'string' ? encoder.encode(item)
+                    const bytes = type === 'string' ? utf8.encode(item)
                         : type === 'bytes' ? item
                             : encode(/** @type {Schema} */ (type), item);
                     varint(BigInt(bytes.length));
@@ -225,7 +225,7 @@ export function decode(schema, bytes){
         else if (wire === WIRE_LENGTH && (type === 'string' || type === 'bytes'))
         {
             const slice = take(Number(varint()));
-            values.push(type === 'string' ? decoder.decode(slice) : slice.slice());
+            values.push(type === 'string' ? utf8.decode(slice) : slice.slice());
         }
         else if (wire === WIRE_LENGTH)
         {

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf16be, utf16le, utf8 } from '../../../system/text.js';
+
 /**
  * Assembly manifests: the XML an activation context is built from.
  *
@@ -110,13 +112,13 @@ const WINRT_NAMESPACE = 'urn:schemas-microsoft-com:winrt.v1';
 function decode(/** @type {Uint8Array} */ bytes){
     if (bytes[0] === 0xff && bytes[1] === 0xfe)
     {
-        return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+        return utf16le.decode(bytes.subarray(2));
     }
     if (bytes[0] === 0xfe && bytes[1] === 0xff)
     {
-        return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+        return utf16be.decode(bytes.subarray(2));
     }
-    return new TextDecoder('utf-8').decode(bytes[0] === 0xef && bytes[1] === 0xbb
+    return utf8.decode(bytes[0] === 0xef && bytes[1] === 0xbb
         && bytes[2] === 0xbf ? bytes.subarray(3) : bytes);
 }
 

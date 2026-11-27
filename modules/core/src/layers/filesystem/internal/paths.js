@@ -20,6 +20,7 @@
  */
 
 import { ErrorCode, fsError } from './errors.js';
+import { foldName } from '../../../system/text.js';
 
 /**
  * Names NT reserves for devices, recognised in every directory rather than only
@@ -44,12 +45,8 @@ const usableName = name=>name.length > 0
     && !INVALID_CHARACTERS.test(name)
     && ![...name].some(character=>character.charCodeAt(0) < 0x20);
 
-/**
- * Windows folds case with the invariant mapping, never the user's locale.
- *
- * @param {string} name
- */
-export const foldName = name=>name.toLowerCase();
+/** A name as NTFS compares it: each unit through Windows' case table. */
+export { foldName };
 
 /** @param {string} name */
 const hasWildcard = name=>name.includes('*') || name.includes('?');

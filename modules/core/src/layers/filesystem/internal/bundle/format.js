@@ -5,6 +5,7 @@
  */
 
 import { crc32 } from '../../../../system/hash.js';
+import { utf8 } from '../../../../system/text.js';
 
 /**
  * The .btl container, read.
@@ -204,7 +205,7 @@ export async function openBundle(fetchRange, decode, options = {}){
     // Awaited: opening is already asynchronous, and the index may be written
     // with a codec that has no synchronous decoder here. Only the blocks a guest
     // read touches must be decodable without waiting.
-    const text = new TextDecoder().decode(await decode(indexCodec, stored, null));
+    const text = utf8.decode(await decode(indexCodec, stored, null));
     const index = JSON.parse(text);
 
     if (index.blockSize !== blockSize)
@@ -335,7 +336,7 @@ export async function withManifest(fetchRange, decode, manifest, relay = null){
     const indexOffset = Number(view.getBigUint64(0x10, true));
     const indexLength = Number(view.getBigUint64(0x18, true));
     const stored = await fetchRange(indexOffset, indexLength);
-    const index = JSON.parse(new TextDecoder().decode(
+    const index = JSON.parse(utf8.decode(
         await decode(view.getUint32(0x20, true), stored, null)));
     const end = relay ? relay(index) : indexOffset;
     if (manifest === null)
@@ -346,7 +347,7 @@ export async function withManifest(fetchRange, decode, manifest, relay = null){
     {
         index.manifest = manifest;
     }
-    const written = new TextEncoder().encode(JSON.stringify(index));
+    const written = utf8.encode(JSON.stringify(index));
     view.setBigUint64(0x10, BigInt(end), true);
     view.setBigUint64(0x18, BigInt(written.length), true);
     view.setUint32(0x20, Codec.STORED, true);

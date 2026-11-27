@@ -19,6 +19,7 @@
 import { STATUS } from './status.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16, utf16z } from '../common/utf16.js';
+import { foldName } from '../../../system/text.js';
 
 const STATUS_VARIABLE_NOT_FOUND = 0xc0000100;
 /** The most a block may hold, in UTF-16 units; a walk stops there. */
@@ -110,9 +111,9 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
      * @returns {string | undefined}
      */
     const lookup = (block, name)=>{
-        const wanted = name.toUpperCase();
+        const wanted = foldName(name);
         return (block === 0 ? processEntries() : entries(block))
-            .find(([key])=>key.toUpperCase() === wanted)?.[1];
+            .find(([key])=>foldName(key) === wanted)?.[1];
     };
     /**
      * The expansion's pieces: the text between variables as it is, each
@@ -350,7 +351,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 }
                 const old = u32(wholeAddress(where));
                 const list = (old === 0 ? [] : entries(old))
-                    .filter(([entry])=>entry.toUpperCase() !== key.toUpperCase());
+                    .filter(([entry])=>foldName(entry) !== foldName(key));
                 if (text !== null)
                 {
                     list.push([key, text]);
@@ -416,10 +417,10 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 }
                 // No block is no variables at all.
                 const after = wholeAddress(block) === 0 ? [] : entries(wholeAddress(block));
-                const kept = new Set(after.map(([key])=>key.toUpperCase()));
+                const kept = new Set(after.map(([key])=>foldName(key)));
                 for (const [key] of before)
                 {
-                    if (!kept.has(key.toUpperCase()))
+                    if (!kept.has(foldName(key)))
                     {
                         set(key, null);
                     }

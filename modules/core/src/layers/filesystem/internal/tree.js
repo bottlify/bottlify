@@ -43,22 +43,16 @@ import { fromBase64, toBase64 } from '../../../system/base64.js';
 
 /**
  * A directory's entries in the order NTFS keeps its index and FindNextFile
- * reads it: by name upper-cased a character at a time, compared as UTF-16 code
- * units - not in the order the names were created, nor the bundle's before the
- * session's. A character whose capital is longer (ß) keeps itself, as NTFS's
- * upcase table has it.
+ * reads it: by name upper-cased a unit at a time through the upcase table
+ * (`foldName`), compared as UTF-16 code units - not in the order the names were
+ * created, nor the bundle's before the session's.
  *
  * @template {{ name: string }} T
  * @param {T[]} entries
  * @returns {T[]}
  */
 function inIndexOrder(entries){
-    /** @param {string} name */
-    const key = name=>Array.from(name, one=>{
-        const upper = one.toUpperCase();
-        return upper.length === one.length ? upper : one;
-    }).join('');
-    return entries.map(entry=>({ entry, key: key(entry.name) }))
+    return entries.map(entry=>({ entry, key: foldName(entry.name) }))
         .sort((left, right)=>(left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
         .map(one=>one.entry);
 }

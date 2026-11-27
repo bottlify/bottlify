@@ -17,6 +17,7 @@
 import { u32 } from './text.js';
 import { formatToString } from '../msvcrt/format.js';
 import { wholeAddress } from '../common/pointers.js';
+import { foldName } from '../../../system/text.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -64,16 +65,6 @@ const searched = (width, code)=>{
     }
     return width.char(value);
 };
-
-/**
- * Text with case ignored, folded a character at a time so that a place in the
- * folded text is the same place in the caller's: a character whose capital is
- * two (the German sharp s) stays as it is.
- *
- * @param {string} value
- */
-const foldCase = value=>
-    Array.from(value, c=>(c.toUpperCase().length === 1 ? c.toUpperCase() : c)).join('');
 
 /**
  * StrFromTimeInterval's text: the interval rounded to the second, then hours,
@@ -151,8 +142,8 @@ function logicalOrder(a, b){
             j += right.length;
             continue;
         }
-        const left = a[i].toUpperCase();
-        const right = b[j].toUpperCase();
+        const left = foldName(a[i]);
+        const right = foldName(b[j]);
         if (left !== right)
         {
             return x ? -1 : y ? 1 : left < right ? -1 : 1;
@@ -255,7 +246,7 @@ export function createStringFunctions(host, { A, W }){
             return answer - CSTR_EQUAL;
         }
         const fold = (/** @type {string} */ text)=>((flags & NORM_IGNORECASE) !== 0
-            ? text.toLowerCase() : text);
+            ? foldName(text) : text);
         const x = fold(a.slice(0, left));
         const y = fold(b.slice(0, right));
         return x < y ? -1 : x > y ? 1 : 0;
@@ -339,7 +330,7 @@ export function createStringFunctions(host, { A, W }){
      * @param {number} set @param {boolean} ignoreCase
      */
     const span = (width, text, set, ignoreCase)=>{
-        const fold = (/** @type {string} */ value)=>(ignoreCase ? value.toUpperCase() : value);
+        const fold = (/** @type {string} */ value)=>(ignoreCase ? foldName(value) : value);
         const string = width.read(text);
         const stops = width.read(set);
         if (string === null || stops === null)
@@ -378,7 +369,7 @@ export function createStringFunctions(host, { A, W }){
             const text = width.read(start);
             const wanted = searched(width, code);
             const at = text === null || wanted === null ? -1
-                : foldCase(text).indexOf(foldCase(wanted));
+                : foldName(text).indexOf(foldName(wanted));
             return at < 0 ? 0 : (start >>> 0) + at * width.unit;
         }, { returns: 'pointer' }),
 
@@ -531,7 +522,7 @@ export function createStringFunctions(host, { A, W }){
         ...both('StrStrI', 8, (width, [first, second])=>{
             const text = width.read(first);
             const wanted = width.read(second);
-            const at = text === null || !wanted ? -1 : foldCase(text).indexOf(foldCase(wanted));
+            const at = text === null || !wanted ? -1 : foldName(text).indexOf(foldName(wanted));
             return at < 0 ? 0 : (first >>> 0) + at * width.unit;
         }, { returns: 'pointer' }),
 
@@ -551,7 +542,7 @@ export function createStringFunctions(host, { A, W }){
             }
             const stop = (last >>> 0) === 0 ? text.length
                 : Math.min(text.length, Math.floor(((last >>> 0) - (source >>> 0)) / width.unit));
-            const at = stop <= 0 ? -1 : foldCase(text).lastIndexOf(foldCase(wanted), stop - 1);
+            const at = stop <= 0 ? -1 : foldName(text).lastIndexOf(foldName(wanted), stop - 1);
             return at < 0 ? 0 : (source >>> 0) + at * width.unit;
         }, { returns: 'pointer' }),
 
@@ -660,7 +651,7 @@ export function createStringFunctions(host, { A, W }){
         StrStrNIW: one(W, 12, (width, [first, second, count])=>{
             const text = width.read(first);
             const wanted = width.read(second);
-            const at = text === null || !wanted ? -1 : foldCase(text).indexOf(foldCase(wanted));
+            const at = text === null || !wanted ? -1 : foldName(text).indexOf(foldName(wanted));
             return at < 0 || at >= (count >>> 0) ? 0 : (first >>> 0) + at * width.unit;
         }),
 
@@ -735,7 +726,7 @@ export function createStringFunctions(host, { A, W }){
         ...both('ChrCmpI', 8, (width, [first, second])=>{
             const a = searched(width, first) ?? '';
             const b = searched(width, second) ?? '';
-            return foldCase(a) === foldCase(b) ? 0 : 1;
+            return foldName(a) === foldName(b) ? 0 : 1;
         }),
 
         /**
@@ -880,12 +871,12 @@ export function createStringFunctions(host, { A, W }){
             {
                 return 0;
             }
-            const wanted = width.char(code).toUpperCase();
+            const wanted = foldName(width.char(code));
             const stop = (end >>> 0) === 0 ? text.length
                 : Math.min(text.length, Math.floor(((end >>> 0) - (start >>> 0)) / width.unit));
             for (let at = stop - 1; at >= 0; at--)
             {
-                if (text[at].toUpperCase() === wanted)
+                if (foldName(text[at]) === wanted)
                 {
                     return (start >>> 0) + at * width.unit;
                 }
@@ -1009,8 +1000,8 @@ export function createStringFunctions(host, { A, W }){
         {
             const x = at < a.length ? a[at] : '';
             const y = at < b.length ? b[at] : '';
-            const left = ignoreCase ? x.toUpperCase() : x;
-            const right = ignoreCase ? y.toUpperCase() : y;
+            const left = ignoreCase ? foldName(x) : x;
+            const right = ignoreCase ? foldName(y) : y;
             if (left !== right)
             {
                 return (left.charCodeAt(0) || 0) - (right.charCodeAt(0) || 0) < 0 ? -1 : 1;

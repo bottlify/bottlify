@@ -20,6 +20,8 @@
  * told is still the surface's decision, not ours.
  */
 
+import { foldName } from '../../../system/text.js';
+
 /**
  * @typedef {Object} VfsErrorNames
  * @property {string} NOT_FOUND
@@ -480,7 +482,7 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
     /** @param {string} path  The volume's own spelling, no trailing separator. */
     const spelled = path=>attempt(()=>fs.resolve(path).path, path).replace(/\\+$/, '');
     /** @param {string} path  The volume's own spelling, folded, no trailing separator. */
-    const canonical = path=>spelled(path).toLowerCase();
+    const canonical = path=>foldName(spelled(path));
 
     /**
      * A change to one name, told to every watch over the directory it is in
@@ -517,12 +519,12 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
             }
             // Its removal is told; its move is not, as Windows does neither
             // more nor less.
-            const self = names.some((name, index)=>name.toLowerCase() === watch.directory
+            const self = names.some((name, index)=>foldName(name) === watch.directory
                 && kind === CHANGE_DIR_NAME && acts[index] === FILE_ACTION_REMOVED);
             /** @type {ChangeRecord[]} */
             const records = [];
             names.forEach((name, index)=>{
-                const folded = name.toLowerCase();
+                const folded = foldName(name);
                 const parent = folded.slice(0, Math.max(folded.lastIndexOf('\\'), 0));
                 if (parent === watch.directory
                     || (watch.subtree && parent.startsWith(`${watch.directory}\\`)))

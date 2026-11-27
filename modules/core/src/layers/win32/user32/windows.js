@@ -70,6 +70,7 @@ import { areaOf } from '../gdi32/regions.js';
 import { forwarded, paramsOf, wholeAddress, wideOf } from '../common/pointers.js';
 import { afterWait } from './after-wait.js';
 import { utf16 } from '../common/utf16.js';
+import { foldName } from '../../../system/text.js';
 
 /** @typedef {import('../gdi32/rects.js').Rect} Rect */
 
@@ -271,7 +272,7 @@ const INERT_CLASSES = Object.freeze(['SysHeader32', 'ToolbarWindow32', 'ReBarWin
  * its versioned name, or by its plain one under a context that holds that
  * assembly (`host.windowClass`), and by no other.
  */
-const VERSION_6_CLASSES = new Set(['syslink']);
+const VERSION_6_CLASSES = new Set(['SYSLINK']);
 
 /**
  * The standard arrow, as LoadCursor(NULL, IDC_ARROW) names it: the cursor of
@@ -1090,7 +1091,7 @@ export function createWindowFunctions(host){
     const classes = createClassRegistry({
         main: ()=>host.moduleHandle?.(null) ?? 0,
         user32: ()=>host.moduleHandle?.('user32.dll') ?? 0,
-        isSystem: name=>systemClasses.has(name.toLowerCase()),
+        isSystem: name=>systemClasses.has(foldName(name)),
     });
     /** @type {Map<number, string>} */
     const atoms = new Map();
@@ -1189,7 +1190,7 @@ export function createWindowFunctions(host){
      * @returns {any | null}
      */
     const versionedClass = (versioned, major, instance = 0, asking = 'create')=>{
-        const key = versioned.toLowerCase();
+        const key = foldName(versioned);
         if (!systemClasses.has(key))
         {
             const base = systemClasses.get(key.slice(key.indexOf('!') + 1));
@@ -1219,7 +1220,7 @@ export function createWindowFunctions(host){
         {
             return own;
         }
-        const folded = name.toLowerCase();
+        const folded = foldName(name);
         const found = systemClasses.get(folded);
         // A class of a later version only by its versioned name.
         const system = found?.since !== undefined && found.label === undefined ? null : found;
@@ -2157,8 +2158,8 @@ export function createWindowFunctions(host){
      * @param {string | null} title      Null matches any title.
      */
     const findOwn = (parent, after, className, title)=>{
-        const cls = className?.toLowerCase() ?? null;
-        const text = title?.toLowerCase() ?? null;
+        const cls = className === null ? null : foldName(className);
+        const text = title === null ? null : foldName(title);
         let reached = after === 0;
         for (const record of windows.values())
         {
@@ -2171,11 +2172,11 @@ export function createWindowFunctions(host){
             {
                 continue;
             }
-            if (cls !== null && String(record.className).toLowerCase() !== cls)
+            if (cls !== null && foldName(String(record.className)) !== cls)
             {
                 continue;
             }
-            if (text !== null && record.title.toLowerCase() !== text)
+            if (text !== null && foldName(record.title) !== text)
             {
                 continue;
             }
@@ -4159,7 +4160,7 @@ export function createWindowFunctions(host){
         }
         // A system class supplies the procedure and the name a program reads
         // back: `#128` in a template is the Button class.
-        const system = systemClasses.has(String(record.className).toLowerCase())
+        const system = systemClasses.has(foldName(String(record.className)))
             ? classNamed(String(record.className)) : null;
         if (system && record.wndProc === 0)
         {
@@ -4517,8 +4518,8 @@ export function createWindowFunctions(host){
         // an atom, or the name itself, as the caller passed it.
         const registeredName = record.cls?.baseName;
         const classBytes = (className >>> 0) > LAST_ATOM && registeredName !== undefined
-            && readText(host, className >>> 0, unicode, MAX_CLASS_NAME).toLowerCase()
-                !== registeredName.toLowerCase() ? nameIn(registeredName, unicode) : null;
+            && foldName(readText(host, className >>> 0, unicode, MAX_CLASS_NAME))
+                !== foldName(registeredName) ? nameIn(registeredName, unicode) : null;
         // Named once, before anything is awaited: a call made after the hook
         // has answered is answering a call the bridge has already let go of.
         const thread = caller ?? host.callerThread?.();
@@ -7025,8 +7026,8 @@ export function createWindowFunctions(host){
      *     background?: number, library?: boolean, style?: number }} definition
      */
     const registerSystemClass = definition=>{
-        systemClasses.set(definition.name.toLowerCase(), {
-            ...VERSION_6_CLASSES.has(definition.name.toLowerCase()) ? { since: 6 } : {},
+        systemClasses.set(foldName(definition.name), {
+            ...VERSION_6_CLASSES.has(foldName(definition.name)) ? { since: 6 } : {},
             name: definition.name,
             atom: definition.atom ?? 0,
             style: definition.style ?? 0,
@@ -7087,7 +7088,7 @@ export function createWindowFunctions(host){
     });
     for (const name of INERT_CLASSES)
     {
-        if (!systemClasses.has(name.toLowerCase()))
+        if (!systemClasses.has(foldName(name)))
         {
             registerLibraryClass({ name, procedure: inertProcedure(name) });
         }
@@ -7156,7 +7157,7 @@ export function createWindowFunctions(host){
             className: 0,
             iconSm: 0,
         };
-        systemClasses.set(definition.name.toLowerCase(), cls);
+        systemClasses.set(foldName(definition.name), cls);
         systemClasses.set(`#${definition.atom}`, cls);
         atoms.set(definition.atom, definition.name);
     });
