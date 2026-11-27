@@ -1294,12 +1294,15 @@ export function areaOf(call, cache){
  * keeps what it lets go of from memory and no later run reads, or null to
  * keep it all in memory.
  *
- * @param {AppOptions} options
+ * @param {AppOptions} options @param {any} events  where its failure is said
  */
-async function openRunFolderOf(options){
+async function openRunFolderOf(options, events){
     const spec = options.pageFile ?? 'local';
     return spec === false ? null
-        : openRunFolder({ root: spec === 'local' ? undefined : spec.root });
+        : openRunFolder({ root: spec === 'local' ? undefined : spec.root,
+            onFailure: error=>events.emit('loss', { api: 'filesystem', detail: 'the run\'s folder'
+                + ` did not open (${error?.message ?? error}): its page file and cache have no`
+                + ' disk, and keep all they hold in memory, within the cache\'s budget' }) });
 }
 
 /**
@@ -3985,8 +3988,9 @@ export async function createApp(options){
     // through a reader there (`processesBeside`). A process joined to a run
     // across a link is handed the run's reader (`options.cache`).
     // Both keep what they let go of from memory in the run's own folder.
-    const runFolder = options.system ? null : await openRunFolderOf(options);
+    const runFolder = options.system ? null : await openRunFolderOf(options, events);
     const runCache = options.system ? null : await openRunCache({ ...options.cache, runFolder,
+        onLoss: detail=>events.emit('loss', { api: 'cache', detail }),
         // An owner that went (a graphics root) leaving bodies under its names
         // past what it held: let go of now, said as what it is.
         onTail: tail=>events.emit('loss', { api: 'cache', detail: `${tail.prefix}: ${tail.bodies} `

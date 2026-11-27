@@ -122,6 +122,40 @@ async()=>{
     assert.deepEqual(opfs.names('bottlify-runs'), [], 'the run\'s folder goes with it');
 });
 
+test('a run\'s folder whose cache does not open is said, and its figures say why', async()=>{
+    /** @type {string[]} */
+    const lost = [];
+    let released = 0;
+    const runFolder = {
+        folder: { getDirectoryHandle: async()=>{
+            throw new DOMException('the origin refused it', 'SecurityError');
+        } },
+        use: ()=>()=>{
+            released++;
+        },
+    };
+    const run = await openRunCache({ budget: 16 << 20, runFolder,
+        onLoss: detail=>lost.push(detail) });
+    try
+    {
+        assert.equal(lost.length, 1);
+        assert.match(lost[0], /the origin refused it/);
+        assert.equal(run.figures().diskLost, 'the origin refused it');
+        assert.equal(released, 1, 'the folder let go of at once: nothing of the cache is in it');
+    }
+    finally
+    {
+        run.close();
+    }
+    assert.equal(released, 1, 'and not again with the run');
+});
+
+test('a run with no folder has no disk and nothing to say of it', async()=>{
+    const run = await openRunCache({ budget: 16 << 20, onLoss: ()=>assert.fail('said') });
+    assert.equal(run.figures().diskLost, null);
+    run.close();
+});
+
 test('the run\'s figures carry its budget and the most it held at once, after bodies went',
     async()=>{
         const MIB = 1 << 20;
