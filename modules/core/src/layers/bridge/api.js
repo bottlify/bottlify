@@ -19,6 +19,9 @@
  * - `park(thread?)` → the token a handler returns instead of an answer, having
  *   parked the caller. Nothing else produces one (§12.3).
  * - `calls()` — the imports the guest has called, in order.
+ * - `publishInterface(object, id)` → a COM interface pointer in guest memory;
+ *   a library publishes its own objects through `com-seam.js`
+ *   (`createComPublisher`), the one adapter between them and the bridge.
  *
  * @typedef {import("../../system/contract.js").ModuleConfig} Config
  */

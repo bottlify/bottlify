@@ -29,9 +29,11 @@
  */
 
 import { canonicalGuid } from './guid.js';
+import { IID_IUNKNOWN, IUNKNOWN_METHODS, methodTable } from '../../bridge/com-seam.js';
 
-/** IID_IUnknown. Every object answers to it and answers with the same record. */
-export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
+// The head of every vtable is the bridge's; the library objects here and in
+// the layers beside it take it from where they take the rest of COM.
+export { IID_IUNKNOWN, IUNKNOWN_METHODS };
 
 /**
  * @typedef {Object} ComMethod
@@ -95,13 +97,6 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @property {() => Promise<void> | void} [lastRelease]  As the definition's.
  */
 
-/** The head of every COM vtable, in the only order it is ever in. */
-export const IUNKNOWN_METHODS = Object.freeze([
-    Object.freeze({ name: 'QueryInterface', argBytes: 12, builtin: 'queryInterface' }),
-    Object.freeze({ name: 'AddRef', argBytes: 4, builtin: 'addRef' }),
-    Object.freeze({ name: 'Release', argBytes: 4, builtin: 'release' }),
-]);
-
 /** IID_IUnknown adds nothing of its own. */
 const IUNKNOWN_DESCRIPTOR = Object.freeze({ id: IID_IUNKNOWN, methods: [] });
 
@@ -137,29 +132,6 @@ function checkDescriptor(descriptor){
         }
     }
     return [id, descriptor];
-}
-
-/**
- * Each interface description's methods behind IUnknown's, made once: every
- * object of one description hands the same list to the bridge, which builds a
- * table -- stubs, and guest code for methods that have it -- once per list. A
- * list made per object built all of that again for every object, and a
- * program that made a few thousand objects of an interface with guest code
- * ran the stub table out.
- *
- * @type {WeakMap<object, readonly any[]>}
- */
-const fullMethods = new WeakMap();
-
-/** @param {ComInterfaceDescriptor} descriptor @returns {readonly any[]} */
-function methodsOf(descriptor){
-    let methods = fullMethods.get(descriptor);
-    if (!methods)
-    {
-        methods = Object.freeze([...IUNKNOWN_METHODS, ...descriptor.methods]);
-        fullMethods.set(descriptor, methods);
-    }
-    return methods;
 }
 
 /**
@@ -214,7 +186,10 @@ export function createComObject(clsid, definition){
             const record = Object.freeze({
                 object,
                 id: key,
-                methods: methodsOf(descriptor),
+                // One list per description (`methodTable`): the bridge builds a
+                // table of stubs per list, and a list per object ran the stubs
+                // out for a program that made a few thousand objects.
+                methods: methodTable(descriptor),
             });
             // Memoised, so the record -- and therefore the pointer published for
             // it -- is the same one every time this object is asked for this
