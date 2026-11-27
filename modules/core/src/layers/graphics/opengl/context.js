@@ -305,6 +305,10 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  *           levels, only their shapes: a context whose twin elsewhere draws
  *           has the data sent there with each call and never reads it again.
  *           Such a context reads a level back (glGetTexImage) as black.
+ * @property {import('./processor-levels.js').ProcessorLevels} [levels]
+ *           Where the processor path keeps its levels' RGBA and hands the levels no
+ *           draw samples to the texel store (`processor-levels.js`), shared by the
+ *           root's contexts; absent, the RGBA is plain memory and nothing moves.
  * @property {boolean} [keepPrimitives]
  *           Every primitive drawn is kept, with its vertices, for
  *           `submittedPrimitives` to answer -- what a test reads back to see
@@ -580,6 +584,7 @@ export function createGlContext(options = {}){
         bufferDeleted: gpu ? buffer=>gpu.releaseBuffer(buffer) : null,
         gpuBacked: ()=>gpu !== null && attached,
         keepTexels: options.keepTexels !== false,
+        levels: gpu ? null : options.levels ?? null,
         currentVertex,
         currentAttributes,
         side: {},

@@ -105,7 +105,12 @@ flowchart TB
   none has come back, and counted (`sent` in the presenter's report, `handoff.buffers` in the
   graphics worker's). An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
-  it while the level is unchanged. A game loads
+  it, and what an S3TC level decodes to, while the level is unchanged, held in the run's cache
+  under the root's names (`opengl/processor-levels.js`). On the processor a level's own bytes -
+  its RGBA texels, a sized level's data, its kept S3TC blocks - go to the texel store once no
+  draw has sampled the level since the look before (about a second of swaps), the same way and
+  through the same accessors as the device path's (`opengl/level-spill.js`), and its RGBA is let
+  go of with them; its first reader or writer takes them back. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of
   2132 textures held 88.5 MB this way. Once uploaded, they are let go; a read of the level's
   image (`glGetTexImage`) by the context that draws copies it back from the device, once what

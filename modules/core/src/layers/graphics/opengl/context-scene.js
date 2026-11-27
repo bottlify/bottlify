@@ -215,6 +215,8 @@ export function createSceneBuilder(kernel){
             {
                 const level = /** @type {import('./objects.js').TextureLevel} */ (
                     baseLevelOf(texture, face));
+                // Needed by a draw: the processor keeps its bytes where it reads them.
+                kernel.levels?.drawn(level);
                 images.push({
                     width: level.width,
                     height: level.height,

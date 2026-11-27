@@ -17,6 +17,7 @@
 import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createModelRenderer } from './gpu-model.js';
+import { createProcessorLevels } from './processor-levels.js';
 
 /** Swaps between two looks for texels no draw has needed (`spill`): about a second at 60. */
 const SPILL_SWAPS = 60;
@@ -38,6 +39,9 @@ const SPILL_SWAPS = 60;
  * @property {boolean} [compressedTextures]
  * @property {boolean} [astcTextures]
  * @property {import('./gpu.js').GpuServices['texelCache']} [texelCache]
+ * @property {import('../../cache/scratch.js').Hold | null} [hold]  memory of the run's
+ *           cache held for an object's life, null where there is no room: the RGBA a
+ *           context on the processor samples (`processor-levels.js`)
  * @property {boolean} [dumpDraws]
  * @property {number} [maxDraws]
  * @property {string | null} [skipTexture]
@@ -69,6 +73,17 @@ export function createOpenglRoot(services){
     let gpu;
     /** The share groups of the contexts made here, whose textures the diagnostics count. */
     const groups = new Set();
+    /**
+     * What the contexts on the processor keep of their levels, made with the
+     * first of them; and their share groups, looked through for idle levels.
+     *
+     * @type {import('./processor-levels.js').ProcessorLevels | null}
+     */
+    let processorLevels = null;
+    /** @type {Set<any>} */
+    const processorGroups = new Set();
+    /** @param {Set<any>} of */
+    const texturesOf = of=>[...of].flatMap(group=>[...group.textures.objects.values()]);
     let swaps = 0;
     const renderer = ()=>{
         if (gpu === undefined)
@@ -109,12 +124,19 @@ export function createOpenglRoot(services){
          *     root has, as the generic renderer of a memory DC does.
          */
         CreateContext(options){
+            const drawsOn = options.processor ? undefined : renderer() ?? undefined;
+            if (!drawsOn)
+            {
+                processorLevels ??= createProcessorLevels({ cache: services.texelCache ?? null,
+                    hold: services.hold ?? null, divergence: services.divergence ?? null });
+            }
             const context = createGlContext({
                 extensions: options.extensions,
                 version: options.version,
                 memory,
                 divergence: services.divergence,
-                gpu: options.processor ? undefined : renderer() ?? undefined,
+                gpu: drawsOn,
+                levels: drawsOn ? undefined : processorLevels ?? undefined,
                 // A model's twin draws, and is sent each level's data with
                 // the call that gives it: kept here as well, every texture a
                 // program loaded was held twice (the Doom 3 demo's first
@@ -125,6 +147,10 @@ export function createOpenglRoot(services){
                 keepPrimitives: services.keepPrimitives,
             });
             groups.add(context.shareGroup);
+            if (!drawsOn)
+            {
+                processorGroups.add(context.shareGroup);
+            }
             return context;
         },
 
@@ -140,9 +166,13 @@ export function createOpenglRoot(services){
             const shown = renderer()?.present(context) ?? null;
             // Now and then, what the contexts' textures hold that no draw has
             // needed goes to the run's cache (`spill`).
-            if (++swaps % SPILL_SWAPS === 0 && typeof gpu?.spill === 'function')
+            if (++swaps % SPILL_SWAPS === 0)
             {
-                gpu.spill([...groups].flatMap(group=>[...group.textures.objects.values()]));
+                if (typeof gpu?.spill === 'function')
+                {
+                    gpu.spill(texturesOf(groups));
+                }
+                processorLevels?.look(texturesOf(processorGroups));
             }
             return shown;
         },
@@ -160,6 +190,10 @@ export function createOpenglRoot(services){
 
         diagnostics: ()=>{
             const figures = renderer()?.diagnostics() ?? null;
+            if (figures === null && processorLevels)
+            {
+                return { processorLevels: processorLevels.figures() };
+            }
             if (figures === null || typeof gpu?.heldTexels !== 'function')
             {
                 return figures;

@@ -46,6 +46,7 @@ import {
 import {
     VIEW_TARGETS, ViewDirty, ViewLevels, layerCount, viewCompatible, viewReadable,
 } from './texture-views.js';
+import { dropRgba, forgetRgba, keepRgba, keptRgba } from './processor-levels.js';
 
 /** glGetTexParameter's names for what glTexStorage makes (OpenGL 4.2, GL_ARB_texture_storage). */
 export const TEXTURE_IMMUTABLE_FORMAT = 0x912f;
@@ -236,23 +237,6 @@ const DEPTH_TEXTURE_MODES = new Set([GL.LUMINANCE, GL.INTENSITY, GL.ALPHA, GL.RE
  */
 const environmentBase = sized=>(sized.base === GL.RED || sized.base === TEX.RG
     ? GL.RGB : sized.base);
-
-/** The RGBA bytes made from a sized level's data, while that data is unchanged. */
-/** @type {WeakMap<object, Uint8Array | null>} */
-const rgbaCache = new WeakMap();
-
-/**
- * Forgets the RGBA kept of a level whose bytes were written, and of the
- * level it reads them from (a texture view's, `texture-views.js`).
- *
- * @param {import('./objects.js').TextureLevel | undefined} level
- */
-function forgetRgba(level){
-    for (let at = level; at; at = at.source)
-    {
-        rgbaCache.delete(at);
-    }
-}
 
 /**
  * Pixels a list holds already in the level's own layout: replayed, they are
@@ -1550,7 +1534,7 @@ export function installTextureCalls(context, kernel){
                 ? blankStorage(kept, width, height, depth) : null),
             compressed: null,
             get texels(){
-                const cached = rgbaCache.get(level);
+                const cached = keptRgba(level);
                 if (cached !== undefined)
                 {
                     return cached;
@@ -1559,15 +1543,12 @@ export function installTextureCalls(context, kernel){
                 // On a device the RGBA is read by a call (a read-back, a copy)
                 // and made again at the next: kept, every level read once would
                 // hold it beside its data for as long as the texture lives. The
-                // processor's rasteriser reads it every draw and keeps it.
-                if (!kernel.gpuBacked())
-                {
-                    rgbaCache.set(level, made);
-                }
-                return made;
+                // processor's rasteriser reads it every draw and keeps it, in
+                // the run's cache (`processor-levels.js`).
+                return kernel.gpuBacked() ? made : keepRgba(level, made, kernel.levels);
             },
             set texels(value){
-                rgbaCache.set(level, value);
+                keepRgba(level, value, null);
             },
         };
         return level;
@@ -2028,7 +2009,13 @@ export function installTextureCalls(context, kernel){
         }
         // Read once: a compressed level decodes at each read on a device, and
         // from this write on the level is the texels it holds, not its blocks.
-        const into = level.texels ?? new Uint8Array(level.width * level.height * 4);
+        // RGBA in shared memory is the cache's, held for the rasteriser
+        // (`processor-levels.js`) and let go of when the level changes: the
+        // level takes a copy of its own.
+        const read = level.texels;
+        const into = read && !(read.buffer instanceof SharedArrayBuffer) ? read
+            : read?.slice() ?? new Uint8Array(level.width * level.height * 4);
+        dropRgba(level);
         for (let y = 0; y < height; y++)
         {
             into.set(
@@ -2587,11 +2574,10 @@ export function installTextureCalls(context, kernel){
         // device takes no blocks, and not kept: decoded, a level holds four to
         // eight times its blocks for as long as the texture lives (the Doom 3
         // demo's first level, 47 MB of blocks). A processor's rasteriser reads
-        // them every draw and keeps them. The blocks are read from the level,
-        // not held apart: the drawing side may move them into the run's cache
-        // while no draw needs them (`gpu.js` `spill`).
-        /** @type {Uint8Array | null | undefined} */
-        let decoded;
+        // them every draw and keeps them, held in the run's cache. The blocks
+        // are read from the level, not held apart: the drawing side may move
+        // them into the run's cache while no draw needs them (`gpu.js`
+        // `spill`, `processor-levels.js`).
         const decode = ()=>{
             const blocks = level.compressed?.bytes;
             return blocks && width > 0 && height > 0
@@ -2602,12 +2588,12 @@ export function installTextureCalls(context, kernel){
             width, height, internalFormat: internal, border,
             baseFormat: /** @type {number} */ (baseFormatOf(internal)),
             get texels(){
-                if (kernel.gpuBacked())
+                const rgba = keptRgba(level);
+                if (rgba)
                 {
-                    return decoded ?? decode();
+                    return rgba;
                 }
-                decoded ??= decode();
-                return decoded;
+                return kernel.gpuBacked() ? decode() : keepRgba(level, decode(), kernel.levels);
             },
             compressedFormat: internal,
             compressedBytes: compressedBytes(internal, width, height),

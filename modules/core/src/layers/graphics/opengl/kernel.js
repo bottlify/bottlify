@@ -112,6 +112,9 @@
  *           a device rather than in `framebuffer()`, which then holds nothing
  * @property {boolean} keepTexels  whether texture levels keep their texels and
  *           blocks (`GlContextOptions.keepTexels`)
+ * @property {import('./processor-levels.js').ProcessorLevels | null} levels  what the
+ *           processor path keeps of its levels under the run's cache, null for none
+ *           (`GlContextOptions.levels`)
  * @property {() => any} currentAttributes  the current attributes, shared and not to
  *           be written
  * @property {() => any} currentVertex  the current attributes, as a vertex

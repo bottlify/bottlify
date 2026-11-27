@@ -721,6 +721,15 @@ export function createGraphicsModule(){
                 return owned;
             };
             /**
+             * An OpenGL root's names in the run's cache, where it draws here:
+             * the levels it keeps there, and the RGBA its processor contexts
+             * sample held under them.
+             */
+            const openglTexels = ()=>{
+                const owned = remote ? null : ownTexels();
+                return { texelCache: owned, hold: owned?.space.hold ?? null };
+            };
+            /**
              * A Direct3D 8 or 9 root, drawn here or in the graphics worker.
              *
              * @param {'d3d8' | 'd3d9'} name @param {(services: any) => any} factory
@@ -1006,9 +1015,10 @@ export function createGraphicsModule(){
                     // guest's own code.
                     compressedTextures,
                     astcTextures,
-                    // Made only where the contexts draw here: a root in the
-                    // graphics worker is given names of its own there.
-                    texelCache: device && !remote ? ownTexels() : null,
+                    // Made only where the contexts draw here, on a device or on
+                    // the processor: a root in the graphics worker is given names
+                    // of its own there.
+                    ...openglTexels(),
                     presenter: ()=>state.shown,
                     frameQueued,
                     // The same per-draw account the Direct3D 8 device takes, on
