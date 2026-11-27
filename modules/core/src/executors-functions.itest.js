@@ -7,11 +7,12 @@
 /**
  * One translation for every executor of a process past its own:
  * their translations are made for the process's shared layout, the
- * same bytes on each, and kept in one arena all of them and their translators
- * share. A routine made hot by a thread on one of them and then run by a
- * thread on another is not emitted there again: the second takes the first's
- * functions from the arena. (The process's own executor translates for a
- * layout of its own, its state at constant addresses.)
+ * same bytes on each, and the functions emitted are bodies of the run's cache
+ * every one of them and their translators read in place. A routine made hot by
+ * a thread on one of them and then run by a thread on another is not emitted
+ * there again: the second takes the first's functions from the run's cache.
+ * (The process's own executor translates for a layout of its own, its state at
+ * constant addresses.)
  */
 
 import { test } from 'node:test';
@@ -91,21 +92,30 @@ function expected(){
     return eax & 0xff;
 }
 
-test('a routine a thread made hot on one executor is taken from the process\'s arena on another',
+test('a routine a thread made hot on one executor is taken from the run\'s cache on another',
     { timeout: 120_000 }, async()=>{
         const app = await createApp({ executable: buildExecutable(),
             cpu: { cores: 3 } });
         try
         {
             const code = await app.run({ timeoutMs: 60_000 });
+            // The executors answer a report between their slices: the second
+            // carries their answer to the first.
+            await app.diagnostics();
+            await new Promise(resolve=>setTimeout(resolve, 200));
             const tables = await app.diagnostics();
             const cpu = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'cpu');
-            const arena = cpu?.metrics?.cork?.arena;
+            const metrics = cpu?.metrics;
             assert.equal(code >>> 0, expected());
-            assert.ok(arena, 'the process has an arena');
-            // Looked up on both, written by the first: one emission for the two.
-            assert.ok(arena.hits > 0 && arena.writes < arena.lookups,
-                `the arena: ${JSON.stringify(arena)}`);
+            assert.ok(metrics?.cork?.kept, 'the process keeps its functions in the run\'s cache');
+            // Emitted on the first, taken on the second: one emission for the two.
+            // Each executor's runtime counts what it took; the process's counts
+            // say nothing of another executor's.
+            const executors = metrics.executors ?? [];
+            const hits = executors.reduce((sum, /** @type {any} */ one)=>sum
+                + (one?.cork?.kept?.hits ?? 0), metrics.cork.kept.hits);
+            assert.ok(hits > 0, `the run's cache: process ${JSON.stringify(metrics.cork.kept)}, `
+                + `executors ${JSON.stringify(executors.map((/** @type {any} */ one)=>one?.cork?.kept))}`);
         }
         finally
         {

@@ -14,7 +14,8 @@
  *
  * The program finds a manifest resource in each library, by its module
  * handle, and exits with both sizes. What the process holds in array buffers
- * once it has run is measured with libraries grown by megabytes of file
+ * once it has run, past the run's cache (the machine's memory, where the
+ * volume's files lie), is measured with libraries grown by megabytes of file
  * data and with the same libraries at their own size: the difference was
  * twice the bytes added to the shipped library (its file and its mapped image)
  * and once those added to the one loaded at run time, and is none of them now.
@@ -137,7 +138,10 @@ async function heldAfterRun(extra, settle){
     {
         const code = await app.run({ timeoutMs: 100000 });
         await settle();
-        return { code, held: process.memoryUsage().arrayBuffers - before };
+        // The run's cache is the machine's memory, where the volume's files
+        // lie (the page file's pieces): what is held past it is the engine's.
+        const cached = app.runCache()?.segmentBytes ?? 0;
+        return { code, held: process.memoryUsage().arrayBuffers - before - cached };
     }
     finally
     {

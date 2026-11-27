@@ -10,6 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { noCache } from '../cache/module.js';
 import { cpuModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { readTable } from '../log/internal/table.js';
@@ -32,7 +33,7 @@ async function booted(code, at, config = {}){
     /** @type {string[]} */
     const words = [];
     const moduleHost = /** @type {any} */ ({
-        requireApi: ()=>({
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {
             metrics,
             /** @param {string} text */
             intern: text=>{
@@ -55,7 +56,7 @@ test('the frame counters carry what the host wrote into guest memory', async()=>
     const api = await cpuModule.create({
         engineUrl: CORK,
     }, /** @type {any} */ ({
-        requireApi: ()=>({ metrics, intern: ()=>-1 }), provide: ()=>{},
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : { metrics, intern: ()=>-1 }), provide: ()=>{},
     }));
     await api.boot();
     api.writePhysical(GUEST_CODE, new Uint8Array([0xf4]));
@@ -151,7 +152,7 @@ test('a second instance in one realm boots on its own, never seeing the first on
         const metrics = createMetrics();
         const second = await cpuModule.create({ engineUrl: CORK },
             /** @type {any} */ ({
-                requireApi: ()=>({ metrics, intern: ()=>-1 }),
+                requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : { metrics, intern: ()=>-1 }),
                 provide: ()=>{},
             }));
         // The check reads this instance's own host, not the module's, which

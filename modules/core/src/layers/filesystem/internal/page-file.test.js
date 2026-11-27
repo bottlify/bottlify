@@ -271,6 +271,25 @@ test('what is held in memory stays within the bound being written; the rest are 
     }
 });
 
+test('a piece one write fills whole is put in the cache from where its bytes lie, nothing of it '
+    + 'held in memory; one filled a write at a time is held until put', async()=>{
+    const { keeper, space } = await pieceSpace(cacheSpace, { budget: 16 << 20 });
+    const pageFile = createPageFile(space, { workingBytes: 8 * PIECE_SIZE });
+    const store = createPageFileStore(pageFile);
+    // A file laid down whole - a session's file restored, a copy - in one write.
+    const whole = Uint8Array.from({ length: 4 * PIECE_SIZE + 100 }, (_, at)=>(at * 7) & 0xff);
+    store.write('lib.dll', 0, whole);
+    assert.equal(pageFile.diagnostics().workingPieces, 1,
+        'only the piece the write did not fill is held');
+    assert.equal(keeper.under('pages/').bodies, 4, 'the four whole pieces are bodies at once');
+    assert.deepEqual(store.read('lib.dll', 0, whole.length), whole, 'read back as written');
+    // Written into again, a whole piece comes back into memory as before.
+    store.write('lib.dll', PIECE_SIZE + 3, Uint8Array.of(9));
+    assert.equal(store.read('lib.dll', PIECE_SIZE + 3, 1)[0], 9);
+    assert.deepEqual([keeper.under('pages/').bodies, pageFile.diagnostics().workingPieces], [3, 2],
+        'every piece in one place');
+});
+
 test('once the cache has no room, a piece written again is held once, and pieces go back to the '
     + 'cache once it has room again', async()=>{
     // No disk: the cache's memory is all it has, as a run with no folder.
@@ -278,9 +297,12 @@ test('once the cache has no room, a piece written again is held once, and pieces
     const pageFile = createPageFile(space, { workingBytes: PIECE_SIZE });
     const store = createPageFileStore(pageFile);
     const held = ()=>keeper.under('pages/').bytes + pageFile.workingBytes();
+    // Each piece a half at a time: filled a write at a time, held until put.
+    const half = PIECE_SIZE / 2;
     for (let index = 0; index < 6; index++)
     {
-        store.write('big.bin', index * PIECE_SIZE, new Uint8Array(PIECE_SIZE).fill(index + 1));
+        store.write('big.bin', index * PIECE_SIZE, new Uint8Array(half).fill(index + 1));
+        store.write('big.bin', index * PIECE_SIZE + half, new Uint8Array(half).fill(index + 1));
     }
     assert.ok(pageFile.diagnostics().refused);
     assert.equal(pageFile.diagnostics().stalled, true);
@@ -291,7 +313,10 @@ test('once the cache has no room, a piece written again is held once, and pieces
     }
     // The file goes: its bodies with it, and the next file's pieces are put.
     store.remove('big.bin');
-    store.write('next.bin', 0, new Uint8Array(3 * PIECE_SIZE).fill(5));
+    for (let at = 0; at < 3 * PIECE_SIZE; at += half)
+    {
+        store.write('next.bin', at, new Uint8Array(half).fill(5));
+    }
     assert.equal(pageFile.workingBytes(), PIECE_SIZE, 'within the bound again');
     assert.equal(keeper.under('pages/').bytes, 2 * PIECE_SIZE, 'the rest put in the cache');
     assert.equal(pageFile.diagnostics().stalled, false);

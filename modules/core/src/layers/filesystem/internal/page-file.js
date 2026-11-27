@@ -254,6 +254,34 @@ export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
         read,
 
         /**
+         * A piece one write fills whole, put in the cache from where its
+         * bytes lie: nothing of it is held in memory, as a piece filled a
+         * write at a time is until it is put. Null where the cache would not
+         * take it (refused, said once): the write goes on in memory.
+         *
+         * @param {Uint8Array} bytes @returns {Piece | null}
+         */
+        whole(bytes){
+            if (stalled >= 0)
+            {
+                return null;
+            }
+            /** @type {Piece} */
+            const piece = { key: String(next++), length: bytes.length, bytes: null, kept: true,
+                refs: 1 };
+            if (!space.put(piece.key, bytes))
+            {
+                refuse();
+                return null;
+            }
+            kept.add(piece);
+            keptBytes += piece.length;
+            counts.put++;
+            counts.putBytes += bytes.length;
+            return piece;
+        },
+
+        /**
          * A piece's bytes to change, in memory: held until `trim` puts it. Its
          * body in the cache is let go of as it is brought in: a piece is in
          * one place, so every byte written is held once, and a body is never
@@ -632,8 +660,22 @@ export function createPageFileStore(pageFile){
             const index = Math.floor(at / PIECE_SIZE);
             const within = at % PIECE_SIZE;
             const span = Math.min(bytes.length - done, PIECE_SIZE - within);
-            pieceFor(entry, index, within + span).set(bytes.subarray(done, done + span), within);
-            pageFile.trim();
+            const whole = span === PIECE_SIZE
+                ? pageFile.whole(bytes.subarray(done, done + span)) : null;
+            if (whole)
+            {
+                const old = entry.pieces[index];
+                if (old)
+                {
+                    pageFile.release(old);
+                }
+                entry.pieces[index] = whole;
+            }
+            else
+            {
+                pieceFor(entry, index, within + span).set(bytes.subarray(done, done + span), within);
+                pageFile.trim();
+            }
             done += span;
         }
         entry.size = Math.max(entry.size, offset + bytes.length);

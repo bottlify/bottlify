@@ -744,9 +744,11 @@ test('the writable layer says what it holds, and on a page file holds no more th
             { workingBytes: PIECE_SIZE }) });
         const handle = fs.open(at('setup.tmp'),
             { write: true, disposition: fs.Disposition.CREATE_NEW });
+        // Each piece a half at a time: filled a write at a time, held until put.
         for (let index = 0; index < 8; index++)
         {
-            fs.write(handle, new Uint8Array(PIECE_SIZE).fill(index + 1));
+            fs.write(handle, new Uint8Array(PIECE_SIZE / 2).fill(index + 1));
+            fs.write(handle, new Uint8Array(PIECE_SIZE / 2).fill(index + 1));
         }
         fs.close(handle);
         const report = /** @type {any} */ (paged.diagnostics()).metrics;
