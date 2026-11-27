@@ -32,9 +32,8 @@ import { wholeAddress } from '../common/pointers.js';
  * @typedef {Object} UcrtMathHost
  * @property {import('./float.js').FloatHost} fpu
  * @property {(code: number) => void} errno
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {number} pointerSize
+ * @property {import('../common/guest.js').Guest} guest  What the handlers and the
+ *     routines in the guest read and write, at the process's width.
  * @property {(index: number) => Uint32Array} [readXmm]
  * @property {(index: number, words: Uint32Array) => void} [writeXmm]
  */
@@ -236,8 +235,7 @@ export function createUcrtMathFunctions(host){
     table.modff = returningSingle(fpu, 8, ([bits, out])=>{
         const x = readSingle([bits], 0);
         const whole = Number.isFinite(x) ? Math.trunc(x) : x;
-        scratch.setFloat32(0, whole, true);
-        host.writeMemory(wholeAddress(out), new Uint8Array(scratch.buffer, 0, 4));
+        host.guest.setF32(wholeAddress(out), whole);
         return Number.isNaN(x) ? x : Number.isFinite(x) ? x - whole : copySign(0, x);
     }, ONE_FLOAT);
 
@@ -307,8 +305,7 @@ export function createUcrtMathFunctions(host){
      * short _fdtest(float *x), int _dsign(double x), int _fdsign(float x): the
      * class and the sign from the bits, in the guest (`inguest-float.js`).
      */
-    const memory = { readMemory: host.readMemory, writeMemory: host.writeMemory,
-        pointerSize: host.pointerSize };
+    const memory = { guest: host.guest };
     table.modff = guestEntry(inGuestMath.modff, MATH_CODE.modff, { fpu, ...memory },
         table.modff);
     for (const name of /** @type {const} */ (['_dclass', '_fdclass', '_dtest', '_fdtest',
@@ -331,7 +328,7 @@ export function createUcrtMathFunctions(host){
         const fpe = args[0] >>> 0;
         let result = doubleArg(args, 4);
         const word = args[6] >>> 0;
-        const masks = host.pointerSize === 8 ? word >>> 7 & 0x3f : word;
+        const masks = host.guest.pointerSize === 8 ? word >>> 7 & 0x3f : word;
         const first = EXCEPT1.find(({ bit })=>(fpe & bit) !== 0);
         if (first && (masks & first.mask) === 0)
         {
@@ -345,14 +342,14 @@ export function createUcrtMathFunctions(host){
         {
             result = copySign(Infinity, result);
         }
-        if (host.pointerSize !== 8)
+        if (host.guest.pointerSize !== 8)
         {
             fpu.setControlWord?.(word & 0xffff);
         }
         return result;
     }, { 2: 'f64', 4: 'f64' });
 
-    if (host.pointerSize === 4 && host.readXmm && host.writeXmm)
+    if (host.guest.pointerSize === 4 && host.readXmm && host.writeXmm)
     {
         const { readXmm, writeXmm } = host;
         /** @param {number} index */

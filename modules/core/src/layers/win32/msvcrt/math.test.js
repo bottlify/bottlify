@@ -12,6 +12,7 @@ import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
 import { GUEST_EXCEPTION } from '../common/raise.js';
 import { EDOM, ERANGE } from './globals.js';
 import { fakeMemory, fakeFpu, doubleSlots } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const build = ()=>{
     const memory = fakeMemory();
@@ -23,7 +24,7 @@ const build = ()=>{
         fpu,
         errors,
         table: /** @type {Record<string, any>} */ (createMathFunctions({
-            readMemory: memory.readMemory, writeMemory: memory.writeMemory, fpu,
+            guest: memory.guest, fpu,
             errno: code=>void errors.push(code),
         })),
     };
@@ -90,7 +91,7 @@ test('_ftol\'s handler, where EDX can be set, pops ST0 and answers both halves',
     const registers = {};
     const memory = fakeMemory();
     const table = /** @type {Record<string, any>} */ (createMathFunctions({
-        readMemory: memory.readMemory, writeMemory: memory.writeMemory, fpu,
+        guest: memory.guest, fpu,
         setRegisters: values=>Object.assign(registers, values),
     }));
     fpu.load([-(2 ** 40) - 0.5]);
@@ -111,6 +112,27 @@ test('frexp splits into a mantissa in [0.5, 1) and an exponent', ()=>{
     table.frexp.handler([...doubleSlots(24), exponent]);
     assert.equal(fpu.result, 0.75);
     assert.equal(memory.i32(exponent), 5);
+});
+
+test('at 64 bits past 4 GiB: frexp, modf and _cabs reach their pointers whole', ()=>{
+    // The window's first byte: its address's low dword is zero.
+    const base = 0x100000000;
+    const bytes = new Uint8Array(0x100);
+    const view = new DataView(bytes.buffer);
+    const fpu = fakeFpu();
+    const table = /** @type {Record<string, any>} */ (createMathFunctions({
+        guest: guestWindow(bytes, { base, pointerSize: 8 }), fpu,
+    }));
+    table.frexp.handler([...doubleSlots(24), base]);
+    assert.equal(fpu.result, 0.75);
+    assert.equal(view.getInt32(0, true), 5, 'the exponent where it points');
+    table.modf.handler([...doubleSlots(-2.5), base + 8]);
+    assert.equal(fpu.result, -0.5);
+    assert.equal(view.getFloat64(8, true), -2, 'the integral part where it points');
+    view.setFloat64(0x10, 3, true);
+    view.setFloat64(0x18, 4, true);
+    table._cabs.handler([base + 0x10]);
+    assert.equal(fpu.result, 5, 'a struct _complex by its address, whole');
 });
 
 test('frexp answers zero for both halves at zero', ()=>{
@@ -242,7 +264,7 @@ test('div and ldiv answer in EAX and EDX, and raise what idiv raises', ()=>{
     const registers = {};
     const memory = fakeMemory();
     const table = /** @type {Record<string, any>} */ (createMathFunctions({
-        readMemory: memory.readMemory, writeMemory: memory.writeMemory, fpu: fakeFpu(),
+        guest: memory.guest, fpu: fakeFpu(),
         setRegisters: values=>Object.assign(registers, values),
     }));
     assert.equal(table.div.handler([-7, 2]) | 0, -3);

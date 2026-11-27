@@ -27,22 +27,10 @@ import { pointerWidth, wholeAddress } from '../common/pointers.js';
 /**
  * @typedef {Object} StringHost
  * @property {import('../common/guest.js').Guest} guest  What the handlers read and
- *     write, at the process's pointer width.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- *     With writeMemory, what the routines that run in the guest read and write
- *     when they answer as handlers (`guestEntry`).
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, limit: number, wanted: Uint8Array) =>
- *            { index: number, byte: number }} scanCString
- *     Walks a guest string's bytes in chunks and answers with the first one a
- *     table marks -- or the terminator -- without materialising the string.
- *     The span and search functions below answer from a position near the
- *     front of buffers that reach megabytes; reading the text to find it was
- *     the largest host cost in an install that scans while it copies.
+ *     write, at the process's pointer width, and the routines that run in the
+ *     guest read and write when they answer as handlers (`guestEntry`).
  * @property {(bytes: number) => number} allocate  Guest memory that outlives a call.
  * @property {(code: number) => void} [errno]  Where a refused parameter says why.
- * @property {number} [pointerSize]  8 in a 64-bit process, where the routines in the
- *     guest read pointers of eight bytes.
  */
 
 /** A string is scanned no further than this, since nothing in C bounds one. */
@@ -95,11 +83,19 @@ export function createStringFunctions(host){
     let tokenAt = 0;
 
     /**
-     * The scan table's scratch. Handlers answer one call at a time and never
-     * await inside a scan, so one table per runtime is safe and saves clearing
-     * a fresh one per call.
+     * A string's bytes before its terminator, read where they lie a byte at a
+     * time: the answer sits at the terminator, and no text is made to find it.
+     *
+     * @param {number} at
      */
-    const scanTable = new Uint8Array(256);
+    const lengthOf = at=>{
+        let length = 0;
+        while (length < MAX_STRING && guest.u8(at + length) !== 0)
+        {
+            length++;
+        }
+        return length;
+    };
 
     /**
      * @param {(text: string) => string} transform
@@ -276,22 +272,22 @@ export function createStringFunctions(host){
                     host.errno?.(EINVAL);
                     return NLS_COMPARE_ERROR;
                 }
-                /** @param {number} at */
-                const bytesOf = at=>guest.bytes(at,
-                    host.scanCString(at, MAX_STRING, scanTable.fill(0)).index + 1);
-                const a = bytesOf(wholeAddress(left));
-                const b = bytesOf(wholeAddress(right));
-                for (let at = 0; ; at++)
+                const a = wholeAddress(left);
+                const b = wholeAddress(right);
+                for (let at = 0; at < MAX_STRING; at++)
                 {
-                    if (a[at] !== b[at])
+                    const x = guest.u8(a + at);
+                    const y = guest.u8(b + at);
+                    if (x !== y)
                     {
-                        return a[at] < b[at] ? -1 >>> 0 : 1;
+                        return x < y ? -1 >>> 0 : 1;
                     }
-                    if (a[at] === 0)
+                    if (x === 0)
                     {
                         return 0;
                     }
                 }
+                return 0;
             },
         },
 
@@ -315,7 +311,7 @@ export function createStringFunctions(host){
                     host.errno?.(EINVAL);
                     return INT_MAX;
                 }
-                const length = host.scanCString(source, MAX_STRING, scanTable.fill(0)).index;
+                const length = lengthOf(wholeAddress(source));
                 if (room !== 0)
                 {
                     guest.copy(destination, source, Math.min(room, length + 1));

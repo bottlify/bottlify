@@ -38,12 +38,10 @@ export const LATER_HEAP = Symbol('later heap functions');
  * @property {(address: number) => boolean} free
  * @property {(address: number) => { size: number, capacity: number } | null} block
  * @property {(address: number, bytes: number) => boolean} resize
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, value: number, length: number) => void} fillMemory
- *     Sets a range to one byte value in place, with no host buffer holding
- *     the pattern: the lengths are the program's, and a clear of a megabyte
- *     through writeMemory costs an allocation and two extra passes.
+ * @property {import('../common/guest.js').Guest} guest  What the handlers read and
+ *     write, at the process's pointer width: an aligned block keeps a whole
+ *     pointer below itself, and a clear of the program's length is the
+ *     memory layer's own fill, with no host buffer holding the pattern.
  * @property {(code: number) => void} [errno]  Where a failure says why.
  * @property {ReturnType<typeof import('../kernel32/guest-heap.js').createGuestHeap>} [guestHeap]
  *     Where the small blocks are the guest's own: malloc, free, calloc,
@@ -57,9 +55,6 @@ export const LATER_HEAP = Symbol('later heap functions');
  * @property {() => any} [currentThread]
  */
 
-/** A pointer's size: what an aligned block keeps below itself, and its least alignment. */
-const POINTER = 4;
-
 /** The small-block threshold's step and its most. */
 const SBH_STEP = 16;
 const SBH_MAX = 1016;
@@ -68,6 +63,13 @@ const SBH_MAX = 1016;
  * @param {HeapHost} host
  */
 export function createHeapFunctions(host){
+    const { guest } = host;
+    /**
+     * A pointer's size: what an aligned block keeps below itself, and its
+     * least alignment -- eight in a 64-bit process, as its runtime keeps a
+     * uintptr_t there.
+     */
+    const POINTER = guest.pointerSize;
     /** @param {number} bytes */
     const malloc = bytes=>host.allocate(bytes >>> 0);
 
@@ -85,13 +87,13 @@ export function createHeapFunctions(host){
      *
      * @param {number} block
      */
-    const savedSlot = block=>(block - POINTER & ~(POINTER - 1)) >>> 0;
+    const savedSlot = block=>{
+        const below = wholeAddress(block) - POINTER;
+        return below - below % POINTER;
+    };
 
     /** The address malloc gave for an aligned block. @param {number} block */
-    const alignedBase = block=>{
-        const saved = host.readMemory(savedSlot(block), POINTER);
-        return new DataView(saved.buffer, saved.byteOffset, POINTER).getUint32(0, true);
-    };
+    const alignedBase = block=>guest.ptr(savedSlot(block));
 
     /**
      * _aligned_offset_malloc's body.
@@ -113,9 +115,7 @@ export function createHeapFunctions(host){
             return 0;
         }
         const block = Math.ceil((base + POINTER + offset) / step) * step - offset;
-        const saved = new Uint8Array(POINTER);
-        new DataView(saved.buffer).setUint32(0, base, true);
-        host.writeMemory(savedSlot(block), saved);
+        guest.setPtr(savedSlot(block), base);
         return block;
     };
 
@@ -145,7 +145,7 @@ export function createHeapFunctions(host){
         const kept = Math.min(held, size);
         if (kept > 0)
         {
-            host.writeMemory(moved, host.readMemory(block, kept));
+            guest.copy(moved, block, kept);
         }
         host.free(base);
         return moved;
@@ -180,7 +180,7 @@ export function createHeapFunctions(host){
         const moved = alignedResize(block, bytes, alignment, offset);
         if (moved !== 0 && bytes > before)
         {
-            host.fillMemory(moved + before, 0, bytes - before);
+            guest.fill(moved + before, 0, bytes - before);
         }
         return moved;
     };
@@ -230,9 +230,9 @@ export function createHeapFunctions(host){
     const freeHandler = ([address])=>{
         // Freeing null is defined and common: it is what a cleanup path does
         // when the allocation it is unwinding never happened.
-        if ((address >>> 0) !== 0)
+        if (wholeAddress(address) !== 0)
         {
-            host.free(address);
+            host.free(wholeAddress(address));
         }
         return 0;
     };
@@ -250,8 +250,8 @@ export function createHeapFunctions(host){
         {
             return routines;
         }
-        const guest = /** @type {NonNullable<HeapHost['guestHeap']>} */ (host.guestHeap);
-        const placement = guest.placement();
+        const guestHeap = /** @type {NonNullable<HeapHost['guestHeap']>} */ (host.guestHeap);
+        const placement = guestHeap.placement();
         const heap = /** @type {() => number} */ (host.heapHandle)();
         const allocateCode = /** @type {(bytes: number) => number} */ (host.allocateCode);
         /**
@@ -266,12 +266,12 @@ export function createHeapFunctions(host){
                 convention: 'cdecl', argBytes: entry.argBytes, handler: entry.handler,
                 returns: entry.returns, ...entry.sizes ? { sizes: entry.sizes } : {},
             });
-            if (placement === null || !guest.isHeap(heap))
+            if (placement === null || !guestHeap.isHeap(heap))
             {
                 return trap;
             }
             const at = allocateCode(code(placement, 0, trap).length);
-            host.writeMemory(at, code(placement, at, trap));
+            guest.setBytes(at, code(placement, at, trap));
             return at;
         };
         routines = {
@@ -313,11 +313,11 @@ export function createHeapFunctions(host){
             /** @param {import('../kernel32/guest-heap-long.js').LongBuilder} builder */
             long: builder=>{
                 const [entryOf, make] = longRoutines[which];
-                const guest = /** @type {NonNullable<HeapHost['guestHeap']>} */ (host.guestHeap);
-                const placement = guest.placement();
+                const guestHeap = /** @type {NonNullable<HeapHost['guestHeap']>} */ (host.guestHeap);
+                const placement = guestHeap.placement();
                 const heap = /** @type {() => number} */ (host.heapHandle)();
                 const entry = entryOf();
-                return bindLong(builder, placement === null || !guest.isHeap(heap) ? null
+                return bindLong(builder, placement === null || !guestHeap.isHeap(heap) ? null
                     : make(placement, heap), {
                     convention: 'cdecl', argBytes: entry.argBytes, handler: entry.handler,
                     returns: entry.returns, ...entry.sizes ? { sizes: entry.sizes } : {},
@@ -363,7 +363,7 @@ export function createHeapFunctions(host){
         /** @param {number[]} args */
         handler: ([handler])=>{
             const previous = newHandler;
-            newHandler = handler >>> 0;
+            newHandler = wholeAddress(handler);
             return previous;
         },
     };
@@ -392,7 +392,7 @@ export function createHeapFunctions(host){
                 const address = malloc(bytes);
                 if (address !== 0)
                 {
-                    host.fillMemory(address, 0, bytes);
+                    guest.fill(address, 0, bytes);
                 }
                 return address;
             },
@@ -435,8 +435,7 @@ export function createHeapFunctions(host){
                     // condition into a use-after-free somewhere unrelated.
                     return 0;
                 }
-                host.writeMemory(moved,
-                    host.readMemory(address, Math.min(existing.size, bytes)));
+                guest.copy(moved, wholeAddress(address), Math.min(existing.size, bytes));
                 host.free(address);
                 return moved;
             },
@@ -613,7 +612,7 @@ export function createHeapFunctions(host){
                     const moved = table.realloc.handler([block, bytes]);
                     if (moved !== 0 && bytes > before)
                     {
-                        host.fillMemory(moved + before, 0, bytes - before);
+                        guest.fill(moved + before, 0, bytes - before);
                     }
                     return moved;
                 },

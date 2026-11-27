@@ -180,8 +180,6 @@ test('the host grows a string as the library does, and trims it back inline', ()
     };
     const table = createMsvcp80Functions(crt, {
         guest: guestWindow(memory),
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
     });
     const STRING = '?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@';
     const self = 0x100;
@@ -233,8 +231,6 @@ test('assignment, appending and comparison read their text before they grow', ()
     };
     const table = createMsvcp80Functions(crt, {
         guest: guestWindow(memory),
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
     });
     const STRING = '?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@';
     const put = (/** @type {number} */ at, /** @type {string} */ text)=>
@@ -288,8 +284,6 @@ test('a 64-bit process\'s string: forty bytes, the text after the iterator list,
     const singles = [];
     const table = createMsvcp80Functions(crt, {
         guest: guestWindow(memory, { pointerSize: 8 }),
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
         fpu: /** @type {any} */ ({ setResult: ()=>{},
             setSingleResult: (/** @type {number} */ value)=>singles.push(value) }),
     });

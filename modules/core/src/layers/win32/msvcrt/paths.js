@@ -24,6 +24,7 @@
 import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { bytesView, fieldOf, struct, write as writeField } from '../../../system/layout.js';
 
 /** The last errors DeleteFile and RemoveDirectory leave. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -33,52 +34,41 @@ const ERROR_DIR_NOT_EMPTY = 145;
 
 const MAX_STRING = 1 << 20;
 
-/** `struct _finddata_t` as msvcrt.dll lays it out: 32-bit times, 260 bytes of name. */
-const FINDDATA = Object.freeze({
-    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: false,
-    NAME: 20, WIDE_NAME: false, BYTES: 280,
-});
+/** A record's name: MAX_PATH characters, the terminator among them. */
+const MAX_PATH = 260;
 
 /**
- * `struct _finddatai64_t`: the same with a 64-bit size, which moves the name
- * to 24, and the whole rounded up to the size's 8-byte alignment.
+ * The `_finddata_t` family as io.h declares it: the attributes, the three
+ * times, the size and 260 characters of name, each on its natural alignment
+ * (a 64-bit time or size on eight, so `__finddata64_t`'s attributes are
+ * followed by four bytes of padding). None holds a pointer: each is the same
+ * at either width.
+ *
+ * @param {'i32' | 'i64'} time  `__time32_t` or `__time64_t`
+ * @param {'u32' | 'i64'} size  `_fsize_t` or `__int64`
+ * @param {'u8' | 'u16'} unit  the name's characters
  */
-const FINDDATAI64 = Object.freeze({
-    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: true,
-    NAME: 24, WIDE_NAME: false, BYTES: 288,
-});
+const findData = (time, size, unit)=>struct([['attrib', 'u32'], ['time_create', time],
+    ['time_access', time], ['time_write', time], ['size', size], ['name', unit, MAX_PATH]]);
 
-/** `struct _wfinddata_t`: `_finddata_t` with 260 wide characters of name. */
-const WFINDDATA = Object.freeze({
-    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: false,
-    NAME: 20, WIDE_NAME: true, BYTES: 540,
-});
+/** `_finddata32_t` (a 32-bit msvcrt.dll's `_finddata_t`): 280 bytes. */
+const FINDDATA32 = findData('i32', 'u32', 'u8').at();
+/** `_finddata32i64_t` (its `_finddatai64_t`): the size on eight, the name at 24, 288 bytes. */
+const FINDDATA32I64 = findData('i32', 'i64', 'u8').at();
+/** `_finddata64i32_t` (a 64-bit msvcrt.dll's `_finddata_t`): 296 bytes. */
+const FINDDATA64I32 = findData('i64', 'u32', 'u8').at();
+/** `__finddata64_t` (a 64-bit msvcrt.dll's `_finddatai64_t`): 304 bytes. */
+const FINDDATA64 = findData('i64', 'i64', 'u8').at();
+/** The same four with 260 wide characters of name. */
+const WFINDDATA32 = findData('i32', 'u32', 'u16').at();
+const WFINDDATA32I64 = findData('i32', 'i64', 'u16').at();
+const WFINDDATA64I32 = findData('i64', 'u32', 'u16').at();
+const WFINDDATA64 = findData('i64', 'i64', 'u16').at();
 
-/** `struct _wfinddatai64_t`: `_finddatai64_t` with 260 wide characters of name. */
-const WFINDDATAI64 = Object.freeze({
-    ATTRIB: 0, TIME_CREATE: 4, TIME_ACCESS: 8, TIME_WRITE: 12, SIZE: 16, WIDE_SIZE: true,
-    NAME: 24, WIDE_NAME: true, BYTES: 544,
-});
+/** @typedef {import('../../../system/layout.js').Table} FindLayout */
 
-/**
- * `struct __finddata64_t`: 64-bit times and size, each on its 8-byte
- * alignment, so the attributes are followed by four bytes of padding.
- */
-const FINDDATA64 = Object.freeze({
-    ATTRIB: 0, TIME_CREATE: 8, TIME_ACCESS: 16, TIME_WRITE: 24, WIDE_TIME: true,
-    SIZE: 32, WIDE_SIZE: true, NAME: 40, WIDE_NAME: false, BYTES: 304,
-});
-
-/** `struct _finddata64i32_t`: `__finddata64_t` with a 32-bit size. */
-const FINDDATA64I32 = Object.freeze({
-    ATTRIB: 0, TIME_CREATE: 8, TIME_ACCESS: 16, TIME_WRITE: 24, WIDE_TIME: true,
-    SIZE: 32, WIDE_SIZE: false, NAME: 36, WIDE_NAME: false, BYTES: 296,
-});
-
-/**
- * @typedef {typeof FINDDATA | typeof FINDDATAI64 | typeof WFINDDATA
- *           | typeof WFINDDATAI64 | typeof FINDDATA64 | typeof FINDDATA64I32} FindLayout
- */
+/** Whether a record's name is wide characters. @param {FindLayout} layout */
+const isWide = layout=>fieldOf(layout, 'name')?.size === 2;
 const MAX_NAME = 259;
 
 /** The attributes FindFirstFile reports, which `_findfirst` passes on. */
@@ -222,6 +212,8 @@ export const splitSearch = spec=>{
  */
 export function createPathFunctions(host){
     const { guest } = host;
+    /** A 64-bit process, whose time_t is an __int64. */
+    const time64 = guest.pointerSize === 8;
 
     /**
      * A path as each width reads and writes it where it lies: ANSI in the page
@@ -450,47 +442,33 @@ export function createPathFunctions(host){
     let nextSearch = 1;
 
     /**
-     * Fills a whole `_finddata_t`, `_finddatai64_t` or `_wfinddatai64_t`.
-     * The volume keeps one time per file, the last write, and it stands for
-     * all three.
+     * Fills a whole record of the `_finddata_t` family, each field as wide
+     * as its layout declares it. The volume keeps one time per file, the
+     * last write, and it stands for all three.
      *
      * @param {number} address @param {any} entry @param {FindLayout} layout
      */
     const writeFound = (address, entry, layout)=>{
-        const bytes = new Uint8Array(layout.BYTES);
-        const view = new DataView(bytes.buffer);
-        view.setUint32(layout.ATTRIB, entry.isDirectory ? A_SUBDIR : A_ARCH, true);
+        const bytes = new Uint8Array(layout.SIZE);
+        const view = bytesView(bytes);
+        writeField(view, 0, layout, 'attrib', entry.isDirectory ? A_SUBDIR : A_ARCH);
         const time = Math.floor((entry.modified ?? 0) / 1000);
-        for (const at of [layout.TIME_CREATE, layout.TIME_ACCESS, layout.TIME_WRITE])
+        for (const field of ['time_create', 'time_access', 'time_write'])
         {
-            if ('WIDE_TIME' in layout)
-            {
-                view.setBigInt64(at, BigInt(time), true);
-            }
-            else
-            {
-                view.setUint32(at, time >>> 0, true);
-            }
+            writeField(view, 0, layout, field, time);
         }
-        if (layout.WIDE_SIZE)
-        {
-            view.setBigUint64(layout.SIZE, BigInt(entry.size ?? 0), true);
-        }
-        else
-        {
-            view.setUint32(layout.SIZE, (entry.size ?? 0) >>> 0, true);
-        }
+        writeField(view, 0, layout, 'size', entry.size ?? 0);
         const name = String(entry.name).slice(0, MAX_NAME);
-        if (layout.WIDE_NAME)
+        if (isWide(layout))
         {
             for (let at = 0; at < name.length; at++)
             {
-                view.setUint16(layout.NAME + at * 2, name.charCodeAt(at), true);
+                view.set16(layout.name + at * 2, name.charCodeAt(at));
             }
         }
         else
         {
-            bytes.set(encodeAnsi(name), layout.NAME);
+            bytes.set(encodeAnsi(name), layout.name);
         }
         guest.setBytes(wholeAddress(address), bytes);
     };
@@ -515,7 +493,7 @@ export function createPathFunctions(host){
                 return -1;
             }
             const { directory, pattern } = splitSearch(
-                layout.WIDE_NAME ? utf16.read(spec) : ansi.read(spec));
+                isWide(layout) ? utf16.read(spec) : ansi.read(spec));
             const holder = host.files.stat(directory);
             // "." and ".." first in every folder but a drive's root, as the
             // FindFirstFile this wraps on Windows lists them (kernel32/files.js).
@@ -1147,21 +1125,27 @@ export function createPathFunctions(host){
                     mask | 1 << (letter[0].toUpperCase().charCodeAt(0) - 0x41), 0) >>> 0,
         },
 
-        /** intptr_t _findfirst(const char *filespec, struct _finddata_t *fileinfo) */
-        _findfirst: findFirst(FINDDATA),
+        /**
+         * intptr_t _findfirst(const char *filespec, struct _finddata_t *fileinfo)
+         *
+         * A 64-bit msvcrt.dll's time_t is an __int64: there `_findfirst` is
+         * `_findfirst64i32` and `_findfirsti64` is `_findfirst64`, as its
+         * exports and the headers' names are (Wine's win64 spec entries).
+         */
+        _findfirst: findFirst(time64 ? FINDDATA64I32 : FINDDATA32),
 
         /** int _findnext(intptr_t handle, struct _finddata_t *fileinfo) */
-        _findnext: findNext(FINDDATA),
+        _findnext: findNext(time64 ? FINDDATA64I32 : FINDDATA32),
 
         /**
          * intptr_t _findfirsti64(const char *filespec, struct _finddatai64_t *fileinfo)
          *
          * `_findfirst` with sizes that go past 4 GiB.
          */
-        _findfirsti64: findFirst(FINDDATAI64),
+        _findfirsti64: findFirst(time64 ? FINDDATA64 : FINDDATA32I64),
 
         /** int _findnexti64(intptr_t handle, struct _finddatai64_t *fileinfo) */
-        _findnexti64: findNext(FINDDATAI64),
+        _findnexti64: findNext(time64 ? FINDDATA64 : FINDDATA32I64),
 
         /** intptr_t _findfirst64(const char *filespec, struct __finddata64_t *fileinfo) */
         _findfirst64: findFirst(FINDDATA64),
@@ -1200,19 +1184,19 @@ export function createPathFunctions(host){
         }, 2),
 
         /** intptr_t _wfindfirst(const wchar_t *filespec, struct _wfinddata_t *fileinfo) */
-        _wfindfirst: findFirst(WFINDDATA),
+        _wfindfirst: findFirst(time64 ? WFINDDATA64I32 : WFINDDATA32),
 
         /** int _wfindnext(intptr_t handle, struct _wfinddata_t *fileinfo) */
-        _wfindnext: findNext(WFINDDATA),
+        _wfindnext: findNext(time64 ? WFINDDATA64I32 : WFINDDATA32),
 
         /**
          * intptr_t _wfindfirsti64(const wchar_t *filespec,
          *                         struct _wfinddatai64_t *fileinfo)
          */
-        _wfindfirsti64: findFirst(WFINDDATAI64),
+        _wfindfirsti64: findFirst(time64 ? WFINDDATA64 : WFINDDATA32I64),
 
         /** int _wfindnexti64(intptr_t handle, struct _wfinddatai64_t *fileinfo) */
-        _wfindnexti64: findNext(WFINDDATAI64),
+        _wfindnexti64: findNext(time64 ? WFINDDATA64 : WFINDDATA32I64),
 
         /** int _waccess(const wchar_t *path, int mode) -- `_access`, wide. */
         _waccess: operation(8, ([path])=>(exists(utf16.read(path)) ? 0 : ENOENT)),

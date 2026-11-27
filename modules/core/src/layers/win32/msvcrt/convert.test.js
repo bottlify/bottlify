@@ -300,14 +300,6 @@ test('strtod and atof hand over a long number, which the handler reads through a
     const fenced = guestWindow(memory.bytes.subarray(0, mapped));
     const table = /** @type {Record<string, any>} */ (createConversionFunctions({
         ...memory, fpu,
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>{
-            if (address + length > mapped)
-            {
-                throw new Error(`unmapped at 0x${mapped.toString(16)}`);
-            }
-            return memory.readMemory(address, length);
-        },
         // The guest view fenced where the mapping ends, its whole reads counted.
         guest: { ...fenced, cstr: (address, max)=>{
             whole++;
@@ -387,7 +379,7 @@ test('a 64-bit caller\'s end pointer is written whole, its high half zero', ()=>
     // of whatever the variable held, and the caller's next read faults.
     const memory = fakeMemory();
     const table = /** @type {Record<string, any>} */ (
-        createConversionFunctions({ ...memory, pointerSize: 8,
+        createConversionFunctions({ ...memory,
             guest: guestWindow(memory.bytes, { pointerSize: 8 }) }));
     const end = memory.allocate(8);
     const view = new DataView(memory.bytes.buffer);
@@ -625,13 +617,12 @@ test('at 64 bits past 4 GiB: every end pointer is written whole, the null text\'
     const bytes = new Uint8Array(0x1000);
     const view = new DataView(bytes.buffer);
     const fpu = fakeFpu();
+    // The handlers alone: the routines in the guest are tested past 4 GiB below.
     const table = /** @type {Record<string, any>} */ (createConversionFunctions({
         guest: guestWindow(bytes, { base, pointerSize: 8 }),
-        writeMemory: (at, data)=>bytes.set(data, at - base),
         allocate: ()=>0,
         fpu,
-        pointerSize: 8,
-    }));
+    }, { inGuest: false }));
     /** @param {number} at */
     const quad = at=>view.getUint32(at - base, true)
         + view.getUint32(at - base + 4, true) * 2 ** 32;

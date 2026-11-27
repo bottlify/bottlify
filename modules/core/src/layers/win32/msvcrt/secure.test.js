@@ -8,6 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSecureFunctions, STRUNCATE } from './secure.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
+import { writeMade } from '../common/guest.js';
 
 const EINVAL = 22;
 const ERANGE = 34;
@@ -185,12 +187,13 @@ test('memcpy_s makes no buffer of the program\'s length: a large room is zeroed,
     const memory = fakeMemory(0x10000, 2 * size + 0x20000);
     let largest = 0;
     const errno = /** @type {number[]} */ ([]);
+    // What is written a chunk at a time is counted; a fill is the memory
+    // layer's own, in place, and only the host's growth says it made nothing.
     const table = /** @type {Record<string, any>} */ (createSecureFunctions({
-        ...memory,
-        writeMemory: (address, bytes)=>{
+        guest: { ...memory.guest, setMade: (address, length, make)=>writeMade((at, bytes)=>{
             largest = Math.max(largest, bytes.length);
-            memory.writeMemory(address, bytes);
-        },
+            memory.guest.setBytes(at, bytes);
+        }, address, length, make) },
         errno: code=>errno.push(code),
     }));
     const dest = 0x10000;
@@ -208,3 +211,33 @@ test('memcpy_s makes no buffer of the program\'s length: a large room is zeroed,
     assert.ok(memory.bytes.subarray(dest, dest + size).every(byte=>byte === 0x41), 'copied whole');
     assert.ok(largest <= 0x10000, `written ${largest} bytes at once`);
 });
+
+test('at 64 bits past 4 GiB: a buffer whose low dword is zero is no null, its units read whole',
+    ()=>{
+        const base = 0x100000000;
+        const bytes = new Uint8Array(0x1000);
+        const errno = /** @type {number[]} */ ([]);
+        const table = /** @type {Record<string, any>} */ (createSecureFunctions({
+            guest: guestWindow(bytes, { base, pointerSize: 8 }), errno: code=>errno.push(code),
+        }, { inGuest: false }));
+        /** @param {number} at @param {string} text */
+        const put = (at, text)=>bytes.set([...text, '\0'].map(c=>c.charCodeAt(0)), at - base);
+        /** @param {number} at @param {number} count */
+        const text = (at, count)=>String.fromCharCode(...bytes.subarray(at - base,
+            at - base + count));
+        put(base, 'mixed Case');
+        assert.equal(table._strupr_s.handler([base, 16]), 0);
+        assert.equal(text(base, 11), 'MIXED CASE\0', 'folded where it lies');
+        assert.equal(table._strset_s.handler([base, 16, 0x2a]), 0);
+        assert.equal(text(base, 11), '**********\0');
+        put(base + 0x100, 'copied');
+        assert.equal(table.strcpy_s.handler([base, 16, base + 0x100]), 0);
+        assert.equal(text(base, 7), 'copied\0');
+        assert.equal(table.strcat_s.handler([base, 16, base + 0x100]), 0);
+        assert.equal(text(base, 13), 'copiedcopied\0');
+        assert.equal(table._itoa_s.handler([-42, base, 16, 10]), 0);
+        assert.equal(text(base, 4), '-42\0');
+        assert.equal(table.memcpy_s.handler([base + 0x200, 8, base + 0x100, 6]), 0);
+        assert.equal(text(base + 0x200, 6), 'copied');
+        assert.deepEqual(errno, []);
+    });

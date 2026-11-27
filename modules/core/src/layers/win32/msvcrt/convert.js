@@ -450,27 +450,23 @@ export function scanStandardDecimal(text){
 /**
  * @typedef {Object} ConversionHost
  * @property {import('../common/guest.js').Guest} guest  What the handlers read and
- *           write: in a 64-bit process the end pointer a conversion writes
- *           back is a quadword.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- *           With it, strtol and strtoul are code in the guest, handing the
- *           host only what they leave to it; without it, handlers. The two
- *           are what the code in the guest reads and writes as a handler.
+ *           write, and the code in the guest as a handler: in a 64-bit
+ *           process the end pointer a conversion writes back is a quadword.
  * @property {(bytes: number) => number} allocate
  * @property {import('./float.js').FloatHost} [fpu]  Absent means the functions
  *           that return a double are not exported at all.
  * @property {(code: number) => void} [errno]  Where an out-of-range value says so.
- * @property {number} [pointerSize]  8 in a 64-bit process: what the code in the
- *           guest reads a pointer as.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Where an __int64 answer puts its high half, EDX.
  */
 
 /**
  * @param {ConversionHost} host
+ * @param {{ inGuest?: boolean }} [options]  `inGuest: false` answers every
+ *     conversion on the host, the path the guest's is gated against: strtol
+ *     and its kin are then handlers, and the wide readings are not exported.
  */
-export function createConversionFunctions(host){
+export function createConversionFunctions(host, { inGuest: guestCode = true } = {}){
     const { guest } = host;
 
     /**
@@ -766,8 +762,7 @@ export function createConversionFunctions(host){
         },
     });
 
-    const { readMemory, writeMemory } = host;
-    const entryHost = { readMemory, writeMemory, pointerSize: host.pointerSize,
+    const entryHost = { guest,
         ...host.setRegisters ? { setRegisters: host.setRegisters } : {} };
     const table = {
         /**
@@ -839,23 +834,23 @@ export function createConversionFunctions(host){
          * high half in EDX; out of range clamped with ERANGE.
          */
         // An i64 answered in the JavaScript sets EDX through `setRegisters`.
-        _strtoi64: readMemory && host.setRegisters
+        _strtoi64: guestCode && host.setRegisters
             ? guestEntry(inGuest64._strtoi64, INT64_CODE._strtoi64, entryHost,
                 strtoInteger(12, toInt64, int64Limit, false, true))
             : strtoInteger(12, toInt64, int64Limit, false, true),
-        _strtoui64: readMemory && host.setRegisters
+        _strtoui64: guestCode && host.setRegisters
             ? guestEntry(inGuest64._strtoui64, INT64_CODE._strtoui64, entryHost,
                 strtoInteger(12, toUint64, uint64Limit, false, true))
             : strtoInteger(12, toUint64, uint64Limit, false, true),
 
-        strtol: readMemory
+        strtol: guestCode
             ? guestEntry(inGuest.strtol, COMPILED.strtol, entryHost, strtol)
             : strtol,
-        strtoul: readMemory
+        strtoul: guestCode
             ? guestEntry(inGuest.strtoul, COMPILED.strtoul, entryHost, strtoul)
             : strtoul,
 
-        ...readMemory ? {
+        ...guestCode ? {
             /**
              * long wcstol(const wchar_t *str, wchar_t **end, int base) and
              * unsigned long wcstoul: strtol and strtoul over a wide string,
@@ -914,42 +909,42 @@ export function createConversionFunctions(host){
         } : {},
 
         /** wchar_t *_itow(int value, wchar_t *buffer, int radix) -- _ltoa's text, wide */
-        _itow: readMemory ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
+        _itow: guestCode ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
             toText(1, true, true)) : toText(1, true, true),
 
         /** wchar_t *_ltow(long value, wchar_t *buffer, int radix) */
-        _ltow: readMemory ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
+        _ltow: guestCode ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
             toText(1, true, true)) : toText(1, true, true),
 
         /** wchar_t *_ultow(unsigned long value, wchar_t *buffer, int radix) */
-        _ultow: readMemory ? guestEntry(inGuest._ultow, COMPILED._ultow, entryHost,
+        _ultow: guestCode ? guestEntry(inGuest._ultow, COMPILED._ultow, entryHost,
             toText(1, false, true)) : toText(1, false, true),
 
         /** char *_ltoa(long value, char *buffer, int radix) */
-        _ltoa: readMemory ? guestEntry(inGuest._itoa, COMPILED._itoa, entryHost,
+        _ltoa: guestCode ? guestEntry(inGuest._itoa, COMPILED._itoa, entryHost,
             toText(1, true)) : toText(1, true),
 
         /** char *ltoa(long, char *, int) -- the name without the underscore */
         ltoa: { ...toText(1, true), returns: 'pointer' },
 
         /** char *_ultoa(unsigned long value, char *buffer, int radix) */
-        _ultoa: readMemory ? guestEntry(inGuest._ultoa, COMPILED._ultoa, entryHost,
+        _ultoa: guestCode ? guestEntry(inGuest._ultoa, COMPILED._ultoa, entryHost,
             toText(1, false)) : toText(1, false),
 
         /** char *_ui64toa(unsigned __int64 value, char *buffer, int radix) */
-        _ui64toa: readMemory ? guestEntry(inGuest64._ui64toa, INT64_CODE._ui64toa, entryHost,
+        _ui64toa: guestCode ? guestEntry(inGuest64._ui64toa, INT64_CODE._ui64toa, entryHost,
             toText(2, false)) : toText(2, false),
 
         /** char *_i64toa(__int64 value, char *buffer, int radix) */
-        _i64toa: readMemory ? guestEntry(inGuest64._i64toa, INT64_CODE._i64toa, entryHost,
+        _i64toa: guestCode ? guestEntry(inGuest64._i64toa, INT64_CODE._i64toa, entryHost,
             toText(2, true)) : toText(2, true),
 
         /** wchar_t *_ui64tow(unsigned __int64 value, wchar_t *buffer, int radix) */
-        _ui64tow: readMemory ? guestEntry(inGuest64._ui64tow, INT64_CODE._ui64tow, entryHost,
+        _ui64tow: guestCode ? guestEntry(inGuest64._ui64tow, INT64_CODE._ui64tow, entryHost,
             toText(2, false, true)) : toText(2, false, true),
 
         /** wchar_t *_i64tow(__int64 value, wchar_t *buffer, int radix) */
-        _i64tow: readMemory ? guestEntry(inGuest64._i64tow, INT64_CODE._i64tow, entryHost,
+        _i64tow: guestCode ? guestEntry(inGuest64._i64tow, INT64_CODE._i64tow, entryHost,
             toText(2, true, true)) : toText(2, true, true),
 
         /** int abs(int value) -- in the guest */
@@ -1186,7 +1181,7 @@ export function createConversionFunctions(host){
             _strtod_l: returningDouble(fpu, 12, narrow),
             _atof_l: returningDouble(fpu, 8, args=>narrow([args[0], 0])),
         };
-        if (!readMemory)
+        if (!guestCode)
         {
             return entries;
         }
@@ -1216,20 +1211,20 @@ export function createConversionFunctions(host){
     // Code in the guest (`inguest-float.js`), which reads the number and
     // computes the values Clinger's fast path makes exact; the handlers above
     // answer the rest, and set errno for an overflow or an underflow.
-    const floatHost = { readMemory, writeMemory, fpu: host.fpu, pointerSize: host.pointerSize };
+    const floatHost = { guest, fpu: host.fpu };
     return {
         ...table,
-        ...readMemory ? {
+        ...guestCode ? {
             wcstod: guestEntry(inGuestFloat.wcstod, FLOAT_CODE.wcstod, floatHost,
                 returningDouble(host.fpu, 8, wcstod)),
             /** double _wtof(const wchar_t *str): `wcstod`, no end. */
             _wtof: guestEntry(inGuestFloat._wtof, FLOAT_CODE._wtof, floatHost,
                 returningDouble(host.fpu, 4, args=>wcstod([args[0], 0]))),
         } : {},
-        atof: readMemory
+        atof: guestCode
             ? guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, floatHost, handlers.atof)
             : handlers.atof,
-        strtod: readMemory
+        strtod: guestCode
             ? guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, floatHost, handlers.strtod)
             : handlers.strtod,
 

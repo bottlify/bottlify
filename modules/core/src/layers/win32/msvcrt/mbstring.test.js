@@ -74,15 +74,7 @@ test('a wide string that ends where its region does is read no further than its 
     const memory = fakeMemory();
     const end = 0x12000;
     const table = /** @type {Record<string, any>} */ (createWideFunctions({
-        ...memory,
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>{
-            if (address + length > end)
-            {
-                throw new RangeError(`read of ${length} bytes at 0x${address.toString(16)} `
-                    + 'runs past the end of the region');
-            }
-            return memory.readMemory(address, length);
-        },
+        ...memory, guest: guestWindow(memory.bytes.subarray(0, end)),
     }));
     const put = (/** @type {string} */ text)=>{
         const at = end - (text.length + 1) * 2;
@@ -264,7 +256,7 @@ test('mbsrtowcs and wcsrtombs move the caller\'s pointer, a quadword in a 64-bit
         const memory = fakeMemory();
         const table = /** @type {Record<string, any>} */ (createWideFunctions({ ...memory,
             guest: guestWindow(memory.bytes, { pointerSize: /** @type {4 | 8} */ (pointerSize) }),
-            pointerSize }));
+        }));
         const source = memory.put('abcd');
         const from = memory.allocate(8);
         const view = new DataView(memory.bytes.buffer);
@@ -731,14 +723,8 @@ test('a wide string near the end of its region is read to its terminator, not pa
     // window of the longest string would.
     const memory = fakeMemory();
     const end = memory.bytes.length;
-    const readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>{
-        if (address + length > end)
-        {
-            throw new Error(`read of ${length} bytes at ${address} runs past the end of region`);
-        }
-        return memory.readMemory(address, length);
-    };
-    const table = /** @type {Record<string, any>} */ (createWideFunctions({ ...memory, readMemory }));
+    // The fake's own window ends with its bytes: a read past them faults.
+    const table = /** @type {Record<string, any>} */ (createWideFunctions(memory));
     const text = 'C:/App/System';
     const at = end - 0x40;
     for (const [index, character] of [...`${text}\0`].entries())
@@ -829,11 +815,6 @@ test('at 64 bits past 4 GiB: the walks keep their addresses whole, *src a whole 
     const view = new DataView(bytes.buffer);
     const io = {
         guest: guestWindow(bytes, { base, pointerSize: 8 }),
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.slice(at - base, at - base + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, at - base),
-        pointerSize: 8,
     };
     const multi = /** @type {Record<string, any>} */ (createMultiByteFunctions({}, io));
     bytes.set([...'ab cd\0 \0'].map(c=>c.charCodeAt(0)), 0x100);
