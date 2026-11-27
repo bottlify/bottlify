@@ -147,6 +147,9 @@
  * @property {(frame: PresentedFrame)=>void} presentTo
  * @property {()=>number} [now]            clock for the frame profiler
  * @property {number} [frameHistory]       how many frame records to keep
+ * @property {(name: string) => import('../../cache/scratch.js').Scratch} [scratches]
+ *     memory the backend keeps between frames, held in the run's cache: the uniform ring's
+ *     copy on this side; plain memory if absent
  */
 
 // Intentionally no runtime exports: types are used through JSDoc-import.
