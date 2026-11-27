@@ -13,7 +13,8 @@
  * the graphics worker holds (`channelSpace`) and those a root drawn on the
  * run's own thread holds (`ownedSpace`). The device must be given the same
  * calls with the same bytes, and the cache must hold nothing once the frames
- * are let go of.
+ * are let go of. On the run's thread the frames' uniform arenas are held in
+ * the cache too (`createUniformArena`), their blocks among the bytes compared.
  */
 
 import { test } from 'node:test';
@@ -25,6 +26,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { openRunCache } from '../../../process/run-cache.js';
+import { createScratches } from '../../cache/scratch.js';
 import { channelSpace, ownedSpace } from '../../cache/module.js';
 
 const RAM_BASE = 0x40000000;
@@ -94,6 +96,9 @@ async function run(seed, where, { mutate = false } = {}){
             return reader(wrong);
         }, options);
     }
+    const rooms = runCache && where === 'thread'
+        ? createScratches(ownedSpace(runCache.reader, runCache.own('rooms')).space.hold ?? null)
+        : null;
     const ram = new Uint8Array(8 << 20);
     let free = RAM_BASE + (1 << 20);
     /** @type {string[]} */
@@ -101,6 +106,9 @@ async function run(seed, where, { mutate = false } = {}){
     const d3d = createDirect3D9({
         backend,
         texelCache: texels,
+        // On the run's thread, the frames' uniform arenas held in the cache as well: a
+        // hold across a channel waits on the keeper, which is this thread.
+        holds: rooms ? (name, length)=>rooms.hold(name, length) : undefined,
         divergence: (api, detail, severity)=>{
             if (severity === 'loss')
             {
@@ -253,6 +261,7 @@ async function run(seed, where, { mutate = false } = {}){
     return {
         calls: gpu.calls.map(callText),
         kept: figures.keptTexels,
+        uniformsHeld: rooms?.figures().held ?? 0,
         failures: figures.failures,
         losses,
         left,
@@ -288,6 +297,8 @@ test('an upload that waits for its frame gives the device the same bytes from th
             assert.equal(cached.left, 0, `${at}: nothing left under the root's names`);
             assert.deepEqual(cached.released, { bodies: 0, bytes: 0, waiting: 0 }, at);
             assert.equal(plain.kept.cache, false);
+            assert.ok(where !== 'thread' || cached.uniformsHeld > 0,
+                `${at}: the frames' uniform arenas held in the cache`);
             moved += cached.kept.moved;
             puts += cached.kept.put;
         }

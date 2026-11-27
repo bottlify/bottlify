@@ -502,6 +502,8 @@ const LIST_TYPES = new Map([
  *           Indices of uncompressed uploads whose texels the diagnostics carry.
  * @property {boolean} [compressedTextures]
  * @property {boolean} [astcTextures]
+ * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
+ *     memory held in the run's cache for an object's life, on a root drawn on this thread
  * @property {import('./gpu.js').GpuServices['texelCache']} [texelCache]  the names in the
  *     run's cache a root drawn on this thread keeps its texels under
  *           The device has `texture-compression-bc`: an S3TC texture whose
@@ -596,6 +598,7 @@ export function createOpengl(services){
         compressedTextures: services.compressedTextures,
         astcTextures: services.astcTextures,
         texelCache: services.texelCache,
+        holds: services.holds,
         dumpDraws: services.dumpDraws,
         maxDraws: services.maxDraws,
         skipTexture: services.skipTexture,

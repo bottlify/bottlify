@@ -112,6 +112,9 @@
  *           a device rather than in `framebuffer()`, which then holds nothing
  * @property {boolean} keepTexels  whether texture levels keep their texels and
  *           blocks (`GlContextOptions.keepTexels`)
+ * @property {(length: number) => import('../../cache/scratch.js').Held} holdTexels
+ *           memory for a level's RGBA the processor's rasteriser keeps, held in the run's
+ *           cache (`GlContextOptions.holds`), plain memory without one
  * @property {() => any} currentAttributes  the current attributes, shared and not to
  *           be written
  * @property {() => any} currentVertex  the current attributes, as a vertex

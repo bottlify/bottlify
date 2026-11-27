@@ -2010,14 +2010,25 @@ export function createGdiFunctions(host){
      */
     const glyphBitmap = (dc, code, kind, metrics, size, buffer, api)=>{
         const font = currentFont(dc);
-        const glyph = host.graphics?.glyph?.(code, font);
-        if (!glyph)
+        // The engine places a glyph against the top of its own cell.
+        const ascent = host.graphics?.fontMetrics?.(font)?.ascent ?? currentMetrics(dc).ascent;
+        const answer = host.graphics?.glyph?.(code, font, glyph=>glyphBits(glyph, ascent, kind,
+            metrics, size, buffer)) ?? null;
+        if (answer === null)
         {
             host.divergence?.(api, 'no font engine to draw a glyph with');
             return GDI_ERROR;
         }
-        // The engine places a glyph against the top of its own cell.
-        const ascent = host.graphics?.fontMetrics?.(font)?.ascent ?? currentMetrics(dc).ascent;
+        return answer;
+    };
+
+    /**
+     * `glyphBitmap`'s answer from the glyph, read where the engine keeps it.
+     *
+     * @param {import('./drawing.js').GlyphRead} glyph @param {number} ascent
+     * @param {number} kind @param {number} metrics @param {number} size @param {number} buffer
+     */
+    const glyphBits = (glyph, ascent, kind, metrics, size, buffer)=>{
         const empty = glyph.width === 0 || glyph.height === 0;
         const pitch = kind === GGO_BITMAP ? ((glyph.width + 31) >> 5) * 4 : (glyph.width + 3) & ~3;
         const needed = empty ? 0 : pitch * glyph.height;
@@ -2044,7 +2055,7 @@ export function createGdiFunctions(host){
         {
             for (let x = 0; x < glyph.width; x++)
             {
-                const covered = glyph.coverage[y * glyph.width + x];
+                const covered = glyph.bytes[glyph.offset + y * glyph.width + x];
                 if (kind === GGO_BITMAP)
                 {
                     bits[y * pitch + (x >> 3)] |= covered >= 128 ? 0x80 >> (x & 7) : 0;

@@ -38,6 +38,8 @@ const SPILL_SWAPS = 60;
  * @property {boolean} [compressedTextures]
  * @property {boolean} [astcTextures]
  * @property {import('./gpu.js').GpuServices['texelCache']} [texelCache]
+ * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
+ *     memory its contexts hold for an object's life (`GlContextOptions.holds`)
  * @property {boolean} [dumpDraws]
  * @property {number} [maxDraws]
  * @property {string | null} [skipTexture]
@@ -123,6 +125,7 @@ export function createOpenglRoot(services){
                 keepTexels: !services.model,
                 raster: services.raster,
                 keepPrimitives: services.keepPrimitives,
+                holds: services.holds,
             });
             groups.add(context.shareGroup);
             return context;

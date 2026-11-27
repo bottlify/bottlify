@@ -1522,11 +1522,12 @@ function withEngine(/** @type {Record<string, any>} */ more = {}){
             },
             textWidth: (font, text)=>[...text].reduce((sum, ch)=>sum + 4 + ch.charCodeAt(0) % 2, 0),
             // 'A' a three-by-two box of mixed coverage, a space nothing at all.
-            glyph: code=>(code === 0x41
+            // Read in place: the coverage at an offset into bytes of its own.
+            glyph: (code, font, read, arg)=>read(code === 0x41
                 ? { advance: 5, left: 1, top: 3, width: 3, height: 2,
-                    coverage: Uint8Array.of(255, 0, 128, 0, 255, 64) }
+                    bytes: Uint8Array.of(9, 9, 255, 0, 128, 0, 255, 64), offset: 2 }
                 : { advance: 4, left: 0, top: 0, width: 0, height: 0,
-                    coverage: new Uint8Array(0) }),
+                    bytes: new Uint8Array(0), offset: 0 }, /** @type {any} */ (arg)),
             ...more,
         },
     });
