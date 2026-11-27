@@ -18,6 +18,7 @@ import { createVolume } from '../kernel32/vfs.js';
 import {
     FO_COPY, FO_DELETE, FO_MOVE, FO_RENAME, createDirectoryPath, runFileOperation,
 } from './fileop.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
 
 const FOF_MULTIDESTFILES = 0x0001;
 const FOF_SILENT = 0x0004;
@@ -47,7 +48,7 @@ const DE_FILEDESTISFLD = 0x80;
 /** init_shfo_tests: the files and directories every case starts from. */
 async function workspace(){
     const fs = await filesystemModule.create({ pageFile: await testPageFile() });
-    const volume = /** @type {any} */ (createVolume(fs));
+    const volume = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     volume.mkdir('C:\\work');
     volume.setCurrentDirectory('C:\\work');
     /** @param {string} name */

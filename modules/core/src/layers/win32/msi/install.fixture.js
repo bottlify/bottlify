@@ -24,6 +24,7 @@ import { INSTALLSTATE, createSession } from './session.js';
 import { runSequence } from './actions.js';
 import { createRegistration, valueText } from './registration.js';
 import { utf8, windows1252 } from '../../../system/text.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
 
 /** @type {import('./session.js').Machine} */
 export const MACHINE = {
@@ -89,7 +90,7 @@ export function typed(db){
  */
 export async function machine(folders = [], files = {}){
     const volume = /** @type {any} */ (createVolume(await filesystemModule.create({
-        pageFile: createPageFile((await pieceSpace(cacheSpace, { budget: 256 << 20 })).space) })));
+        pageFile: createPageFile((await pieceSpace(cacheSpace, { budget: 256 << 20 })).space) }), null, { kept: freshSpace('reads') }));
     for (const path of ['C:\\Program Files', 'C:\\WINDOWS', ...folders])
     {
         volume.mkdir(path);

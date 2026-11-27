@@ -20,6 +20,7 @@ import { createIsoSource } from '../../filesystem/internal/iso/source.js';
 import { createVolume } from './vfs.js';
 import { createFileFunctions } from './files.js';
 import { createHandleTable } from '../../kernel/internal/handles.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const GENERIC_READ = 0x80000000;
@@ -75,7 +76,7 @@ async function setup(){
             return text;
         },
         readWideString: ()=>'',
-        files: /** @type {any} */ (createVolume(fs)),
+        files: /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') })),
         setLastError: code=>{
             errors.push(code);
         },

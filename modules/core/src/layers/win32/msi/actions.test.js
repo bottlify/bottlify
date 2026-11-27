@@ -20,6 +20,7 @@ import { windowsVersion } from '../kernel32/versions.js';
 import { createEmptyDatabase } from './database.js';
 import { createSession } from './session.js';
 import { INSTALLMESSAGE, runSequence } from './actions.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
 
 /** @type {import('./session.js').Machine} */
 const MACHINE = {
@@ -81,7 +82,7 @@ async function install(){
                 name: column, type: 0 })),
         });
     }
-    const files = /** @type {any} */ (createVolume(await filesystemModule.create({ pageFile: await testPageFile() })));
+    const files = /** @type {any} */ (createVolume(await filesystemModule.create({ pageFile: await testPageFile() }), null, { kept: freshSpace('reads') }));
     files.mkdir('C:\\src');
     files.mkdir('C:\\src\\App');
     for (const [name, text] of [['one.txt', 'first'], ['two.txt', 'two']])

@@ -25,6 +25,7 @@ import { runSequence } from './actions.js';
 import { createRegistration, valueText } from './registration.js';
 import { editIni, INI_ACTION } from './ini.js';
 import { environmentRow, installedValue, removedValue } from './environment.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
 
 const PRODUCT = '{6D7A2B10-1111-4222-8333-944455556666}';
 
@@ -114,7 +115,7 @@ function packageDatabase(){
 
 /** A machine with the package's files beside it under C:\src. */
 async function machine(){
-    const files = /** @type {any} */ (createVolume(await filesystemModule.create({ pageFile: await testPageFile() })));
+    const files = /** @type {any} */ (createVolume(await filesystemModule.create({ pageFile: await testPageFile() }), null, { kept: freshSpace('reads') }));
     for (const path of ['C:\\src', 'C:\\src\\Test', 'C:\\src\\Test\\Data', 'C:\\Program Files'])
     {
         files.mkdir(path);

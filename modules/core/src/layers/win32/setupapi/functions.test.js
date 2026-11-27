@@ -20,6 +20,7 @@ import { createHive, shellFolders } from '../advapi32/registry.js';
 import { FILEOP, SPFILENOTIFY, createSetupapiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { decodeShellLink } from '../common/shell-link.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -46,7 +47,7 @@ async function machine(extra = {}){
     const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
     const fs = await filesystemModule.create({ pageFile: await testPageFile() });
-    const volume = /** @type {any} */ (createVolume(fs));
+    const volume = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     for (const path of ['C:\\WINDOWS', 'C:\\WINDOWS\\inf', 'C:\\WINDOWS\\system32', 'C:\\src',
         'C:\\dst'])
     {

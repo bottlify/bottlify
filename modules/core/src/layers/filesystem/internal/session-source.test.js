@@ -12,6 +12,7 @@ import { createOverlay } from './tree.js';
 import { createUnionSource } from './union-source.js';
 import { SESSION_LAYER, createSessionSource } from './session-source.js';
 import { createReader, openKeeper } from '@bottlify/cellar';
+import { freshSpace } from '../../cache/testing.fixture.js';
 
 /**
  * A session's files as a store hands them out lazily, every read counted.
@@ -67,12 +68,17 @@ async function fetchedAgain(operation, session){
     }
 }
 
+test('a session source is made over a space of the run\'s cache, and none is an error', ()=>{
+    assert.throws(()=>createSessionSource(lazySession({ 'a.bin': pattern(1, 1) }).files),
+        /no space of the run's cache/);
+});
+
 test('a session is listed whole and nothing of it is read until a read asks', async()=>{
     const { files, reads } = lazySession({
         'save.dat': pattern(10, 1),
         'Data\\big.pak': pattern(2 * PIECE_SIZE + 5, 2),
     });
-    const session = createSessionSource(files);
+    const session = createSessionSource(files, { kept: freshSpace('session') });
 
     assert.deepEqual(session.list().map(entry=>[entry.path, entry.size, entry.modified]),
         [['save.dat', 10, 1234], ['Data\\big.pak', 2 * PIECE_SIZE + 5, 1234]]);
@@ -208,11 +214,12 @@ test('the contract: a read answers the bytes or a miss naming every piece it lac
     assert.deepEqual(session.held(), { sessionUnkept: 0 });
 });
 
-test('with nowhere to keep pieces, a fetch\'s pieces are held until the next fetch: a range'
-    + ' is read after one fetch, and held bytes are said', async()=>{
+test('with no room in the cache for a piece, a fetch\'s pieces are held until the next fetch:'
+    + ' a range is read after one fetch, and held bytes are said', async t=>{
     const bytes = pattern(3 * PIECE_SIZE, 9);
     const { files, reads } = lazySession({ 'a.bin': bytes });
-    const session = createSessionSource(files);
+    // A cache whose segments are smaller than a piece refuses every one.
+    const session = await sessionWithRoom(t, files, PIECE_SIZE / 16);
     const { result, misses } = await fetchedAgain(()=>session.read('a.bin', 5, 2 * PIECE_SIZE),
         session);
     assert.equal(misses, 1);

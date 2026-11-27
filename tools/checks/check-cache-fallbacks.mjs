@@ -37,10 +37,6 @@ const SAID = /\b(?:plainScratches|plainHold|KEEP_NOTHING|noCache)\b|\b(?:cache|s
  * @type {Record<string, number>}
  */
 const BASELINE = {
-    // A volume, and a session's files, with nowhere to keep what they read
-    // again: a space that keeps nothing, until every one is handed a space.
-    'modules/core/src/layers/win32/kernel32/vfs.js': 2,
-    'modules/core/src/layers/filesystem/internal/session-source.js': 2,
     // Not a fallback: the relay's cache arrives after the first messages, which wait.
     'modules/core/src/layers/cpu/internal/store-relay.js': 1,
     // Not a fallback: a desktop's folder space, and the far-heap's space.

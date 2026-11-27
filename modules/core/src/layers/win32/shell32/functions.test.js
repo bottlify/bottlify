@@ -11,6 +11,7 @@ import { SHELL32_ORDINALS, createShellFunctions } from './functions.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
 
 /** @param {number} [allocator]  The IMalloc pointer ole32 would hand out, if any. */
 function machine(allocator){
@@ -601,7 +602,7 @@ test('a notification icon is kept by its window and id until it is deleted', ()=
  */
 async function machineWithVolume(extra = {}, allocationEnd = 0){
     const fs = await filesystemModule.create({ pageFile: await testPageFile() });
-    const volume = /** @type {any} */ (createVolume(fs));
+    const volume = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     volume.mkdir('C:\\work');
     volume.setCurrentDirectory('C:\\work');
     for (const name of ['a.txt', 'b.txt'])
