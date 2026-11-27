@@ -2795,9 +2795,7 @@ export function createWin32Module(){
             {
                 const dispatcher = seh64;
                 cxx64 = createCxxExceptions64({
-                    readMemory,
-                    writeMemory,
-                    readCString,
+                    guest,
                     isMapped,
                     imageBaseOf: address=>modules.imageOf?.(address)?.base ?? 0,
                     raise: what=>dispatcher.raise(what),
