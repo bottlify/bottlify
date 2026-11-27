@@ -1347,11 +1347,11 @@ export function createCertificateFunctions(host){
     const getNameString = wide=>({
         argBytes: 24,
         handler: (/** @type {number[]} */ [address, type, flags, para, out, count])=>{
-            if (!contexts.has(address >>> 0))
+            if (!contexts.has(wholeAddress(address)))
             {
                 return fail(E_INVALIDARG);
             }
-            const text = nameOf(address >>> 0, type >>> 0, flags >>> 0, para >>> 0);
+            const text = nameOf(wholeAddress(address), type >>> 0, flags >>> 0, wholeAddress(para));
             if ((out >>> 0) === 0 || (count >>> 0) === 0)
             {
                 return text.length + 1;

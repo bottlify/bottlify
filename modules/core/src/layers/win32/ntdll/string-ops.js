@@ -231,7 +231,7 @@ export function createStringOperations(host){
                 return STATUS.BUFFER_OVERFLOW;
             }
             host.writeMemory(buffer, bytesOfUnits(units));
-            writeDescriptor(destination >>> 0, { length, maximumLength, buffer });
+            writeDescriptor(wholeAddress(destination), { length, maximumLength, buffer });
             return STATUS.SUCCESS;
         },
     });

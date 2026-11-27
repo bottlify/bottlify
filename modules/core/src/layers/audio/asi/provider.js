@@ -26,6 +26,7 @@
  */
 
 import { id3Length, parseFrameHeader, scanFrames } from './mp3.js';
+import { wholeAddress } from '../../../system/address.js';
 
 /** The provider's file name, which is how the library finds it. */
 export const PROVIDER_LIBRARY = 'Mp3dec.asi';
@@ -863,10 +864,11 @@ export function createMp3Provider(host){
                     // 22050 as 0x5622 -- where a later one passes its address. The low
                     // 64 KiB are never mapped in a Win32 process, so an argument there
                     // is a value and not a pointer.
-                    let chosen = value | 0;
-                    if ((value >>> 0) >= 0x10000)
+                    const address = wholeAddress(value);
+                    let chosen = address;
+                    if (address >= 0x10000)
                     {
-                        const bytes = readMemory(value >>> 0, 4);
+                        const bytes = readMemory(address, 4);
                         chosen = new DataView(bytes.buffer, bytes.byteOffset, 4)
                             .getInt32(0, true);
                     }

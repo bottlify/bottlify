@@ -3896,7 +3896,7 @@ export function createMonikerFunctions(env){
     const entry = (argBytes, body)=>({
         argBytes,
         /** @param {number[]} args */
-        handler: args=>Promise.resolve(body(args.map(value=>value >>> 0), env.callerThread()))
+        handler: args=>Promise.resolve(body(args.map(wholeAddress), env.callerThread()))
             .then(hr=>hr | 0),
     });
 

@@ -391,7 +391,7 @@ export function createWintrustFunctions(host){
             }, subject) : CRYPT_E_FILE_ERROR;
             if (state === WTD_STATEACTION_VERIFY)
             {
-                const provider = layProvider(chain, judgedAt, data >>> 0, code);
+                const provider = layProvider(chain, judgedAt, wholeAddress(data), code);
                 writeU32(data + WTD.STATE_DATA, host.handles.open('wintrust-state',
                     { code, provider }));
             }

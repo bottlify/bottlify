@@ -270,7 +270,7 @@ export function createThreadpoolApi(core){
 
     /** @param {number} handle @param {Item['kind']} kind */
     const itemOf = (handle, kind)=>{
-        const item = items.get(handle >>> 0);
+        const item = items.get(wholeAddress(handle));
         return item && item.kind === kind ? item : null;
     };
 
@@ -447,7 +447,7 @@ export function createThreadpoolApi(core){
 
         /** @param {number} handle */
         releasePool: handle=>{
-            const pool = pools.get(handle >>> 0);
+            const pool = pools.get(wholeAddress(handle));
             if (pool)
             {
                 pools.delete(pool.handle);
@@ -462,7 +462,7 @@ export function createThreadpoolApi(core){
          * @param {number} handle @param {number} max
          */
         setMax: (handle, max)=>{
-            const pool = pools.get(handle >>> 0);
+            const pool = pools.get(wholeAddress(handle));
             if (pool)
             {
                 pool.lane.max = max >>> 0;
@@ -476,7 +476,7 @@ export function createThreadpoolApi(core){
          * @param {number} handle @param {number} min
          */
         setMin: (handle, min)=>{
-            const pool = pools.get(handle >>> 0);
+            const pool = pools.get(wholeAddress(handle));
             if (!pool)
             {
                 return false;
@@ -499,7 +499,7 @@ export function createThreadpoolApi(core){
          * @param {number} handle @param {number} information
          */
         setStack: (handle, information)=>{
-            const pool = pools.get(handle >>> 0);
+            const pool = pools.get(wholeAddress(handle));
             if (!pool || (information >>> 0) === 0 || !host.readMemory)
             {
                 return false;
@@ -515,7 +515,7 @@ export function createThreadpoolApi(core){
          * @param {number} handle @param {number} information
          */
         queryStack: (handle, information)=>{
-            const pool = pools.get(handle >>> 0);
+            const pool = pools.get(wholeAddress(handle));
             const stack = pool?.lane.stack ?? host.imageStack?.();
             if (!pool || !stack || (information >>> 0) === 0)
             {
@@ -537,9 +537,9 @@ export function createThreadpoolApi(core){
 
         /** @param {number} handle */
         releaseGroup: handle=>{
-            if (groups.delete(handle >>> 0))
+            if (groups.delete(wholeAddress(handle)))
             {
-                objectHeap.free(handle >>> 0);
+                objectHeap.free(wholeAddress(handle));
             }
         },
 
@@ -556,7 +556,7 @@ export function createThreadpoolApi(core){
          * @returns {0 | Promise<number>}
          */
         releaseMembers: (handle, cancel, userdata)=>{
-            const group = groups.get(handle >>> 0);
+            const group = groups.get(wholeAddress(handle));
             if (!group || group.members.size === 0)
             {
                 return 0;
@@ -707,7 +707,7 @@ export function createThreadpoolApi(core){
             // The wait holds the object, not the program's handle to it: a
             // handle closed once the wait is set leaves the wait on its
             // object (Wine's ntdll test_tp_wait_early_closure).
-            item.held = hold(object >>> 0);
+            item.held = hold(wholeAddress(object));
             const made = core.registerWait(item.held || object, item.callback, item.context,
                 (timeout >>> 0) === 0 ? INFINITE : core.dueIn(timeout >>> 0), WT_EXECUTEONLYONCE);
             if (typeof made === 'number')
@@ -735,7 +735,7 @@ export function createThreadpoolApi(core){
          * @param {number} handle @param {number} cancel
          */
         waitFor: (handle, cancel)=>{
-            const item = items.get(handle >>> 0);
+            const item = items.get(wholeAddress(handle));
             if (!item)
             {
                 return 0;
@@ -822,7 +822,7 @@ export function createThreadpoolApi(core){
          * @param {number} handle
          */
         close: handle=>{
-            const item = items.get(handle >>> 0);
+            const item = items.get(wholeAddress(handle));
             if (!item || item.closed)
             {
                 return;
@@ -1051,12 +1051,12 @@ export function createThreadpoolApi(core){
         }),
         /** VOID LeaveCriticalSectionWhenCallbackReturns(PTP_CALLBACK_INSTANCE, PCRITICAL_SECTION) */
         LeaveCriticalSectionWhenCallbackReturns: fn(8, ([instance, section])=>{
-            objects.onCompletion(instance, 'LeaveCriticalSection', [section >>> 0]);
+            objects.onCompletion(instance, 'LeaveCriticalSection', [wholeAddress(section)]);
             return 0;
         }),
         /** VOID FreeLibraryWhenCallbackReturns(PTP_CALLBACK_INSTANCE, HMODULE) */
         FreeLibraryWhenCallbackReturns: fn(8, ([instance, module])=>{
-            objects.onCompletion(instance, 'FreeLibrary', [module >>> 0]);
+            objects.onCompletion(instance, 'FreeLibrary', [wholeAddress(module)]);
             return 0;
         }),
         /** VOID DisassociateCurrentThreadFromCallback(PTP_CALLBACK_INSTANCE) */

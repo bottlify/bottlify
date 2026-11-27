@@ -48,15 +48,21 @@ const DSBCAPS_CTRLPOSITIONNOTIFY = 0x00000100;
 const DSBCAPS_CTRLFX = 0x00000200;
 const DSBCAPS_GETCURRENTPOSITION2 = 0x00010000;
 
-/** Flat guest memory, one megabyte, addressed from zero. */
-function guestMemory(){
+/**
+ * Flat guest memory, one megabyte, addressed from zero.
+ *
+ * @param {number} [high]  where the same bytes lie past 4 GiB, as a 64-bit program's
+ */
+function guestMemory(high){
     const bytes = new Uint8Array(0x100000);
+    const at = (/** @type {number} */ address)=>(high !== undefined && address >= high
+        ? address - high : address);
     return {
         bytes,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.subarray(at(address), at(address) + length),
         /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
+        writeMemory: (address, data)=>bytes.set(data, at(address)),
         /** @param {number} address */
         u32: address=>new DataView(bytes.buffer).getUint32(address, true),
         /** @param {number} address @param {number} value */
@@ -1783,6 +1789,23 @@ test('DllGetClassObject has no class but DirectSound\'s to hand out, and clears 
     assert.equal(f.dsound.libraries['DSOUND.dll'].DllGetClassObject.handler([0x1f30, 0x1f40, out])
         >>> 0, 0x80040111);
     assert.equal(f.memory.u32(out), 0);
+});
+
+test('a 64-bit program\'s GUIDs past 4 GiB are read and written where they are', ()=>{
+    // Cut to their low dword, 0x400xxxxx named nothing of the program's.
+    const high = 0x1_4000_0000;
+    const f = fixture({ pointerSize: 8, memory: guestMemory(high) });
+    const dll = f.dsound.libraries['DSOUND.dll'];
+    // DSDEVID_DefaultPlayback names the one device there is.
+    f.memory.writeMemory(0x3000, Uint8Array.of(0, 0x00, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47,
+        0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03));
+    f.memory.bytes.fill(0xcc, 0x3100, 0x3110);
+    assert.equal(dll.GetDeviceID.handler([high + 0x3000, high + 0x3100]), DS_OK);
+    assert.notDeepEqual([...f.memory.bytes.subarray(0x3100, 0x3110)], Array(16).fill(0xcc));
+    writeGuid(f.memory, 0x1e00, '{47D4D946-62E8-11CF-93BC-444553540000}');
+    writeGuid(f.memory, 0x1e20, '{00000001-0000-0000-C000-000000000046}');
+    assert.equal(dll.DllGetClassObject.handler([high + 0x1e00, high + 0x1e20, high + 0x1e40]),
+        DS_OK);
 });
 
 test('DirectSound\'s class object makes objects that wait for Initialize', ()=>{

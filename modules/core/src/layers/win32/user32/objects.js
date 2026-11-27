@@ -895,7 +895,7 @@ export function createObjectFunctions(options){
             {
                 if ((mask & bit) !== 0)
                 {
-                    writeU32s((info >>> 0) + at, [menu.info?.[name] ?? 0]);
+                    writeU32s(wholeAddress(info) + at, [menu.info?.[name] ?? 0]);
                 }
             }
             return 1;

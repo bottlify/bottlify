@@ -81,7 +81,7 @@ export function createCefStrings(host, { utf8 = false } = {}){
     /** @param {number} at @param {Uint8Array} bytes @param {number} length  In units. */
     const fill = (at, bytes, length)=>{
         clear(at);
-        const str = host.allocate(bytes.length + 2) >>> 0;
+        const str = wholeAddress(host.allocate(bytes.length + 2));
         host.writeMemory(str, bytes);
         host.writeMemory(str + bytes.length, new Uint8Array(2));
         words(at, [str, length, dtor()]);
@@ -129,7 +129,7 @@ export function createCefStrings(host, { utf8 = false } = {}){
 
     /** @param {string} text @returns {number} a userfree string the program frees */
     const userfree = text=>{
-        const at = host.allocate(STRING_SIZE) >>> 0;
+        const at = wholeAddress(host.allocate(STRING_SIZE));
         words(at, [0, 0, 0]);
         write(at, text);
         return at;
@@ -163,7 +163,7 @@ export function createCefStrings(host, { utf8 = false } = {}){
     const collections = new Map();
     /** @param {string[] | [string, string][]} items */
     const collection = items=>{
-        const at = host.allocate(4) >>> 0;
+        const at = wholeAddress(host.allocate(4));
         collections.set(at, items);
         return at;
     };

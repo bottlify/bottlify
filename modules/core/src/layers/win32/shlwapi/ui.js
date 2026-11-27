@@ -341,8 +341,9 @@ export function createUiFunctions(host, { A, W }){
         ...['A', 'W'].reduce((all, suffix)=>({ ...all, [`SHSendMessageBroadcast${suffix}`]: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: (/** @type {number[]} */ [message, wParam, lParam])=>scratch(4, at=>{
-                host.writeMemory(at, dword(0));
+            handler: (/** @type {number[]} */ [message, wParam, lParam])=>scratch(8, at=>{
+                // A DWORD_PTR the call writes: eight bytes in a 64-bit process.
+                host.writeMemory(at, new Uint8Array(8));
                 user32(`SendMessageTimeout${suffix}`, [HWND_BROADCAST, message, wParam, lParam,
                     SMTO_ABORTIFHUNG, 15000, at]);
                 return u32(/** @type {(a: number, l: number) => Uint8Array} */ (
@@ -572,7 +573,7 @@ export function createUiFunctions(host, { A, W }){
                     {
                         return E_INVALIDARG;
                     }
-                    const handle = (module >>> 0) !== 0 ? module >>> 0
+                    const handle = (module >>> 0) !== 0 ? wholeAddress(module)
                         : kernel32(`GetModuleHandle${suffix}`, [library]);
                     const path = handle === 0 ? null : scratch(520, at=>{
                         const length = kernel32('GetModuleFileNameW', [handle, at, 260]);

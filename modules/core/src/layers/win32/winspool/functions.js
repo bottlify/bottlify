@@ -297,7 +297,7 @@ export function createSpoolerFunctions(host){
             {
                 return fail(ERROR_INVALID_USER_BUFFER);
             }
-            host.writeMemory?.(buffer >>> 0, bytes);
+            host.writeMemory?.(wholeAddress(buffer), bytes);
             return TRUE;
         },
     });

@@ -37,6 +37,7 @@ import { OBJREF_BYTES, decodeObjref } from './objref.js';
 import { IID_ISTORAGE, IID_ISTREAM } from './storage.js';
 import { WHOLE } from '../common/guest.js';
 import { utf16z } from '../common/utf16.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WDT_INPROC_CALL = 0x48746457;
 const WDT_REMOTE_CALL = 0x52746457;
@@ -255,7 +256,7 @@ export function createUserMarshalFunctions(host){
         {
             return host.call(routine, [bytes], thread).then(address=>address >>> 0);
         }
-        return host.heap.allocate(bytes) >>> 0;
+        return wholeAddress(host.heap.allocate(bytes));
     };
     /**
      * @param {number} flags @param {number} address @param {unknown} thread
@@ -374,7 +375,7 @@ export function createUserMarshalFunctions(host){
             {
                 fault(RPC_X_BAD_STUB_DATA);
             }
-            const block = host.heap.allocate(Math.max(bytes, 1)) >>> 0;
+            const block = wholeAddress(host.heap.allocate(Math.max(bytes, 1)));
             if (block === 0)
             {
                 fault(RPC_X_NO_MEMORY);
@@ -622,7 +623,7 @@ export function createUserMarshalFunctions(host){
                 guest.set32(slot, 0);
                 return at + 8;
             }
-            const block = host.heap.allocate(METAFILEPICT_BYTES) >>> 0;
+            const block = wholeAddress(host.heap.allocate(METAFILEPICT_BYTES));
             if (block === 0)
             {
                 fault(RPC_X_NO_MEMORY);
@@ -827,7 +828,7 @@ export function createUserMarshalFunctions(host){
             {
                 fault(RPC_S_INVALID_BOUND);
             }
-            const block = host.heap.allocate(units * 2) >>> 0;
+            const block = wholeAddress(host.heap.allocate(units * 2));
             if (block === 0)
             {
                 fault(RPC_X_NO_MEMORY);
@@ -1097,7 +1098,7 @@ export function createUserMarshalFunctions(host){
             const thread = host.callerThread?.();
             try
             {
-                const answer = body(args.map(arg=>arg >>> 0), thread);
+                const answer = body(args.map(wholeAddress), thread);
                 if (typeof answer === 'number')
                 {
                     return answer >>> 0;

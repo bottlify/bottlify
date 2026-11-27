@@ -1892,7 +1892,7 @@ export function createRegistryFunctions(host){
             {
                 return ERROR_INVALID_HANDLE;
             }
-            const path = form.read(file >>> 0);
+            const path = form.read(wholeAddress(file));
             return path ? writeHive(key, path, false) : ERROR_INVALID_PARAMETER;
         },
     });

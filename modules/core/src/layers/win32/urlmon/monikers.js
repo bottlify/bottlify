@@ -182,7 +182,7 @@ export function createUrlMonikers(host){
      * @param {number} size @param {(at: number) => Promise<T>} body @param {T} failed
      */
     const lend = async(size, body, failed)=>{
-        const at = host.heap.allocate(size) >>> 0;
+        const at = wholeAddress(host.heap.allocate(size));
         if (at === 0)
         {
             return failed;
@@ -469,7 +469,7 @@ export function createUrlMonikers(host){
             refused('RelativePathTo', 2, E_NOTIMPL),
             method('GetDisplayName', 3, ([, , out])=>{
                 const bytes = wide(urlOf());
-                const at = host.heap.allocate(bytes.length) >>> 0;
+                const at = wholeAddress(host.heap.allocate(bytes.length));
                 writeU32(out, at);
                 if (at === 0)
                 {
@@ -697,7 +697,7 @@ export function createUrlMonikers(host){
                 else if (kind === TYMED_FILE && handle !== 0)
                 {
                     const bytes = wide(host.readWideString(handle, 0x8000));
-                    const copy = host.heap.allocate(bytes.length) >>> 0;
+                    const copy = wholeAddress(host.heap.allocate(bytes.length));
                     if (copy === 0)
                     {
                         return E_OUTOFMEMORY;

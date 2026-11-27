@@ -2306,9 +2306,9 @@ export function createAutomationFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            const left = readOperand(pleft >>> 0);
-            const right = readOperand(pright >>> 0);
-            return writeOutcome(presult >>> 0, typeof left === 'number' ? left
+            const left = readOperand(wholeAddress(pleft));
+            const right = readOperand(wholeAddress(pright));
+            return writeOutcome(wholeAddress(presult), typeof left === 'number' ? left
                 : typeof right === 'number' ? right : operation(left, right));
         },
     });
@@ -2327,8 +2327,8 @@ export function createAutomationFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            const value = readOperand(pin >>> 0);
-            return writeOutcome(presult >>> 0,
+            const value = readOperand(wholeAddress(pin));
+            return writeOutcome(wholeAddress(presult),
                 typeof value === 'number' ? value : operation(value));
         },
     });
@@ -4593,7 +4593,7 @@ export function createAutomationFunctions(host){
                 }
                 guest.set32(wholeAddress(out), 0);
                 const key = registrationKey(
-                    guest.guid(guid >>> 0), major & 0xffff, minor & 0xffff, false);
+                    guest.guid(wholeAddress(guid)), major & 0xffff, minor & 0xffff, false);
                 const win32 = key && host.hive ? host.hive.open(key, '0\\win32') : null;
                 const value = win32 && host.hive ? host.hive.getValue(win32, '') : null;
                 if (!value)
@@ -4643,7 +4643,7 @@ export function createAutomationFunctions(host){
                 {
                     return TYPE_E_REGISTRYACCESS;
                 }
-                const id = guest.guid(guid >>> 0);
+                const id = guest.guid(wholeAddress(guid));
                 const version = `TypeLib\\${id}\\${versionKey(major & 0xffff, minor & 0xffff)}`;
                 if (!hive.open(root, version))
                 {
@@ -5238,7 +5238,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_POINTER;
                 }
-                return pictures.create(wholeAddress(desc), guest.guid(riid >>> 0),
+                return pictures.create(wholeAddress(desc), guest.guid(wholeAddress(riid)),
                     (own >>> 0) !== 0,
                     wholeAddress(out));
             },
@@ -5264,7 +5264,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_POINTER;
                 }
-                return pictures.load(wholeAddress(stream), size | 0, guest.guid(riid >>> 0),
+                return pictures.load(wholeAddress(stream), size | 0, guest.guid(wholeAddress(riid)),
                     wholeAddress(out));
             },
         },
@@ -5289,7 +5289,8 @@ export function createAutomationFunctions(host){
                 }
                 guest.fill(wholeAddress(out), 0, 4);
                 return pictureAtPath(guest.wstr(wholeAddress(path), WHOLE),
-                    (riid >>> 0) === 0 ? IID_IPICTURE : guest.guid(riid >>> 0), wholeAddress(out));
+                    (riid >>> 0) === 0 ? IID_IPICTURE : guest.guid(wholeAddress(riid)),
+                    wholeAddress(out));
             },
         },
 

@@ -545,7 +545,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
      *     out: number, hr: number }} parse
      */
     const loader = (api, view, parse)=>async(/** @type {number[]} */ args)=>{
-        const { device, source, info, pump, out, hr } = parse(args.map(a=>a >>> 0));
+        const { device, source, info, pump, out, hr } = parse(args.map(wholeAddress));
         if (device === 0 || out === 0 || !host.callGuest || !host.heap)
         {
             return E_INVALIDARG;
@@ -736,7 +736,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
     const compile = async(/** @type {number[]} */ args)=>{
         const thread = host.currentThread?.();
         const [data, size, file, defines, include, entryAt, profileAt, flags1, flags2, ,
-            shaderOut, errorsOut, hrAt] = args.map(a=>a >>> 0);
+            shaderOut, errorsOut, hrAt] = args.map(wholeAddress);
         const compiler = host.callGuest ? await host.compiler?.() ?? 0 : 0;
         if (compiler !== 0 && host.callGuest)
         {
@@ -814,8 +814,8 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([data, size, pump, infoAt, hr])=>imageInfo(
-                `${prefix}GetImageInfoFromMemory`, { kind: 'Memory', args: [data >>> 0,
-                    size >>> 0] }, pump >>> 0, infoAt >>> 0, hr >>> 0),
+                `${prefix}GetImageInfoFromMemory`, { kind: 'Memory', args: [wholeAddress(data),
+                    size >>> 0] }, wholeAddress(pump), wholeAddress(infoAt), wholeAddress(hr)),
         },
         /**
          * HRESULT D3DX10GetImageInfoFromFile(LPCTSTR pSrcFile, ID3DX10ThreadPump*,
@@ -845,8 +845,8 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([infoAt, out])=>((out >>> 0) === 0 ? E_INVALIDARG
-                : infoProcessor(`${prefix}CreateAsyncTextureInfoProcessor`, infoAt >>> 0,
-                    out >>> 0)),
+                : infoProcessor(`${prefix}CreateAsyncTextureInfoProcessor`, wholeAddress(infoAt),
+                    wholeAddress(out))),
         },
         /**
          * HRESULT D3DX10CreateAsyncTextureProcessor(ID3D10Device*, D3DX10_IMAGE_LOAD_INFO*,
@@ -856,8 +856,9 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             const api = `${prefix}CreateAsync${view ? 'ShaderResourceView' : 'Texture'}Processor`;
             return [api, { argBytes: 12, handler: (/** @type {number[]} */ [device, info, out])=>
                 ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.heap ? E_INVALIDARG
-                    : textureProcessor(api, device >>> 0, view, loadInfoAt(info >>> 0),
-                        out >>> 0)) }];
+                    : textureProcessor(api, wholeAddress(device), view,
+                        loadInfoAt(wholeAddress(info)),
+                        wholeAddress(out))) }];
         })),
         [`${prefix}CompileFromMemory`]: { argBytes: 52, handler: compile },
         /**
@@ -874,7 +875,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             const api = `${prefix}CompileFromFile${wide ? 'W' : 'A'}`;
             return [api, { argBytes: 44, handler: async(/** @type {number[]} */ args)=>{
                 const [file, defines, include, entry, target, flags1, flags2, pump, shaderOut,
-                    errorsOut, hrAt] = args.map(a=>a >>> 0);
+                    errorsOut, hrAt] = args.map(wholeAddress);
                 if (shaderOut !== 0)
                 {
                     putU32s(shaderOut, [0]);

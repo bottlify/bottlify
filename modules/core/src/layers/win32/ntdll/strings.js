@@ -174,7 +174,7 @@ export function createCountedStringFunctions(host){
         handler: ([destination, source])=>{
             const at = wholeAddress(source);
             const text = at === 0 ? '' : host.readCString(at, MAX_ANSI_BYTES);
-            writeDescriptor(destination >>> 0, {
+            writeDescriptor(wholeAddress(destination), {
                 length: text.length,
                 // Zero rather than one for a NULL source: there is no buffer, so
                 // there is no room for a terminator to account for.
@@ -228,7 +228,8 @@ export function createCountedStringFunctions(host){
             }
 
             writeWide(buffer, text);
-            writeDescriptor(destination >>> 0, { length: total - 2, maximumLength, buffer });
+            writeDescriptor(wholeAddress(destination), { length: total - 2, maximumLength,
+                buffer });
             return STATUS.SUCCESS;
         },
     });
@@ -286,7 +287,8 @@ export function createCountedStringFunctions(host){
             }
 
             host.writeMemory(buffer, encode(counted ? kept : `${kept}\0`));
-            writeDescriptor(destination >>> 0, { length: kept.length, maximumLength, buffer });
+            writeDescriptor(wholeAddress(destination), { length: kept.length, maximumLength,
+                buffer });
             return status;
         },
     });

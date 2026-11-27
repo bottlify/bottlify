@@ -48,17 +48,20 @@ function recordingContext(){
     return { context, calls, store };
 }
 
-/** @param {{ exportAddress?: (name: string) => number }} [options] */
-function world({ exportAddress = ()=>0 } = {}){
+/** @param {{ exportAddress?: (name: string) => number, high?: number }} [options] */
+function world({ exportAddress = ()=>0, high = 0 } = {}){
     const ram = new Uint8Array(1 << 20);
+    // A 64-bit program's data past 4 GiB (`high`) is these same bytes.
+    const below = (/** @type {number} */ address)=>(high !== 0 && address >= high
+        ? address - high : address);
     let next = 0x80000;
     /** @type {{ entry: number, args: number[] }[]} */
     const called = [];
     const { context, calls, store } = recordingContext();
     const table = createGlu({
         memory: {
-            readMemory: (address, length)=>ram.subarray(address, address + length),
-            writeMemory: (address, bytes)=>ram.set(bytes, address),
+            readMemory: (address, length)=>ram.subarray(below(address), below(address) + length),
+            writeMemory: (address, bytes)=>ram.set(bytes, below(address)),
         },
         exportAddress,
         withContext: body=>body(context),
@@ -72,6 +75,7 @@ function world({ exportAddress = ()=>0 } = {}){
             return 0;
         },
         currentThread: ()=>1,
+        ...high !== 0 ? { pointerSize: /** @type {8} */ (8) } : {},
     });
     const guest = guestMemory({
         readMemory: (address, length)=>ram.subarray(address, address + length),
@@ -128,6 +132,25 @@ test('the handlers multiply the current matrix as the code does', ()=>{
     const rotation = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     assert.ok(rotation.every((v, i)=>calls[0][1][i] === v), 'the identity rotation');
     assert.ok([0, 0, -5].every((v, i)=>calls[1][1 + i] === v), 'the eye negated');
+});
+
+test('gluUnProject and gluUnProject4 read and write a 64-bit program\'s memory past 4 GiB', ()=>{
+    // Cut to their low dwords, 0x400001xx named nothing of the program's.
+    const high = 0x1_4000_0000;
+    const { ram, call } = world({ high });
+    const view = new DataView(ram.buffer);
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    identity.forEach((v, i)=>view.setFloat64(0x100 + i * 8, v, true));
+    identity.forEach((v, i)=>view.setFloat64(0x200 + i * 8, v, true));
+    [0, 0, 2, 2].forEach((v, i)=>view.setInt32(0x300 + i * 4, v, true));
+    const [model, proj, viewport] = [0x100, 0x200, 0x300].map(at=>high + at);
+    assert.equal(call('gluUnProject', [...[1, 1, 0.5].flatMap(doubleWords), model, proj,
+        viewport, high + 0x500, high + 0x508, high + 0x510]), 1);
+    assert.deepEqual([0, 1, 2].map(i=>view.getFloat64(0x500 + i * 8, true)), [0, 0, 0]);
+    assert.equal(call('gluUnProject4', [...[1, 1, 0.5, 1].flatMap(doubleWords), model, proj,
+        viewport, ...[0, 1].flatMap(doubleWords), high + 0x600, high + 0x608, high + 0x610,
+        high + 0x618]), 1);
+    assert.deepEqual([0, 1, 2, 3].map(i=>view.getFloat64(0x600 + i * 8, true)), [0, 0, 0, 1]);
 });
 
 test('gluProject and gluUnProject round-trip a point, and gluCheckExtension finds words', ()=>{
