@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { noCache } from '../../cache/module.js';
+import { roomy } from '../../cache/testing.fixture.js';
 import { CORK_TSC_MHZ, cacheShare, createCorkHost } from './cork-host.js';
 import { freshThreadFpu } from './context.js';
 import * as engine from '../../../../../cork/src/index.js';
@@ -666,7 +666,7 @@ test('newContext under cork positions eip and esp', async()=>{
     const { cpuModule } = await import('../module.js');
     const api = await cpuModule.create({
         engineUrl: ENGINE_URL, memorySize: MEMORY,
-    }, /** @type {any} */ ({ requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {}), provide: ()=>{} }));
+    }, /** @type {any} */ ({ requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api : {}), provide: ()=>{} }));
     try
     {
         await api.boot();

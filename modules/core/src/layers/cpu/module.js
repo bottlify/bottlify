@@ -47,22 +47,13 @@ export const TRANSLATION_ZONE_BYTES = 256 * 1024 * 1024;
  * The run's cache as the translator is given it (`KeptStore`): its emitted
  * functions under `cork/`, bodies that stay however long idle - one is read
  * again only at a relink, long after it was written - and leave when their
- * room is wanted, never to a disk (one is made again by emitting it). None
- * where the cache layer joins no one (no reader under it, a tool's machine).
+ * room is wanted, never to a disk (one is made again by emitting it).
  *
  * @param {any} cache  the cache layer's api
- * @returns {{ kept?: import('./engine.js').KeptStore }}
+ * @returns {import('./engine.js').KeptStore}
  */
-const keptStore = cache=>{
-    const probe = cache.join(()=>{});
-    if (probe === null)
-    {
-        return {};
-    }
-    probe.leave?.();
-    return { kept: { space: cache.space(KEPT_SPACE, KEPT_OPTIONS), prefix: `${KEPT_SPACE}/`,
-        join: cache.join } };
-};
+const keptStore = cache=>({ space: cache.space(KEPT_SPACE, KEPT_OPTIONS), prefix: `${KEPT_SPACE}/`,
+    join: cache.join });
 
 /**
  * What an executor's worker costs the tab while it stands: its JavaScript
@@ -318,14 +309,14 @@ export function createCpuModule(){
 
         /**
          * @param {any} config
-         * @param {import('../../system/contract.js').ScopedModuleHost} [moduleHost]
+         * @param {import('../../system/contract.js').ScopedModuleHost} moduleHost
          * @returns {Promise<any>}
          */
         async create(config, moduleHost){
-            const log = moduleHost?.requireApi('log');
+            const log = moduleHost.requireApi('log');
             // The run's cache, where a translation another executor of the process
             // asks for is put once and read there in place (`createRemoteExecutor`).
-            const cache = moduleHost?.requireApi('cache') ?? null;
+            const cache = moduleHost.requireApi('cache');
 
             /**
              * Who is told the guest's memory grew (`onGrow`), kept from before
@@ -824,7 +815,7 @@ export function createCpuModule(){
                         // stops forming while another executor waits for this
                         // one's answer (`awaitedBy`).
                         cork: { ...settings.cork,
-                            ...keptStore(cache),
+                            kept: keptStore(cache),
                             ...several ? { atomic: true,
                                 awaited: ()=>state.awaited?.() === true } : {} },
                         closedBelow: settings.closedBelow,
@@ -896,8 +887,7 @@ export function createCpuModule(){
                                 ? { workerUrl: new URL(settings.executorWorker) } : {}),
                             unbroken: state.unbroken.buffer,
                             store: hostConfig.cork?.store ?? null,
-                            ...cache?.join ? { cache: { join: cache.join,
-                                space: cache.space(STORE_SPACE) } } : {},
+                            cache: { join: cache.join, space: cache.space(STORE_SPACE) },
                             config: { ...hostConfig, cork } }).then(remote=>{
                             if (lending === null)
                             {

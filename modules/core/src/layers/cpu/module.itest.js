@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { noCache } from '../cache/module.js';
+import { roomy } from '../cache/testing.fixture.js';
 import { cpuModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { openTable } from '@bottlify/cellar';
@@ -33,7 +33,7 @@ async function booted(code, at, config = {}){
     /** @type {string[]} */
     const words = [];
     const moduleHost = /** @type {any} */ ({
-        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api : {
             metrics,
             /** @param {string} text */
             intern: text=>{
@@ -51,12 +51,22 @@ async function booted(code, at, config = {}){
     return { api, metrics, counters };
 }
 
+test('the translator keeps what it emits in the run\'s cache it is handed', async()=>{
+    // The cache layer of a test, as of a process whose executors join nothing:
+    // its spaces are still the run's, and the translator keeps its functions there.
+    const { api } = await booted(new Uint8Array([0xf4]), GUEST_CODE);
+    api.runSlice(100);
+    const kept = /** @type {any} */ (cpuModule.diagnostics().metrics).cork.kept;
+    assert.equal(typeof kept, 'object', String(kept));
+    await cpuModule.dispose();
+});
+
 test('the frame counters carry what the host wrote into guest memory', async()=>{
     const metrics = createMetrics();
     const api = await cpuModule.create({
         engineUrl: CORK,
     }, /** @type {any} */ ({
-        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : { metrics, intern: ()=>-1 }), provide: ()=>{},
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api : { metrics, intern: ()=>-1 }), provide: ()=>{},
     }));
     await api.boot();
     api.writePhysical(GUEST_CODE, new Uint8Array([0xf4]));
@@ -152,7 +162,7 @@ test('a second instance in one realm boots on its own, never seeing the first on
         const metrics = createMetrics();
         const second = await cpuModule.create({ engineUrl: CORK },
             /** @type {any} */ ({
-                requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : { metrics, intern: ()=>-1 }),
+                requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api : { metrics, intern: ()=>-1 }),
                 provide: ()=>{},
             }));
         // The check reads this instance's own host, not the module's, which
