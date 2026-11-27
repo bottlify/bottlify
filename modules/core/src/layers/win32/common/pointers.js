@@ -260,7 +260,6 @@ export function declareAddresses(libraries, table){
             {
                 continue;
             }
-            seen.add(spec);
             if (spec.addresses !== undefined || typeof spec.handler !== 'function'
                 || spec.hook || spec.site || spec.invoke)
             {
@@ -268,10 +267,13 @@ export function declareAddresses(libraries, table){
             }
             const listed = spec.convention === 'thiscall' ? [0]
                 : Object.hasOwn(table, name) ? table[name] : null;
+            // A function exported first by a name the table has not (ntdll's
+            // Zw... beside its Nt..., an alias) is declared by the next that it has.
             if (!listed)
             {
                 continue;
             }
+            seen.add(spec);
             const words = (spec.argBytes ?? 0) >>> 2;
             /** @type {number[]} */
             const quadwords = spec.quadwords ?? [];
@@ -288,4 +290,40 @@ export function declareAddresses(libraries, table){
             }
         }
     }
+}
+
+/**
+ * The libraries of `tables` as property descriptors that declare each one's
+ * address arguments (`declareAddresses`) as it is first read: the table is
+ * every layer's - a graphics, sound, input or media library is named in it by
+ * its signature comments as kernel32 is - and a library its layer makes when
+ * first read is declared then, never made for it.
+ *
+ * @param {Record<string, Record<string, any>>} tables
+ * @param {Readonly<Record<string, readonly number[]>>} table
+ * @returns {PropertyDescriptorMap}
+ */
+export function declaringOnRead(tables, table){
+    /** @type {PropertyDescriptorMap} */
+    const descriptors = {};
+    for (const [name, own] of Object.entries(Object.getOwnPropertyDescriptors(tables)))
+    {
+        const read = own.get ? ()=>own.get?.call(tables) : ()=>own.value;
+        /** @type {unknown} */
+        let declared = null;
+        descriptors[name] = {
+            enumerable: own.enumerable,
+            configurable: true,
+            get: ()=>{
+                const library = read();
+                if (library && library !== declared)
+                {
+                    declareAddresses({ [name]: library }, table);
+                    declared = library;
+                }
+                return library;
+            },
+        };
+    }
+    return descriptors;
 }
