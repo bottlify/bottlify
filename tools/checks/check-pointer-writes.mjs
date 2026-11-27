@@ -8,8 +8,9 @@
 /**
  * Fails where a guest pointer is written or read by hand rather than by the one
  * reader and writer every layer goes through: the memory layer's `readPointer`
- * and `writePointer`, and, for a block put together in a buffer, win32's
- * `pointerWidth` and `pointerIo` (whose rule is the same). Thirteen copies had
+ * and `writePointer`, win32's guest view's `ptr` and `setPtr` over them
+ * (`win32/common/guest.js`), and, for a block put together in a buffer,
+ * win32's `pointerWidth` and `pointerIo` (whose rule is the same). Thirteen copies had
  * grown, each writing a dword and a zero beside it in a 64-bit process: every
  * one keeps an address below 4 GiB only, and a 64-bit process given addresses
  * past it wrote the wrong pointer through each.
@@ -17,6 +18,7 @@
  * Two rules over core's sources (tests and fixtures aside):
  *  - a `readPointer` or `writePointer` defined anywhere but the two owners
  *    must hand its work to one of them (`.writePointer(`, `.readPointer(`,
+ *    `guest.ptr`, `guest.setPtr`, an alias taken from a guest by name,
  *    `pointerIo(`, `pointerWidth(`, `width.bytes(`, `width.get(`);
  *  - no dword zero written at `+ 4` within a few lines under a test of the
  *    pointer's width (`if (long)`, `pointerSize === 8`, ...): a pointer's upper
@@ -37,7 +39,7 @@ const SRC = join(ROOT, 'modules/core/src');
 const OWNERS = new Set(['layers/memory/module.js', 'layers/win32/common/pointers.js']);
 
 const DEFINITION = /(?:const|let)\s+(?:\{[^}]*\b(?:readPointer|writePointer)\b[^}]*\}|(?:readPointer|writePointer))\s*=|\b(?:readPointer|writePointer)\s*:\s*(?:\(|async|[a-z]+\s*=>)|function\s+(?:readPointer|writePointer)\b/;
-const DELEGATES = /\.writePointer\(|\.readPointer\(|pointerIo\(|pointerWidth\(|width\.bytes\(|width\.get\(/;
+const DELEGATES = /\.writePointer\(|\.readPointer\(|\bguest\??\.(?:ptr|setPtr)\b|\{[^}]*\b(?:ptr|setPtr)\b[^}]*\}\s*=\s*(?:[\w$]+\??\.)*guest\b|pointerIo\(|pointerWidth\(|width\.bytes\(|width\.get\(/;
 const WIDTH_TEST = /if \((?:long|long\(\)|pointerSize === 8|pointer === 8|width\.size === 8|bits === 64|wide)\)/;
 const HIGH_HALF = /write(?:U32|32)\([^;]*\+ ?4\)?, 0\)|setUint32\([^;]*\+ ?4, 0, true\)/;
 
