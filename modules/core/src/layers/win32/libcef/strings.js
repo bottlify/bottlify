@@ -6,6 +6,7 @@
 
 import { wholeAddress } from '../common/pointers.js';
 import { utf16 } from '../common/utf16.js';
+import { utf8 as UTF8 } from '../../../system/text.js';
 
 /**
  * The framework's strings, lists and maps.
@@ -105,7 +106,7 @@ export function createCefStrings(host, { utf8 = false } = {}){
         }
         if (!wide)
         {
-            return new TextDecoder().decode(host.readMemory(str, length).slice());
+            return UTF8.decode(host.readMemory(str, length).slice());
         }
         const bytes = host.readMemory(str, length * 2).slice();
         return String.fromCharCode(...new Uint16Array(bytes.buffer, 0, length));
@@ -118,7 +119,7 @@ export function createCefStrings(host, { utf8 = false } = {}){
             fill(at, utf16(text), text.length);
             return;
         }
-        const bytes = new TextEncoder().encode(text);
+        const bytes = UTF8.encode(text);
         fill(at, bytes, bytes.length);
     };
 
@@ -222,16 +223,16 @@ export function createCefStrings(host, { utf8 = false } = {}){
         cef_string_wide_to_utf8: cdecl(12, ([src, length, output])=>{
             const raw = host.readMemory(wholeAddress(src), (length >>> 0) * 2).slice();
             const text = String.fromCharCode(...new Uint16Array(raw.buffer, 0, length >>> 0));
-            const bytes = new TextEncoder().encode(text);
+            const bytes = UTF8.encode(text);
             fill(output, bytes, bytes.length);
             return 1;
         }),
         cef_string_utf8_to_utf16: cdecl(12, ([src, length, output])=>{
-            writeAs(output, new TextDecoder().decode(bytesAt(src, length >>> 0)), true);
+            writeAs(output, UTF8.decode(bytesAt(src, length >>> 0)), true);
             return 1;
         }),
         cef_string_utf8_to_wide: cdecl(12, ([src, length, output])=>{
-            writeAs(output, new TextDecoder().decode(bytesAt(src, length >>> 0)), true);
+            writeAs(output, UTF8.decode(bytesAt(src, length >>> 0)), true);
             return 1;
         }),
         cef_string_userfree_utf8_free: cdecl(4, ([at])=>{

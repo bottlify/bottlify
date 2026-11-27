@@ -39,6 +39,7 @@ import { isTextUnicode } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { writeZeros } from '../common/guest.js';
 import { utf16 } from '../common/utf16.js';
+import { foldName, utf8 } from '../../../system/text.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -1750,7 +1751,7 @@ export function createRegistryFunctions(host){
         {
             return ERROR_ACCESS_DENIED;
         }
-        files.write(node, 0, new TextEncoder().encode(
+        files.write(node, 0, utf8.encode(
             `${HIVE_MAGIC}${JSON.stringify(exportTree(key))}`));
         files.close(node);
         if (!saidFormat)
@@ -1784,7 +1785,7 @@ export function createRegistryFunctions(host){
         /** @param {Uint8Array} bytes */
         const parse = bytes=>{
             files.close(node);
-            const text = new TextDecoder().decode(bytes);
+            const text = utf8.decode(bytes);
             if (!text.startsWith(HIVE_MAGIC))
             {
                 return ERROR_BADDB;
@@ -1809,7 +1810,7 @@ export function createRegistryFunctions(host){
      */
     const loaded = new Map();
     /** @param {number} root @param {string} name */
-    const loadedName = (root, name)=>`${root}\\${name.toLowerCase()}`;
+    const loadedName = (root, name)=>`${root}\\${foldName(name)}`;
 
     /**
      * RegLoadKey in either spelling: the file's tree under a new key of

@@ -782,10 +782,14 @@ export async function layerConfig(deps){
                 /** @param {import('../layers/win32/gdi32/structs.js').LogFontFields} font */
                 fontMetrics: font=>core().api('graphics').gdiDrawing().fontMetrics(font),
                 /**
+                 * A glyph read in place (`graphics/gdi/fonts.js` `GlyphReader`).
+                 *
                  * @param {number} code
                  * @param {import('../layers/win32/gdi32/structs.js').LogFontFields} font
+                 * @param {(glyph: any, arg: any) => any} read @param {any} [arg]
                  */
-                glyph: (code, font)=>core().api('graphics').gdiDrawing().glyph(code, font),
+                glyph: (code, font, read, arg)=>core().api('graphics').gdiDrawing()
+                    .glyph(code, font, read, arg),
                 /**
                  * @param {import('../layers/win32/gdi32/structs.js').LogFontFields} font
                  * @param {string} text

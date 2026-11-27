@@ -761,11 +761,7 @@ test('rand draws the runtime\'s sequence through the import, in the guest, on th
     + ' own variable', { timeout: 60000 }, async()=>{
     // The handler is the reference; the library's variable starts where it does.
     const reference = createMsvcrtFunctions(/** @type {any} */ ({
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            new Uint8Array(length),
-        writeMemory: ()=>{}, fillMemory: ()=>{}, readCString: ()=>'',
-        guest: guestOver(new Uint8Array(0x10000)),
-        scanCString: ()=>({ index: 0, byte: 0 }), write: ()=>{}, callGuest: ()=>Promise.resolve(0),
+        guest: guestOver(new Uint8Array(0x10000)), write: ()=>{}, callGuest: ()=>Promise.resolve(0),
     }));
     /** @type {Call[]} */
     const calls = Array.from({ length: 20 }, ()=>({ name: 'rand', args: ()=>[],

@@ -42,17 +42,12 @@ const MAX_WIDE = 1 << 16;
 /**
  * @typedef {Object} WideHost
  * @property {import('../common/guest.js').Guest} guest  What the handlers read and
- *           write: in a 64-bit process the string pointer `mbsrtowcs` and
- *           `wcsrtombs` advance is a quadword.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- *           With writeMemory, what the routines that run in the guest read and
- *           write when they answer as handlers (`guestEntry`).
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ *           write, and the routines that run in the guest when they answer as
+ *           handlers (`guestEntry`): in a 64-bit process the string pointer
+ *           `mbsrtowcs` and `wcsrtombs` advance is a quadword.
  * @property {(code: number) => void} [errno]  Where a failure says why.
  * @property {(bytes: number) => number} [allocate]  The heap a duplicate is
  *           made on; without it `_wcsdup` stays unexported.
- * @property {number} [pointerSize]  8 in a 64-bit process: what the routines in the
- *           guest read a pointer as.
  */
 
 /** WEOF, and what no class is answered for. */
@@ -664,12 +659,9 @@ export function createWideClassificationFunctions(){
 
 /**
  * @typedef {Object} MultiByteFunctionsHost
- * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, length: number) => Uint8Array} readMemory
- *     With writeMemory, what the routines that run in the guest read and write
- *     when they answer as handlers (`guestEntry`).
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ * @property {import('../common/guest.js').Guest} guest  What the handlers read
+ *     and write, and the routines that run in the guest when they answer as
+ *     handlers (`guestEntry`).
  * @property {(code: number) => void} [errno]
  * @property {(name: string) => number} [addressOf]
  *     Where the runtime's own export of that name was placed, zero before it

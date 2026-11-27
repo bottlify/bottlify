@@ -21,6 +21,8 @@
  * cannot say, its UTF-16 units.
  */
 
+import { utf8 } from './text.js';
+
 const UNDEFINED = 0;
 const NULL = 1;
 const FALSE = 2;
@@ -36,18 +38,11 @@ const UNITS = 10;
 /** A surrogate with no partner: what UTF-8 cannot carry. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-
 /**
- * UTF-8 bytes as text, wherever they are. A browser decodes no view of
- * shared memory, and a ring's records are one: such bytes are copied out
- * first.
- *
- * @param {Uint8Array} bytes
+ * UTF-8 bytes as text, wherever they are - a ring's records are a view of
+ * shared memory, which `utf8.decode` copies out first.
  */
-export const textOf = bytes=>decoder.decode(typeof SharedArrayBuffer === 'function'
-    && bytes.buffer instanceof SharedArrayBuffer ? bytes.slice() : bytes);
+export const textOf = utf8.decode;
 
 /**
  * A growing buffer the encoder writes into.
@@ -147,7 +142,7 @@ function put(out, value, depth){
     {
         if (!LONE_SURROGATE.test(value))
         {
-            const text = encoder.encode(value);
+            const text = utf8.encode(value);
             out.u8(STRING);
             out.u32(text.length);
             out.raw(text);

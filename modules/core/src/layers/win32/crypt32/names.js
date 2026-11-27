@@ -17,6 +17,7 @@
 
 import { TAG } from '../crypto/der.js';
 import { derElement, oidContents, readName } from '../crypto/x509.js';
+import { utf8 } from '../../../system/text.js';
 
 /** CertNameToStr's string types. */
 export const NAME_STR = Object.freeze({
@@ -100,7 +101,7 @@ function encodeValue(oid, value){
     {
         return derElement(TAG.PRINTABLE_STRING, Uint8Array.from(value, ch=>ch.charCodeAt(0)));
     }
-    return derElement(TAG.UTF8_STRING, new TextEncoder().encode(value));
+    return derElement(TAG.UTF8_STRING, utf8.encode(value));
 }
 
 /**

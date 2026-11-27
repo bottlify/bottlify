@@ -24,6 +24,7 @@
  */
 
 import { decodeAnsi } from '../kernel32/locale.js';
+import { utf16le, utf8 } from '../../../system/text.js';
 
 /** The type's low bits: what the action is. */
 const TYPE_DLL = 1;
@@ -79,11 +80,11 @@ let temporaryNumber = 0x1a2b;
 function scriptText(bytes){
     if (bytes[0] === 0xff && bytes[1] === 0xfe)
     {
-        return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+        return utf16le.decode(bytes.subarray(2));
     }
     if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)
     {
-        return new TextDecoder('utf-8').decode(bytes.subarray(3));
+        return utf8.decode(bytes.subarray(3));
     }
     return decodeAnsi(bytes);
 }

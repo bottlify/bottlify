@@ -182,15 +182,11 @@ test('at 64 bits past 4 GiB: _pctype is a whole pointer, strtok and _strdup whol
         let next = base + 0x1000;
         const table = createStringFunctions({
             guest: guestWindow(bytes, { base, pointerSize: 8 }),
-            readMemory: (at, length)=>bytes.slice(at - base, at - base + length),
-            writeMemory: (at, data)=>bytes.set(data, at - base),
-            scanCString: ()=>assert.fail('no scan here'),
             allocate: size=>{
                 const at = next;
                 next += size + 15 & ~15;
                 return at;
             },
-            pointerSize: 8,
         });
         const pointer = table._pctype.data();
         assert.equal(pointer.length, 8);
@@ -205,6 +201,27 @@ test('at 64 bits past 4 GiB: _pctype is a whole pointer, strtok and _strdup whol
         const copy = table._strdup.handler([base + 0x102]);
         assert.ok(copy > base);
         assert.deepEqual([...bytes.subarray(copy - base, copy - base + 2)], [0x62, 0]);
+    });
+
+test('at 64 bits past 4 GiB: the routines in the guest answer as handlers through the view',
+    ()=>{
+        // A buffer at the window's first byte: its address's low dword is zero.
+        const base = 0x100000000;
+        const bytes = new Uint8Array(0x1000);
+        const table = createStringFunctions({
+            guest: guestWindow(bytes, { base, pointerSize: 8 }),
+            allocate: ()=>0,
+        });
+        bytes.set([...'abc\0'].map(c=>c.charCodeAt(0)), 0);
+        bytes.set([...'dEf\0'].map(c=>c.charCodeAt(0)), 0x100);
+        // A pointer past 4 GiB is answered as RAX takes it whole: a bigint.
+        assert.equal(table.memchr.handler([base, 'c'.charCodeAt(0), 3]), BigInt(base + 2));
+        assert.equal(table.strncat.handler([base, base + 0x100, 2]), BigInt(base));
+        assert.equal(String.fromCharCode(...bytes.subarray(0, 6)), 'abcdE\0');
+        assert.equal(table._memicmp.handler([base + 3, base + 0x100, 2]), 0);
+        assert.equal(table.strcoll.handler([base, base + 0x100]), -1 >>> 0);
+        assert.equal(table.strxfrm.handler([base + 0x200, base, 16]), 5);
+        assert.equal(String.fromCharCode(...bytes.subarray(0x200, 0x206)), 'abcdE\0');
     });
 
 /**

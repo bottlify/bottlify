@@ -34,11 +34,9 @@ const TRUNCATE = 0xffffffff;
 
 /**
  * @typedef {Object} Msvcr80Host
- * @property {import('../common/guest.js').Guest} guest  At the process's pointer width.
- * @property {(address: number, length: number) => Uint8Array} readMemory  For the
- *           functions whose code runs in the guest (`guestEntry`).
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {number} [pointerSize]  8 in a 64-bit process: the guest code's width.
+ * @property {import('../common/guest.js').Guest} guest  At the process's pointer
+ *           width: what the handlers and the functions whose code runs in the
+ *           guest (`guestEntry`) read and write.
  * @property {(entry: number, args: number[], thread?: unknown) => any} [callGuest]
  *           What calls the program's invalid-parameter handler.
  * @property {() => unknown} [currentThread]
@@ -95,7 +93,7 @@ export function createMsvcr80Functions(crt, host){
         handler: ([text, delimiters, context])=>{
             const start = wholeAddress(context) === 0 ? 0
                 : wholeAddress(text) || guest.ptr(context);
-            if ((delimiters >>> 0) === 0 || start === 0)
+            if (wholeAddress(delimiters) === 0 || start === 0)
             {
                 fail(EINVAL);
                 return 0;
@@ -143,12 +141,12 @@ export function createMsvcr80Functions(crt, host){
         argBytes: 20,
         /** @param {number[]} args */
         handler: ([out, path, flags, share, mode])=>{
-            if ((out >>> 0) === 0)
+            if (wholeAddress(out) === 0)
             {
                 return fail(EINVAL);
             }
             guest.set32(out, -1);
-            if ((path >>> 0) === 0)
+            if (wholeAddress(path) === 0)
             {
                 return fail(EINVAL);
             }
@@ -173,7 +171,8 @@ export function createMsvcr80Functions(crt, host){
         // `__pioinfo` in this runtime's layout, over msvcrt's descriptors:
         // a program built against it reads `textmode` past the lock.
         ...(/** @type {any} */ (crt)[IOINFO_EXPORT]
-            ? { __pioinfo: /** @type {any} */ (crt)[IOINFO_EXPORT](IOINFO_LAYOUTS.msvcr80) }
+            ? { __pioinfo: /** @type {any} */ (crt)[IOINFO_EXPORT](
+                IOINFO_LAYOUTS.msvcr80.at(guest.pointerSize)) }
             : {}),
 
         _encode_pointer: encode,
@@ -251,7 +250,7 @@ export function createMsvcr80Functions(crt, host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([buffer, size, count, format, list])=>{
-                if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (format >>> 0) === 0)
+                if (wholeAddress(buffer) === 0 || (size >>> 0) === 0 || wholeAddress(format) === 0)
                 {
                     fail(EINVAL);
                     return -1;
@@ -450,7 +449,7 @@ export function createMsvcr80Functions(crt, host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([buffer, size, format, list])=>{
-                if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (format >>> 0) === 0)
+                if (wholeAddress(buffer) === 0 || (size >>> 0) === 0 || wholeAddress(format) === 0)
                 {
                     fail(EINVAL);
                     return -1;

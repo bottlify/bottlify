@@ -16,6 +16,7 @@ import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import zlib from 'node:zlib';
 import { encode } from './protobuf.js';
 import { adler32 } from './depot.js';
+import { utf8 } from '../system/text.js';
 
 /** @type {import('./protobuf.js').Schema} */
 const Payload = {
@@ -110,7 +111,7 @@ export function fakeDepot({ depot, gid, files, code = 77n, key = new Uint8Array(
                 cb_original: piece.length, cb_compressed: packed.length });
         }
         return {
-            filename: Buffer.from(symmetricEncrypt(new TextEncoder().encode(file.name), key))
+            filename: Buffer.from(symmetricEncrypt(utf8.encode(file.name), key))
                 .toString('base64'),
             size: BigInt(bytes.length),
             flags: file.directory ? 0x40 : 0,

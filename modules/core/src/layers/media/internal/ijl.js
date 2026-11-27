@@ -36,6 +36,7 @@
 
 import { decodeJpeg, readJpegHeader } from './jpeg.js';
 import { wholeAddress } from '../../../system/address.js';
+import { utf8 } from '../../../system/text.js';
 
 const OFFSET = {
     // The first word says whether the caller filled in the detailed
@@ -117,7 +118,7 @@ export function createIjlLibrary({ readMemory, writeMemory, allocate, warn }){
                 return address;
             }
         }
-        const bytes = new TextEncoder().encode(`${text}\0`);
+        const bytes = utf8.encode(`${text}\0`);
         const address = allocate(bytes.length);
         if (address !== 0)
         {

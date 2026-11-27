@@ -84,27 +84,6 @@ function fakeHost(size = 0x1000){
             }
             return decodeAnsi(bytes.subarray(address, end));
         },
-        /**
-         * @param {number} address @param {number} limit
-         * @param {Uint8Array} [wanted]
-         */
-        scanCString: (address, limit, wanted = new Uint8Array(256))=>{
-            for (let at = 0; at < limit; at += 256)
-            {
-                const length = Math.max(0, Math.min(256, limit - at, size - address - at));
-                asked += length;
-                const chunk = bytes.subarray(address + at, address + at + length);
-                for (let i = 0; i < chunk.length; i++)
-                {
-                    const byte = chunk[i];
-                    if (byte === 0 || wanted[byte] !== 0)
-                    {
-                        return { index: at + i, byte };
-                    }
-                }
-            }
-            throw new Error(`No NUL within ${limit} bytes of 0x${address.toString(16)}`);
-        },
         /** @param {number} handle @param {string} text */
         write: (handle, text)=>output.push({ handle, text }),
 
@@ -1222,3 +1201,25 @@ test('at 64 bits past 4 GiB: a printer\'s buffer whose low dword is zero is a bu
     assert.equal(fns._get_fmode.handler([base]), 0);
     assert.equal(guest.u32(base), 0, '_get_fmode\'s int at the block\'s start');
 });
+
+test('at 64 bits past 4 GiB: _controlfp_s\'s handler is the SSE one, its word written whole',
+    ()=>{
+        // A 64-bit process's floating-point control is MXCSR's: the handler
+        // answers from it, as the code a 64-bit process places does.
+        const base = 2 ** 32;
+        const bytes = new Uint8Array(0x100).fill(0xcc);
+        const guest = guestWindow(bytes, { base, pointerSize: 8 });
+        /** @type {string[]} */
+        const asked = [];
+        const fpu = /** @type {any} */ ({
+            mxcsr: ()=>asked.push('mxcsr') && 0x1f80,
+            setMxcsr: ()=>void asked.push('setMxcsr'),
+            controlWord: ()=>asked.push('controlWord') && 0x27f,
+            setControlWord: ()=>void asked.push('setControlWord'),
+        });
+        const fns = /** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(), guest,
+            pointerSize: 8, fpu, write: ()=>{}, callGuest: async()=>0 }));
+        assert.equal(fns._controlfp_s.handler([base, 0, 0]), 0);
+        assert.deepEqual(asked, ['mxcsr', 'setMxcsr']);
+        assert.notEqual(guest.u32(base), 0xcccccccc, 'the word at the block\'s start');
+    });

@@ -23,6 +23,7 @@
 
 import { argumentsOf } from './command-line.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { utf16le, utf8 } from '../../../system/text.js';
 
 const GENERIC_READ = 0x80000000;
 const FILE_SHARE_READ = 0x1;
@@ -71,11 +72,11 @@ export function textOfFile(bytes){
     let text;
     if (bytes[0] === 0xff && bytes[1] === 0xfe)
     {
-        text = new TextDecoder('utf-16le').decode(bytes.subarray(2));
+        text = utf16le.decode(bytes.subarray(2));
     }
     else if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)
     {
-        text = new TextDecoder('utf-8').decode(bytes.subarray(3));
+        text = utf8.decode(bytes.subarray(3));
     }
     else
     {

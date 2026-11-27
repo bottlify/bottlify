@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf8 } from '../../../system/text.js';
+
 /**
  * The JavaScript half of the video decoder: the C surface of the wasm module
  * built out of FFmpeg by scripts/video-decoder, wrapped so that nothing above this file handles
@@ -164,7 +166,7 @@ export async function createDecoder(wasmBytes){
         {
             end++;
         }
-        return new TextDecoder().decode(memory.subarray(pointer, end));
+        return utf8.decode(memory.subarray(pointer, end));
     };
 
     /** @param {number} id @returns {ClipInfo} */

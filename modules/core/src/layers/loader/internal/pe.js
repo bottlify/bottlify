@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf8 } from '../../../system/text.js';
+
 /**
  * PE32 and PE32+ parsing: headers, sections, imports, base relocations.
  *
@@ -215,7 +217,7 @@ function parseHeaders(bytes, wide){
         const at = sectionTable + i * 40;
         const characteristics = view.getUint32(at + 36, true);
         sections.push({
-            name: new TextDecoder().decode(bytes.subarray(at, at + 8)).replace(/\0+$/, ''),
+            name: utf8.decode(bytes.subarray(at, at + 8)).replace(/\0+$/, ''),
             virtualSize: view.getUint32(at + 8, true),
             virtualAddress: view.getUint32(at + 12, true),
             rawSize: view.getUint32(at + 16, true),
@@ -468,7 +470,7 @@ export function parseExportDirectory(read, directory){
             const end = bytes.indexOf(0);
             if (end >= 0)
             {
-                return new TextDecoder().decode(bytes.subarray(0, end));
+                return utf8.decode(bytes.subarray(0, end));
             }
             if (bytes.length < length)
             {
@@ -709,5 +711,5 @@ export function rvaToFileOffset(image, rva){
 function readCString(bytes, offset){
     let end = offset;
     while (end < bytes.length && bytes[end] !== 0) end++;
-    return new TextDecoder().decode(bytes.subarray(offset, end));
+    return utf8.decode(bytes.subarray(offset, end));
 }

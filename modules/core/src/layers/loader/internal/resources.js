@@ -23,6 +23,7 @@
  */
 
 import { rvaToFileOffset } from './pe.js';
+import { foldName } from '../../../system/text.js';
 
 const DIR_RESOURCE = 2;
 
@@ -427,7 +428,7 @@ function openTree(source, image){
                 }
                 if (typeof key === 'string' && typeof entry.key === 'string')
                 {
-                    if (key.toLowerCase() === entry.key.toLowerCase())
+                    if (foldName(key) === foldName(entry.key))
                     {
                         return entry;
                     }

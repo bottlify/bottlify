@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf8 } from '../../../system/text.js';
+
 /**
  * Synthesis of an in-guest system module: a real PE32 image with a real export
  * directory, whose exported addresses are JMP trampolines into host trap stubs,
@@ -78,7 +80,6 @@ const INT3 = 0xcc;
 const EXPORT_DIRECTORY_SIZE = 40;
 const DEFAULT_ORDINAL_BASE = 1;
 
-const encoder = new TextEncoder();
 
 /**
  * @typedef {Object} SynthExport
@@ -297,7 +298,7 @@ export function synthesiseModule({ name, base, exports, entryPoint, long = false
         view.setUint16(nameOrdinalsRva + slot * 2, ordinals[index] - ordinalBase, true);
     });
 
-    strings.forEach((text, index)=>bytes.set(encoder.encode(text), stringRvas[index]));
+    strings.forEach((text, index)=>bytes.set(utf8.encode(text), stringRvas[index]));
 
     const table = new Map(exports.map((entry, index)=>[entry.name, {
         address: base + exportRva(index),
@@ -445,8 +446,8 @@ export function synthesiseProgram({ library, routine, long = false }){
         view.setUint32(descriptor + 16, iatSlot(index), true); // FirstThunk
         view.setUint32(iltRva + index * table, hintRvas[index], true);
         view.setUint32(iatSlot(index), hintRvas[index], true);
-        bytes.set(encoder.encode(entry.name), hintRvas[index] + 2);
-        bytes.set(encoder.encode(entry.library), libraryRvas[index]);
+        bytes.set(utf8.encode(entry.name), hintRvas[index] + 2);
+        bytes.set(utf8.encode(entry.library), libraryRvas[index]);
     });
 
     return { bytes, base, entryPointRva: SECTION_RVA };
@@ -624,7 +625,7 @@ function writeHeaders(bytes, view, layout){
  * @param {number} section  where the table starts @param {number} rawSize
  */
 function writeSections(bytes, view, layout, section, rawSize){
-    bytes.set(encoder.encode('.text'), section);
+    bytes.set(utf8.encode('.text'), section);
     view.setUint32(section + 8, layout.sectionSize, true); // VirtualSize
     view.setUint32(section + 12, SECTION_RVA, true);
     view.setUint32(section + 16, rawSize, true); // SizeOfRawData
@@ -634,7 +635,7 @@ function writeSections(bytes, view, layout, section, rawSize){
     if (layout.dataRva !== 0)
     {
         const data = section + 40;
-        bytes.set(encoder.encode('.data'), data);
+        bytes.set(utf8.encode('.data'), data);
         view.setUint32(data + 8, layout.dataSize, true); // VirtualSize
         view.setUint32(data + 12, layout.dataRva, true);
         view.setUint32(data + 16, align(layout.dataSize, PAGE), true); // SizeOfRawData

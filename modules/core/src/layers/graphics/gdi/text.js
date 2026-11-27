@@ -69,8 +69,11 @@ export function textExtent(text, metrics, dx){
  * @returns {number}
  */
 function advanceOf(code, metrics){
-    return metrics.glyphs?.(code)?.advance ?? metrics.cellWidth;
+    return metrics.glyphs?.(code, advanceRead) ?? metrics.cellWidth;
 }
+
+/** @param {import("./fonts.js").Glyph} glyph */
+const advanceRead = glyph=>glyph.advance;
 
 /**
  * A pixel of the text colour over what is there, by the glyph's coverage.
@@ -95,14 +98,18 @@ function mix(ink, under, alpha){
  * through the painter as any other ink does; partly covered ones are mixed
  * with what is under them first, which is what anti-aliasing is.
  *
- * @param {import("./shapes.js").Painter} painter
+ * A glyph read in place (`fonts.js` `GlyphReader`): `pen` is where, one
+ * object a run of text, moved on for each character.
+ *
  * @param {import("./fonts.js").Glyph} glyph
- * @param {number} x   The pen.
- * @param {number} y   The top of the cell.
- * @param {number} ink
+ * @param {{ painter: import("./shapes.js").Painter, x: number, y: number, ink: number }} pen
+ *     the painter, the pen, the top of the cell and the ink
+ * @returns {true}
  */
-function compositeGlyph(painter, glyph, x, y, ink){
+function compositeGlyph(glyph, pen){
+    const { painter, x, y, ink } = pen;
     const { clip, surface } = painter;
+    const { bytes, offset } = glyph;
     for (let row = 0; row < glyph.height; row++)
     {
         const at = y + glyph.top + row;
@@ -112,7 +119,7 @@ function compositeGlyph(painter, glyph, x, y, ink){
         }
         for (let column = 0; column < glyph.width; column++)
         {
-            const alpha = glyph.coverage[row * glyph.width + column];
+            const alpha = bytes[offset + row * glyph.width + column];
             const across = x + glyph.left + column;
             if (alpha === 0 || across < clip.left || across >= clip.right)
             {
@@ -122,6 +129,7 @@ function compositeGlyph(painter, glyph, x, y, ink){
                 alpha === 255 ? ink : mix(ink, surface.read(across, at), alpha));
         }
     }
+    return true;
 }
 
 /**
@@ -194,17 +202,16 @@ export function extTextOut(painter, options){
     const bodyWidth = Math.max(1, metrics.cellWidth - 1);
     const bodyHeight = Math.max(1, metrics.ascent - 1);
     let pen = left;
+    const place = { painter: clipped, x: left, y: top, ink };
     for (let index = 0; index < options.text.length; index++)
     {
         const code = options.text.charCodeAt(index);
         const advance = options.dx?.[index] ?? advanceOf(code, metrics);
-        const glyph = metrics.glyphs?.(code);
-        const rows = glyph ? null : glyphOf(code);
-        if (glyph)
-        {
-            compositeGlyph(clipped, glyph, pen, top, ink);
-        }
-        else if (rows)
+        place.x = pen;
+        // A glyph of the engine's is composited where it lies, inside its read.
+        const drawn = metrics.glyphs?.(code, compositeGlyph, place) ?? null;
+        const rows = drawn ? null : glyphOf(code);
+        if (rows)
         {
             for (let row = 0; row < GLYPH_ROWS; row++)
             {
@@ -222,7 +229,7 @@ export function extTextOut(painter, options){
                 }
             }
         }
-        else if (code !== 0x20)
+        else if (!drawn && code !== 0x20)
         {
             fillRect(clipped, {
                 left: pen,

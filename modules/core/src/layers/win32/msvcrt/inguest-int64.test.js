@@ -47,8 +47,6 @@ function handlers(){
                 }
                 return decodeAnsi(memory.subarray(address, end));
             } },
-            readMemory: (address, length)=>memory.slice(address, address + length),
-            writeMemory: (address, bytes)=>memory.set(bytes, address),
             allocate: ()=>{
                 throw new Error('nothing here allocates');
             },

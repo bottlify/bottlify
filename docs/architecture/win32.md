@@ -124,7 +124,12 @@ faults where it ends, as Windows' loop does, rather than allocating gigabytes fi
 64 MiB). A library makes no accessor of
 its own and copies no read again: `tools/checks/check-guest-access.mjs` (`npm run
 check:boundaries`) fails a new one, and lists in its baseline the ones the layer still has, which
-only shrinks.
+only shrinks. A routine that runs in the guest answers through the same view when it is asked as
+a handler ([`msvcrt/guest-code.js`](../../modules/core/src/layers/win32/msvcrt/guest-code.js)
+`guestEntry`), so the C runtime's libraries are handed the view and nothing else; a structure
+they lay out in guest memory, `__pioinfo`'s entries among them, is declared once with
+[`system/layout.js`](../../modules/core/src/system/layout.js)'s `struct` and laid out at the
+process's width.
 
 ## One call, from the program to JS and back
 

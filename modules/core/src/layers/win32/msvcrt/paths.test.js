@@ -722,3 +722,39 @@ test('at 64 bits past 4 GiB: a buffer whose low dword is zero is a buffer, and e
     guest.writeWide(base + 0x300, 'C:\\game\\data.mpq');
     assert.equal(table._waccess.handler([base + 0x300, 0]), 0, 'a wide path read whole');
 });
+
+test('in a 64-bit process _findfirst is _findfirst64i32 and _findfirsti64 _findfirst64: time_t'
+    + ' whole', ()=>{
+    // A 64-bit msvcrt.dll's time_t is an __int64, so its _finddata_t is
+    // _finddata64i32_t (times at 8, 16 and 24, the size a dword at 32, the
+    // name at 36) and its _finddatai64_t __finddata64_t (the size whole at
+    // 32, the name at 40); the wide forms the same with wide names.
+    const base = 2 ** 32;
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    // A time past 2038, which only a 64-bit time_t holds.
+    const written = Date.UTC(2040, 0, 1);
+    const files = fakeFiles({ 'C:\\game\\a.dat': new Uint8Array(3) },
+        { directories: ['C:\\', 'C:\\game'], modified: written });
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({ guest, files, allocate: ()=>0,
+        errno: ()=>{} }));
+    guest.writeAnsi(base + 0x800, 'C:\\game\\*.dat');
+    guest.writeWide(base + 0x900, 'C:\\game\\*.dat');
+    const seconds = BigInt(written / 1000);
+    /** @param {string} name @param {number} pattern @param {number} size @param {number} at */
+    const found = (name, pattern, size, at)=>{
+        bytes.fill(0xcc, 0, 0x300);
+        assert.notEqual(table[name].handler([base + pattern, base]), -1, name);
+        assert.deepEqual([8, 16, 24].map(time=>view.getBigInt64(time, true)),
+            [seconds, seconds, seconds], `${name}: the three times whole`);
+        assert.equal(size === 8 ? view.getBigUint64(32, true) : BigInt(view.getUint32(32, true)),
+            3n, `${name}: the size`);
+        return at;
+    };
+    assert.equal(guest.cstr(base + found('_findfirst', 0x800, 4, 36), 16), 'a.dat');
+    assert.equal(guest.cstr(base + found('_findfirsti64', 0x800, 8, 40), 16), 'a.dat');
+    assert.equal(guest.wstr(base + found('_wfindfirst', 0x900, 4, 36), 32), 'a.dat');
+    assert.equal(guest.wstr(base + found('_wfindfirsti64', 0x900, 8, 40), 32), 'a.dat');
+    assert.equal(bytes[40 + 2 * 260], 0xcc, 'nothing past __wfinddata64_t\'s 560 bytes');
+});

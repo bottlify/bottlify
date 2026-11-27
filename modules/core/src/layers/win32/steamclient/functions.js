@@ -25,6 +25,7 @@
 
 import { createSteamObjects } from './objects.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf8 } from '../../../system/text.js';
 
 /**
  * @typedef {Object} SteamAccount
@@ -145,7 +146,7 @@ export function createSteamclientFunctions(host){
         {
             return;
         }
-        const bytes = new TextEncoder().encode(text).subarray(0, room - 1);
+        const bytes = utf8.encode(text).subarray(0, room - 1);
         host.writeMemory(wholeAddress(address), Uint8Array.of(...bytes, 0));
     };
 
@@ -155,7 +156,7 @@ export function createSteamclientFunctions(host){
     const constant = text=>{
         if (!constants.has(text))
         {
-            const bytes = new TextEncoder().encode(text);
+            const bytes = utf8.encode(text);
             const at = wholeAddress(host.allocate(bytes.length + 1));
             host.writeMemory(at, Uint8Array.of(...bytes, 0));
             constants.set(text, at);

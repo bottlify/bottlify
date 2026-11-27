@@ -292,6 +292,17 @@ test('StrCSpn counts the characters before one of the set, StrCSpnI ignoring cas
     }
 });
 
+test('the I functions fold a unit at a time through Windows\' case table', ()=>{
+    // A sharp s does not become two letters, and the dotless i is not i.
+    const m = shlwapiMachine();
+    const text = m.put('as', true);
+    assert.equal(m.fns.StrCSpnIW.handler([text, m.put('ß', true)]), 2);
+    assert.equal(m.fns.StrRChrIW.handler([m.put('ı', true), 0, 'i'.charCodeAt(0)]), 0);
+    assert.equal(m.fns.StrStrIW.handler([m.put('ı', true), m.put('I', true)]), 0);
+    const hay = m.put('xÿ', true);
+    assert.equal(m.fns.StrStrIW.handler([hay, m.put('Ÿ', true)]), hay + 2);
+});
+
 test('StrChrI finds a character whatever its case', ()=>{
     // Wine's test_StrChrIA and test_StrChrIW: the capital comes first in the string.
     for (const [suffix, wide] of WIDTHS)

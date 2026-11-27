@@ -25,6 +25,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { foldName } from '../../../system/text.js';
 
 const CS_GLOBALCLASS = 0x4000;
 
@@ -48,7 +49,7 @@ export function createClassRegistry({ main, user32, isSystem }){
         === Math.floor(wholeAddress(b) / 0x10000);
 
     /** @param {any} cls @param {string} folded */
-    const named = (cls, folded)=>cls.name.toLowerCase() === folded;
+    const named = (cls, folded)=>foldName(cls.name) === folded;
 
     /**
      * The module a call's instance stands for, for that call.
@@ -72,7 +73,7 @@ export function createClassRegistry({ main, user32, isSystem }){
      * @param {string} name @param {number} instance @param {Asking} asking
      */
     const find = (name, instance, asking)=>{
-        const folded = name.toLowerCase();
+        const folded = foldName(name);
         const module = moduleFor(instance, asking);
         return list.find(cls=>!cls.global && named(cls, folded)
             && (module === null || sameModule(cls.instance, module)))
@@ -97,7 +98,7 @@ export function createClassRegistry({ main, user32, isSystem }){
                 return ERROR_INVALID_PARAMETER;
             }
             const global = (cls.style & CS_GLOBALCLASS) !== 0;
-            const folded = cls.name.toLowerCase();
+            const folded = foldName(cls.name);
             const taken = list.some(other=>named(other, folded)
                 && (other.global || (!global && sameModule(other.instance, instance))))
                 || (global && isSystem(cls.name));

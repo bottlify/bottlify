@@ -16,11 +16,11 @@
  */
 
 import { STATUS } from './status.js';
-import { countedStringAccess, upcaseText } from './strings.js';
+import { countedStringAccess } from './strings.js';
 import { unitsFromUtf8, utf8FromUnits } from '../kernel32/utf8.js';
 import { formatMessageText } from '../kernel32/format-message.js';
-import { decodeAnsi, decodeOem, downcaseUnit, encodeAnsi, encodeOem, upcaseUnit }
-    from '../kernel32/locale.js';
+import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from '../kernel32/locale.js';
+import { downcaseUnit, foldName, upcaseUnit } from '../../../system/text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { bytesOfUnits, utf16, utf16z } from '../common/utf16.js';
 import { readGuid } from '../../../system/guid.js';
@@ -924,9 +924,9 @@ export function createStringOperations(host){
         /** NTSTATUS RtlUnicodeToOemN(PCHAR, ULONG, PULONG, PCWCH, ULONG) */
         RtlUnicodeToOemN: plain(bytes=>encodeOem(unitsText(bytes)), 2, 1),
         /** NTSTATUS RtlUpcaseUnicodeToMultiByteN(PCHAR, ULONG, PULONG, PCWCH, ULONG) */
-        RtlUpcaseUnicodeToMultiByteN: plain(bytes=>encodeAnsi(upcaseText(unitsText(bytes))), 2, 1),
+        RtlUpcaseUnicodeToMultiByteN: plain(bytes=>encodeAnsi(foldName(unitsText(bytes))), 2, 1),
         /** NTSTATUS RtlUpcaseUnicodeToOemN(PCHAR, ULONG, PULONG, PCWCH, ULONG) */
-        RtlUpcaseUnicodeToOemN: plain(bytes=>encodeOem(upcaseText(unitsText(bytes))), 2, 1),
+        RtlUpcaseUnicodeToOemN: plain(bytes=>encodeOem(foldName(unitsText(bytes))), 2, 1),
 
         /** NTSTATUS RtlMultiByteToUnicodeSize(PULONG Bytes, const CHAR *Source, ULONG Length) */
         RtlMultiByteToUnicodeSize: {

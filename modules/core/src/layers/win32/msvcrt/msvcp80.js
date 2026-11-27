@@ -38,11 +38,8 @@ const STRING_ARG = '$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@';
 /**
  * @typedef {Object} Msvcp80Host
  * @property {import('../common/guest.js').Guest} guest  The process's memory, at its
- *     pointer width: 8 in a 64-bit process, whose string is 40 bytes.
- * @property {(address: number, length: number) => Uint8Array} readMemory  For the
- *     members whose code runs in the guest (`guestEntry`).
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ *     pointer width: 8 in a 64-bit process, whose string is 40 bytes. The
+ *     members whose code runs in the guest (`guestEntry`) answer through it.
  * @property {import('./float.js').FloatHost} [fpu]  Where a float is answered.
  */
 
@@ -88,8 +85,6 @@ export function createMsvcp80Functions(crt, host){
     const SIZE = POINTER === 8 ? 24 : STRING_SIZE;
     const RESERVED = POINTER === 8 ? 32 : STRING_RESERVED;
     const { guest } = host;
-    /** What the code of a member that runs in the guest is made over. */
-    const code = { ...host, pointerSize: POINTER };
     /**
      * The text's pointer, its length and its capacity: each a word of the
      * pointer's width, read and written whole (a size_t is a pointer wide).
@@ -216,7 +211,7 @@ export function createMsvcp80Functions(crt, host){
      * @param {keyof typeof COMPILED} name @param {(args: number[]) => number} handler
      */
     const member = (name, handler)=>guestEntry(/** @type {Function} */ (inGuest[name]),
-        COMPILED[name], code, { argBytes: COMPILED[name].params.length * 4, handler });
+        COMPILED[name], host, { argBytes: COMPILED[name].params.length * 4, handler });
 
     /**
      * The string's text set to `bytes`: room made first when they do not
@@ -324,7 +319,7 @@ export function createMsvcp80Functions(crt, host){
          *     handler: (args: number[]) => number }} own
          */
         const inGuestLong = (name, own)=>guestEntry(/** @type {Function} */ (inGuest[name]),
-            COMPILED[name], code, { argBytes: own.argBytes, handler: own.handler });
+            COMPILED[name], host, { argBytes: own.argBytes, handler: own.handler });
         /** @type {import('./float.js').FloatHost | undefined} */
         const fpu = host.fpu;
         return {

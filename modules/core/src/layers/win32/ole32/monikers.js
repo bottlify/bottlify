@@ -33,6 +33,7 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16, utf16z } from '../common/utf16.js';
+import { foldName, sameName, upcaseUnit } from '../../../system/text.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -283,22 +284,6 @@ const classOf = state=>(state.objref ? CLSID_OBJREF_MONIKER : CLASS_OF[state.kin
 const defaultState = kind=>newState(kind, kind === 'item' ? { delimiter: '' }
     : kind === 'anti' ? { count: 1 } : {});
 
-/**
- * One UTF-16 unit uppercased, or itself when its uppercase is not one unit:
- * the comparison data keeps one unit per character, as towupper does.
- *
- * @param {number} unit
- */
-const upperUnit = unit=>{
-    const upper = String.fromCharCode(unit).toUpperCase();
-    return upper.length === 1 ? upper.charCodeAt(0) : unit;
-};
-
-/** @param {string} text */
-const upperText = text=>String.fromCharCode(...Array.from(text, c=>upperUnit(c.charCodeAt(0))));
-
-/** @param {string} a @param {string} b */
-const sameIgnoringCase = (a, b)=>a.length === b.length && upperText(a) === upperText(b);
 
 /**
  * @param {Uint8Array} bytes  UTF-16LE; reading stops at a terminator.
@@ -396,7 +381,7 @@ const itemHash = name=>{
     let hash = 0;
     for (let index = 0; index < name.length; index++)
     {
-        hash = (Math.imul(hash, 3) ^ upperUnit(name.charCodeAt(index))) >>> 0;
+        hash = (Math.imul(hash, 3) ^ upcaseUnit(name.charCodeAt(index))) >>> 0;
     }
     return hash;
 };
@@ -421,9 +406,9 @@ const comparisonDataOf = state=>{
     switch (state.kind)
     {
         case 'item':
-            return concat(clsid, utf16z(upperText(`${state.delimiter ?? ''}${state.name}`)));
+            return concat(clsid, utf16z(foldName(`${state.delimiter ?? ''}${state.name}`)));
         case 'file':
-            return concat(clsid, utf16z(upperText(state.path)));
+            return concat(clsid, utf16z(foldName(state.path)));
         case 'class':
             return concat(clsid, guidBytes(state.clsid));
         case 'anti':
@@ -1395,7 +1380,7 @@ export function createMonikerFunctions(env){
         const a = pathPieces(mine);
         const b = pathPieces(theirs);
         let same = 0;
-        while (same < a.length && same < b.length && sameIgnoringCase(a[same], b[same]))
+        while (same < a.length && same < b.length && sameName(a[same], b[same]))
         {
             same++;
         }
@@ -2341,9 +2326,9 @@ export function createMonikerFunctions(env){
         switch (state.kind)
         {
             case 'item':
-                return sameIgnoringCase(state.name, theirs.name) ? S_OK : S_FALSE;
+                return sameName(state.name, theirs.name) ? S_OK : S_FALSE;
             case 'file':
-                return sameIgnoringCase(state.path, theirs.path) ? S_OK : S_FALSE;
+                return sameName(state.path, theirs.path) ? S_OK : S_FALSE;
             case 'class':
                 return state.clsid === theirs.clsid ? S_OK : S_FALSE;
             case 'pointer':
@@ -2707,7 +2692,7 @@ export function createMonikerFunctions(env){
                 {
                     return answerMade(await commonPrefix(state.self, other, thread));
                 }
-                if (sameIgnoringCase(path, state.path))
+                if (sameName(path, state.path))
                 {
                     return answer(state.self, MK_S_US);
                 }
@@ -2716,11 +2701,11 @@ export function createMonikerFunctions(env){
                 {
                     return MK_E_NOPREFIX;
                 }
-                if (sameIgnoringCase(common, state.path))
+                if (sameName(common, state.path))
                 {
                     return answer(state.self, MK_S_ME);
                 }
-                if (sameIgnoringCase(common, path))
+                if (sameName(common, path))
                 {
                     return answer(other, MK_S_HIM);
                 }
@@ -2824,7 +2809,7 @@ export function createMonikerFunctions(env){
                 const a = pathPieces(state.path);
                 const b = path === null ? [] : pathPieces(path);
                 let same = 0;
-                while (same < a.length && same < b.length && sameIgnoringCase(a[same], b[same]))
+                while (same < a.length && same < b.length && sameName(a[same], b[same]))
                 {
                     same++;
                 }

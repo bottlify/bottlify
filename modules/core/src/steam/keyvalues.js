@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf16le, utf8 } from '../system/text.js';
+
 /**
  * Valve's KeyValues, the two forms product info comes in: text (an app's
  * info -- name, type, launch options, depots) and binary (a package's: which
@@ -149,7 +151,6 @@ const TYPE_ALTERNATE_END = 11;
  */
 export function parseBinary(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const utf8 = new TextDecoder();
     let at = 0;
     const string = ()=>{
         const end = bytes.indexOf(0, at);
@@ -192,7 +193,7 @@ export function parseBinary(bytes){
                     {
                         end += 2;
                     }
-                    out[key] = new TextDecoder('utf-16le').decode(bytes.subarray(at, end));
+                    out[key] = utf16le.decode(bytes.subarray(at, end));
                     at = end + 2;
                     break;
                 }

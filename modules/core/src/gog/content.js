@@ -21,6 +21,7 @@
 
 import { createMd5 } from '../layers/win32/crypto/digest.js';
 import { installedFiles as depotFiles } from '../steam/install.js';
+import { utf8 } from '../system/text.js';
 
 /** The CDN the manifests are read from: they are public and answer any origin. */
 export const GOG_CDN = 'https://gog-cdn-fastly.gog.com';
@@ -68,7 +69,7 @@ export async function inflate(bytes){
 export async function readMeta(bytes){
     // A deflated stream's first byte is 0x78; JSON's is `{`.
     const text = bytes[0] === 0x78 ? await inflate(bytes) : bytes;
-    return JSON.parse(new TextDecoder().decode(text));
+    return JSON.parse(utf8.decode(text));
 }
 
 /**
@@ -317,7 +318,7 @@ export function primaryTask(bytes){
     let info;
     try
     {
-        info = JSON.parse(new TextDecoder().decode(bytes).replace(/^\uFEFF/, ''));
+        info = JSON.parse(utf8.decode(bytes).replace(/^\uFEFF/, ''));
     }
     catch {
         return null;

@@ -1515,6 +1515,10 @@ function stageConstantsOf(model){
     return floats;
 }
 
+/** Memory for an object's life where no cache is given: plain, under the same contract. */
+const plainHold = (/** @type {string} */ name, /** @type {number} */ length)=>
+    plainScratches.hold(name, length);
+
 /** The last arena serial handed out (`createUniformArena`). */
 let arenaSerials = 0;
 
@@ -1524,10 +1528,28 @@ let arenaSerials = 0;
  * replay, after the frame is recorded, so the arena is the recording's until
  * then and goes back to the pool after.
  *
+ * Its array is memory held in the run's cache (`hold`, `cache/scratch.js`),
+ * one hold a generation: outgrown, the arena holds a larger one and keeps the
+ * old until its next `reset`, because the draws recorded so far keep their
+ * views of it until their frame replays - a scratch, which lets go of its old
+ * room as it grows, would hand the next blocks the bytes those views read.
+ * Plain memory under the same contract without a hold.
+ *
  * @param {number} [floats]
+ * @param {(name: string, length: number) => import('../../cache/scratch.js').Held} [hold]
  */
-export function createUniformArena(floats = 1 << 16){
-    let storage = new Float32Array(floats);
+export function createUniformArena(floats = 1 << 16, hold = plainHold){
+    /** @param {number} count */
+    const generation = count=>{
+        const held = hold('d3d/uniforms', count * 4);
+        // A hold starts on a block of the cache, or is an array of its own:
+        // aligned for floats either way.
+        return { held, floats: new Float32Array(held.bytes.buffer, held.bytes.byteOffset, count) };
+    };
+    let current = generation(floats);
+    let storage = current.floats;
+    /** The generations outgrown since the last reset, whose views draws may still read. */
+    const outgrown = /** @type {ReturnType<typeof generation>[]} */ ([]);
     let used = 0;
     return {
         /**
@@ -1535,9 +1557,20 @@ export function createUniformArena(floats = 1 << 16){
          * another arena's, so a block kept by it is one this frame took.
          */
         serial: ++arenaSerials,
+        /** Its frame replayed: the generations it outgrew let go of. */
         reset(){
             used = 0;
             this.serial = ++arenaSerials;
+            for (const old of outgrown)
+            {
+                old.held.release();
+            }
+            outgrown.length = 0;
+        },
+        /** Every generation let go of: the device went. */
+        release(){
+            this.reset();
+            current.held.release();
         },
         /**
          * @param {number} count
@@ -1546,11 +1579,11 @@ export function createUniformArena(floats = 1 << 16){
          * @returns {Float32Array}
          */
         take(count, written = false){
-            // The arena outgrown: the draws recorded so far keep their views
-            // of the old array, which the old array keeps alive for them.
             if (used + count > storage.length)
             {
-                storage = new Float32Array(Math.max(storage.length * 2, used + count));
+                outgrown.push(current);
+                current = generation(Math.max(storage.length * 2, used + count));
+                storage = current.floats;
                 used = 0;
             }
             const block = storage.subarray(used, used + count);
@@ -3327,6 +3360,9 @@ const CLEAR_STRIDE = 20;
  *     Memory the renderer keeps between calls, held in the run's cache: where a level
  *     going to the queue at once is decoded, widened or taken out tight. Plain memory
  *     if absent.
+ * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
+ *     Memory the renderer keeps for an object's life, held in the run's cache: its frames'
+ *     uniform arenas (`createUniformArena`). Plain memory if absent.
  */
 
 /** D3DUSAGE_DYNAMIC: a buffer the program keeps writing. */
@@ -6176,6 +6212,15 @@ export function createRenderer(options){
 
     /** Arenas of frames already replayed, for the next recording to take. @type {any[]} */
     const arenas = [];
+    /** Every arena made, for their memory to go with the device. @type {any[]} */
+    const madeArenas = [];
+    const holdOf = options.holds ?? plainHold;
+    const madeArena = ()=>{
+        const arena = Object.assign(createUniformArena(undefined, holdOf),
+            { draws: /** @type {any[]} */ ([]) });
+        madeArenas.push(arena);
+        return arena;
+    };
     /**
      * A frame replayed for the last time: its arena for the next recording,
      * and the texels its uploads kept in the store let go of.
@@ -6301,8 +6346,7 @@ export function createRenderer(options){
     const ensureFrame = ()=>{
         if (!recording)
         {
-            const arena = arenas.pop() ?? Object.assign(createUniformArena(),
-                { draws: /** @type {any[]} */ ([]) });
+            const arena = arenas.pop() ?? madeArena();
             arena.reset();
             recording = {
                 commands: [], pipelines: [], pass: null, viewport: null, scissor: '', arena,
@@ -11630,7 +11674,16 @@ export function createRenderer(options){
          * @returns {Promise<void>}
          */
         dispose(){
-            chain = chain.then(()=>backend.giveBack?.()).catch(failure);
+            chain = chain.then(()=>backend.giveBack?.()).catch(failure).then(()=>{
+                // Nothing replays after this: the frames' uniform memory goes too.
+                for (const arena of madeArenas)
+                {
+                    arena.release();
+                }
+                madeArenas.length = 0;
+                arenas.length = 0;
+                recording = null;
+            });
             return chain;
         },
 

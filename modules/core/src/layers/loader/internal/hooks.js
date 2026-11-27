@@ -15,6 +15,8 @@
  * for real, and a test's stand-in for the rest).
  */
 
+import { foldName } from '../../../system/text.js';
+
 /**
  * @typedef {Object} HookEntry
  * @property {string} image                                   e.g. `"program.exe"`.
@@ -138,7 +140,7 @@ const bytesEqual = (left, right)=>left.length === right.length
  * @returns {string | null}  A refusal reason, or null when both checks pass.
  */
 function checkImage(entry, image){
-    if (entry.image.toLowerCase() !== image.name.toLowerCase())
+    if (foldName(entry.image) !== foldName(image.name))
     {
         return `${entry.kernel}: for ${entry.image}, not ${image.name}`;
     }

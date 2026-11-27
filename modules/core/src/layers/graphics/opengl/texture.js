@@ -512,15 +512,17 @@ export function compressedBytes(format, width, height){
  * @param {number} format
  * @param {number} width
  * @param {number} height
+ * @param {Uint8Array} [into]  receives the texels where it is large enough (`decodeS3tc` in
+ *     `media/internal/s3tc.js`)
  * @returns {Uint8Array | null} null when the bytes are too few, or not S3TC at all
  */
-export function decodeS3tc(bytes, format, width, height){
+export function decodeS3tc(bytes, format, width, height, into){
     const kind = S3TC_KIND[format];
     if (kind === undefined)
     {
         return null;
     }
-    const texels = decodeS3tcOf(bytes, kind, width, height);
+    const texels = decodeS3tcOf(bytes, kind, width, height, into);
     if (texels && format === GL.COMPRESSED_RGB_S3TC_DXT1_EXT)
     {
         for (let at = 3; at < texels.length; at += 4)

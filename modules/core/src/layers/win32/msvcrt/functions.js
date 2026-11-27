@@ -195,29 +195,14 @@ const seededCode = (made, long, argBytes, handler)=>({
 /**
  * @typedef {Object} MsvcrtHost
  * @property {import('../common/guest.js').Guest} guest  The process's memory, read
- *           and written in place at its pointer width (`host.guest`).
- * @property {(address: number, length: number) => Uint8Array} readMemory
- *           Bytes of the caller's own, never a window on guest memory: a
- *           handler keeps them across a guest step or a write, decodes them
- *           (`TextDecoder` refuses shared memory) and takes `.buffer` from
- *           them, so no caller copies them a second time.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- *           The bytes are in guest memory when it returns: a caller may
- *           write the same scratch again at once.
+ *           and written in place at its pointer width (`host.guest`): every
+ *           library of the runtime, and the routines that run in the guest
+ *           when they answer as handlers, read and write through it alone.
  * @property {(address: number) => { base: number, size: number } | null} [regionAt]
  *           The region an address sits in, from the memory layer's map: the
  *           `va_list` window stops at its end rather than faulting the run.
- * @property {(address: number, value: number, length: number) => void} fillMemory
- *     Sets a range to one byte value in place, with no host buffer holding
- *     the pattern: the lengths are the program's, and a clear of a megabyte
- *     through writeMemory costs an allocation and two extra passes.
  * @property {(code: number) => void} [setLastError]  kernel32's, for what the
  *           runtime's file calls leave there as Windows' leave it.
- * @property {(address: number, limit: number, wanted: Uint8Array) =>
- *            { index: number, byte: number }} scanCString
- *     Walks a guest string's bytes in chunks and answers with the first one a
- *     table marks -- or the terminator -- without materialising the string:
- *     the scan under the C functions whose answer is a position or a length.
  * @property {(handle: number, text: string) => void} write   Where stdout goes.
  * @property {(entry: number, args: number[], thread?: any) => Promise<number>} callGuest
  * @property {() => any} [currentThread]
@@ -542,9 +527,9 @@ export function createMsvcrtFunctions(host){
      *
      * @param {number} list
      */
-    const varargsAt = list=>varargsSlots(
-        host.readMemory, address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS,
-        host.pointerSize === 8 ? 2 : 1);
+    const varargsAt = list=>varargsSlots((address, length)=>guest.bytes(address, length),
+        address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS,
+        guest.pointerSize === 8 ? 2 : 1);
 
     /**
      * The secure printers' shared body. A size of zero leaves nowhere to put
@@ -841,8 +826,7 @@ export function createMsvcrtFunctions(host){
         _controlfp: guestEntry(inGuestFloat._controlfp, FLOAT_CODE._controlfp,
             { ...host.fpu ? { fpu: host.fpu } : {} }),
         _controlfp_s: guestEntry(inGuestFloat._controlfp_s, FLOAT_CODE._controlfp_s,
-            { readMemory: host.readMemory, writeMemory: host.writeMemory,
-                ...host.fpu ? { fpu: host.fpu } : {} }),
+            { guest, ...host.fpu ? { fpu: host.fpu } : {} }),
         _statusfp: guestEntry(inGuestFloat._statusfp, FLOAT_CODE._statusfp,
             { ...host.fpu ? { fpu: host.fpu } : {} }),
         _clearfp: guestEntry(inGuestFloat._clearfp, FLOAT_CODE._clearfp,
@@ -1187,7 +1171,7 @@ export function createMsvcrtFunctions(host){
         ? createDescriptors({
             files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
             handles: host.handles,
-            writeMemory: host.writeMemory,
+            guest: host.guest,
             ...host.ioinfo ? { ioinfo: host.ioinfo } : {},
         })
         : null;
@@ -1237,25 +1221,13 @@ export function createMsvcrtFunctions(host){
 
     const narrow = {
         ...table,
-        ...createStringFunctions({
-            guest: host.guest,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            scanCString: host.scanCString,
-            allocate,
-            errno,
-            pointerSize: host.pointerSize,
-        }),
+        ...createStringFunctions({ guest: host.guest, allocate, errno }),
     };
 
     const wideClasses = createWideClassificationFunctions();
-    const secure = createSecureFunctions({ readMemory: host.readMemory,
-        writeMemory: host.writeMemory, errno });
+    const secure = createSecureFunctions({ guest: host.guest, errno });
     const wideStrings = createWideFunctions({
         guest: host.guest,
-        pointerSize: host.pointerSize,
-        readMemory: host.readMemory,
-        writeMemory: host.writeMemory,
         errno,
         ...host.allocate ? { allocate: host.allocate } : {},
     });
@@ -1298,9 +1270,6 @@ export function createMsvcrtFunctions(host){
         // Bound to the byte functions above, so the two families cannot drift.
         ...createMultiByteFunctions(narrow, {
             guest: host.guest,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            fillMemory: host.fillMemory,
             errno,
             addressOf: host.addressOf,
             divergence: host.divergence,
@@ -1454,9 +1423,6 @@ export function createMsvcrtFunctions(host){
         __strncnt: secure.strnlen,
         ...createConversionFunctions({
             guest: host.guest,
-            pointerSize: host.pointerSize,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
             allocate,
             fpu: host.fpu,
             errno,
@@ -1481,10 +1447,8 @@ export function createMsvcrtFunctions(host){
         __RTDynamicCast: guestEntry(inGuestRtti.__RTDynamicCast, RTTI_CODE.__RTDynamicCast, host),
         ...createProcessFunctions({
             errno,
-            readCString: ansi.read,
-            readU32: at=>guest.u32(wholeAddress(at)),
+            guest,
             allocate,
-            writeMemory: host.writeMemory,
             ...host.launch ? { launch: host.launch } : {},
             ...host.closeHandle ? { closeHandle: host.closeHandle } : {},
             callGuest: host.callGuest,
@@ -1552,9 +1516,7 @@ export function createMsvcrtFunctions(host){
                 free: host.free,
                 block: host.block,
                 resize: host.resize,
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
-                fillMemory: host.fillMemory,
+                guest: host.guest,
                 errno,
                 callGuest: host.callGuest,
                 ...host.currentThread ? { currentThread: host.currentThread } : {},
@@ -1742,11 +1704,9 @@ export function createMsvcrtFunctions(host){
         } : {},
         ...(host.fpu
             ? createMathFunctions({
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
+                guest: host.guest,
                 fpu: host.fpu,
                 errno,
-                pointerSize: host.pointerSize ?? 4,
                 ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
             })
             : {}),

@@ -227,6 +227,29 @@ test('%Z prints a counted string and %n writes the count, where the guest memory
     assert.equal(view.getInt32(0x40, true), 4);
 });
 
+test('at 64 bits past 4 GiB: %s, %Z and %n take their pointers whole, %Z its Buffer at 8',
+    ()=>{
+        // ANSI_STRING and UNICODE_STRING: two USHORTs, then the PCHAR on its
+        // alignment, eight bytes in a 64-bit process.
+        const base = 0x100000000;
+        const memory = new Uint8Array(0x400);
+        const view = new DataView(memory.buffer);
+        memory.set([...'wide view\0'].map(c=>c.charCodeAt(0)), 0x100);
+        view.setUint16(0x10, 4, true);
+        view.setUint32(0x14, 0xcccccccc, true);
+        view.setUint32(0x18, 0x100, true);
+        view.setUint32(0x1c, 1, true);
+        const guest = guestWindow(memory, { base, pointerSize: 8 });
+        const options = { ...guestAccess(guest) };
+        /** Each pointer's slot, two dwords. @param {number[]} pointers */
+        const quadwords = pointers=>wideSlots(pointers.flatMap(at=>[at % 2 ** 32,
+            Math.floor(at / 2 ** 32)]));
+        const readWindow = (/** @type {number} */ at)=>guest.cstr(at, 64);
+        assert.equal(formatToString('%s|%Z%n', quadwords([base + 0x100, base + 0x10, base + 0x40]),
+            readWindow, options), 'wide view|wide');
+        assert.equal(view.getInt32(0x40, true), 14, '%n where it points');
+    });
+
 test('a 64-bit caller\'s arguments are eight-byte slots, an int as much as a double', ()=>{
     /** @type {Record<number, string>} */
     const texts = { 0x1000: 'Astro', 0x2000: 'uproject' };

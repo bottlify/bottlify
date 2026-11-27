@@ -163,6 +163,7 @@
     "src/system/hash.js",
     "src/system/layout.js",
     "src/system/opfs-file.js",
+    "src/system/text.js",
     "src/zstd.js"
   ],
   "dependencies": {

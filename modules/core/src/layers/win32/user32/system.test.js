@@ -3550,6 +3550,22 @@ test('CharUpperW and CharLowerW convert UTF-16 in place, or one character by val
     assert.equal(fns.CharLowerBuffW.handler([0, 4]), 0);
 });
 
+test('CharUpperW and CharLowerW map only what Windows\' case table maps', ()=>{
+    // The table keeps only mappings that round-trip: the dotless i, final sigma,
+    // the titlecase digraph and the Kelvin sign keep themselves, as in Windows.
+    const { memory, fns } = setup();
+    putWideText(memory, TEXT_BUFFER, 'ıςǅÿK');
+    fns.CharUpperW.handler([TEXT_BUFFER]);
+    assert.equal(readWideText(memory, TEXT_BUFFER), 'ıςǅŸK');
+    fns.CharLowerW.handler([TEXT_BUFFER]);
+    assert.equal(readWideText(memory, TEXT_BUFFER), 'ıςǅÿK');
+    assert.equal(fns.CharUpperW.handler([0x0131]), 0x0131);
+    putWideText(memory, TEXT_BUFFER, 'ǅK');
+    assert.equal(fns.CharUpperBuffW.handler([TEXT_BUFFER, 2]), 2);
+    fns.CharLowerBuffW.handler([TEXT_BUFFER, 2]);
+    assert.equal(readWideText(memory, TEXT_BUFFER), 'ǅK');
+});
+
 test('wvsprintfW formats wide through the list it was handed', ()=>{
     const { memory, fns } = setup();
     putWideText(memory, FORMAT_BUFFER, '%s scored %d of %S');

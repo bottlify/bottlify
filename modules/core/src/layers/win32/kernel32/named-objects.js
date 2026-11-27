@@ -27,6 +27,7 @@
 
 import { DIRECTORY, SYMBOLIC_LINK, bootNamespace, createObjectNamespace, nameIn }
     from './object-namespace.js';
+import { foldName } from '../../../system/text.js';
 
 /** What a create reports when the name was already taken. */
 const ERROR_ALREADY_EXISTS = 183;
@@ -61,12 +62,12 @@ export function createNamedObjects({ table = new Map(), handles } = {}){
         {
             return held ? { key, kind: held.kind, object: held.object } : null;
         }
-        const folded = key.toLowerCase();
+        const folded = foldName(key);
         /** @type {{ key: string, kind: string, object: any } | null} */
         let found = null;
         for (const [one, entry] of table)
         {
-            if (one.toLowerCase() === folded)
+            if (foldName(one) === folded)
             {
                 found = { key: one, kind: entry.kind, object: entry.object };
             }

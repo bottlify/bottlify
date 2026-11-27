@@ -716,6 +716,15 @@
    ]
   },
   {
+   "path": "tools/checks/check-text-codecs.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "No TextDecoder or TextEncoder is made in core outside src/system/text.js, but the files it lists",
+   "command": "node tools/checks/check-text-codecs.mjs",
+   "tests": []
+  },
+  {
    "path": "tools/checks/check-volume-spread.mjs",
    "category": "checks",
    "kind": "check",

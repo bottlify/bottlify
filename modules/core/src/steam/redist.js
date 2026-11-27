@@ -59,6 +59,7 @@ import { openCompound, bytesSource } from '../layers/win32/msi/compound.js';
 import { openDatabase } from '../layers/win32/msi/database.js';
 import { evaluateCondition, MSICONDITION } from '../layers/win32/msi/condition.js';
 import { managedImageOf } from '../layers/win32/mscoree/need.js';
+import { utf8 } from '../system/text.js';
 
 export { directxFiles, imageMachine, parseInf };
 
@@ -953,9 +954,9 @@ export async function installRedistributables(tree, scripts, machine, programs =
     if (registry.length > 0)
     {
         const kept = find(REGISTRY_PATH);
-        const hive = kept ? JSON.parse(new TextDecoder().decode(await tree.read(kept))) : null;
+        const hive = kept ? JSON.parse(utf8.decode(await tree.read(kept))) : null;
         await tree.write(REGISTRY_PATH,
-            new TextEncoder().encode(JSON.stringify(writeRegistry(hive, registry))));
+            utf8.encode(JSON.stringify(writeRegistry(hive, registry))));
     }
     said.push(`redistributables: ${files.size} file(s), ${registry.length} registry value(s)`);
     return said;

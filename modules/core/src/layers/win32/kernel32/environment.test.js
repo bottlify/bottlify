@@ -262,6 +262,25 @@ test('the W form copies text while a character of room stays, and a value whole 
     assert.deepEqual(expand('%TVAR long long', 17), [16, '%TVAR long long']);
 });
 
+test('a variable\'s name is one name as Windows\' case table folds it, and no other', ()=>{
+    // Names compare through RtlUpcaseUnicodeChar: ÿ finds Ÿ, but the dotless i
+    // is not I and the long s not S, which JavaScript's upper case makes them.
+    const host = fakeHost({ environment: ()=>({ IN: 'one', 'ŸES': 'two', S: 'three' }) });
+    const fns = createEnvironmentFunctions(host);
+    const ask = (/** @type {string} */ name)=>{
+        [...name, '\0'].forEach((unit, index)=>{
+            host.bytes[0x100 + index * 2] = unit.charCodeAt(0) & 0xff;
+            host.bytes[0x100 + index * 2 + 1] = unit.charCodeAt(0) >> 8;
+        });
+        return fns.GetEnvironmentVariableW.handler([0x100, 0x200, 64]);
+    };
+    assert.equal(ask('in'), 3);
+    assert.equal(ask('ÿes'), 3);
+    assert.equal(ask('ın'), 0);
+    assert.equal(ask('ſ'), 0);
+    assert.deepEqual(host.errors, [ERROR_ENVVAR_NOT_FOUND, ERROR_ENVVAR_NOT_FOUND]);
+});
+
 test('setting a variable is visible to the next reader', ()=>{
     const host = fakeHost();
     const fns = createEnvironmentFunctions(host);

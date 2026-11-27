@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createProcessFunctions } from './process.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const EINVAL = 22;
 const ENOENT = 2;
@@ -83,12 +84,24 @@ test('_spawnv answers as _spawnl does, its arguments in an array', ()=>{
 });
 
 /**
- * A process table with an image `C:\\Game\\bf.exe` and strings in memory.
+ * A process table with an image `C:\\Game\\bf.exe` and strings in memory,
+ * each at its offset in a window placed at `base`, and pointers there of
+ * the process's width.
  *
  * @param {Record<number, string>} strings
- * @param {Record<number, number>} [words]
+ * @param {Record<number, number>} [pointers]
+ * @param {{ base?: number, pointerSize?: 4 | 8 }} [place]
  */
-const launching = (strings, words = {})=>{
+const launching = (strings, pointers = {}, { base = 0, pointerSize = 4 } = {})=>{
+    const guest = guestWindow(new Uint8Array(0x3000), { base, pointerSize });
+    for (const [at, text] of Object.entries(strings))
+    {
+        guest.writeAnsi(base + Number(at), text);
+    }
+    for (const [at, value] of Object.entries(pointers))
+    {
+        guest.setPtr(base + Number(at), value === 0 ? 0 : base + value);
+    }
     /** @type {Array<{ named: string, line: string }>} */
     const launched = [];
     /** @type {number[]} */
@@ -99,8 +112,7 @@ const launching = (strings, words = {})=>{
     const errno = [];
     const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
         errno: code=>void errno.push(code),
-        readCString: at=>strings[at] ?? '',
-        readU32: at=>words[at] ?? 0,
+        guest,
         launch: (named, line)=>{
             if (!/bf\.exe$/i.test(named))
             {
@@ -154,6 +166,16 @@ test('_spawnv reads argv up to its NULL', ()=>{
     assert.deepEqual(launched, [{ named: 'C:\\Game\\bf.exe', line: 'bf.exe +restart' }]);
 });
 
+test('at 64 bits past 4 GiB: _spawnv reads argv\'s pointers whole, eight bytes each', ()=>{
+    const base = 0x100000000;
+    // The image's name at the window's first byte: its low dword is zero.
+    const { fns, launched } = launching({ 0: 'C:\\Game\\bf.exe', 0x1100: 'bf.exe',
+        0x1200: '+restart' }, { 0x2000: 0x1100, 0x2008: 0x1200, 0x2010: 0 },
+    { base, pointerSize: 8 });
+    assert.equal(fns._spawnv.handler([1, base, base + 0x2000]), 0x40);
+    assert.deepEqual(launched, [{ named: 'C:\\Game\\bf.exe', line: 'bf.exe +restart' }]);
+});
+
 test('raise ignores, ends the process by default, or runs the handler set', async()=>{
     /** @type {number[]} */
     const errno = [];
@@ -203,6 +225,29 @@ test('_spawnvp and _spawnlp are _spawnv and _spawnl', ()=>{
     assert.equal(fns._spawnlp, fns._spawnl);
 });
 
+test('at 64 bits past 4 GiB: __pxcptinfoptrs\'s cell is a whole pointer, kept whole', async()=>{
+    const base = 0x100000000;
+    const bytes = new Uint8Array(0x100).fill(0xcc);
+    const view = new DataView(bytes.buffer);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    /** @type {number[]} */
+    const seen = [];
+    const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
+        errno: ()=>{},
+        allocate: ()=>base + 0x10,
+        guest,
+        callGuest: async()=>seen.push(guest.ptr(base + 0x10)) && 0,
+    }));
+    const cell = fns.__pxcptinfoptrs.handler([]);
+    assert.equal(cell, base + 0x10);
+    assert.equal(view.getBigUint64(0x10, true), 0n, 'null, all eight bytes of it');
+    guest.setPtr(cell, base + 0x80);
+    fns.signal.handler([11, 0x140001000]);
+    assert.equal(await fns.raise.handler([11]), 0);
+    assert.deepEqual(seen, [0], 'null while the handler runs');
+    assert.equal(guest.ptr(cell), base + 0x80, 'the pointer back, whole');
+});
+
 test('__pxcptinfoptrs: a thread\'s cell, null while an exception signal\'s handler runs', async()=>{
     // Wine's msvcrt test___pxcptinfoptrs: SIGSEGV's handler sees null, and
     // the value set before comes back after; SIGABRT's sees it unchanged.
@@ -212,8 +257,7 @@ test('__pxcptinfoptrs: a thread\'s cell, null while an exception signal\'s handl
     const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
         errno: ()=>{},
         allocate: memory.allocate,
-        writeMemory: memory.writeMemory,
-        readU32: memory.u32,
+        guest: memory.guest,
         callGuest: async()=>{
             seen.push(memory.u32(cell));
             return 0;

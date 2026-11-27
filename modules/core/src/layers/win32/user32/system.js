@@ -64,6 +64,7 @@ import { afterWait } from './after-wait.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { forwarded, wholeAddress, wholeAnswer, wideOf } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
+import { downcaseName, downcaseUnit, foldName, upcaseUnit } from '../../../system/text.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -1758,9 +1759,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
 
     /**
      * CharUpperW and CharLowerW: CharUpperA's two meanings of the one
-     * argument, over UTF-16 units. A unit whose other case is not one unit --
-     * a sharp s, which uppercases to two letters -- is left as it was, since
-     * the string is converted in place and cannot grow.
+     * argument, over UTF-16 units, through Windows' one-to-one case table.
      *
      * @param {boolean} upper
      */
@@ -1778,9 +1777,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 return caseOfUnit(at, upper);
             }
             const string = readWideString(at);
-            // By unit, not by code point: a surrogate has no case and keeps its place.
-            const changed = string.split('').map(
-                unit=>String.fromCharCode(caseOfUnit(unit.charCodeAt(0), upper))).join('');
+            const changed = upper ? foldName(string) : downcaseName(string);
             writeWideString(at, changed, changed.length + 1);
             return at;
         },
@@ -1809,11 +1806,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
     });
 
     /** @param {number} unit @param {boolean} upper */
-    const caseOfUnit = (unit, upper)=>{
-        const character = String.fromCharCode(unit);
-        const changed = upper ? character.toUpperCase() : character.toLowerCase();
-        return changed.length === 1 ? changed.charCodeAt(0) : unit;
-    };
+    const caseOfUnit = (unit, upper)=>(upper ? upcaseUnit(unit) : downcaseUnit(unit));
 
     /**
      * The IsChar family's one test: the character, as the ANSI page or UTF-16

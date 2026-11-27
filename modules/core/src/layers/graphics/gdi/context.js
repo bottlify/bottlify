@@ -430,7 +430,7 @@ export function createGdiDrawing(options = {}){
         // with no font record -- one bound outside win32 -- gets its default.
         const record = objects.get(context.state.font);
         const font = record && record.type === 'font' ? record.attributes : null;
-        return { ...cell, glyphs: code=>fonts.glyph(code, font) };
+        return { ...cell, glyphs: (code, read, arg)=>fonts.glyph(code, font, read, arg) };
     };
 
     return {

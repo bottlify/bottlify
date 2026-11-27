@@ -345,6 +345,21 @@ test('a key path is created once and found again whatever its case', ()=>{
     assert.equal(hive.open(root, 'Software\\Missing'), null);
 });
 
+test('a key or value name is one name as Windows\' case table folds it, and no other', ()=>{
+    // The registry compares through RtlUpcaseUnicodeChar: ÿ and Ÿ are one name,
+    // but the Kelvin sign is not k nor the capital sharp s a sharp s, which
+    // JavaScript's lower case would make one.
+    const hive = createHive();
+    const root = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+    const first = hive.create(root, 'Software\\ÿ\\k\\ß');
+    assert.equal(hive.create(root, 'SOFTWARE\\Ÿ\\K\\ß').key, first.key);
+    assert.equal(hive.open(root, 'Software\\ÿ\\\u212a'), null);
+    assert.equal(hive.open(root, 'Software\\ÿ\\k\\\u1e9e'), null);
+    hive.setValue(first.key, 'Mark', REG_SZ, latin1('x'));
+    assert.equal(hive.getValue(first.key, 'MARK')?.name, 'Mark');
+    assert.equal(hive.getValue(first.key, 'Mar\u212a'), null);
+});
+
 test('an empty path names the key itself', ()=>{
     const hive = createHive();
     const root = /** @type {any} */ (hive.root(HKEY_CURRENT_USER));

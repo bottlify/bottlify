@@ -39,6 +39,7 @@ import { decodeAnsi, encodeAnsi } from './locale.js';
 import { createIniMapping } from './ini-mapping.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16 } from '../common/utf16.js';
+import { decoderFor, utf8 } from '../../../system/text.js';
 
 /** Where a profile file with no directory of its own is. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -167,7 +168,7 @@ const encodeIn = (encoding, text)=>{
     const mark = BOMS[encoding];
     if (encoding === 'utf-8')
     {
-        const body = new TextEncoder().encode(text);
+        const body = utf8.encode(text);
         const out = new Uint8Array(mark.length + body.length);
         out.set(mark);
         out.set(body, mark.length);
@@ -301,7 +302,7 @@ export function createProfileFunctions(host){
             // terminator holds one, and a rewrite leaves it behind
             // (Wine's shlwapi ordinal.c write_inifile).
             const decoded = encoding === 'ansi' ? null
-                : new TextDecoder(encoding).decode(body);
+                : decoderFor(encoding).decode(body);
             const end = decoded === null ? body.indexOf(0) : decoded.indexOf('\0');
             const whole = decoded === null ? decodeAnsi(end < 0 ? body : body.subarray(0, end))
                 : end < 0 ? decoded : decoded.slice(0, end);

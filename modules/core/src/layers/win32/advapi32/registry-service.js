@@ -23,6 +23,7 @@
  */
 
 import { detachedKey } from './registry.js';
+import { foldName } from '../../../system/text.js';
 
 /**
  * @param {ReturnType<typeof import('./registry.js').createHive>} hive
@@ -46,7 +47,7 @@ export function createRegistryService(hive){
         }
         if (key.view === 'classes')
         {
-            const path = `${key.path.join('\\').toLowerCase()}`;
+            const path = foldName(key.path.join('\\'));
             let id = classes.get(path);
             if (id === undefined)
             {

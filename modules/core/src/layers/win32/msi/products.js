@@ -28,6 +28,7 @@ import { REG_EXPAND_SZ, REG_SZ } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { BASE85 } from './system.js';
 import { wholeAddress } from '../common/pointers.js';
+import { windows1252 } from '../../../system/text.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -473,7 +474,7 @@ export function createProductFunctions(context){
             {
                 return ERROR_NO_MORE_ITEMS;
             }
-            const text = new TextDecoder('latin1').decode(value.data).split('\0')[0];
+            const text = windows1252.decode(value.data).split('\0')[0];
             const parts = decomposeDescriptor(text);
             const written = putString(wide, value.name, qualifier, qualifierSize);
             const extra = putString(wide, parts ? text.slice(parts.used) : '', data, dataSize);
@@ -1693,7 +1694,7 @@ export function createProductFunctions(context){
         {
             return ERROR_INDEX_ABSENT;
         }
-        const descriptors = new TextDecoder('latin1').decode(value.data).split('\0')
+        const descriptors = windows1252.decode(value.data).split('\0')
             .filter(Boolean).map(decomposeDescriptor);
         const chosen = descriptors.find(parts=>parts && (!product
             || parts.product.toUpperCase() === product.toUpperCase()));

@@ -175,8 +175,10 @@ withLongCode(QUATERNION, QUATERNION_LONG);
  *           thread pump's stages.
  * @property {(font: any) => any} [fontMetrics]
  *           What the font engine GDI draws with measures for a font, or null.
- * @property {(code: number, font: any) => any} [glyph]
- *           One character's coverage from that engine, or null.
+ * @property {<T, A>(code: number, font: any,
+ *     read: (glyph: import('../gdi32/drawing.js').GlyphRead, arg: A) => T, arg?: A)
+ *     => T | null} [glyph]
+ *           One character's coverage from that engine, read in place inside `read`, or null.
  * @property {(record: { api: string, profile: string, entry: string,
  *     defines: [string, string][], flags: number, source: string,
  *     included: Record<string, string>, messages: string, tokens: Uint32Array | null })
