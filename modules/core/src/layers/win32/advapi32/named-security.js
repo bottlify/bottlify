@@ -200,10 +200,9 @@ const parentOf = path=>{
  * @property {{ root: (root: number) => number | null,
  *              open: (key: number, path?: string | null) => number | null }} hive
  * @property {Map<string, { owner?: Uint8Array, group?: Uint8Array,
- *              dacl?: Uint8Array | null }>} [security]
+ *              dacl?: Uint8Array | null }>} security
  *           The run's store of the descriptors programs set on files, by path,
- *           shared by every process of the run. Without it a set is kept
- *           nowhere and a read answers the volume's made-up descriptor.
+ *           shared by every process of the run.
  * @property {(path: string) => string} [resolvePath]  A path made absolute, to key the store by.
  * @property {(path: string) => void} [dropSecurity]  Drops a path's entry on delete.
  * @property {(from: string, to: string) => void} [moveSecurity]  Moves it on rename.
@@ -223,8 +222,7 @@ const parentOf = path=>{
  */
 export function createNamedSecurityFunctions(host){
     const codec = createDescriptorCodec(host.readMemory);
-    /** The run's file-security store; a private one when the run shares none. */
-    const store = host.security ?? new Map();
+    const store = host.security;
 
     /** @param {string} path */
     const pathKey = path=>keyForPath(host.resolvePath?.(path) ?? path);

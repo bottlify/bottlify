@@ -845,7 +845,7 @@ export function createWin32Module(){
             // its own. The one namespace a mutex, event, semaphore, timer and
             // file mapping all share is part of it.
             /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
-             *     objects?: any, fileSecurity?: Map<string, any>,
+             *     objects?: any, fileSecurity?: Pick<Map<string, any>, 'get' | 'set'>,
              *     processTables?: Map<number, any>,
              *     pipes?: import('./kernel32/pipes.js').PipesAcross,
              *     sharedViews?: ReturnType<typeof import('./kernel32/shared-views.js')
@@ -1399,8 +1399,9 @@ export function createWin32Module(){
             // The descriptors programs set on files are the run's, not a
             // process's: a setup that writes one and a service that reads it
             // run in different processes of the one run. Kept beside the
-            // hive, in the system half when there is one.
-            const fileSecurity = system ? (system.fileSecurity ??= new Map()) : new Map();
+            // hive, in the system half; a caller with no run to share it
+            // with keeps its own, as it does its namespace.
+            const fileSecurity = system?.fileSecurity ?? new Map();
             // A window handle is the run's, and a window of another process is
             // found and posted to through it (`user32/directory.js`).
             const windowDirectory = system?.windows ?? createWindowDirectory();

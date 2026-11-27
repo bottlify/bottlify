@@ -374,6 +374,7 @@ test('a performance key answers a PERF_DATA_BLOCK, stamped with the clocks it re
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
+        security: new Map(),
         system: perfClockStub(memory),
         computerName: 'BOTTLIFY',
     });
@@ -425,6 +426,7 @@ test('a performance key answers the Counter and Help index lists as REG_MULTI_SZ
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
+        security: new Map(),
         computerName: 'BOTTLIFY',
     });
     const HKEY_PERFORMANCE_DATA = 0x80000004;
@@ -857,6 +859,7 @@ test('the refusal says ERROR_INSUFFICIENT_BUFFER, as a caller sizing its buffer 
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
+        security: new Map(),
         setLastError: code=>errors.push(code),
     });
     memory.putDword(OUT_SIZE, 0);
@@ -879,6 +882,7 @@ test('a SID is built in guest memory in the layout a program compares byte by by
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
+        security: new Map(),
         allocate: bytes=>{
             const at = next;
             next += bytes;
@@ -914,6 +918,7 @@ test('GetFileSecurity and SetFileSecurity are the file-security calls, stdcall-s
         readMemory: memory.readMemory, writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()), setLastError: ()=>{},
+        security: new Map(),
     });
     assert.equal(fns.SetFileSecurityW.argBytes, 12);
     assert.equal(fns.GetFileSecurityW.argBytes, 20);
@@ -933,6 +938,7 @@ test('the file security calls are named-security\'s, wired into the table', ()=>
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
+        security: new Map(),
         setLastError: code=>errors.push(code),
     });
     const expected = { GetFileSecurityA: 20, GetFileSecurityW: 20,
@@ -959,6 +965,7 @@ test('a restart is not implemented, as the consumer line answered, and says so',
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
+        security: new Map(),
         setLastError: code=>errors.push(code),
         divergence: api=>diverged.push(api),
     })));
@@ -1350,6 +1357,7 @@ test('an object\'s security by name is read through the volume and the hive this
             writeMemory: memory.writeMemory,
             readCString: (address, maxLength)=>memory.readCString(address, maxLength),
             hive: createRegistryService(createHive()),
+            security: new Map(),
             // The drive's root, which the stand-in volume of files alone lacks.
             files: { ...files, stat: path=>(path.toLowerCase() === 'c:\\'
                 ? { exists: true, isDirectory: true, size: 0 } : files.stat(path)) },
@@ -1475,6 +1483,7 @@ test('RegNotifyChangeKeyValue answers one change to the key or under it, and a c
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
+        security: new Map(),
         events: {
             set: handle=>told.push(`set ${handle}`) > 0,
             reset: handle=>told.push(`reset ${handle}`) > 0,
@@ -1669,6 +1678,7 @@ test('IsTextUnicode reads the buffer, the tests asked for, and writes back which
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
+        security: new Map(),
         setLastError: ()=>{},
     });
     const text = new Uint8Array(Uint16Array.from('Hi there', c=>c.charCodeAt(0)).buffer);
