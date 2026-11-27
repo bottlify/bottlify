@@ -424,7 +424,8 @@ function readDds(bytes){
                 break;
             }
             const data = bytes.subarray(at, at + size);
-            levels.push(keptAsIs(format)
+            // A level already in the working form is the file's bytes, not a copy.
+            levels.push(keptAsIs(format) || format === FMT.A8R8G8B8 && !indexed
                 ? { width: w, height: h, format, data }
                 : { width: w, height: h, format: FMT.A8R8G8B8,
                     data: indexed ? throughPalette(data) : decodeTexels(format, data, w, h) });
