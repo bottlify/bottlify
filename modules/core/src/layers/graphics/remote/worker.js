@@ -49,7 +49,12 @@
  *                                    longer view, the `number`th, which the batches
  *                                    sent after its mark wait for (`KIND.MARK`)
  *   { type: 'cache', root, message } what the run's cache says to root `root`'s join
- *                                    to it: segments made and let go of
+ *                                    to it: segments made and let go of; with no
+ *                                    `root`, to the backend's
+ *   { type: 'backend', cache }       the backend's own names in the run's cache, from
+ *                                    the run's thread, once (`lendBackend` in
+ *                                    connect.js): `{ shared, segments, channel, prefix }`,
+ *                                    which its scratches are held under
  *   { type: 'client', port, client } a way in for a process on another thread: `root`,
  *                                    `memory` and `cache` on the port are taken as they
  *                                    are here, and `lost` is told there too; its frames
@@ -177,6 +182,25 @@ export function serveGraphics(scope, deps){
     let ledger = null;
     /** What the backend's dynamic buffers hold (`dynamicHeld`). @type {(() => any) | null} */
     let heldBy = null;
+    /**
+     * The backend's names in the run's cache, once the run hands them
+     * (`backend`): an owner of its own, numbered by the keeper, for as long
+     * as the run lasts.
+     *
+     * @type {ReturnType<typeof channelSpace> | null}
+     */
+    let backendCache = null;
+    /**
+     * What the backend keeps between calls (the uniform ring's staging copy),
+     * held under those names, plain memory until they come or where there is
+     * no room. A room is taken at its first use, at the first draw, which
+     * comes after the run handed them. The worker waits for that room on the
+     * keeper's thread as a root does for its holds; it serves roots that lend
+     * as well, whose thread waits on this one only while a lend is being
+     * copied out of guest memory, which grows no scratch of the backend's.
+     */
+    const backendRooms = createScratches((key, length)=>backendCache?.space.hold?.(key, length)
+        ?? null);
     /**
      * Asked of the page on a running program (`app.debug.dumpFrames`): every
      * Direct3D 8, 9, 10 and 11 device and OpenGL context here writes its next
@@ -537,7 +561,8 @@ export function serveGraphics(scope, deps){
             }
         });
         const backend = createBackend({ device, queue: device.queue,
-            presentTo: (/** @type {any} */ frame)=>present(device, frame) });
+            presentTo: (/** @type {any} */ frame)=>present(device, frame),
+            scratches: name=>backendRooms.scratch(name) });
         heldBy = ()=>backend.dynamicHeld();
         return { device, backend, adapter: {
             vendor: adapter.info?.vendor ?? '',
@@ -747,7 +772,8 @@ export function serveGraphics(scope, deps){
         receiver = createReceiver({ played, rings, serve: !driven,
             latency: ()=>latency.diagnostics(),
             gpuMemory: ()=>(ledger ? { ...ledger.diagnostics(),
-                dynamic: heldBy?.() ?? null } : null), times: ()=>latency.times(),
+                dynamic: heldBy?.() ?? null, scratch: backendRooms.figures() } : null),
+            times: ()=>latency.times(),
             // A batch sent after the guest's memory grew may use what it gained:
             // it waits for the longer view, which comes by message.
             marked: number=>{
@@ -926,8 +952,27 @@ export function serveGraphics(scope, deps){
             case 'root':
                 takeRoot(data, ownEnds, ownRoots);
                 break;
-            case 'memory':
+            case 'backend':
+                // Handed by each run the worker draws for: an engine that starts
+                // a program again keeps its graphics worker, and the run before
+                // took its cache with it. What was held there is let go of, its
+                // memory the backend's alone until a room grows into the new one.
+                if (data.cache)
+                {
+                    backendRooms.releaseAll();
+                    backendCache?.close();
+                    backendCache = channelSpace(data.cache, data.cache);
+                }
+                break;
             case 'cache':
+                if (data.root === undefined)
+                {
+                    backendCache?.adopt(data.message);
+                    break;
+                }
+                toRoot(data, ownRoots);
+                break;
+            case 'memory':
                 toRoot(data, ownRoots);
                 break;
             case 'debug':
@@ -1087,6 +1132,8 @@ export function serveGraphics(scope, deps){
     return {
         /** The roots open now, over every way in. */
         roots: ()=>rootsOpen,
+        /** What the backend's scratches hold, in the run's cache and plain. */
+        scratch: ()=>backendRooms.figures(),
         /**
          * Where the roots are `driven`: plays every batch their rings hold
          * now, and ends the roots whose rings the other side closed.

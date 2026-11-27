@@ -33,7 +33,7 @@ import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
 import { handedFiles } from '../system/inherited-files.js';
-import { remoteCacheReader } from '../process/run-cache.js';
+import { remoteCacheOwners, remoteCacheReader } from '../process/run-cache.js';
 import { relayedJoin } from '../layers/cache/module.js';
 
 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
@@ -158,6 +158,9 @@ export async function serveProcess(start){
     });
     // And passed on to the process's executors, each a reader of its own.
     const cacheRelay = cache === null ? null : relayedJoin(cache);
+    // Its owners' names, numbered by the keeper as every owner of the run is.
+    const cacheOwners = cache === null ? null : remoteCacheOwners(
+        { ask: (method, args)=>ask('cache', method, args) }, toRun);
     if (cacheReader !== null)
     {
         cacheReaders.add(cacheReader);
@@ -279,7 +282,8 @@ export async function serveProcess(start){
             // the batch is taken at the next turn rather than at the next timed
             // yield, as the engine's thread takes its own.
             ...cacheReader === null ? {}
-                : { cache: { reader: cacheReader, join: cacheRelay?.join ?? null } },
+                : { cache: { reader: cacheReader, join: cacheRelay?.join ?? null,
+                    own: cacheOwners?.own ?? null, serve: cacheOwners?.serve ?? null } },
             cork: { ...options.cork, config: { ...options.cork?.config,
                 // The run's store, kept by the system's thread.
                 store: options.cork?.config?.store === 'run'

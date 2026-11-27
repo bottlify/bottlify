@@ -12,7 +12,7 @@ import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { recordedDirect3D } from './direct3d.js';
 import { D3DISSUE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { COUNT_STATE, QUERY } from '../seam/block.js';
-import { D3DCLEAR, D3DFMT, D3DSWAPEFFECT, D3D_OK } from '../d3d8/constants.js';
+import { D3DCLEAR, D3DFMT, D3DPT, D3DSWAPEFFECT, D3D_OK } from '../d3d8/constants.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
 /** The roots made here, numbered as the program's thread numbers them. */
@@ -977,5 +977,79 @@ test('a batch sent after the guest\'s memory grew waits for the longer view, sen
     finally
     {
         sender.close();
+    }
+});
+
+/**
+ * The run's cache on a thread of its own, as the engine's thread keeps it
+ * beside a graphics worker: it serves the backend's names (`lendBackend`)
+ * and answers what is held under them. This thread then plays the worker,
+ * whose waits for room the keeper's thread answers.
+ */
+const KEEPER = `
+    const { workerData, parentPort } = require('node:worker_threads');
+    Promise.all([import(workerData.runCache), import(workerData.connect)])
+        .then(async([{ openRunCache }, { lendBackend }])=>{
+            const run = await openRunCache();
+            const lent = lendBackend(
+                { postMessage: message=>parentPort.postMessage(message) }, run);
+            parentPort.on('message', ()=>parentPort.postMessage({ type: 'under',
+                under: run.under(lent.prefix), prefix: lent.prefix }));
+        });`;
+
+test('the backend\'s scratches are held in the run\'s cache under names the run hands it, '
+    + 'counted there, and it draws as with plain ones', { timeout: 60_000 }, async()=>{
+    const { Worker } = await import('node:worker_threads');
+    const { scope, served } = await openedWorker();
+    const keeper = new Worker(KEEPER, { eval: true, workerData: {
+        runCache: new URL('../../../process/run-cache.js', import.meta.url).href,
+        connect: new URL('./connect.js', import.meta.url).href } });
+    /** @type {((data: any) => void) | null} */
+    let answered = null;
+    const handed = new Promise(resolve=>{
+        keeper.on('message', data=>{
+            if (data.type === 'under')
+            {
+                answered?.(data);
+                return;
+            }
+            // What the run's thread posts to the graphics worker, as it would.
+            scope.onmessage({ data });
+            if (data.type === 'backend')
+            {
+                resolve(undefined);
+            }
+        });
+    });
+    const under = ()=>/** @type {Promise<any>} */ (new Promise(resolve=>{
+        answered = resolve;
+        keeper.postMessage('under');
+    }));
+    const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
+    try
+    {
+        await handed;
+        assert.deepEqual(served.scratch().held, 0, 'nothing held before the first draw');
+        const { device } = deviceOn(sender);
+        device.BeginScene();
+        assert.equal(device.SetFVF(0x004 | 0x040), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(20 * 3), 20),
+            D3D_OK);
+        device.EndScene();
+        await device.Present();
+        await device.idle();
+        await settle();
+        const figures = served.scratch();
+        assert.equal(figures.held, 1, 'the uniform ring\'s copy, in the run\'s cache');
+        assert.equal(figures.plain, 0);
+        const { under: held, prefix } = await under();
+        assert.match(prefix, /^scratch\/\d+\/$/, 'an owner of the run\'s, numbered there');
+        assert.equal(held.bodies, 1);
+        assert.equal(held.hotBytes, figures.heldBytes, 'counted under the backend\'s names');
+    }
+    finally
+    {
+        sender.close();
+        await keeper.terminate();
     }
 });

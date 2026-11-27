@@ -653,7 +653,7 @@ export async function layerConfig(deps){
         // The run's cache, read through this process's reader where the run
         // made one (`app.js`); none, and every space answers a miss.
         cache: { reader: options.cache?.reader ?? null, join: options.cache?.join ?? null,
-            serve: options.cache?.serve ?? null },
+            serve: options.cache?.serve ?? null, own: options.cache?.own ?? null },
         win32: {
             // A 64-bit process's structures hold 8-byte pointers.
             bits: processBits,

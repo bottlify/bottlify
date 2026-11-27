@@ -247,7 +247,7 @@ test('an owner on the keeper\'s own thread - an in-thread root\'s texels - is nu
     try
     {
         const api = await createCacheModule().create({ reader: run.reader, join: run.join,
-            serve: run.serve });
+            serve: run.serve, own: run.own });
         const worker = run.serve('texels');
         const owned = /** @type {NonNullable<ReturnType<typeof api.owner>>} */ (api.owner('texels'));
         assert.ok(owned, 'a run that serves names gives one');
@@ -352,7 +352,7 @@ test('memory an owner on the keeper\'s own thread holds goes through its reader,
     try
     {
         const api = await createCacheModule().create({ reader: run.reader, join: run.join,
-            serve: run.serve });
+            serve: run.serve, own: run.own });
         const owned = /** @type {NonNullable<ReturnType<typeof api.owner>>} */ (
             api.owner('resources'));
         const held = owned.space.hold?.('a', 10_000) ?? null;

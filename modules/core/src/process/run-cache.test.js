@@ -66,7 +66,7 @@ test('the figures weigh each space on its own: its bodies, those in memory, the 
             assert.ok(run.reader.put('reads/a', new Uint8Array(256)));
             assert.ok(run.reader.put('reads/b', new Uint8Array(4096)));
             // Through the handlers a process in a worker of its own calls.
-            const place = run.handlers.cache.reserve('translations/m', 5000, {});
+            const place = run.across().handlers.cache.reserve('translations/m', 5000, {});
             assert.ok(place !== null);
             const standing = {
                 reads: { bodies: 2, bytes: 4352, hotBytes: 4352, placedBytes: 2 * 4096 },
@@ -152,3 +152,175 @@ test('the run\'s figures carry its budget and the most it held at once, after bo
             run.close();
         }
     });
+
+/**
+ * A process in a worker of its own, as `process.worker.js` makes its cache:
+ * a reader and owner names across its link. It holds a scratch, a hold, an
+ * in-thread root's texels and a graphics root's channel (here, in its own
+ * thread, as a worker of the process's would), says what it holds, and on
+ * the word lets go of all of it as a process that goes does.
+ */
+const PROCESS = `
+    const { workerData, parentPort } = require('node:worker_threads');
+    const next = ()=>new Promise(resolve=>parentPort.once('message', resolve));
+    Promise.all([import(workerData.link), import(workerData.runCache), import(workerData.cache)])
+        .then(async([{ openLink }, { remoteCacheReader, remoteCacheOwners },
+            { createCacheModule, channelSpace }])=>{
+            const link = openLink(workerData.end, {});
+            const ask = (method, args)=>link.callWaiting('cache', method, args);
+            const reader = remoteCacheReader(workerData.joined,
+                { ask, call: (method, args)=>link.call('cache', method, args) });
+            const owners = remoteCacheOwners({ ask }, message=>parentPort.postMessage(message));
+            const module = createCacheModule();
+            const api = await module.create({ reader, own: owners.own, serve: owners.serve });
+            const room = api.scratch('blit').bytes(100_000).fill(5);
+            const resource = api.hold('resource', 50_000);
+            resource.bytes.fill(6);
+            const texels = api.owner('texels');
+            const put = texels.put('a', new Uint8Array(8192).fill(7));
+            const served = api.serve('texels');
+            const root = channelSpace(workerData.joined, served);
+            const granted = await root.ask('b', 4096);
+            root.put('b', new Uint8Array(4096).fill(8));
+            parentPort.postMessage({ type: 'held', room, resource: resource.bytes, put, granted,
+                texels: texels.prefix, root: served.prefix });
+            await next();
+            const released = { texels: await texels.close(), root: await root.close() };
+            await module.dispose();
+            parentPort.postMessage({ type: 'gone', released });
+        });`;
+
+test('a process in a worker of its own is served names of its own: its scratches, holds and '
+    + 'roots are the run\'s, counted under each owner, read in place, and gone with it, no tail',
+{ timeout: 60_000 }, async()=>{
+    const { Worker } = await import('node:worker_threads');
+    const { createLinkMemory, openLink } = await import('../system/link.js');
+    /** @type {import('../layers/cache/module.js').OwnerTail[]} */
+    const tails = [];
+    const run = await openRunCache({ onTail: tail=>tails.push(tail) });
+    const across = run.across();
+    const { a, b } = createLinkMemory();
+    const system = openLink(a, across.handlers);
+    const serving = system.serve();
+    const joined = run.join(()=>{});
+    const worker = new Worker(PROCESS, { eval: true, workerData: {
+        link: new URL('../system/link.js', import.meta.url).href,
+        runCache: new URL('./run-cache.js', import.meta.url).href,
+        cache: new URL('../layers/cache/module.js', import.meta.url).href,
+        end: b, joined: { shared: joined.shared, segments: joined.segments } } });
+    /** @type {any[]} */
+    const said = [];
+    /** @type {(() => void) | null} */
+    let heard = null;
+    worker.on('message', message=>{
+        if (message.type === 'cache-serve')
+        {
+            across.served(message.prefix, message.channel);
+            return;
+        }
+        said.push(message);
+        heard?.();
+    });
+    const nextSaid = async()=>{
+        while (said.length === 0)
+        {
+            await new Promise((resolve, reject)=>{
+                heard = ()=>resolve(undefined);
+                worker.once('error', reject);
+            });
+        }
+        return said.shift();
+    };
+    try
+    {
+        const held = await nextSaid();
+        assert.equal(held.type, 'held');
+        assert.equal(held.put, true);
+        assert.equal(held.granted, true);
+        assert.ok(held.room.buffer instanceof SharedArrayBuffer, 'the scratch is the cache\'s');
+        assert.ok(held.resource.buffer instanceof SharedArrayBuffer, 'so is the hold');
+        assert.ok(held.room.every((/** @type {number} */ byte)=>byte === 5), 'read in place here');
+        assert.ok(held.resource.every((/** @type {number} */ byte)=>byte === 6));
+        const out = run.figures().ownersOut;
+        assert.deepEqual(Object.keys(out), ['scratch/1/', held.texels],
+            'its scratches and its in-thread root, numbered by the run');
+        assert.deepEqual(out['scratch/1/'], { bodies: 2, bytes: 128 * 1024 + 64 * 1024,
+            hotBytes: 128 * 1024 + 64 * 1024, placedBytes: 128 * 1024 + 64 * 1024 },
+        'the scratch and the hold, each in a block of the budget');
+        assert.equal(out[held.texels].bodies, 1);
+        assert.equal(run.reader.with(`${held.texels}a`, body=>body[8191], { wait: true }), 7,
+            'its root\'s texels read in place on the keeper\'s thread');
+        assert.notEqual(held.root, held.texels);
+        assert.equal(run.under(held.root).bodies, 1, 'the root its channel serves holds there');
+        assert.equal(run.figures().served, 1);
+
+        worker.postMessage('go');
+        const gone = await nextSaid();
+        assert.deepEqual(gone.released, { texels: { bodies: 1, bytes: 8192, waiting: 0 },
+            root: { bodies: 1, bytes: 4096, waiting: 0 } });
+        for (let turns = 0; turns < 100 && run.figures().served > 0; turns++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+        across.end();
+        assert.deepEqual(run.figures().ownersOut, {}, 'nothing of it out');
+        assert.equal(run.figures().served, 0);
+        for (const kind of ['scratch/', 'texels/'])
+        {
+            assert.equal(run.under(kind).bodies, 0, `nothing left under ${kind}`);
+        }
+        assert.deepEqual(tails, []);
+    }
+    finally
+    {
+        await worker.terminate();
+        system.close();
+        await serving;
+        joined.leave();
+        run.close();
+    }
+});
+
+test('a process in a worker that goes without letting go of its names leaves a tail, counted, '
+    + 'and nothing under them; a channel that comes after it went is closed unserved', async()=>{
+    const { createChannel, openClient } = await import('@bottlify/cellar');
+    /** @type {import('../layers/cache/module.js').OwnerTail[]} */
+    const tails = [];
+    const run = await openRunCache({ onTail: tail=>tails.push(tail) });
+    try
+    {
+        const across = run.across();
+        const prefix = across.handlers.cache.own('scratch');
+        const late = across.handlers.cache.own('texels');
+        assert.ok(run.reader.hold(`${prefix}x`, 4096));
+        assert.equal(across.handlers.cache.release('scratch/99/', 0), null, 'not its own');
+        across.end();
+        assert.deepEqual(tails.map(tail=>[tail.prefix, tail.bodies, tail.why]),
+            [[prefix, 1, 'unreleased']]);
+        assert.equal(run.under(prefix).bodies, 0, 'taken back as it went');
+        assert.deepEqual(run.figures().ownersOut, {});
+        assert.equal(run.figures().ownerTails.owners, 1);
+        const channel = createChannel();
+        across.served(late, channel);
+        assert.equal(openClient(channel).closed(), true, 'nothing waits on it');
+        assert.equal(run.figures().served, 0);
+    }
+    finally
+    {
+        run.close();
+    }
+});
+
+test('the run\'s own scratches (its presenter\'s) are held under names of its own, let go of '
+    + 'with the run', async()=>{
+    /** @type {import('../layers/cache/module.js').OwnerTail[]} */
+    const tails = [];
+    const run = await openRunCache({ onTail: tail=>tails.push(tail) });
+    const room = run.scratch('present/converted').bytes(10_000);
+    assert.ok(room.buffer instanceof SharedArrayBuffer);
+    const [prefix] = Object.keys(run.figures().ownersOut);
+    assert.match(prefix, /^scratch\/\d+\/$/);
+    assert.equal(run.under(prefix).hotBytes, 16 * 1024);
+    run.close();
+    assert.deepEqual(tails, [], 'no tail: the run took it with it');
+});

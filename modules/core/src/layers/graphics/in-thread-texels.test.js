@@ -41,8 +41,9 @@ test('a root drawn on the process\'s thread holds names of its own in the run\'s
     const run = await openRunCache();
     try
     {
-        const cache = await createCacheModule().create({ reader: run.reader, join: run.join,
-            serve: run.serve });
+        const cacheModule = createCacheModule();
+        const cache = await cacheModule.create({ reader: run.reader, join: run.join,
+            serve: run.serve, own: run.own });
         const gpu = createFakeDevice({ workDone: true });
         const gpuDevice = /** @type {any} */ (gpu.device);
         gpuDevice.features = new Set();
@@ -51,17 +52,19 @@ test('a root drawn on the process\'s thread holds names of its own in the run\'s
         const api = await graphics.create({
             device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
         }, /** @type {any} */ (hostWith(cache)));
-        assert.equal(run.figures().owners, 0);
+        // The process's scratches are an owner already.
+        assert.deepEqual(Object.keys(run.figures().ownersOut), ['scratch/1/']);
+        const texelOwners = ()=>Object.keys(run.figures().ownersOut)
+            .filter(prefix=>prefix.startsWith('texels/'));
         api.create('d3d8');
         api.create('d3d9');
-        assert.equal(run.figures().owners, 2, 'one owner a root, numbered by the run');
-        assert.equal(run.figures().served, 2);
+        assert.equal(run.figures().owners, 3, 'one owner a root, numbered by the run');
+        assert.deepEqual(texelOwners(), ['texels/2/', 'texels/3/']);
+        assert.equal(run.figures().served, 0, 'on this thread, no channel');
         await graphics.dispose();
-        for (let turns = 0; turns < 100 && run.figures().served > 0; turns++)
-        {
-            await new Promise(resolve=>setTimeout(resolve, 0));
-        }
-        assert.equal(run.figures().served, 0, 'every owner let go of with the layer');
+        assert.deepEqual(texelOwners(), [], 'every owner let go of with the layer');
+        await cacheModule.dispose();
+        assert.deepEqual(run.figures().ownersOut, {}, 'nor the process\'s scratches, once it went');
         assert.equal(run.figures().ownerTails.owners, 0, 'and none left a tail');
     }
     finally
