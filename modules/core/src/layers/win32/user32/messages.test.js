@@ -773,3 +773,42 @@ test('the soonest timer is found without making anything, every turn asking', as
     assert.ok(bytes < 24, `${bytes} bytes a turn`);
     assert.equal(due[0], 130.75);
 });
+
+test('of the timers due, the one due soonest is handed first, those due together as set', ()=>{
+    const { clock, queue } = timed();
+    queue.setTimer(0x40, 1, 30, 0);
+    queue.setTimer(0x40, 2, 10, 0);
+    queue.setTimer(0x40, 3, 20, 0);
+    queue.setTimer(0x40, 4, 20, 0);
+    clock.at = 35;
+    /** @type {number[]} */
+    const order = [];
+    for (let message = queue.peek(ALL); message !== null; message = queue.peek(ALL))
+    {
+        order.push(message.wParam);
+    }
+    assert.deepEqual(order, [2, 3, 4, 1]);
+});
+
+test('asking whether a timer is due makes nothing and leaves the timers due', async()=>{
+    const { clock, queue } = timed();
+    queue.setTimer(0x40, 1, 10, 0);
+    queue.setTimer(0x40, 2, 10, 0);
+    clock.at = 50;
+    const bytes = await bytesPerCall(()=>{
+        queue.waiting();
+    });
+    assert.ok(bytes < 8, `${bytes} bytes a look`);
+    assert.equal(queue.waiting() & QS_TIMER, QS_TIMER, 'and the timers are still due');
+});
+
+test('a message posted later whose news has someone look again is posted once', ()=>{
+    const { clock, queue } = timed();
+    queue.whenNews(()=>queue.news());
+    queue.postLater('a', 10, ()=>({ hwnd: 0x40, message: WM_USER, wParam: 1, lParam: 0 }));
+    queue.postLater('b', 10, ()=>({ hwnd: 0x40, message: WM_USER, wParam: 2, lParam: 0 }));
+    clock.at = 10;
+    assert.equal(queue.waiting() & QS_POSTMESSAGE, QS_POSTMESSAGE);
+    assert.deepEqual([queue.peek(ALL)?.wParam, queue.peek(ALL)?.wParam, queue.peek(ALL)],
+        [1, 2, null]);
+});
