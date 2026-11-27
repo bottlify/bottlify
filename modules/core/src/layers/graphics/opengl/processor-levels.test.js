@@ -101,8 +101,11 @@ function channelTexels(runCache){
     return texels;
 }
 
-/** A body of 6 MiB that can be made again: put past the budget, it makes room. */
-const FILLER = 6 << 20;
+/**
+ * A body of 4 MiB that can be made again, a block of a quarter of the cramped
+ * run's one segment: put past the budget, it makes room.
+ */
+const FILLER = 4 << 20;
 
 /**
  * One run of a seeded program on the processor: every frame's pixels and

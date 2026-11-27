@@ -204,7 +204,8 @@ async function play(seed, api, holds){
             const out = {};
             if (next(2) === 0)
             {
-                // Now and then one past a segment of the cache, which finds no room.
+                // Now and then one past what the cache holds beside its spare segment,
+                // which finds no room.
                 const desc = { ByteWidth: 16 * (1 + next(next(8) === 0 ? 12_000 : 300)),
                     Usage: usage,
                     BindFlags: usage === D3D10_USAGE.STAGING ? 0 : D3D10_BIND.VERTEX_BUFFER,
@@ -451,4 +452,49 @@ test('a resource\'s held bytes go back to the cache once nothing can reach it, a
     cache.idle(1);
     assert.equal(cache.keeper.under('scratch/').bodies, 0);
     assert.ok(out.resource, 'still the program\'s when its holder went');
+});
+
+test('a resource past a segment of the run\'s cache is held there at its length, mapped, written'
+    + ' and read back', { timeout: 60_000 }, async()=>{
+    const cache = await testCache({ budget: 64 << 20, segmentBytes: 16 << 20 });
+    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    /** @type {Uint8Array[]} */
+    const given = [];
+    const { device, context } = deviceOf('d3d11', (name, length)=>{
+        const got = scratches.hold(name, length);
+        given.push(got.bytes);
+        return got;
+    });
+    const bytes = 20 * (1 << 20) + 16;
+    /** @type {{ resource?: any }} */
+    const out = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: bytes, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+        CPUAccessFlags: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE, MiscFlags: 0 }, null, out),
+    S_OK);
+    assert.equal(given.length, 1);
+    assert.ok(given[0].buffer instanceof SharedArrayBuffer, 'in the cache, not plain memory');
+    assert.deepEqual(scratches.figures().plain, 0);
+    assert.equal(cache.keeper.under('scratch/').placedBytes, bytes - 16 + 4096,
+        'its pages, not a power of two');
+    const written = randomBytes(random(7), 4096);
+    /** @type {{ data?: Uint8Array | null }} */
+    const map = {};
+    assert.equal(out.resource.Map(0, D3D10_MAP.READ_WRITE, 0, map), S_OK);
+    map.data?.set(written, bytes - written.length);
+    map.data?.set(written, 0);
+    out.resource.Unmap(0);
+    context.Flush();
+    await device.idle();
+    /** @type {{ data?: Uint8Array | null }} */
+    const read = {};
+    assert.equal(out.resource.Map(0, D3D10_MAP.READ, 0, read), S_OK);
+    const back = /** @type {Uint8Array} */ (read.data);
+    assert.deepEqual([...back.subarray(bytes - written.length)], [...written]);
+    assert.deepEqual([...back.subarray(0, written.length)], [...written]);
+    out.resource.Unmap(0);
+    out.resource.release();
+    scratches.releaseAll();
+    assert.equal(cache.keeper.under('scratch/').bodies, 0);
+    cache.idle(1);
+    assert.equal(cache.keeper.figures().segmentBytes, 16 << 20, 'its segment went with it');
 });

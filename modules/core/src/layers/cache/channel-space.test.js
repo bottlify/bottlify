@@ -374,8 +374,8 @@ test('memory an owner on the keeper\'s own thread holds goes through its reader,
     }
 });
 
-test('a worker owner\'s scratches and holds are held under its names, plain where there is no '
-    + 'room, and nothing is left when it goes', { timeout: 60_000 }, async()=>{
+test('a worker owner\'s scratches and holds are held under its names, one past a segment too, '
+    + 'and nothing is left when it goes', { timeout: 60_000 }, async()=>{
     /** @type {import('./module.js').OwnerTail[]} */
     const tails = [];
     const run = await openRunCache({ onTail: tail=>tails.push(tail) });
@@ -391,7 +391,8 @@ test('a worker owner\'s scratches and holds are held under its names, plain wher
             blit.bytes(1000).fill(1);
             const grown = blit.bytes(300_000);
             const resource = rooms.hold('resource', 50_000);
-            // Past a segment of the cache: no block holds it.
+            // Past a segment of the cache: a segment of its own, which the
+            // worker heard of before it asked.
             const large = rooms.hold('large', 20 << 20);
             const during = { figures: rooms.figures(), holding: owner.holding(),
                 shared: [grown.buffer instanceof SharedArrayBuffer,
@@ -402,12 +403,12 @@ test('a worker owner\'s scratches and holds are held under its names, plain wher
             post({ during, after: owner.holding(), released: await owner.close() });`,
         { joined: { shared: joined.shared, segments: joined.segments }, served,
             scratch: new URL('./scratch.js', import.meta.url).href });
-        assert.deepEqual(said.during.shared, [true, true, false]);
+        assert.deepEqual(said.during.shared, [true, true, true]);
         assert.equal(said.during.zero, true);
-        assert.deepEqual(said.during.figures, { scratches: 1, holds: 2, held: 2,
-            heldBytes: 512 * 1024 + 64 * 1024, plain: 1, plainBytes: 20 << 20, grows: 2,
-            plainGrows: 0 });
-        assert.deepEqual(said.during.holding, { holds: 2, bytes: 512 * 1024 + 64 * 1024 },
+        const heldBytes = 512 * 1024 + 13 * 4096 + (20 << 20);
+        assert.deepEqual(said.during.figures, { scratches: 1, holds: 2, held: 3, heldBytes,
+            plain: 0, plainBytes: 0, grows: 2, plainGrows: 0 });
+        assert.deepEqual(said.during.holding, { holds: 3, bytes: heldBytes },
             'the owner counts what its scratches hold');
         assert.deepEqual(said.after, { holds: 0, bytes: 0 });
         assert.deepEqual(said.released, { bodies: 0, bytes: 0, waiting: 0 });

@@ -254,6 +254,8 @@ test('the sound output is memory held in the run\'s cache: counted there, writte
     assert.deepEqual(Object.keys(output.memory), ['table'],
         'what crosses to a worker: the table alone');
     assert.ok(table instanceof Uint8Array, 'a view of memory, not a buffer of its own');
+    assert.equal(ARENA_BYTES, 16 << 20, 'an arena of 16 MiB, the rings before it');
+    assert.equal(table.byteLength, ARENA_OFFSET + ARENA_BYTES, 'the whole table, past a segment');
     assert.ok(run.keeper.segmentBuffers().includes(/** @type {any} */ (table.buffer)),
         'in one of the run cache\'s segments');
     assert.equal(run.keeper.under('sound/').hotBytes, table.byteLength, 'counted under sound/');

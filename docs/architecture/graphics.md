@@ -154,10 +154,10 @@ flowchart TB
   address, and an unmap reads the pages written since (`d3d10/render.js`, `GuestStorage`).
   The host's copy of every resource's bytes, which a copy, an update and a read-back work in,
   is held in the run's cache for the resource's life (`backingOf`, `cache/scratch.js` `hold`):
-  zero when made, in a block of a power of two from 4 KiB, under the process's `scratch/<n>/`
+  zero when made, of its length rounded to a page (the cache places it in a block of a power of
+  two, or past a quarter of a segment in a segment of its own), under the process's `scratch/<n>/`
   names on the program's thread (in a worker of its own too) and under the root's `resources/<n>/` names in the graphics
-  worker; plain memory of its own length where the cache has no room (a resource past a
-  segment of 16 MiB) or there is no cache. It is let go of when the backing is collected - a
+  worker; plain memory of its own length where the cache has no room or there is no cache. It is let go of when the backing is collected - a
   view, a share's other device or a read-back in flight outlives the program's last
   reference - and the root or the process going takes back what is still held. A
   dynamic buffer's map and unmap run in the guest too: NO_OVERWRITE hands out the storage the
