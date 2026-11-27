@@ -19,6 +19,7 @@
  */
 
 import { RUNTIME_HELPERS, helperAt, helperInstructions } from './helpers.js';
+import { FNV_OFFSET, POSITION_OFFSET, fnv1aStep, positionStep } from './hash.js';
 import { decode } from './decode/decoder.js';
 import { switchTable64 } from './region-switch64.js';
 import { translatesLong } from './emit/long-ops.js';
@@ -1900,13 +1901,13 @@ export function hashPlan({ blocks, tables = [] }){
  * @returns {string}
  */
 export function hashOfPlan(read, { spans, named, tables, helpers }){
-    let low = 0x811c9dc5;
-    let high = 0x050c5d1f;
+    let low = FNV_OFFSET;
+    let high = POSITION_OFFSET;
     let at = 0;
     /** @param {number} byte */
     const mix = byte=>{
-        low = Math.imul(low ^ byte, 0x01000193);
-        high = Math.imul(high ^ byte ^ at++ & 0xff, 0x01000193);
+        low = fnv1aStep(low, byte);
+        high = positionStep(high, byte, at++);
     };
     for (const [start, end] of spans)
     {

@@ -34,6 +34,7 @@
 import { decode, MODE_64 } from './decode/decoder.js';
 import { ARITH_FLAGS } from './decode/table.js';
 import { CRT_DICTIONARY } from './crt-dictionary.js';
+import { FNV_OFFSET, POSITION_OFFSET, fnv1aStep, positionStep } from './hash.js';
 
 /**
  * @typedef {Object} RuntimeHelper
@@ -162,17 +163,8 @@ export const RUNTIME_HELPERS = Object.freeze([FTOL2, ...CRT_DICTIONARY]);
  * @param {(address: number) => number} read
  * @param {number} address @param {number} length
  */
-export function fingerprint(read, address, length){
-    let low = 0x811c9dc5;
-    let high = 0x050c5d1f;
-    for (let at = 0; at < length; at++)
-    {
-        const byte = read(address + at);
-        low = Math.imul(low ^ byte, 0x01000193);
-        high = Math.imul(high ^ byte ^ at & 0xff, 0x01000193);
-    }
-    return (high >>> 0).toString(16).padStart(8, '0') + (low >>> 0).toString(16).padStart(8, '0');
-}
+export const fingerprint = (read, address, length)=>maskedFingerprint(read, address,
+    [[0, length]], []);
 
 /**
  * How many bytes of a function's first span its quick key covers: the look a
@@ -208,8 +200,8 @@ export function maskedFingerprint(read, address, spans, masks){
  * @returns {[number, number]}
  */
 function maskedHash(read, address, spans, masks){
-    let low = 0x811c9dc5;
-    let high = 0x050c5d1f;
+    let low = FNV_OFFSET;
+    let high = POSITION_OFFSET;
     let at = 0;
     let mask = 0;
     for (const [offset, length] of spans)
@@ -222,8 +214,8 @@ function maskedHash(read, address, spans, masks){
                 mask++;
             }
             const byte = mask < masks.length && masks[mask] === where ? 0 : read(address + where);
-            low = Math.imul(low ^ byte, 0x01000193);
-            high = Math.imul(high ^ byte ^ at & 0xff, 0x01000193);
+            low = fnv1aStep(low, byte);
+            high = positionStep(high, byte, at);
         }
     }
     return [high >>> 0, low >>> 0];
@@ -272,8 +264,8 @@ export function helperAt(read, target, helpers = RUNTIME_HELPERS, bits = 32){
     for (const { length, masks, helpers: keyed } of looks)
     {
         // `maskedHash` of the head under this look's masks, from the bytes read once.
-        let low = 0x811c9dc5;
-        let high = 0x050c5d1f;
+        let low = FNV_OFFSET;
+        let high = POSITION_OFFSET;
         let mask = 0;
         for (let at = 0; at < length; at++)
         {
@@ -283,8 +275,8 @@ export function helperAt(read, target, helpers = RUNTIME_HELPERS, bits = 32){
                 byte = 0;
                 mask++;
             }
-            low = Math.imul(low ^ byte, 0x01000193);
-            high = Math.imul(high ^ byte ^ at & 0xff, 0x01000193);
+            low = fnv1aStep(low, byte);
+            high = positionStep(high, byte, at);
         }
         const found = keyed.get(keyOf(high >>> 0, low >>> 0));
         if (found !== undefined)
