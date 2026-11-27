@@ -16,6 +16,8 @@
  * the memory layer's `writePointer`, whose rule is the same.
  */
 
+import { highOf } from '../../../system/layout.js';
+
 /**
  * @typedef {Object} PointerWidth
  * @property {4 | 8} size
@@ -52,9 +54,8 @@ export function pointerWidth(size = 4){
     /** @type {(view: DataView, offset: number, value: number) => void} */
     const set = size === 8
         ? (view, offset, value)=>{
-            const whole = value < 0 ? value >>> 0 : value;
-            view.setUint32(offset, whole % 2 ** 32, true);
-            view.setUint32(offset + 4, Math.floor(whole / 2 ** 32), true);
+            view.setUint32(offset, value < 0 ? value >>> 0 : value % 2 ** 32, true);
+            view.setUint32(offset + 4, highOf(value, 'ptr'), true);
         }
         : (view, offset, value)=>view.setUint32(offset, value >>> 0, true);
     /** @type {(view: DataView, offset: number) => number} */
