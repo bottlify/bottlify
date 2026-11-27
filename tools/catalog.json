@@ -615,7 +615,7 @@
    "category": "checks",
    "kind": "check",
    "browser": false,
-   "question": "A 64-bit process's handler answers the same call the same wherever its memory lies: RAX whole, what it writes, what it faults on",
+   "question": "A 64-bit process's handler answers the same call the same wherever its memory lies: RAX whole, what it writes, what it faults on; and none cuts an address it is handed whole back to a dword",
    "command": "node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90100000] [--known FILE] [--write-known] [--trace]",
    "tests": [
     "tools/checks/check-wide-addresses.test.js"
@@ -751,7 +751,7 @@
    "category": "checks",
    "kind": "check",
    "browser": false,
-   "question": "A host function or COM method taking a 64-bit, floating or wide structure argument by value says so to the bridge, for an x86-64 caller",
+   "question": "A host function or COM method taking a 64-bit, floating or wide structure argument by value says so to the bridge, for an x86-64 caller, and keeps an address the bridge hands it whole",
    "command": "npm run check:boundaries",
    "tests": [
     "tools/checks/check-wide-arguments.test.js"
