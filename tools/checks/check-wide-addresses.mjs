@@ -523,8 +523,11 @@ export function sameAnswer(low, high, lowBase, highBase, kind){
  * The offsets of the dwords one call wrote that differ between the two
  * windows other than by a pointer moved by the bases' distance: a dword at a
  * 4-byte boundary whose value is the low one's plus the distance, mod 2^32,
- * and points into the low window. Only what the call changed is compared - a
- * window the layers had already parted on before it is not this call's.
+ * and points into the low window, or a quadword at an 8-byte boundary that
+ * points there and moved by the whole distance - a 64-bit pointer written
+ * whole, whose upper dword past 4 GiB is not the low window's. Only what the
+ * call changed is compared - a window the layers had already parted on before
+ * it is not this call's.
  *
  * @param {Uint8Array} lowBefore @param {Uint8Array} low
  * @param {Uint8Array} highBefore @param {Uint8Array} high
@@ -539,6 +542,16 @@ export function writeDifferences(lowBefore, low, highBefore, high, lowBase, high
     const distance = (highBase - lowBase) >>> 0;
     for (let at = 0; at + 4 <= low.length && found.length < 4; at += 4)
     {
+        if (at % 8 === 0 && at + 8 <= low.length)
+        {
+            const a = la.getUint32(at, true) + la.getUint32(at + 4, true) * 2 ** 32;
+            const b = ha.getUint32(at, true) + ha.getUint32(at + 4, true) * 2 ** 32;
+            if (a + highBase - lowBase === b && a >= lowBase && a < lowBase + WINDOW)
+            {
+                at += 4;
+                continue;
+            }
+        }
         const a = la.getUint32(at, true);
         const b = ha.getUint32(at, true);
         if (a === lb.getUint32(at, true) && b === hb.getUint32(at, true))
@@ -710,7 +723,14 @@ export async function compare(low, high, only = null, rebuild = null){
             // length of 0x90100000 is negative as an int - no width's doing.
             const typed = (pointers.get(name) ?? mangledPointers(name))
                 ?.filter(place=>place < count);
-            const places = typed ?? Array.from({ length: Math.min(count, MOST_PLACES) }, (_, i)=>i);
+            // Without one, a place the spec itself lays out as a float or a
+            // quadword's dword holds no address of its own and is not tried.
+            const own = entry?.[ORIGINAL_EXPORT] ?? entry;
+            const valued = new Set([...(own.quadwords ?? []).flatMap((/** @type {number} */ at)=>
+                [at, at + 1]), ...Object.entries(own.floats ?? {}).flatMap(([at, kind])=>(
+                kind === 'f64' ? [Number(at), Number(at) + 1] : [Number(at)]))]);
+            const places = typed ?? Array.from({ length: Math.min(count, MOST_PLACES) }, (_, i)=>i)
+                .filter(place=>!valued.has(place));
             /** @type {[string, (number | 'p')[]][]} */
             const shapes = places.map(place=>[
                 `argument ${place + 1} a pointer`,

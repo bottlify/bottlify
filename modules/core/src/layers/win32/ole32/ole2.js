@@ -27,7 +27,7 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 import { publishEnumerator } from './enumerator.js';
 import {
-    CF, DVASPECT_CONTENT, FORMATETC_SIZE, SLOT, STGMEDIUM_SIZE, createOleUtil,
+    CF, DVASPECT_CONTENT, FORMATETC_SIZE, METAFILEPICT, SLOT, STGMEDIUM_SIZE, createOleUtil,
 } from './oleutil.js';
 import {
     CLSID_PICTURE_DIB, CLSID_PICTURE_ENHMETAFILE, CLSID_PICTURE_METAFILE,
@@ -900,11 +900,12 @@ export function createOle2Functions(env){
         const refusal = refuse(name, { argBytes, answer, why });
         return {
             argBytes,
+            addresses: [out],
             /** @param {number[]} args */
             handler: args=>{
-                if ((args[out] >>> 0) !== 0)
+                if (wholeAddress(args[out]) !== 0)
                 {
-                    writeU32(args[out], 0);
+                    util.writePointer(args[out], 0);
                 }
                 return refusal.handler();
             },
@@ -1507,8 +1508,9 @@ export function createOle2Functions(env){
                 }
                 await system('USER32.dll', 'DrawIcon', [dc, 0, 0, icon >>> 0]);
                 const metafile = await system('GDI32.dll', 'CloseMetaFile', [dc]);
-                const block = metafile
-                    ? await system('KERNEL32.dll', 'GlobalAlloc', [GMEM_MOVEABLE, 16]) : 0;
+                const picture = METAFILEPICT.at(env.pointerSize);
+                const block = metafile ? await system('KERNEL32.dll', 'GlobalAlloc',
+                    [GMEM_MOVEABLE, picture.SIZE]) : 0;
                 const at = block ? await system('KERNEL32.dll', 'GlobalLock', [block]) : 0;
                 if (!at)
                 {
@@ -1524,10 +1526,10 @@ export function createOle2Functions(env){
                 }
                 const cx = (await system('USER32.dll', 'GetSystemMetrics', [SM_CXICON])) || 32;
                 const cy = (await system('USER32.dll', 'GetSystemMetrics', [SM_CYICON])) || 32;
-                writeU32(at, MM_ANISOTROPIC);
-                writeU32(at + 4, Math.round(cx * HIMETRIC_PER_INCH / 96));
-                writeU32(at + 8, Math.round(cy * HIMETRIC_PER_INCH / 96));
-                writeU32(at + 12, metafile >>> 0);
+                writeU32(at + picture.mm, MM_ANISOTROPIC);
+                writeU32(at + picture.xExt, Math.round(cx * HIMETRIC_PER_INCH / 96));
+                writeU32(at + picture.yExt, Math.round(cy * HIMETRIC_PER_INCH / 96));
+                util.writePointer(at + picture.hMF, metafile >>> 0);
                 await system('KERNEL32.dll', 'GlobalUnlock', [block]);
                 util.sayOnce('OleMetafilePictFromIconAndLabel',
                     'the label is not drawn, and the extent is the icon\'s alone');
