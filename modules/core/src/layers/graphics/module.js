@@ -699,7 +699,7 @@ export function createGraphicsModule(){
              */
             const direct3d = (name, factory, services)=>(remote
                 ? remote.root(name, factory, services, cache)
-                : factory({ ...services, texelCache: device ? ownTexels() : null, scratches,
+                : factory({ ...services, texelCache: ownTexels(), scratches,
                     holds }));
             /**
              * Direct3D 10's root, drawn here or in the graphics worker.
