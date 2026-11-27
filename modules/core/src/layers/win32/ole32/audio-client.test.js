@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { soundMemory } from '../../audio/output/sound.fixture.js';
 import { createAudioClients, readStreamFormat, validateFormat } from './audio-client.js';
 import { LONG_RSP, callLong } from '../../bridge/internal/long-machine.fixture.js';
 import { createMixer } from '../../audio/output/mixer.js';
@@ -107,7 +108,7 @@ function fakeTrack(){
  *     audio layer's shared table gives, the audio adapter's, not fakes.
  */
 function setup(options = {}){
-    const table = options.output === 'table' ? createMixer() : null;
+    const table = options.output === 'table' ? createMixer({ made: soundMemory() }) : null;
     const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
     let time = 1000;

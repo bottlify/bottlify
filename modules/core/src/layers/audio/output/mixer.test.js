@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { soundMemory } from './sound.fixture.js';
 import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 
 import { createMixer } from './mixer.js';
@@ -48,7 +49,7 @@ test('with a shared table, write puts the guest\'s own bytes into the slot', ()=
     // its absence is the point -- so the assertion is on the observable
     // instead: the bytes that land in the slot are the bytes that went in,
     // unrounded, and `WRITTEN` moved by exactly that many.
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     const track = mixer.open(DIRECT);
     const written = pcm16([1234, -1234, 5678, -5678]);
 
@@ -65,7 +66,7 @@ test('with a shared table, write puts the guest\'s own bytes into the slot', ()=
 });
 
 test('with a shared table, a retuned track tells the reader its new rate', ()=>{
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     const track = mixer.open({ sampleRate: 22050, channels: 2, bitsPerSample: 16 });
     track.retune(44100);
     const { header } = slotView(mixer, track.slot);
@@ -89,7 +90,7 @@ test('with a shared table, pump() allocates no Float32Array', ()=>{
     globalThis.Float32Array = /** @type {any} */ (CountingFloat32Array);
     try
     {
-        const mixer = createMixer();
+        const mixer = createMixer({ made: soundMemory() });
         const track = mixer.open(DIRECT);
         track.write(pcm16([1000, 1000]));
         seen.count = 0;
@@ -104,7 +105,7 @@ test('with a shared table, pump() allocates no Float32Array', ()=>{
 
 test('with a shared table, playedBytes() credits a one-frame probe whole: held, once the '
     + 'reader\'s READ passes it; playing, at once, within the adapter\'s lead', ()=>{
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     const track = mixer.open(DIRECT); // the output's own rate: no resampling in the way
     const probe = pcm16([1000, -1000]);
     track.paused = true;
@@ -125,7 +126,7 @@ test('with a shared table, playedBytes() credits a one-frame probe whole: held, 
 test('the audio adapter: a track tells what it took DEVICE_LEAD_MS ahead of the audio thread,'
     + ' never past what was written, never back, and not while it is held', ()=>{
     const lead = 48000 * DEVICE_LEAD_MS / 1000 * 4;
-    const shared = createMixer();
+    const shared = createMixer({ made: soundMemory() });
     const table = shared.open(DIRECT);
     const { header } = slotView(shared, table.slot);
     table.paused = true;
@@ -145,7 +146,7 @@ test('the audio adapter: a track tells what it took DEVICE_LEAD_MS ahead of the 
 });
 
 test('with a shared table, a backlog past the depth sets DROP_TO', ()=>{
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     const track = mixer.open(DIRECT);
     // 12,000 frames (48,000 samples, stereo) -- past capacityFrames (9,600, 200
     // ms at 48 kHz) and still under one slot's 65,536-byte ring.
@@ -165,7 +166,7 @@ test('with a shared table, a closed slot is freed by the reader and reused', ()=
     // open() must reuse it -- otherwise a game that opens and closes many
     // short-lived buffers over a session exhausts every slot and falls back
     // permanently.
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     const tracks = [];
     for (let i = 0; i < SLOTS; i++)
     {
@@ -199,13 +200,13 @@ test('with a shared table, write() returns output frames, not bytes', ()=>{
     // nearly double what it means when the answer was bytes.
     const format = { sampleRate: 22050, channels: 2, bitsPerSample: 16 };
     const pcm = pcm16(new Array(2205 * 2).fill(1000)); // 100 ms, stereo
-    const frames = createMixer().open(format).write(pcm);
+    const frames = createMixer({ made: soundMemory() }).open(format).write(pcm);
     // A flat ratio, not the real resampler, which holds a fractional frame
     // back at the tail for the seam.
     assert.ok(Math.abs(frames - 4800) <= 5, `${frames} frames for 100 ms`);
 });
 test('with a shared table, a fallback track\'s write() also answers in output frames', ()=>{
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     for (let i = 0; i < SLOTS; i++)
     {
         mixer.open(DIRECT);
@@ -227,13 +228,13 @@ test('a mixer that attaches to a table it did not open sweeps every inherited sl
     // CLOSING. Without the sweep, every slot the parent had open is
     // permanently lost -- the child can never reuse it, however many
     // buffers the program that survives the replacement opens and closes.
-    const parent = createMixer();
+    const parent = createMixer({ made: soundMemory() });
     for (let i = 0; i < SLOTS; i++)
     {
         parent.open(DIRECT);
     }
 
-    const child = createMixer({ memory: parent.memory });
+    const child = createMixer({ made: soundMemory(), memory: parent.memory });
     assert.equal(child.open(DIRECT).slot, -1,
         'the sweep marks the inherited slots CLOSING, not FREE yet');
 
@@ -260,7 +261,7 @@ test('with a shared table, a backlog drop does not let write() overrun what the 
     // next block, so sizing room against it (as if the ring were already
     // empty) lets a write land on bytes the reader may still be mid-block
     // on -- a torn block, heard as a click, once per drop.
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     const track = mixer.open(DIRECT); // the direct-copy path: 4 bytes/frame
 
     const quarter = SLOT_BYTES / 4;
@@ -286,7 +287,7 @@ test('with a shared table, a film\'s owed-ms arithmetic does not inflate: write(
     // `bytesPerFrame * filmRate / outputRate` per real second (about 837 ms/s)
     // and the picture crawled at a fraction of real speed for the whole
     // cinematic. One second of sound, fully played, must leave `owed` near 0.
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     const track = mixer.open({ sampleRate: 22050, channels: 2, bitsPerSample: 16 });
 
     let written = 0;
@@ -310,7 +311,7 @@ test('with a shared table, a film\'s owed-ms arithmetic does not inflate: write(
 
 test('with a shared table, reset() restarts playedBytes() at zero, the way waveOutReset expects',
     ()=>{
-        const mixer = createMixer();
+        const mixer = createMixer({ made: soundMemory() });
         const track = mixer.open(DIRECT);
         track.write(pcm16([1000, 1000, 2000, 2000]));
 
@@ -331,7 +332,7 @@ test('with a shared table, a short write drops what does not fit rather than que
     // the past by the time it is offered, so there is nothing later to offer
     // it again to. SLOT_BYTES is a second, harder cap behind the 200 ms
     // backlog policy, and what does not fit past it is dropped, not queued.
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     const track = mixer.open(DIRECT);
 
     const almostFull = pcm16(new Array((SLOT_BYTES - 8) / 2).fill(1000));
@@ -347,7 +348,7 @@ test('with a shared table, a short write drops what does not fit rather than que
 });
 
 test('a voice written in sequence while it plays is a stream, and a jump moves it on', ()=>{
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     const voice = mixer.openVoice({ ...DIRECT, bytes: 4000 });
     assert.ok(voice);
     const header = tableView(Int32Array, mixer.table,
@@ -370,7 +371,7 @@ test('a voice written whole again and again while it plays is no stream', ()=>{
     // Locked whole every few tens of milliseconds, to mix into part of it:
     // counted as a stream written to the end of the lap, the device waited
     // silent at every turn of the circle -- a tick a lap.
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     const voice = mixer.openVoice({ ...DIRECT, bytes: 4000 });
     assert.ok(voice);
     const header = tableView(Int32Array, mixer.table,
@@ -393,7 +394,7 @@ test('a mixer beside another on one table leaves the other\'s slots open, plays 
     // Two processes at once on one thread: a child started beside its parent
     // is not the parent's replacement, and the parent goes on playing.
     const voice = { ...DIRECT, bytes: 4096 };
-    const parent = createMixer();
+    const parent = createMixer({ made: soundMemory() });
     const theirs = /** @type {any} */ (parent.openVoice(voice));
     const base = (/** @type {any} */ mixer, /** @type {number} */ slot)=>
         Atomics.load(slotView(mixer, slot).header, BASE);
@@ -401,7 +402,7 @@ test('a mixer beside another on one table leaves the other\'s slots open, plays 
     const span = parent.lend(lent);
     assert.ok(span >= 0, 'the parent had room to lend');
 
-    const child = createMixer({ memory: parent.memory,
+    const child = createMixer({ made: soundMemory(), memory: parent.memory,
         beside: { arena: [span, lent] } });
     const state = (/** @type {number} */ slot)=>Atomics.load(slotView(parent, slot).header, STATE);
     assert.equal(state(theirs.slot), STATE_OPEN, 'the parent\'s voice still plays');
@@ -425,7 +426,7 @@ test('a mixer beside another on one table leaves the other\'s slots open, plays 
 
 test('a mixer pumps its own fill, once a mix', ()=>{
     let fills = 0;
-    const mixer = createMixer({ fill: ()=>{
+    const mixer = createMixer({ made: soundMemory(), fill: ()=>{
         fills++;
     } });
     mixer.open(DIRECT).write(pcm16([1, 2]));
@@ -438,7 +439,7 @@ test('the open tracks are counted without building the report', async()=>{
     // The run loop asks every turn whether a track is open, to look at the
     // device in time: through diagnostics() that was the whole report,
     // arrays and a string a track, each turn.
-    const mixer = createMixer();
+    const mixer = createMixer({ made: soundMemory() });
     assert.equal(mixer.tracks(), 0);
     const track = mixer.open(DIRECT);
     track.write(pcm16([1000, 1000]));

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { soundMemory } from '../../audio/output/sound.fixture.js';
 import { createWinmmFunctions } from './functions.js';
 import { createWaveNotifier } from './notify.js';
 
@@ -749,7 +750,7 @@ test('a device with a real mixer retires even a very small buffer', async()=>{
     const memory = new Uint8Array(0x10000);
     let clock = 0;
 
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     const wave = /** @type {any} */ (createWinmmFunctions({
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>memory.slice(address, address + length),
@@ -865,7 +866,7 @@ test('PlaySound plays a WAVE image from memory, loops it, and null stops it', as
     const memory = new Uint8Array(0x10000);
     /** @type {string[]} */
     const diverged = [];
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     const wave = /** @type {any} */ (createWinmmFunctions({
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>memory.slice(address, address + length),

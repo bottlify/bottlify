@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { soundMemory } from './sound.fixture.js';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -90,7 +91,7 @@ const pcm16 = samples=>{
 const outputBlock = frames=>[new Float32Array(frames), new Float32Array(frames)];
 
 test('two tracks at different rates and gains come out summed', ()=>{
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     const music = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     const effect = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     music.gain = 1;
@@ -114,8 +115,8 @@ test('two tracks at different rates and gains come out summed', ()=>{
 test('each process\'s table is its own, and the output plays them all at once', ()=>{
     // Two processes, as two films playing at once: neither table holds the
     // other's tracks, so neither can close them, and they meet only here.
-    const run = createMixer({ sampleRate: 48000 });
-    const child = createMixer({ sampleRate: 48000 });
+    const run = createMixer({ made: soundMemory(), sampleRate: 48000 });
+    const child = createMixer({ made: soundMemory(), sampleRate: 48000 });
     const music = run.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     const voice = child.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     music.gain = 1;
@@ -138,7 +139,7 @@ test('each process\'s table is its own, and the output plays them all at once', 
 });
 
 test('a track\'s balance reaches the audio thread, one side at a time', ()=>{
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     const left = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     const right = mixer.open({ sampleRate: 48000, channels: 2, bitsPerSample: 16 });
     left.balance = [1, 0];
@@ -160,7 +161,7 @@ test('a track\'s balance reaches the audio thread, one side at a time', ()=>{
 });
 
 test('a silent block counts STARVED_BLOCKS and STARVED_FRAMES', ()=>{
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 }); // nothing written
 
     const Processor = loadWorkletClass();
@@ -174,7 +175,7 @@ test('a silent block counts STARVED_BLOCKS and STARVED_FRAMES', ()=>{
 });
 
 test('MIXED_FRAMES and READ advance by exactly what was mixed', ()=>{
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     const track = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     // More than one block's worth, at the direct rate: one frame in, one out.
     track.write(pcm16(new Array(40).fill(1000)));
@@ -200,7 +201,7 @@ test('MIXED_FRAMES and READ advance by exactly what was mixed', ()=>{
 });
 
 test('a page reads the speaker\'s gaps off the table the worklet plays', ()=>{
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     const music = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     music.gain = 1;
     music.write(pcm16([1, 2, 3, 4, 5, 6]));

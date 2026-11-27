@@ -27,6 +27,7 @@ import {
 } from './dsound/seam.js';
 import { withPointers } from '../memory/pointers.fixture.js';
 import { testCache } from '../cache/testing.fixture.js';
+import { noCache } from '../cache/module.js';
 
 /**
  * A view of the sound output's table at `offset`, as the device makes one:
@@ -136,10 +137,12 @@ function fixture(){
  *
  * @param {{ silent?: boolean, drained?: boolean, memory?: any, cache?: any,
  *     divergence?: (api: string, detail: string) => void }} [options]
- *     `cache`: the run's cache the module is given (none: a machine built alone)
+ *     `cache`: the run's cache the module is given (one of its own in memory if none)
  */
 async function playing({ silent = false, drained = true, memory, cache, divergence } = {}){
     const f = fixture();
+    // A cache of the machine's own, gone with it: a file of machines holds no table each.
+    const given = cache ?? (await testCache({ budget: 32 << 20, segmentBytes: 32 << 20 })).api;
     /** @type {number[]} */
     const signalled = [];
     const api = await audioModule.create({
@@ -163,7 +166,7 @@ async function playing({ silent = false, drained = true, memory, cache, divergen
             }
             if (name === 'cache')
             {
-                return cache ?? { space: ()=>({ hold: ()=>null }) };
+                return given;
             }
             assert.equal(name, 'memory');
             return f.memory;
@@ -270,15 +273,9 @@ test('the sound output is memory held in the run\'s cache: counted there, writte
     assert.equal(run.keeper.under('sound/').bodies, 0, 'and given back once released');
 });
 
-test('with no cache the output is a buffer of its own, and that is said once', async()=>{
-    /** @type {string[]} */
-    const said = [];
-    const f = await playing({ divergence: (api, detail)=>said.push(`${api}: ${detail}`) });
-    assert.ok(f.api.output().memory.table instanceof Uint8Array);
-    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    f.api.pump();
-    assert.deepEqual(playingVoices(f), [BUFFER_BYTES], 'and it plays');
-    assert.equal(said.filter(line=>/run's cache/.test(line)).length, 1, said.join('\n'));
+test('with no room for the sound output in the run\'s cache the machine does not start: no '
+    + 'buffer of its own stands in', async()=>{
+    await assert.rejects(playing({ cache: noCache }), /no room in the run's cache/);
 });
 
 test('a process that replaces another mixes into the same sound output', async()=>{
@@ -640,9 +637,10 @@ test('DirectSound\'s ordinals are offered beside its table', async()=>{
 
 test('the MPEG provider can be left out, for a run to compare against', async()=>{
     const f = fixture();
+    const cache = (await testCache({ budget: 32 << 20, segmentBytes: 32 << 20 })).api;
     const api = await audioModule.create({ ...f.config, mp3: false }, {
         requireApi: (/** @type {string} */ name)=>
-            name === 'bridge' ? { callGuest: async()=>0 } : f.memory,
+            name === 'bridge' ? { callGuest: async()=>0 } : name === 'cache' ? cache : f.memory,
         provide: ()=>{},
     });
     assert.deepEqual(Object.keys(api.libraries()), ['DSOUND.dll']);
@@ -651,9 +649,10 @@ test('the MPEG provider can be left out, for a run to compare against', async()=
 
 test('the decoder behind the provider follows the configuration', async()=>{
     const f = fixture();
+    const cache = (await testCache({ budget: 64 << 20, segmentBytes: 32 << 20 })).api;
     const host = {
         requireApi: (/** @type {string} */ name)=>
-            name === 'bridge' ? { callGuest: async()=>0 } : f.memory,
+            name === 'bridge' ? { callGuest: async()=>0 } : name === 'cache' ? cache : f.memory,
         provide: ()=>{},
     };
     // Nothing offered: the hosted minimp3, which answers inside the call.

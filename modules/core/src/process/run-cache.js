@@ -315,7 +315,7 @@ export async function openRunCache(opened = {}){
             if (runRooms === null)
             {
                 const owner = ownedSpace(reader, own('scratch'));
-                runRooms = { owner, rooms: createScratches(owner.space.hold ?? null) };
+                runRooms = { owner, rooms: createScratches(owner.space.hold) };
             }
             return runRooms.rooms.scratch(name);
         },

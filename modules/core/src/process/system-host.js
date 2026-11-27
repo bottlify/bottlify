@@ -21,6 +21,8 @@ import { createWindowDirectory } from '../layers/win32/user32/directory.js';
 import { furnishVolume, openSession } from './session.js';
 import { mountBundle } from './bundle-mount.js';
 import { createMixer } from '../layers/audio/output/mixer.js';
+import { TABLE_BYTES } from '../layers/audio/output/mix.js';
+import { cacheSpace } from '../layers/cache/module.js';
 import { liveDumpOf } from './live-dump.js';
 import { eventFrom } from '../system/events-across.js';
 import { createInputRoute } from '../layers/input/route.js';
@@ -272,10 +274,17 @@ export async function buildSystemHost(deps){
         registry: system.registry });
     system.bundle = blocks;
     // The output every process plays into, each in a span of its arena lent
-    // it; the page's worklet reads the table.
+    // it; the page's worklet reads the table. One the page did not hand in is
+    // held in the run's cache, for the run's life.
     const given = options.audio?.memory;
-    const output = createMixer({ sampleRate: options.audio?.sampleRate,
-        memory: given && 'table' in given ? given : undefined });
+    const memory = given && 'table' in given ? given : undefined;
+    const held = memory ? null : cacheSpace(reader, 'sound').hold('run', TABLE_BYTES);
+    if (!memory && held === null)
+    {
+        throw new Error('run: no room in the run\'s cache for the sound output');
+    }
+    const output = createMixer({ sampleRate: options.audio?.sampleRate, memory,
+        made: held ? { table: held.bytes, release: held.release } : undefined });
 
     /** The run's own program: the first process standing. */
     const first = ()=>across()[0] ?? null;

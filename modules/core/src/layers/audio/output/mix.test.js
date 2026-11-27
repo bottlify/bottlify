@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { soundMemory } from './sound.fixture.js';
 
 import {
     resampleInto, createSeam, slotHeaderOffset, slotPcmOffset,
@@ -165,7 +166,7 @@ test('gain scales the samples and a paused slot contributes nothing', ()=>{
 });
 
 test('a mixer over the table stays within TABLE_BYTES', ()=>{
-    const mixer = createMixer({ sampleRate: 48000 });
+    const mixer = createMixer({ made: soundMemory(), sampleRate: 48000 });
     assert.equal(mixer.table.byteLength, TABLE_BYTES);
 });
 
