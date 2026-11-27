@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { decodeObjref, encodeObjref } from './objref.js';
 import { parseGuid } from '../../../system/guid.js';
 import { createUserMarshalFunctions } from './usrmarshal.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const WDT_INPROC_CALL = 0x48746457;
 const WDT_REMOTE_CALL = 0x52746457;
@@ -164,13 +165,7 @@ function setup(options = {}){
 
     /** @type {import('./usrmarshal.js').UserMarshalHost} */
     const host = {
-        readMemory: (address, length)=>{
-            const end = options.end ?? 0;
-            assert.ok(address >= end || address + length <= end, `read of ${length} bytes at`
-                + ` 0x${address.toString(16)} runs past the end of an allocation`);
-            return memory.subarray(address, address + length);
-        },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory, 4, options.end ? [options.end] : []),
         heap,
         raise: code=>{
             throw new Raised(code, false);

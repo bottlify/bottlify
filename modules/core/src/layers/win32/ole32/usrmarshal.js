@@ -32,11 +32,10 @@
  * (dlls/ole32/tests/usrmarshal.c) check them byte for byte.
  */
 
-import { GUID_NULL, formatGuid, readGuid } from '../../../system/guid.js';
+import { GUID_NULL, formatGuid } from '../../../system/guid.js';
 import { OBJREF_BYTES, decodeObjref } from './objref.js';
 import { IID_ISTORAGE, IID_ISTREAM } from './storage.js';
-import { readToTerminator } from '../common/scan-windows.js';
-import { wholeAddress } from '../common/pointers.js';
+import { WHOLE } from '../common/guest.js';
 import { utf16z } from '../common/utf16.js';
 
 const WDT_INPROC_CALL = 0x48746457;
@@ -113,8 +112,7 @@ const BITMAP_HEADER_BYTES = 20;
 
 /**
  * @typedef {Object} UserMarshalHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown,
  *              block: (address: number) => { size: number } | null }} heap
  *           The process heap kernel32's Global* and CoTaskMemAlloc both stand
@@ -188,47 +186,19 @@ const after = (value, then)=>(value instanceof Promise ? value.then(then) : then
  *     returns?: string }>}
  */
 export function createUserMarshalFunctions(host){
-    /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
-        .getUint32(0, true);
-    /** @param {number} address */
-    const readU16 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 2);
-        return bytes[0] | bytes[1] << 8;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU16 = (address, value)=>host.writeMemory(wholeAddress(address),
-        Uint8Array.of(value & 0xff, (value >>> 8) & 0xff));
-    /**
-     * Consecutive words from `address`, written at once.
-     *
-     * @param {number} address @param {number[]} words
-     * @returns {number} where they end
-     */
-    const putWords = (address, words)=>{
-        const bytes = new Uint8Array(words.length * 4);
-        const view = new DataView(bytes.buffer);
-        words.forEach((word, index)=>view.setUint32(index * 4, word >>> 0, true));
-        host.writeMemory(wholeAddress(address), bytes);
-        return (address + bytes.length) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        putWords(address, [value]);
-    };
+    const { guest } = host;
     /** @param {number} flags */
-    const context = flags=>readU32(flags) & 0xffff;
+    const context = flags=>guest.u32(flags) & 0xffff;
     /** @param {number} flags */
     const inProcess = flags=>context(flags) === MSHCTX_INPROC;
 
     /**
      * The UTF-16 units of a terminated wide string, its terminator excluded;
-     * read a window at a time, so one at the end of what the program
-     * allocated is not read past.
+     * one at the end of what the program allocated is not read past.
      *
      * @param {number} address
      */
-    const wideUnits = address=>readToTerminator(host, address, 2).bytes.length >> 1;
+    const wideUnits = address=>guest.wstr(address, WHOLE).length;
     /** @param {Uint8Array} bytes */
     const wideText = bytes=>{
         let text = '';
@@ -253,7 +223,7 @@ export function createUserMarshalFunctions(host){
                 'no call into the program: a reference it is owed is not taken or given back');
             return Promise.resolve(0);
         }
-        return call(readU32(readU32(object) + slot * 4), [object >>> 0, ...args], thread)
+        return call(guest.u32(guest.u32(object) + slot * 4), [object >>> 0, ...args], thread)
             .then(answer=>answer | 0);
     };
     /** @param {number} object @param {unknown} thread */
@@ -268,12 +238,12 @@ export function createUserMarshalFunctions(host){
      * @param {number} flags @param {number} offset
      */
     const stubRoutine = (flags, offset)=>{
-        if (!host.call || readU32(flags + UMCB_SIGNATURE) !== USER_MARSHAL_CB_SIGNATURE)
+        if (!host.call || guest.u32(flags + UMCB_SIGNATURE) !== USER_MARSHAL_CB_SIGNATURE)
         {
             return 0;
         }
-        const message = readU32(flags + UMCB_STUB_MESSAGE);
-        return message === 0 ? 0 : readU32(message + offset);
+        const message = guest.u32(flags + UMCB_STUB_MESSAGE);
+        return message === 0 ? 0 : guest.u32(message + offset);
     };
     /**
      * @param {number} flags @param {number} bytes @param {unknown} thread
@@ -329,15 +299,15 @@ export function createUserMarshalFunctions(host){
             },
             marshal: (flags, buffer, slot)=>{
                 reachable(flags, 'UserMarshal');
-                return putWords(align(buffer), [WDT_INPROC_CALL, readU32(slot)]);
+                return guest.set32s(align(buffer), [WDT_INPROC_CALL, guest.u32(slot)]);
             },
             unmarshal: (flags, buffer, slot)=>{
                 const at = align(buffer);
-                if (readU32(at) !== WDT_INPROC_CALL)
+                if (guest.u32(at) !== WDT_INPROC_CALL)
                 {
                     fault(RPC_X_BAD_STUB_DATA);
                 }
-                writeU32(slot, readU32(at + 4));
+                guest.set32(slot, guest.u32(at + 4));
                 return at + 8;
             },
             free: ()=>0,
@@ -355,7 +325,7 @@ export function createUserMarshalFunctions(host){
      */
     const hglobalWire = {
         size: (flags, start, slot)=>{
-            const handle = readU32(slot);
+            const handle = guest.u32(slot);
             if (inProcess(flags) || handle === 0)
             {
                 return align(start) + 8;
@@ -364,30 +334,30 @@ export function createUserMarshalFunctions(host){
         },
         marshal: (flags, buffer, slot)=>{
             const at = align(buffer);
-            const handle = readU32(slot);
+            const handle = guest.u32(slot);
             if (inProcess(flags))
             {
-                return putWords(at, [WDT_INPROC_CALL, handle]);
+                return guest.set32s(at, [WDT_INPROC_CALL, handle]);
             }
             if (handle === 0)
             {
-                return putWords(at, [WDT_REMOTE_CALL, 0]);
+                return guest.set32s(at, [WDT_REMOTE_CALL, 0]);
             }
             const bytes = globalSize(handle);
-            const end = putWords(at, [WDT_REMOTE_CALL, handle, bytes, handle, bytes]);
+            const end = guest.set32s(at, [WDT_REMOTE_CALL, handle, bytes, handle, bytes]);
             if (bytes > 0)
             {
-                host.writeMemory(end, host.readMemory(handle, bytes).slice());
+                guest.copy(end, handle, bytes);
             }
             return end + bytes;
         },
         unmarshal: (flags, buffer, slot)=>{
             const at = align(buffer);
-            const tag = readU32(at);
-            const handle = readU32(at + 4);
+            const tag = guest.u32(at);
+            const handle = guest.u32(at + 4);
             if (tag === WDT_INPROC_CALL)
             {
-                writeU32(slot, handle);
+                guest.set32(slot, handle);
                 return at + 8;
             }
             if (tag !== WDT_REMOTE_CALL)
@@ -396,11 +366,11 @@ export function createUserMarshalFunctions(host){
             }
             if (handle === 0)
             {
-                writeU32(slot, 0);
+                guest.set32(slot, 0);
                 return at + 8;
             }
-            const bytes = readU32(at + 8);
-            if (readU32(at + 12) !== handle || readU32(at + 16) !== bytes)
+            const bytes = guest.u32(at + 8);
+            if (guest.u32(at + 12) !== handle || guest.u32(at + 16) !== bytes)
             {
                 fault(RPC_X_BAD_STUB_DATA);
             }
@@ -411,13 +381,13 @@ export function createUserMarshalFunctions(host){
             }
             if (bytes > 0)
             {
-                host.writeMemory(block, host.readMemory(at + 20, bytes).slice());
+                guest.copy(block, at + 20, bytes);
             }
-            writeU32(slot, block);
+            guest.set32(slot, block);
             return at + 20 + bytes;
         },
         free: (flags, slot)=>{
-            const handle = readU32(slot);
+            const handle = guest.u32(slot);
             if (!inProcess(flags) && handle !== 0)
             {
                 host.heap.free(handle);
@@ -458,7 +428,7 @@ export function createUserMarshalFunctions(host){
         const byValue = flags=>!inProcess(flags) && read() !== undefined;
         return {
             size: (flags, start, slot)=>{
-                const handle = readU32(slot);
+                const handle = guest.u32(slot);
                 const bits = read();
                 if (!byValue(flags) || handle === 0 || !bits)
                 {
@@ -468,31 +438,31 @@ export function createUserMarshalFunctions(host){
             },
             marshal: (flags, buffer, slot)=>{
                 const at = align(buffer);
-                const handle = readU32(slot);
+                const handle = guest.u32(slot);
                 const bits = inProcess(flags) ? undefined : lent(read(), `${type}_UserMarshal`);
                 if (!bits)
                 {
-                    return putWords(at, [WDT_INPROC_CALL, handle]);
+                    return guest.set32s(at, [WDT_INPROC_CALL, handle]);
                 }
                 if (handle === 0)
                 {
-                    return putWords(at, [WDT_REMOTE_CALL, 0]);
+                    return guest.set32s(at, [WDT_REMOTE_CALL, 0]);
                 }
                 const data = bits(handle) ?? new Uint8Array(0);
-                const end = putWords(at, [WDT_REMOTE_CALL, handle, data.length, data.length]);
+                const end = guest.set32s(at, [WDT_REMOTE_CALL, handle, data.length, data.length]);
                 if (data.length > 0)
                 {
-                    host.writeMemory(end, data);
+                    guest.setBytes(end, data);
                 }
                 return end + data.length;
             },
             unmarshal: (flags, buffer, slot)=>{
                 const at = align(buffer);
-                const tag = readU32(at);
-                const handle = readU32(at + 4);
+                const tag = guest.u32(at);
+                const handle = guest.u32(at + 4);
                 if (tag === WDT_INPROC_CALL)
                 {
-                    writeU32(slot, handle);
+                    guest.set32(slot, handle);
                     return at + 8;
                 }
                 if (tag !== WDT_REMOTE_CALL)
@@ -501,20 +471,20 @@ export function createUserMarshalFunctions(host){
                 }
                 if (handle === 0)
                 {
-                    writeU32(slot, 0);
+                    guest.set32(slot, 0);
                     return at + 8;
                 }
-                const length = readU32(at + 8);
-                if (readU32(at + 12) !== length)
+                const length = guest.u32(at + 8);
+                if (guest.u32(at + 12) !== length)
                 {
                     fault(RPC_X_BAD_STUB_DATA);
                 }
                 const make = lent(host.gdi ? maker(host.gdi) : undefined, `${type}_UserUnmarshal`);
-                writeU32(slot, make ? make(host.readMemory(at + 16, length).slice()) >>> 0 : 0);
+                guest.set32(slot, make ? make(guest.bytes(at + 16, length)) >>> 0 : 0);
                 return at + 16 + length;
             },
             free: (flags, slot)=>{
-                const handle = readU32(slot);
+                const handle = guest.u32(slot);
                 if (!inProcess(flags) && handle !== 0 && host.gdi)
                 {
                     deleter(host.gdi)?.(handle);
@@ -536,7 +506,7 @@ export function createUserMarshalFunctions(host){
      */
     const hbitmapWire = {
         size: (flags, start, slot)=>{
-            const handle = readU32(slot);
+            const handle = guest.u32(slot);
             const bitmap = host.gdi?.bitmap;
             if (inProcess(flags) || handle === 0 || !bitmap)
             {
@@ -546,36 +516,36 @@ export function createUserMarshalFunctions(host){
         },
         marshal: (flags, buffer, slot)=>{
             const at = align(buffer);
-            const handle = readU32(slot);
+            const handle = guest.u32(slot);
             const bitmap = inProcess(flags) ? undefined
                 : lent(host.gdi?.bitmap, 'HBITMAP_UserMarshal');
             if (!bitmap)
             {
-                return putWords(at, [WDT_INPROC_CALL, handle]);
+                return guest.set32s(at, [WDT_INPROC_CALL, handle]);
             }
             if (handle === 0)
             {
-                return putWords(at, [WDT_REMOTE_CALL, 0]);
+                return guest.set32s(at, [WDT_REMOTE_CALL, 0]);
             }
             const contents = bitmap(handle);
             const bits = contents?.bits ?? new Uint8Array(0);
             const header = new Uint8Array(BITMAP_HEADER_BYTES);
             header.set((contents?.header ?? header).subarray(0, BITMAP_HEADER_BYTES));
-            const end = putWords(at, [WDT_REMOTE_CALL, handle, bits.length]);
-            host.writeMemory(end, header);
+            const end = guest.set32s(at, [WDT_REMOTE_CALL, handle, bits.length]);
+            guest.setBytes(end, header);
             if (bits.length > 0)
             {
-                host.writeMemory(end + BITMAP_HEADER_BYTES, bits);
+                guest.setBytes(end + BITMAP_HEADER_BYTES, bits);
             }
             return end + BITMAP_HEADER_BYTES + bits.length;
         },
         unmarshal: (flags, buffer, slot)=>{
             const at = align(buffer);
-            const tag = readU32(at);
-            const handle = readU32(at + 4);
+            const tag = guest.u32(at);
+            const handle = guest.u32(at + 4);
             if (tag === WDT_INPROC_CALL)
             {
-                writeU32(slot, handle);
+                guest.set32(slot, handle);
                 return at + 8;
             }
             if (tag !== WDT_REMOTE_CALL)
@@ -584,18 +554,18 @@ export function createUserMarshalFunctions(host){
             }
             if (handle === 0)
             {
-                writeU32(slot, 0);
+                guest.set32(slot, 0);
                 return at + 8;
             }
-            const length = readU32(at + 8);
-            const header = host.readMemory(at + 12, BITMAP_HEADER_BYTES).slice();
-            const bits = host.readMemory(at + 12 + BITMAP_HEADER_BYTES, length).slice();
+            const length = guest.u32(at + 8);
+            const header = guest.bytes(at + 12, BITMAP_HEADER_BYTES);
+            const bits = guest.bytes(at + 12 + BITMAP_HEADER_BYTES, length);
             const make = lent(host.gdi?.createBitmap, 'HBITMAP_UserUnmarshal');
-            writeU32(slot, make ? make(header, bits) >>> 0 : 0);
+            guest.set32(slot, make ? make(header, bits) >>> 0 : 0);
             return at + 12 + BITMAP_HEADER_BYTES + length;
         },
         free: (flags, slot)=>{
-            const handle = readU32(slot);
+            const handle = guest.u32(slot);
             if (!inProcess(flags) && handle !== 0)
             {
                 host.gdi?.deleteObject?.(handle);
@@ -612,7 +582,7 @@ export function createUserMarshalFunctions(host){
      */
     const hmetafilepictWire = {
         size: (flags, start, slot)=>{
-            const handle = readU32(slot);
+            const handle = guest.u32(slot);
             if (inProcess(flags) || handle === 0)
             {
                 return align(start) + 8;
@@ -621,26 +591,26 @@ export function createUserMarshalFunctions(host){
         },
         marshal: (flags, buffer, slot, thread)=>{
             const at = align(buffer);
-            const handle = readU32(slot);
+            const handle = guest.u32(slot);
             if (inProcess(flags))
             {
-                return putWords(at, [WDT_INPROC_CALL, handle]);
+                return guest.set32s(at, [WDT_INPROC_CALL, handle]);
             }
             if (handle === 0)
             {
-                return putWords(at, [WDT_REMOTE_CALL, 0]);
+                return guest.set32s(at, [WDT_REMOTE_CALL, 0]);
             }
-            const end = putWords(at, [WDT_REMOTE_CALL, handle, readU32(handle), readU32(handle + 4),
-                readU32(handle + 8), USER_MARSHAL_PTR_PREFIX]);
+            const end = guest.set32s(at, [WDT_REMOTE_CALL, handle, guest.u32(handle),
+                guest.u32(handle + 4), guest.u32(handle + 8), USER_MARSHAL_PTR_PREFIX]);
             return hmetafileWire.marshal(flags, end, handle + METAFILEPICT_HANDLE, thread);
         },
         unmarshal: (flags, buffer, slot, thread)=>{
             const at = align(buffer);
-            const tag = readU32(at);
-            const handle = readU32(at + 4);
+            const tag = guest.u32(at);
+            const handle = guest.u32(at + 4);
             if (tag === WDT_INPROC_CALL)
             {
-                writeU32(slot, handle);
+                guest.set32(slot, handle);
                 return at + 8;
             }
             if (tag !== WDT_REMOTE_CALL)
@@ -649,7 +619,7 @@ export function createUserMarshalFunctions(host){
             }
             if (handle === 0)
             {
-                writeU32(slot, 0);
+                guest.set32(slot, 0);
                 return at + 8;
             }
             const block = host.heap.allocate(METAFILEPICT_BYTES) >>> 0;
@@ -657,12 +627,12 @@ export function createUserMarshalFunctions(host){
             {
                 fault(RPC_X_NO_MEMORY);
             }
-            putWords(block, [readU32(at + 8), readU32(at + 12), readU32(at + 16), 0]);
-            writeU32(slot, block);
+            guest.set32s(block, [guest.u32(at + 8), guest.u32(at + 12), guest.u32(at + 16), 0]);
+            guest.set32(slot, block);
             return hmetafileWire.unmarshal(flags, at + 24, block + METAFILEPICT_HANDLE, thread);
         },
         free: (flags, slot, thread)=>{
-            const handle = readU32(slot);
+            const handle = guest.u32(slot);
             if (!inProcess(flags) && handle !== 0)
             {
                 hmetafileWire.free(flags, handle + METAFILEPICT_HANDLE, thread);
@@ -689,47 +659,47 @@ export function createUserMarshalFunctions(host){
         };
         return {
             size: (flags, start, slot)=>{
-                const name = named(flags, readU16(slot));
+                const name = named(flags, guest.u16(slot));
                 return align(start) + 8 + (name === null ? 0 : 12 + (name.length + 1) * 2);
             },
             marshal: (flags, buffer, slot)=>{
                 const at = align(buffer);
-                const format = readU16(slot);
+                const format = guest.u16(slot);
                 const name = named(flags, format);
                 if (name === null)
                 {
-                    return putWords(at, [WDT_INPROC_CALL, format]);
+                    return guest.set32s(at, [WDT_INPROC_CALL, format]);
                 }
                 const units = name.length + 1;
-                const end = putWords(at, [WDT_REMOTE_CALL, format, units, 0, units]);
-                host.writeMemory(end, utf16z(name));
+                const end = guest.set32s(at, [WDT_REMOTE_CALL, format, units, 0, units]);
+                guest.setBytes(end, utf16z(name));
                 return end + units * 2;
             },
             unmarshal: (flags, buffer, slot)=>{
                 const at = align(buffer);
-                const tag = readU32(at);
+                const tag = guest.u32(at);
                 if (tag === WDT_INPROC_CALL)
                 {
-                    writeU16(slot, readU32(at + 4));
+                    guest.set16(slot, guest.u32(at + 4));
                     return at + 8;
                 }
                 if (tag !== WDT_REMOTE_CALL)
                 {
                     fault(RPC_S_INVALID_TAG);
                 }
-                const units = readU32(at + 8);
-                if (readU32(at + 4) === 0 || units === 0 || readU32(at + 12) !== 0
-                    || readU32(at + 16) !== units || readU16(at + 20 + (units - 1) * 2) !== 0)
+                const units = guest.u32(at + 8);
+                if (guest.u32(at + 4) === 0 || units === 0 || guest.u32(at + 12) !== 0
+                    || guest.u32(at + 16) !== units || guest.u16(at + 20 + (units - 1) * 2) !== 0)
                 {
                     fault(RPC_S_INVALID_BOUND);
                 }
-                const name = wideText(host.readMemory(at + 20, (units - 1) * 2));
+                const name = wideText(guest.bytes(at + 20, (units - 1) * 2));
                 const format = host.clipboardFormats?.register(name) ?? 0;
                 if (format === 0)
                 {
                     fault(DV_E_CLIPFORMAT);
                 }
-                writeU16(slot, format);
+                guest.set16(slot, format);
                 return at + 20 + units * 2;
             },
             free: ()=>0,
@@ -763,8 +733,8 @@ export function createUserMarshalFunctions(host){
                 return fault(made.hr < 0 ? made.hr : E_FAIL);
             }
             const at = align(buffer);
-            const end = putWords(at, [made.objref.length, made.objref.length]);
-            host.writeMemory(end, made.objref);
+            const end = guest.set32s(at, [made.objref.length, made.objref.length]);
+            guest.setBytes(end, made.objref);
             return end + made.objref.length;
         });
     };
@@ -779,12 +749,12 @@ export function createUserMarshalFunctions(host){
      */
     const pointerUnmarshal = async(buffer, slot, riid, thread)=>{
         const at = align(buffer);
-        const length = readU32(at);
-        if (readU32(at + 4) !== length)
+        const length = guest.u32(at);
+        if (guest.u32(at + 4) !== length)
         {
             fault(RPC_X_BAD_STUB_DATA);
         }
-        const objref = host.readMemory(at + 8, length).slice();
+        const objref = guest.bytes(at + 8, length);
         const decoded = decodeObjref(objref);
         const marshaler = host.marshaler?.();
         if (!decoded || !marshaler)
@@ -797,11 +767,11 @@ export function createUserMarshalFunctions(host){
         {
             fault(made.hr);
         }
-        const previous = readU32(slot);
-        const wanted = riid === 0 ? GUID_NULL : readGuid(host, riid);
+        const previous = guest.u32(slot);
+        const wanted = riid === 0 ? GUID_NULL : guest.guid(riid);
         if (wanted === GUID_NULL || wanted === carried)
         {
-            writeU32(slot, made.pointer);
+            guest.set32(slot, made.pointer);
         }
         else
         {
@@ -827,8 +797,9 @@ export function createUserMarshalFunctions(host){
      * @returns {Wire}
      */
     const interfaceArm = iid=>({
-        size: (flags, start, slot)=>pointerSize(start, readU32(slot)),
-        marshal: (flags, buffer, slot, thread)=>pointerMarshal(buffer, readU32(slot), iid, thread),
+        size: (flags, start, slot)=>pointerSize(start, guest.u32(slot)),
+        marshal: (flags, buffer, slot, thread)=>
+            pointerMarshal(buffer, guest.u32(slot), iid, thread),
         unmarshal: (flags, buffer, slot, thread)=>pointerUnmarshal(buffer, slot, 0, thread),
         free: ()=>0,
     });
@@ -840,19 +811,19 @@ export function createUserMarshalFunctions(host){
      * @type {Wire}
      */
     const fileArm = {
-        size: (flags, start, slot)=>align(start) + 12 + (wideUnits(readU32(slot)) + 1) * 2,
+        size: (flags, start, slot)=>align(start) + 12 + (wideUnits(guest.u32(slot)) + 1) * 2,
         marshal: (flags, buffer, slot)=>{
-            const name = readU32(slot);
+            const name = guest.u32(slot);
             const units = wideUnits(name) + 1;
-            const end = putWords(align(buffer), [units, 0, units]);
-            host.writeMemory(end, host.readMemory(name, units * 2).slice());
+            const end = guest.set32s(align(buffer), [units, 0, units]);
+            guest.copy(end, name, units * 2);
             return end + units * 2;
         },
         unmarshal: (flags, buffer, slot)=>{
             const at = align(buffer);
-            const units = readU32(at);
-            if (units === 0 || readU32(at + 4) !== 0 || readU32(at + 8) !== units
-                || readU16(at + 12 + (units - 1) * 2) !== 0)
+            const units = guest.u32(at);
+            if (units === 0 || guest.u32(at + 4) !== 0 || guest.u32(at + 8) !== units
+                || guest.u16(at + 12 + (units - 1) * 2) !== 0)
             {
                 fault(RPC_S_INVALID_BOUND);
             }
@@ -861,8 +832,8 @@ export function createUserMarshalFunctions(host){
             {
                 fault(RPC_X_NO_MEMORY);
             }
-            host.writeMemory(block, host.readMemory(at + 12, units * 2).slice());
-            writeU32(slot, block);
+            guest.copy(block, at + 12, units * 2);
+            guest.set32(slot, block);
             return at + 12 + units * 2;
         },
         free: ()=>0,
@@ -905,7 +876,7 @@ export function createUserMarshalFunctions(host){
         [TYMED_MFPICT, { wire: hmetafilepictWire, dispose: (value, owned)=>{
             if (owned)
             {
-                host.gdi?.deleteMetaFile?.(readU32(value + METAFILEPICT_HANDLE));
+                host.gdi?.deleteMetaFile?.(guest.u32(value + METAFILEPICT_HANDLE));
                 host.heap.free(value);
             }
         } }],
@@ -945,9 +916,9 @@ export function createUserMarshalFunctions(host){
      * @returns {number | Promise<number>}
      */
     const releaseMedium = (medium, thread)=>{
-        const tymed = readU32(medium);
-        const value = readU32(medium + MEDIUM_VALUE);
-        const unknown = readU32(medium + MEDIUM_RELEASE);
+        const tymed = guest.u32(medium);
+        const value = guest.u32(medium + MEDIUM_VALUE);
+        const unknown = guest.u32(medium + MEDIUM_RELEASE);
         const disposed = tymed === TYMED_NULL || value === 0 ? 0
             : tymed === TYMED_GDI ? disposeGdi(value, unknown === 0)
                 : arms.get(tymed)?.dispose(value, unknown === 0, thread);
@@ -980,47 +951,47 @@ export function createUserMarshalFunctions(host){
      */
     const stgmediumWire = {
         size: (flags, start, medium)=>{
-            const tymed = readU32(medium);
+            const tymed = guest.u32(medium);
             let size = align(start) + 8;
             if (tymed !== TYMED_NULL)
             {
                 size += 4;
-                if (readU32(medium + MEDIUM_VALUE) !== 0)
+                if (guest.u32(medium + MEDIUM_VALUE) !== 0)
                 {
                     size = armOf(tymed).wire.size(flags, size, medium + MEDIUM_VALUE);
                 }
             }
-            return pointerSize(size, readU32(medium + MEDIUM_RELEASE));
+            return pointerSize(size, guest.u32(medium + MEDIUM_RELEASE));
         },
         marshal: (flags, buffer, medium, thread)=>{
-            const tymed = readU32(medium);
-            const value = readU32(medium + MEDIUM_VALUE);
-            const unknown = readU32(medium + MEDIUM_RELEASE);
+            const tymed = guest.u32(medium);
+            const value = guest.u32(medium + MEDIUM_VALUE);
+            const unknown = guest.u32(medium + MEDIUM_RELEASE);
             const wire = tymed === TYMED_NULL ? null : armOf(tymed).wire;
             const marks = wire ? [tymed, value, unknown] : [tymed, unknown];
-            const at = putWords(align(buffer), marks);
+            const at = guest.set32s(align(buffer), marks);
             const end = wire && value !== 0 ? wire.marshal(flags, at, medium + MEDIUM_VALUE, thread)
                 : at;
             return after(end, next=>pointerMarshal(next, unknown, IID_IUNKNOWN, thread));
         },
         unmarshal: (flags, buffer, medium, thread)=>{
             const at = align(buffer);
-            const tymed = readU32(at);
+            const tymed = guest.u32(at);
             const wire = tymed === TYMED_NULL ? null : armOf(tymed).wire;
-            const content = wire ? readU32(at + 4) : 0;
-            const unknown = readU32(at + (wire ? 8 : 4));
+            const content = wire ? guest.u32(at + 4) : 0;
+            const unknown = guest.u32(at + (wire ? 8 : 4));
             const slot = medium + MEDIUM_VALUE;
-            const previousTymed = readU32(medium);
-            const previous = readU32(slot);
+            const previousTymed = guest.u32(medium);
+            const previous = guest.u32(slot);
             const held = holdsInterface(previousTymed) && previous !== 0;
             // An interface read over the same arm gives the old one back
             // itself, once the new one is in hand.
             const inPlace = held && content !== 0 && tymed === previousTymed;
             if (!inPlace)
             {
-                writeU32(slot, 0);
+                guest.set32(slot, 0);
             }
-            writeU32(medium, tymed);
+            guest.set32(medium, tymed);
             const start = at + (wire ? 12 : 8);
             const end = wire && content !== 0 ? wire.unmarshal(flags, start, slot, thread) : start;
             const released = held && !inPlace
@@ -1040,7 +1011,7 @@ export function createUserMarshalFunctions(host){
      */
     const snbNames = snb=>{
         const names = [];
-        for (let at = snb, address = snb && readU32(at); address !== 0; address = readU32(at))
+        for (let at = snb, address = snb && guest.u32(at); address !== 0; address = guest.u32(at))
         {
             names.push({ address, units: wideUnits(address) + 1 });
             at += 4;
@@ -1058,32 +1029,32 @@ export function createUserMarshalFunctions(host){
      */
     const snbWire = {
         size: (flags, start, slot)=>align(start) + 12
-            + snbNames(readU32(slot)).reduce((sum, name)=>sum + name.units, 0) * 2,
+            + snbNames(guest.u32(slot)).reduce((sum, name)=>sum + name.units, 0) * 2,
         marshal: (flags, buffer, slot)=>{
-            const names = snbNames(readU32(slot));
+            const names = snbNames(guest.u32(slot));
             const units = names.reduce((sum, name)=>sum + name.units, 0);
-            let at = putWords(align(buffer), [units, names.length, units]);
+            let at = guest.set32s(align(buffer), [units, names.length, units]);
             for (const name of names)
             {
-                host.writeMemory(at, host.readMemory(name.address, name.units * 2).slice());
+                guest.copy(at, name.address, name.units * 2);
                 at += name.units * 2;
             }
             return at;
         },
         unmarshal: (flags, buffer, slot, thread)=>{
             const at = align(buffer);
-            const units = readU32(at);
-            const count = readU32(at + 4);
-            if (readU32(at + 8) !== units)
+            const units = guest.u32(at);
+            const count = guest.u32(at + 4);
+            if (guest.u32(at + 8) !== units)
             {
                 fault(RPC_X_BAD_STUB_DATA);
             }
             if (units === 0)
             {
-                writeU32(slot, 0);
+                guest.set32(slot, 0);
                 return at + 12;
             }
-            const characters = host.readMemory(at + 12, units * 2).slice();
+            const characters = guest.bytes(at + 12, units * 2);
             /** @type {number[]} */
             const starts = [];
             for (let index = 0, from = 0; index < units && starts.length < count; index++)
@@ -1100,14 +1071,14 @@ export function createUserMarshalFunctions(host){
                 {
                     fault(RPC_X_NO_MEMORY);
                 }
-                putWords(block, [...starts.map(from=>block + table + from * 2), 0]);
-                host.writeMemory(block + table, characters);
-                writeU32(slot, block);
+                guest.set32s(block, [...starts.map(from=>block + table + from * 2), 0]);
+                guest.setBytes(block + table, characters);
+                guest.set32(slot, block);
                 return at + 12 + units * 2;
             });
         },
         free: (flags, slot, thread)=>{
-            const snb = readU32(slot);
+            const snb = guest.u32(slot);
             return snb === 0 ? 0 : stubFree(flags, snb, thread);
         },
     };
@@ -1201,7 +1172,7 @@ export function createUserMarshalFunctions(host){
          */
         WdtpInterfacePointer_UserMarshal: {
             ...entry(20, ([, , buffer, unknown, riid], thread)=>(unknown === 0 ? buffer
-                : pointerMarshal(buffer, unknown, readGuid(host, riid), thread))),
+                : pointerMarshal(buffer, unknown, guest.guid(riid), thread))),
             returns: 'pointer',
         },
 
@@ -1229,7 +1200,7 @@ export function createUserMarshalFunctions(host){
          */
         ReleaseStgMedium: entry(4, ([medium], thread)=>(medium === 0 ? 0
             : after(releaseMedium(medium, thread), ()=>{
-                putWords(medium, [TYMED_NULL, 0, 0]);
+                guest.set32s(medium, [TYMED_NULL, 0, 0]);
                 return 0;
             }))),
     };

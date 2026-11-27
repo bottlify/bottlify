@@ -6683,6 +6683,7 @@ export function createWin32Module(){
                 'GDI32.dll': ()=>gdi.table,
 
                 'ole32.dll': ()=>createOleFunctions({
+                    guest,
                     readMemory,
                     writeMemory,
                     pointerSize,

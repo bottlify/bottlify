@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
 import { IID_IUNKNOWN, createComObject, createComRegistry } from './objects.js';
 import { createOleFunctions, createTaskAllocator } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 import { HKEY_CLASSES_ROOT, createHive } from '../advapi32/registry.js';
 
 const S_OK = 0x00000000;
@@ -106,6 +107,7 @@ function fakeHost(){
 
     const host = {
         bytes,
+        guest: guestOver(bytes),
         threads,
         published,
         /** @type {{ pointer: () => number } | undefined} */

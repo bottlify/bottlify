@@ -1032,14 +1032,6 @@
    "copy readMemory().slice()": 6,
    "string readWide": 1
   },
-  "ole32/usrmarshal.js": {
-   "accessor putWords": 1,
-   "accessor readU16": 1,
-   "accessor readU32": 1,
-   "accessor writeU16": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 11
-  },
   "ole32/wbem.js": {
    "accessor writeU32": 1,
    "string readString": 1

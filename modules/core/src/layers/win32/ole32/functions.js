@@ -271,6 +271,7 @@ const MAX_PROGID = 255;
 
 /**
  * @typedef {Object} OleHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {4 | 8} [pointerSize]  8 in a 64-bit process: a vtable's slots and an
  *     interface pointer written out are eight bytes.
