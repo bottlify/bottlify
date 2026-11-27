@@ -67,13 +67,11 @@ const RESERVED = 2;
 
 /**
  * @param {Object} options
- * @param {import('../../log/internal/table.js').TableWriter} options.table
+ * @param {import('@bottlify/cellar').Table} options.table
  * @param {(text: string) => number} options.intern
  * @returns {WriterAccount}
  */
 export function createWriterAccount({ table, intern }){
-    const values = table.values;
-    const width = table.width;
     /** Each row's name as a dictionary id, so publishing touches no string. */
     const ids = new Int32Array(table.rows).fill(-1);
     /** Every name that has been numbered; the first two are the reserved rows. */
@@ -91,7 +89,7 @@ export function createWriterAccount({ table, intern }){
     };
     name(NO_CALL, names[NO_CALL]);
     name(BEYOND, names[BEYOND]);
-    table.used(RESERVED);
+    table.use(RESERVED);
 
     /**
      * The row a name writes into, taken now because it is writing. Off the hot
@@ -106,7 +104,7 @@ export function createWriterAccount({ table, intern }){
         if (row !== BEYOND)
         {
             name(row, names[id]);
-            table.used(taken);
+            table.use(taken);
         }
         return row;
     };
@@ -154,9 +152,8 @@ export function createWriterAccount({ table, intern }){
             {
                 row = rowFor(current);
             }
-            const at = row * width;
-            values[at + 1] += length;
-            values[at + 2] += 1;
+            table.add(row, 1, length);
+            table.add(row, 2, 1);
             if (frameStamp[row] !== generation)
             {
                 frameStamp[row] = generation;

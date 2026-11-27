@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MEMORY_COUNTERS, REGION_COLUMNS, memoryModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
-import { readTable } from '../log/internal/table.js';
+import { openTable } from '@bottlify/cellar';
 
 /** A log layer that only publishes, with a dictionary that numbers words in order. */
 function fakeLog(){
@@ -43,7 +43,7 @@ test('the layout is published as a table, lowest first, and kept current', async
         access: 'rx' });
     memory.register({ name: 'low', base: 0, size: 0x1000, kind: 'low-mem', access: 'rw' });
 
-    const table = readTable(log.metrics.describe().memory.regions);
+    const table = openTable(log.metrics.describe().memory.regions);
     assert.deepEqual(table.columns, REGION_COLUMNS);
     const rows = table.all();
     assert.deepEqual(rows.map(row=>log.words[row.name]), ['low', 'stack', 'game.exe']);
@@ -84,17 +84,17 @@ test('a write is charged to whoever is in flight, and the frame names the busies
     memory.charging(outside);
     memory.writeU8(0x1200, 1);
 
-    const table = readTable(log.metrics.describe().memory.writers);
+    const table = openTable(log.metrics.describe().memory.writers);
     const charged = Object.fromEntries(table.all()
         .filter(row=>row.writes > 0)
         .map(row=>[log.words[row.name], [row.bytes, row.writes]]));
     assert.deepEqual(charged, { LockRect: [304, 2], '<no host call>': [1, 1] });
 
-    const counters = readTable(log.metrics.describe().memory.counters).row(0);
+    const counters = openTable(log.metrics.describe().memory.counters).row(0);
     assert.deepEqual(Object.keys(counters), MEMORY_COUNTERS,
         'the frame fields are published before anything reads them');
     log.metrics.sample();
-    const closed = readTable(log.metrics.describe().memory.counters).row(0);
+    const closed = openTable(log.metrics.describe().memory.counters).row(0);
     assert.equal(log.words[closed.frameWriter], 'LockRect');
     assert.equal(closed.frameWriterBytes, 304);
     await memoryModule.dispose();
@@ -281,7 +281,7 @@ test('the reader and the charge slot are lent while the instance is open', async
     slot[0] = lock;
     memory.writeBytes(0x1000, new Uint8Array(8));
     slot[0] = was;
-    const table = readTable(log.metrics.describe().memory.writers);
+    const table = openTable(log.metrics.describe().memory.writers);
     const charged = Object.fromEntries(table.all()
         .filter(row=>row.writes > 0)
         .map(row=>[log.words[row.name], [row.bytes, row.writes]]));

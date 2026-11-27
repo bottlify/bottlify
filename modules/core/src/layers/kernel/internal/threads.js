@@ -22,6 +22,7 @@
 
 import { signalledNow } from './sync.js';
 import { takeId } from './processes.js';
+import { createTableMemory, openTable } from '@bottlify/cellar';
 import { createDeadlines } from '../../../system/deadlines.js';
 
 /** What a timer's slot holds once it is gone, so its callback is not kept. */
@@ -52,7 +53,7 @@ const PAGE = 0x10000;
  */
 export const SCHEDULER_COUNTERS = [
     'quantum', 'turns', 'overruns', 'worstSlice', 'worstSliceAt', 'worstSliceFrom',
-    'worstSliceMs', 'expiries', 'boosts', 'stackEscapes', 'threads', 'current',
+    'worstSliceNs', 'expiries', 'boosts', 'stackEscapes', 'threads', 'current',
     // Which of the program's threads the machine was spent on since these
     // were last published, and where its heaviest single slice began. Every
     // other figure here is the run's; these three are the interval's, because
@@ -65,7 +66,7 @@ export const THREAD_COLUMNS = [
     'stackUsed', 'stackSize',
 ];
 export const THREAD_ROWS = 512;
-export const SLOW_SLICE_COLUMNS = ['ms', 'instructions', 'from', 'at', 'thread'];
+export const SLOW_SLICE_COLUMNS = ['heldNs', 'instructions', 'from', 'at', 'thread'];
 /** A thread's state as the table stores it. */
 export const THREAD_STATES = ['ready', 'running', 'blocked', 'terminated'];
 
@@ -332,14 +333,12 @@ function isOpen(remotes, index){
  * @param {() => boolean} [options.hostAnswering]  Whether a host call is still to answer
  *        through the event loop: then a turn with nothing to run here leaves at once rather
  *        than wait for the other executors, its caller waiting for both.
- * @param {Float64Array} [options.pages]
- *        Retired instructions by 64 KiB page, one entry per page of guest
+ * @param {import('@bottlify/cellar').Table} [options.pages]
+ *        Retired instructions by 64 KiB page, one row per page of guest
  *        memory and a last one for anywhere else. Credited in place.
- * @param {Float64Array} [options.counters]   One entry per `SCHEDULER_COUNTERS`.
- * @param {{ set: (row: number, column: number, value: number) => void,
- *     used: (count: number) => void, rows: number }} [options.threadTable]
- * @param {{ set: (row: number, column: number, value: number) => void,
- *     used: (count: number) => void, rows: number }} [options.slowSliceTable]
+ * @param {import('@bottlify/cellar').Table} [options.counters]   One row of `SCHEDULER_COUNTERS`.
+ * @param {import('@bottlify/cellar').Table} [options.threadTable]
+ * @param {import('@bottlify/cellar').Table} [options.slowSliceTable]
  * @param {(text: string) => number} [options.intern]  A name as a dictionary id.
  * @param {{ thread: number }} [options.ids]  The run's next thread id, shared with
  *        the schedulers of the processes beside or after this one.
@@ -365,8 +364,10 @@ export function createScheduler(options){
     let perMs = 0;
     // A gigabyte's worth of pages when nobody says: what a machine is given
     // by default, and small enough to make for every scheduler a test builds.
-    const pages = options.pages ?? new Float64Array(1024 * 1024 * 1024 / PAGE + 1);
-    const counters = options.counters ?? new Float64Array(SCHEDULER_COUNTERS.length);
+    const pages = options.pages ?? openTable(createTableMemory(
+        { rows: 1024 * 1024 * 1024 / PAGE + 1, columns: ['instructions'] }));
+    const counters = options.counters
+        ?? openTable(createTableMemory({ rows: 1, columns: SCHEDULER_COUNTERS }));
     /** The routines a slice does not end inside, as sorted, disjoint [start, end) spans. */
     const atomic = { starts: /** @type {number[]} */ ([]), ends: /** @type {number[]} */ ([]) };
     /** @param {number} eip */
@@ -390,7 +391,7 @@ export function createScheduler(options){
     const threadTable = options.threadTable ?? null;
     const slowSliceTable = options.slowSliceTable ?? null;
     const intern = options.intern ?? (()=>-1);
-    counters[0] = quantum;
+    counters.set(0, 0, quantum);
     const starvation = options.starvation ?? 4000;
     /** Turns given to a thread because it had been passed over too long. */
     let boosts = 0;
@@ -554,7 +555,7 @@ export function createScheduler(options){
      */
     const creditPage = (address, instructions)=>{
         const page = Math.floor((address >>> 0) / PAGE);
-        pages[page < pages.length - 1 ? page : pages.length - 1] += instructions;
+        pages.add(page < pages.rows - 1 ? page : pages.rows - 1, 0, instructions);
     };
     let expiries = 0;
     /**
@@ -1068,18 +1069,18 @@ export function createScheduler(options){
                 for (let row = 0; row < slowSlices.length; row++)
                 {
                     const slice = slowSlices[row];
-                    slowSliceTable.set(row, 0, slice.ms);
+                    slowSliceTable.set(row, 0, slice.ms * 1e6);
                     slowSliceTable.set(row, 1, slice.instructions);
                     slowSliceTable.set(row, 2, slice.from);
                     slowSliceTable.set(row, 3, slice.at);
                     slowSliceTable.set(row, 4, intern(slice.thread ?? '?'));
                 }
-                slowSliceTable.used(slowSlices.length);
+                slowSliceTable.use(slowSlices.length);
             }
         }
         creditPage(from, instructions);
         turns++;
-        counters[1] = turns;
+        counters.set(0, 1, turns);
         // Whether the slice we asked for is the slice we got.
         //
         // A quantum is how long a thread may hold the machine before
@@ -3128,11 +3129,12 @@ export function createScheduler(options){
         pages(){
             /** @type {Record<string, number>} */
             const report = {};
-            for (let page = 0; page < pages.length; page++)
+            for (let page = 0; page < pages.rows; page++)
             {
-                if (pages[page] > 0)
+                const instructions = pages.get(page, 0);
+                if (instructions > 0)
                 {
-                    report[`0x${(page * PAGE).toString(16)}`] = pages[page];
+                    report[`0x${(page * PAGE).toString(16)}`] = instructions;
                 }
             }
             return report;
@@ -3144,17 +3146,17 @@ export function createScheduler(options){
          * tables. Once a frame, a few stores per thread.
          */
         publish(){
-            counters[2] = overruns;
-            counters[3] = worstSlice;
-            counters[4] = worstSliceAt;
-            counters[5] = worstSliceFrom;
-            counters[6] = slowSlices.length > 0 ? slowSlices[0].ms : 0;
-            counters[7] = expiries;
-            counters[8] = boosts;
-            counters[9] = escaped.length;
-            counters[10] = threads.length;
-            counters[11] = current ? current.id : -1;
-            counters[14] = heaviestFrom;
+            counters.set(0, 2, overruns);
+            counters.set(0, 3, worstSlice);
+            counters.set(0, 4, worstSliceAt);
+            counters.set(0, 5, worstSliceFrom);
+            counters.set(0, 6, slowSlices.length > 0 ? slowSlices[0].ms * 1e6 : 0);
+            counters.set(0, 7, expiries);
+            counters.set(0, 8, boosts);
+            counters.set(0, 9, escaped.length);
+            counters.set(0, 10, threads.length);
+            counters.set(0, 11, current ? current.id : -1);
+            counters.set(0, 14, heaviestFrom);
             heaviestSlice = 0;
             heaviestFrom = 0;
             /** The busiest thread's name and what it retired, kept as numbers:
@@ -3195,9 +3197,9 @@ export function createScheduler(options){
                         ? thread.stackTop - thread.stackLimit : 0);
                 thread.sincePublished = 0;
             }
-            counters[12] = busiest;
-            counters[13] = busiestRetired;
-            table?.used(rows);
+            counters.set(0, 12, busiest);
+            counters.set(0, 13, busiestRetired);
+            table?.use(rows);
         },
 
         diagnostics(){

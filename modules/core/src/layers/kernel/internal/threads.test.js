@@ -10,6 +10,7 @@ import {
     SCHEDULER_COUNTERS, SLOW_SLICE_COLUMNS, THREAD_COLUMNS, THREAD_STATES, ThreadState,
     absolutePriority, createScheduler,
 } from './threads.js';
+import { createTableMemory, openTable } from '@bottlify/cellar';
 import { createSwitcher } from './switch.js';
 import { createSyncObjects } from './sync.js';
 import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
@@ -752,7 +753,7 @@ test('instructions are credited into a flat page array, and nothing is walked to
     // there is no bound on how many pages count and nothing here to sort.
     let at = 0x00401000;
     const cpu = { ...fakeCpu(), eip: ()=>at, runSlice: ()=>100 };
-    const pages = new Float64Array(0x1000 + 1);
+    const pages = openTable(createTableMemory({ rows: 0x1000 + 1, columns: ['instructions'] }));
     const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000, pages });
     sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
 
@@ -763,9 +764,10 @@ test('instructions are credited into a flat page array, and nothing is walked to
     at = 0xfffe0000;
     sched.runOnce();
 
-    assert.equal(pages[0x40], 100);
-    assert.equal(pages[0x81], 100);
-    assert.equal(pages[0x1000], 100, 'an address outside guest memory goes to the last entry');
+    assert.equal(pages.get(0x40, 0), 100);
+    assert.equal(pages.get(0x81, 0), 100);
+    assert.equal(pages.get(0x1000, 0), 100,
+        'an address outside guest memory goes to the last entry');
     assert.deepEqual(sched.pages(), { '0x400000': 100, '0x810000': 100, '0x10000000': 100 });
 });
 
@@ -777,17 +779,8 @@ test('the counters and the thread table are published once a frame, not built on
         const known = words.indexOf(text);
         return known >= 0 ? known : words.push(text) - 1;
     };
-    const counters = new Float64Array(SCHEDULER_COUNTERS.length);
-    /** @type {number[][]} */
-    const rows = Array.from({ length: 4 }, ()=>new Array(THREAD_COLUMNS.length).fill(0));
-    let used = 0;
-    const threadTable = {
-        rows: 4,
-        /** @param {number} row @param {number} column @param {number} value */
-        set: (row, column, value)=>{ rows[row][column] = value; },
-        /** @param {number} count */
-        used: count=>{ used = count; },
-    };
+    const counters = openTable(createTableMemory({ rows: 1, columns: SCHEDULER_COUNTERS }));
+    const threadTable = openTable(createTableMemory({ rows: 4, columns: THREAD_COLUMNS }));
     const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
         counters, threadTable, intern });
     const main = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
@@ -796,15 +789,15 @@ test('the counters and the thread table are published once a frame, not built on
     sched.runOnce();
     sched.block(main, 'an event');
 
-    assert.equal(used, 0, 'nothing is published until a frame asks');
-    assert.equal(counters[SCHEDULER_COUNTERS.indexOf('turns')], 2,
+    assert.equal(threadTable.used(), 0, 'nothing is published until a frame asks');
+    assert.equal(counters.row(0)['turns'], 2,
         'except the turn count, which is one store where the turn happens');
 
     sched.publish();
-    assert.equal(used, 2);
-    assert.equal(counters[SCHEDULER_COUNTERS.indexOf('threads')], 2);
-    assert.equal(counters[SCHEDULER_COUNTERS.indexOf('quantum')], 1000);
-    const [first, second] = rows;
+    assert.equal(threadTable.used(), 2);
+    assert.equal(counters.row(0)['threads'], 2);
+    assert.equal(counters.row(0)['quantum'], 1000);
+    const [first, second] = [0, 1].map(row=>Object.values(threadTable.row(row)));
     assert.equal(words[first[THREAD_COLUMNS.indexOf('name')]], 'main');
     assert.equal(first[THREAD_COLUMNS.indexOf('instructions')], 100);
     assert.equal(THREAD_STATES[first[THREAD_COLUMNS.indexOf('state')]], 'blocked');
@@ -819,28 +812,21 @@ test('a slow slice is written into its table when it is recorded', ()=>{
     let cost = 0;
     let tick = 0;
     const cpu = { ...fakeCpu(), runSlice: ()=>{ tick += cost; return 500; }, eip: ()=>0x4000 };
-    /** @type {number[][]} */
-    const rows = Array.from({ length: 8 }, ()=>new Array(SLOW_SLICE_COLUMNS.length).fill(0));
-    let used = 0;
-    const slowSliceTable = {
-        rows: 8,
-        /** @param {number} row @param {number} column @param {number} value */
-        set: (row, column, value)=>{ rows[row][column] = value; },
-        /** @param {number} count */
-        used: count=>{ used = count; },
-    };
+    const slowSliceTable = openTable(createTableMemory({ rows: 8, columns: SLOW_SLICE_COLUMNS }));
     const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
         wall: ()=>tick, slowSliceTable, intern: ()=>7 });
     sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
     sched.runOnce();
-    assert.equal(used, 0, 'a quick slice is not a slow one');
+    assert.equal(slowSliceTable.used(), 0, 'a quick slice is not a slow one');
     cost = 120;
     sched.runOnce();
     cost = 300;
     sched.runOnce();
-    assert.equal(used, 2);
-    assert.deepEqual(rows[0], [300, 500, 0x4000, 0x4000, 7], 'longest first');
-    assert.equal(rows[1][0], 120);
+    const rows = slowSliceTable.all();
+    assert.equal(rows.length, 2);
+    assert.deepEqual(Object.values(rows[0]), [300e6, 500, 0x4000, 0x4000, 7],
+        'longest first, in nanoseconds');
+    assert.equal(Object.values(rows[1])[0], 120e6);
 });
 
 test('each publish names the thread the machine was spent on and where its heaviest slice ran',
@@ -854,9 +840,8 @@ test('each publish names the thread the machine was spent on and where its heavi
             const known = words.indexOf(text);
             return known >= 0 ? known : words.push(text) - 1;
         };
-        const counters = new Float64Array(SCHEDULER_COUNTERS.length);
-        const column = (/** @type {string} */ name)=>
-            counters[SCHEDULER_COUNTERS.indexOf(name)];
+        const counters = openTable(createTableMemory({ rows: 1, columns: SCHEDULER_COUNTERS }));
+        const column = (/** @type {string} */ name)=>counters.row(0)[name];
         const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 100_000,
             counters, intern });
         sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });

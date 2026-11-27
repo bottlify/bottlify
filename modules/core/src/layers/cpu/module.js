@@ -6,7 +6,7 @@
 
 import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { openMemoryBudget } from './internal/memory-budget.js';
-import { mayWait } from '../../system/may-wait.js';
+import { mayWait } from '@bottlify/cellar';
 import { codeNudgesMade, gcNudgeOf, releasedCode, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { KEPT_OPTIONS, KEPT_SPACE, STORE_SPACE } from './internal/store-relay.js';
@@ -275,11 +275,12 @@ const FRAME_INTERPRETED = CPU_COUNTERS.indexOf('frameInterpreted');
 // The translator's own figures, when one is attached: regions live, regions
 // discarded by a write, and the share of retired instructions it ran.
 const CORK_AT = FRAME_INTERPRETED + 2;
-CPU_COUNTERS.push('cork.regions', 'cork.invalidations', 'cork.share',
+// Shares in parts per million, a time in nanoseconds (`log.metrics`).
+CPU_COUNTERS.push('cork.regions', 'cork.invalidations', 'cork.sharePpm',
     // And the frame's own: the share of its instructions the translator ran,
-    // the milliseconds it spent translating in it, the times translated code
-    // came back to the host in it -- what a heavy frame is read against.
-    'cork.frameShare', 'cork.frameTranslateMs', 'cork.frameLeaves');
+    // the time it spent translating in it, the times translated code came
+    // back to the host in it -- what a heavy frame is read against.
+    'cork.frameSharePpm', 'cork.frameTranslateNs', 'cork.frameLeaves');
 
 /** The cpu layer's module for one graph; see `defaultModules`. */
 
@@ -468,36 +469,37 @@ export function createCpuModule(){
                     {
                         return;
                     }
-                    counters[0] = state.running ? 1 : 0;
-                    counters[1] = retiredEverywhere(state);
-                    counters[2] = state.thunks ? state.thunks.size : 0;
-                    counters[3] = state.thunks ? state.thunks.capacity : 0;
-                    counters[4] = state.host.eip();
-                    counters[5] = state.host.trapCrossings();
-                    counters[6] = state.host.hostWrittenBytes();
+                    counters.set(0, 0, state.running ? 1 : 0);
+                    counters.set(0, 1, retiredEverywhere(state));
+                    counters.set(0, 2, state.thunks ? state.thunks.size : 0);
+                    counters.set(0, 3, state.thunks ? state.thunks.capacity : 0);
+                    counters.set(0, 4, state.host.eip());
+                    counters.set(0, 5, state.host.trapCrossings());
+                    counters.set(0, 6, state.host.hostWrittenBytes());
                     feedTranslator();
                     if (state.cork)
                     {
                         const cork = state.cork.counters();
-                        counters[CORK_AT] = cork.regions;
-                        counters[CORK_AT + 1] = cork.invalidations;
-                        counters[CORK_AT + 2] = cork.translatedShare;
+                        counters.set(0, CORK_AT, cork.regions);
+                        counters.set(0, CORK_AT + 1, cork.invalidations);
+                        counters.set(0, CORK_AT + 2, cork.translatedShare * 1e6);
                         const leaves = cork.exits.untranslated + cork.exits.budget + cork.exits.trap
                             + cork.exits.halt + cork.exits.fault + cork.exits.stale
                             + (cork.exits.interpreted ?? 0);
                         const instructions = state.host.instructionCount();
                         const last = state.corkFrame;
                         const ran = instructions - last.instructions;
-                        counters[CORK_AT + 3] = ran > 0 ? (cork.retired - last.retired) / ran : 0;
-                        counters[CORK_AT + 4] = cork.translateMs - last.translateMs;
-                        counters[CORK_AT + 5] = leaves - last.leaves;
+                        counters.set(0, CORK_AT + 3,
+                            ran > 0 ? (cork.retired - last.retired) / ran * 1e6 : 0);
+                        counters.set(0, CORK_AT + 4, (cork.translateMs - last.translateMs) * 1e6);
+                        counters.set(0, CORK_AT + 5, leaves - last.leaves);
                         state.corkFrame = {
                             instructions, retired: cork.retired, translateMs: cork.translateMs,
                             leaves,
                         };
                     }
-                    counters[FRAME_INTERPRETED] = state.worstInterpreted;
-                    counters[FRAME_INTERPRETED + 1] = state.worstInterpretedAt;
+                    counters.set(0, FRAME_INTERPRETED, state.worstInterpreted);
+                    counters.set(0, FRAME_INTERPRETED + 1, state.worstInterpretedAt);
                     state.worstInterpreted = 0;
                     state.worstInterpretedAt = 0;
                 });

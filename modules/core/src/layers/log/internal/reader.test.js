@@ -32,7 +32,7 @@ const mirroredBy = (api, layer)=>{
     return (column, value)=>{
         const at = wanted.findIndex(entry=>entry.column === column);
         assert.notEqual(at, -1, `no frame column named "${column}"`);
-        row[at] = value;
+        row.set(0, at, value);
     };
 };
 
@@ -127,10 +127,10 @@ test('a layer\'s counters and tables are read from the same memory the layer wri
         memory: { journal: journal.memory(), tables: metrics.describe() },
     });
 
-    kernel[0] = 42;
+    kernel.set(0, 0, 42);
     threads.set(0, 0, journal.intern('main'));
     threads.set(0, 1, 2);
-    threads.used(1);
+    threads.use(1);
 
     assert.deepEqual(reader.counters('kernel'), { turns: 42 });
     const rows = reader.table('kernel', 'threads')?.all() ?? [];
@@ -183,12 +183,12 @@ test('the reader names where the guest ran from the kernel\'s pages and the memo
         regions.set(1, 0, journal.intern('storm.dll'));
         regions.set(1, 1, 0x800000);
         regions.set(1, 2, 0x100000);
-        regions.used(2);
-        pages.values[0x40] = 300;
-        pages.values[0x41] = 200;
-        pages.values[0x80] = 400;
-        pages.values[0xf0] = 50;
-        pages.values[0xff] = 5;
+        regions.use(2);
+        pages.set(0x40, 0, 300);
+        pages.set(0x41, 0, 200);
+        pages.set(0x80, 0, 400);
+        pages.set(0xf0, 0, 50);
+        pages.set(0xff, 0, 5);
 
         const reader = createLogReader({
             memory: { journal: journal.memory(), tables: metrics.describe() },
@@ -246,7 +246,7 @@ test('a frame says what the program did and what it cost us, without a second ru
     regions.set(0, 0, api.intern('Storm.dll'));
     regions.set(0, 1, 0x6f00000);
     regions.set(0, 2, 0x100000);
-    regions.used(1);
+    regions.use(1);
     const reader = createLogReader({ memory: api.memory() });
 
     /**
@@ -325,7 +325,7 @@ test('the writers table reads back as names, heaviest first', async()=>{
     put(0, '<no host call>', 0, 0);
     put(1, 'LockRect', 900, 3);
     put(2, 'WriteFile', 9000, 1);
-    table.used(3);
+    table.use(3);
 
     const reader = createLogReader({ memory: api.memory() });
     assert.deepEqual(reader.writers(), [

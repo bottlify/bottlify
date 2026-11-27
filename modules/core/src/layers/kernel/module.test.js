@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { flushWrites, kernelModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
-import { readTable } from '../log/internal/table.js';
+import { openTable } from '@bottlify/cellar';
 
 const PARK = 0xf000dead;
 const STACK_BASE = 0x00300000;
@@ -377,11 +377,11 @@ test('the kernel publishes its figures as tables and keeps the object tables col
     kernel.createMutex({});
     log.metrics.sample();
 
-    const threads = readTable(tables.threads).all();
+    const threads = openTable(tables.threads).all();
     assert.equal(threads.length, 1);
     assert.equal(log.words[threads[0].name], 'main');
-    assert.equal(readTable(tables.pages).values[0], 100, 'the slice at 0x1000 is on page 0');
-    assert.equal(readTable(tables.counters).row(0).turns, 1);
+    assert.equal(openTable(tables.pages).get(0, 0), 100, 'the slice at 0x1000 is on page 0');
+    assert.equal(openTable(tables.counters).row(0).turns, 1);
 
     const metrics = /** @type {any} */ (kernelModule.diagnostics().metrics);
     assert.deepEqual(metrics.sync,

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { noCache } from '../cache/module.js';
 import { CPU_COUNTERS, cpuModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
-import { readTable } from '../log/internal/table.js';
+import { openTable } from '@bottlify/cellar';
 
 test('the cpu registers its counters with the log layer and samples them once a frame',
     async()=>{
@@ -25,7 +25,7 @@ test('the cpu registers its counters with the log layer and samples them once a 
         // Before boot there is no machine to read; a frame closing then must
         // not throw and must leave the row as it was.
         metrics.sample();
-        assert.equal(readTable(table).row(0).instructions, 0);
+        assert.equal(openTable(table).row(0).instructions, 0);
         await cpuModule.dispose();
     });
 
