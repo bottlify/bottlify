@@ -88,7 +88,8 @@ const flat = value=>[...(value?.packed ?? value ?? [])].join(',');
 
 /**
  * The root's names in a run's cache as a thread beside the keeper's has them
- * (`channelSpace`): each ask crosses to the keeper.
+ * (`channelSpace`): each ask crosses to the keeper, here served in place, as
+ * the keeper's server waits on this thread.
  *
  * @param {any} runCache
  */
@@ -98,20 +99,6 @@ function channelTexels(runCache){
     const joined = runCache.join((/** @type {any} */ message)=>texels?.adopt(message));
     texels = channelSpace(joined, runCache.serve('texels'));
     return texels;
-}
-
-/**
- * The root's names on the keeper's own thread, as its reader has them: a
- * cold body is read back from the disk while this thread waits, which a
- * channel's ask to a keeper on the same thread could not answer.
- *
- * @param {any} runCache
- * @returns {import('../internal/texel-store.js').TexelCache & { close?: () => void }}
- */
-function keeperTexels(runCache){
-    const space = cacheSpace(runCache.reader, 'texels', { onlyCopy: true, disk: 'run' });
-    return { space, ask: async()=>true, put: (key, bytes)=>space.put(key, bytes),
-        forgo: ()=>{} };
 }
 
 /** A body of 6 MiB that can be made again: put past the budget, it makes room. */
@@ -137,7 +124,7 @@ async function run(seed, arm){
         : { budget: 64 << 20 });
     // The keeper's first pack opens behind a promise, as every file on OPFS.
     await turn();
-    const texels = arm === 'cramped' ? keeperTexels(runCache) : channelTexels(runCache);
+    const texels = channelTexels(runCache);
     const fillers = cacheSpace(runCache.reader, 'reads');
     let filled = 0;
     // The RGBA the rasteriser samples, held as the engine's thread holds it

@@ -921,6 +921,37 @@ test('the creation calls with no server here are refused as an unregistered clas
     assert.equal(p.reported.length, 6);
 });
 
+test('in a 64-bit process an out pointer is cleared whole, a METAFILEPICT has hMF at 16, and'
+    + ' an address another library answers past 4 GiB is kept whole', async()=>{
+    const p = oleProcess();
+    p.env.pointerSize = 8;
+    /** @type {Record<string, (args: number[]) => number>} */
+    const answers = {
+        CreateMetaFileW: ()=>0x100, DrawIcon: ()=>1, CloseMetaFile: ()=>0x5000,
+        GlobalAlloc: ([, size])=>p.heap.allocate(size), GlobalLock: ([block])=>block,
+        GlobalUnlock: ()=>1, GetSystemMetrics: ()=>32,
+    };
+    p.env.system = (_library, name, args)=>answers[name]?.(args) ?? null;
+    const fns = /** @type {Record<string, any>} */ (createOle2Functions(p.env));
+    for (const [name, outAt] of /** @type {[string, number][]} */ ([['OleCreateFromFile', 7],
+        ['OleCreateLink', 6]]))
+    {
+        assert.deepEqual(fns[name].addresses, [outAt], name);
+        const out = p.out(0xdddddddd);
+        p.put(out + 4, 0xdddddddd);
+        const args = new Array(fns[name].argBytes / 4).fill(0x1000);
+        args[outAt] = out;
+        assert.equal(await fns[name].handler(args), REGDB_E_CLASSNOTREG);
+        assert.deepEqual([p.u32(out), p.u32(out + 4)], [0, 0], `${name}: all eight bytes`);
+    }
+    const block = await fns.OleMetafilePictFromIconAndLabel.handler([0x700, 0, 0, 0]);
+    assert.equal(p.heap.live.get(block)?.size, 24, 'METAFILEPICT is 24 bytes at 64 bits');
+    assert.deepEqual([p.u32(block), p.u32(block + 16), p.u32(block + 20)], [8, 0x5000, 0],
+        'MM_ANISOTROPIC, and the metafile at 16, whole');
+    const util = createOleUtil({ ...p.env, system: ()=>2 ** 32 + 0x100 });
+    assert.equal(await util.system('KERNEL32.dll', 'GlobalLock', [1]), 2 ** 32 + 0x100);
+});
+
 test('without user32, accelerators and registered formats are not reached, and that is said',
     async()=>{
         const { p, run } = setup({ system: false });
