@@ -1241,8 +1241,7 @@ export function createMsvcrtFunctions(host){
     };
 
     const wideClasses = createWideClassificationFunctions();
-    const secure = createSecureFunctions({ readMemory: host.readMemory,
-        writeMemory: host.writeMemory, errno });
+    const secure = createSecureFunctions({ guest: host.guest, errno });
     const wideStrings = createWideFunctions({
         guest: host.guest,
         pointerSize: host.pointerSize,
