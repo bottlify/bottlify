@@ -204,6 +204,20 @@ export function allocationPerCall(body, { calls = 20000 } = {}){
 }
 
 /**
+ * The JS heap alone `body` allocates a call, for a body whose every call
+ * collects garbage within itself, so that no call runs clear of a collection
+ * and its buffers cannot be read (`allocationPerCall` throws "not measured"
+ * for it): the caller says why at the call, and reads the buffers another way.
+ *
+ * @param {() => void} body
+ * @param {{ calls?: number }} [options]
+ * @returns {Promise<number>}
+ */
+export async function heapPerCall(body, { calls = 20000 } = {}){
+    return (await measured(body, ()=>{}, calls, false, false)).heap;
+}
+
+/**
  * The bytes `body` allocates a call, the JS heap's and the buffers' together
  * (`allocationPerCall` gives them apart).
  *
@@ -250,9 +264,10 @@ export async function bytesPerAwait(body, options){
 /**
  * @param {() => void | Promise<unknown>} body @param {() => void | Promise<unknown>} empty
  * @param {number} calls @param {boolean} awaited
+ * @param {boolean} [withBuffers]  false: the heap alone, the buffers left unread (NaN)
  * @returns {Promise<Allocation>}
  */
-async function measured(body, empty, calls, awaited){
+async function measured(body, empty, calls, awaited, withBuffers = true){
     const session = new Session();
     session.connect();
     try
@@ -271,6 +286,10 @@ async function measured(body, empty, calls, awaited){
         {
             around = Math.min(around, await sampled(session, empty, calls, awaited));
             made = Math.min(made, await sampled(session, body, calls, awaited));
+        }
+        if (!withBuffers)
+        {
+            return { heap: Math.max(0, made - around) / calls, buffers: Number.NaN };
         }
         const reads = Math.min(calls, BUFFER_CALLS);
         let bufferAround = Infinity;
