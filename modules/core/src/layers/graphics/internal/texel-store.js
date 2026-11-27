@@ -216,12 +216,13 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
             {
                 return;
             }
-            if (cache === null)
+            // No names in the cache under the store: refused, as no room is.
+            if (cache)
             {
-                refuse(body);
+                move(key, body, cache);
                 return;
             }
-            move(key, body, cache);
+            refuse(body);
         },
 
         /**
