@@ -23,6 +23,7 @@ import { TEX } from './formats.js';
 import { createGlContext } from './context.js';
 import { createOpenglRoot } from './root.js';
 import { createProcessorLevels } from './processor-levels.js';
+import { forgetRgba } from './context-textures.js';
 import { openRunCache } from '../../../process/run-cache.js';
 import { channelSpace } from '../../cache/module.js';
 import { testCache } from '../../cache/testing.fixture.js';
@@ -108,7 +109,7 @@ async function run(seed, arm){
         ? (await testCache()).space('scratch').hold ?? null : ()=>null).hold;
     /** @type {string[]} */
     const said = [];
-    const levels = createProcessorLevels({ cache: texels,
+    const levels = createProcessorLevels({ cache: texels, forgetRgba,
         divergence: detail=>said.push(detail) });
     const gl = /** @type {any} */ (createGlContext({ levels, holds }));
     gl.attach({ width: 16, height: 16, doubleBuffered: false, depthBits: 24 });

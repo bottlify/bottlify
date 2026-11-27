@@ -18,6 +18,7 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createModelRenderer } from './gpu-model.js';
 import { createProcessorLevels } from './processor-levels.js';
+import { forgetRgba } from './context-textures.js';
 
 /** Swaps between two looks for texels no draw has needed (`spill`): about a second at 60. */
 const SPILL_SWAPS = 60;
@@ -127,7 +128,7 @@ export function createOpenglRoot(services){
             if (!drawsOn)
             {
                 processorLevels ??= createProcessorLevels({ cache: services.texelCache ?? null,
-                    divergence: services.divergence ?? null });
+                    forgetRgba, divergence: services.divergence ?? null });
             }
             const context = createGlContext({
                 extensions: options.extensions,

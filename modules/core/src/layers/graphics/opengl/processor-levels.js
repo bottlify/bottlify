@@ -27,7 +27,6 @@
 
 import { createTexelStore } from '../internal/texel-store.js';
 import { createLevelSpill } from './level-spill.js';
-import { forgetRgba } from './context-textures.js';
 
 /**
  * @typedef {ReturnType<typeof createProcessorLevels>} ProcessorLevels
@@ -35,11 +34,15 @@ import { forgetRgba } from './context-textures.js';
 
 /**
  * @param {{ cache?: import('../internal/texel-store.js').TexelCache | null,
+ *     forgetRgba?: ((level: import('./objects.js').TextureLevel) => void) | null,
  *     divergence?: ((detail: string, severity?: 'loss') => void) | null }} [options]
  *     `cache`: the root's names in the run's cache, where idle levels wait;
- *     `divergence`: where a level the cache lost is said
+ *     `forgetRgba`: lets an idle level's RGBA go (`context-textures.js`, handed in
+ *     so this module is not one its kernel's types lead back to); `divergence`:
+ *     where a level the cache lost is said
  */
-export function createProcessorLevels({ cache = null, divergence = null } = {}){
+export function createProcessorLevels(options = {}){
+    const { cache = null, forgetRgba = null, divergence = null } = options;
     const store = createTexelStore({ cache,
         divergence: (detail, severity)=>divergence?.(`a texture's ${detail}: it draws blank`,
             severity) });
@@ -85,7 +88,7 @@ export function createProcessorLevels({ cache = null, divergence = null } = {}){
                     {
                         continue;
                     }
-                    forgetRgba(level);
+                    forgetRgba?.(level);
                     if (spill.spill(texture, level) > 0)
                     {
                         counts.spilledLevels++;

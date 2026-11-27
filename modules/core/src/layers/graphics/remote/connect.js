@@ -107,10 +107,10 @@ function plainOf(services){
  *     diagnostics  `handoff`: the frames the worker sent here, how long they waited there
  *     for the one before to be shown, their way here, showing them, and the answers' way
  *     back, and the buffers frames sent as bytes crossed in, made and handed back (null
- *     while none came as bytes); null before a frame has come with its times; `phases`: where the worker's
- *     thread spent its time on this process's
- *     batches, summed over the roots that have presented or answered a diagnostics ask
- *     (null before any has, or in a build that times nothing); `latency`: each root's bound on the
+ *     while none came as bytes); null before a frame has come with its times;
+ *     `phases`: where the worker's thread spent its time on this process's batches, summed
+ *     over the roots that have presented or answered a diagnostics ask (null before any
+ *     has, or in a build that times nothing); `latency`: each root's bound on the
  *     frames the worker's GPU may still be drawing, with the presents that waited for it
  *     (`held`, `heldMs`), summed over the roots that have said it (null before any has);
  *     `waits`: what the program's thread waited on the worker for, by call;
