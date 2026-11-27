@@ -111,7 +111,9 @@ read a value where it lies, `set8` to `setPtr` write one, `cstr` and `wstr` read
 terminator or to a limit in bytes (cut there, a fault only where memory ends), `writeAnsi` and
 `writeWide` write one cut to its room, and `bytes` is the one read that copies, into a buffer it
 is given or into one it makes. `ptr` and `setPtr` are as wide as the process's pointers. A
-library makes no accessor of its own and copies no read again.
+library makes no accessor of its own and copies no read again:
+`tools/checks/check-guest-access.mjs` (`npm run check:boundaries`) fails a new one, and lists in
+its baseline the ones the layer still has, which only shrinks.
 
 ## One call, from the program to JS and back
 

@@ -498,6 +498,7 @@ From `node tools/checks/duplicate-code.mjs --top 4 on this repository, 2026-11-2
 - [`checks/check-budget-writes.mjs`](checks/check-budget-writes.mjs) - The emitter writes a region's budget only as a count (`npm run check:boundaries`)
 - [`checks/check-emit-options.mjs`](checks/check-emit-options.mjs) - Every emit option reaches the cache key (`npm run check:boundaries`)
 - [`checks/check-guest-pointers.mjs`](checks/check-guest-pointers.mjs) - A handler faults on a bad guest pointer only as Windows does (`npm run check:boundaries`)
+- [`checks/check-guest-access.mjs`](checks/check-guest-access.mjs) - Does a win32 library read or write guest memory past host.guest: a local accessor or string helper of its own, a read copied again? (`node tools/checks/check-guest-access.mjs [--write] [--list]`)
 - [`checks/check-wide-addresses.mjs`](checks/check-wide-addresses.mjs) - A 64-bit process's handler answers the same call the same wherever its memory lies: RAX whole, what it writes, what it faults on (`node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90100000] [--known FILE] [--write-known] [--trace]`)
 - [`checks/check-is-main.mjs`](checks/check-is-main.mjs) - No script decides it was started by comparing paths itself (`npm run check:boundaries`)
 - [`checks/check-link-slots.mjs`](checks/check-link-slots.mjs) - One machine a slot of a process's link (`npm run check:boundaries`)
