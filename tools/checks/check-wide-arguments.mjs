@@ -70,12 +70,6 @@ const STRUCT = new Map([['VARIANT', 4], ['VARIANTARG', 4], ['DECIMAL', 4], ['GUI
 export const KNOWN = new Map([
     ['modules/core/src/layers/win32/advapi32/eventlog.js :: TraceMessage',
         'variadic, argBytes 0: it reads no argument and answers ERROR_INVALID_HANDLE'],
-    ['modules/core/src/layers/win32/kernel32/seh64.js :: RtlLookupFunctionEntry',
-        'a 64-bit process\'s alone, written in its layout: DWORD64 is one slot there'],
-    ['modules/core/src/layers/win32/kernel32/seh64.js :: RtlVirtualUnwind',
-        'a 64-bit process\'s alone, written in its layout: DWORD64 is one slot there'],
-    ['modules/core/src/layers/win32/kernel32/seh64.js :: RtlAddFunctionTable',
-        'a 64-bit process\'s alone, written in its layout: DWORD64 is one slot there'],
     ...['_allmul', '_alldiv', '_allrem', '_aulldiv', '_aullrem'].map(name=>[
         `modules/core/src/layers/win32/ntdll/integer.js :: ${name}`,
         'the 32-bit compiler\'s helpers: a 64-bit ntdll exports none of them']),

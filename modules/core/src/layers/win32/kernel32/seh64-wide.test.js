@@ -150,14 +150,31 @@ test('the unwind tables\' entries take a 64-bit caller\'s addresses whole, as th
     // What each declares, or its signature does where it declares nothing.
     declareAddresses({ 'ntdll.dll': seh.table }, POINTER_ARGUMENTS);
     /**
-     * A call as the bridge makes it: each value its dword, its high half
-     * beside it, and the declared addresses joined again (`wholeAddresses`).
+     * A call as the bridge's `readLongCall` makes it from a 64-bit caller's
+     * slots, one value each: a slot its dword with its high half beside it in
+     * `args.high`, a declared quadword two dwords of the 32-bit signature, and
+     * the declared addresses joined again (`wholeAddresses`).
      *
-     * @param {any} spec @param {number[]} values
+     * @param {any} spec @param {number[]} slots
      */
-    const call = (spec, values)=>{
-        const args = values.map(value=>value % 2 ** 32 | 0);
-        const high = values.map(value=>Math.floor(value / 2 ** 32));
+    const call = (spec, slots)=>{
+        /** @type {number[]} */
+        const args = [];
+        /** @type {number[]} */
+        const high = [];
+        for (const value of slots)
+        {
+            const low = value % 2 ** 32 | 0;
+            const upper = Math.floor(value / 2 ** 32);
+            high[args.length] = upper;
+            args.push(low);
+            if (spec.quadwords?.includes(args.length - 1))
+            {
+                high[args.length] = 0;
+                args.push(upper | 0);
+            }
+        }
+        assert.equal(args.length, spec.argBytes / 4, 'the slots fill the signature\'s dwords');
         wholeAddresses(spec.addresses ?? null, args, high);
         return spec.handler(Object.assign(args, { high }));
     };
@@ -206,8 +223,7 @@ test('the unwind tables\' entries take a 64-bit caller\'s addresses whole, as th
     // A JIT's range past 4 GiB, its base a DWORD64 in two dwords: a lookup
     // there waits on its callback rather than answering at once.
     assert.equal(call(seh.table.RtlInstallFunctionTableCallback, [
-        3, 0, madeBase % 2 ** 32, Math.floor(madeBase / 2 ** 32), 0x1000, WIDE + 0x5000, 0,
-        0]), 1);
+        3, madeBase, 0x1000, WIDE + 0x5000, 0, 0]), 1);
     assert.ok(call(seh.table.RtlLookupFunctionEntry, [madeBase + 0x150, out, 0])
         instanceof Promise, 'the range is the one the address lies in');
 });
