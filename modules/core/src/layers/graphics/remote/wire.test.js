@@ -359,6 +359,14 @@ function seededBatches(seed){
  * @param {any} value @returns {any}
  */
 function plain(value){
+    // A record's lends are the reader's words, three a lend: as plain lends.
+    if (value !== null && typeof value === 'object' && typeof value.lentCount === 'number')
+    {
+        const { lent, lentCount, ...rest } = value;
+        return plain({ ...rest, lent: lentCount === 0 && value.op !== OP.LENT ? undefined
+            : Array.from({ length: lentCount }, (_, at)=>({ address: lent[at * 3],
+                length: lent[at * 3 + 1], slot: lent[at * 3 + 2] })) });
+    }
     if (ArrayBuffer.isView(value))
     {
         return { kind: value.constructor.name, elements: [.../** @type {any} */ (value)] };
@@ -412,14 +420,19 @@ test('a batch read while another is being read leaves the outer one where it was
     /** @type {any[]} */
     const inner = [];
     reader.read(batches[1].buffer, call=>{
-        outer.push(plain(call));
-        if (inner.length === 0)
+        const before = plain(call);
+        // Under every record of the outer batch, its lends among them: the
+        // record is what it was once the inner batch is read.
+        if (inner.length < 2 * 30)
         {
             reader.read(nested.buffer, one=>{
                 inner.push(plain(one));
             }, nested.length);
         }
+        assert.deepEqual(plain(call), before, 'the outer record as it was');
+        outer.push(before);
     }, batches[1].length);
+    inner.length = 2;
     assert.deepEqual(outer, plain(expected[1]));
     assert.deepEqual(inner, [
         { op: OP.WROTE, t: 0, wrote: [{ address: 0x4000,
@@ -514,4 +527,33 @@ test('a batch read where it lies in shared memory, at an offset, gives its text 
     {
         TextDecoder.prototype.decode = decode;
     }
+});
+
+test('a batch is read into one call of the reader\'s, its fields set again for every record, '
+    + 'and its lends into the reader\'s words', ()=>{
+    // A call object per record, and an object per lend, were a measured share
+    // of the graphics worker's garbage in a menu of Doom 3.
+    const { batches } = seededBatches(7);
+    const reader = createReader({ ref: number=>({ ref: number }), service: ()=>'service' });
+    /** @type {Set<object>} */
+    const calls = new Set();
+    /** @type {Set<ArrayBufferLike>} */
+    const lends = new Set();
+    let records = 0;
+    for (const { buffer, length } of batches)
+    {
+        calls.clear();
+        reader.read(buffer, call=>{
+            records++;
+            calls.add(call);
+            if (call.op === OP.LENT)
+            {
+                assert.ok(call.lent instanceof Uint32Array, 'lends as words');
+                lends.add(call.lent.buffer);
+            }
+        }, length);
+        assert.equal(calls.size, 1, 'one call for every record of a batch');
+    }
+    assert.ok(records > batches.length, 'batches of many records');
+    assert.ok(lends.size >= 1 && lends.size <= 2, 'the reader\'s own words, grown at most once');
 });

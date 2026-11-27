@@ -264,7 +264,8 @@ test('a capture keeps every argument whole and zeroes the guest memory a batch c
         const calls = [];
         createReader({ ref: number=>number, service: ()=>null })
             .read(/** @type {ArrayBuffer} */ (batch?.buffer), call=>{
-                calls.push(call);
+                // The reader's call is read into again by the next record.
+                calls.push({ ...call });
             });
         assert.equal(calls.length, 2);
         assert.equal(calls[0].m, 'commands');

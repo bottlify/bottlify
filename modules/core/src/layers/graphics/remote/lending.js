@@ -288,9 +288,9 @@ export function createLender(options){
  *     answers it as it is now: a memory that grows is a longer view after it grew
  * @param {number} [options.base]      the guest address of `memory`'s first byte
  * @returns {(slot: number, address: number, length: number,
- *     use: (bytes: Uint8Array) => void) => void}
- *     a lend's bytes, given to `use` -- in place, so it copies what it keeps --
- *     and the slot done after
+ *     use: (address: number, bytes: Uint8Array) => void) => void}
+ *     a lend's bytes, given to `use` with its address -- in place, so it copies what
+ *     it keeps -- and the slot done after: one `use` takes every lend, made once
  */
 export function createBorrower({ slots, stash, memory, base = 0 }){
     const view = typeof memory === 'function' ? memory : ()=>memory;
@@ -302,12 +302,12 @@ export function createBorrower({ slots, stash, memory, base = 0 }){
         {
             if (was === LEND.LENT)
             {
-                use(view().subarray(address - base, address - base + length));
+                use(address, view().subarray(address - base, address - base + length));
             }
             else if (was === LEND.STASHED)
             {
                 const start = Atomics.load(states, slot * 2 + 1);
-                use(stashBytes.subarray(start, start + length));
+                use(address, stashBytes.subarray(start, start + length));
             }
             else
             {

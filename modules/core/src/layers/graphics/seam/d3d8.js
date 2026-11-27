@@ -3132,6 +3132,7 @@ export function createDirect3D8Seam(
                     // The block is read on every device call and compared
                     // in place, so the window, where there is one.
                     readMemory: memory.windowMemory ?? memory.readMemory,
+                    shared: memory.sharedMemory,
                     readU32: memory.readU32,
                     writeMemory: memory.writeMemory,
                     fillMemory: memory.fillMemory,

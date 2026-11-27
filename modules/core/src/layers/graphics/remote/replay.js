@@ -2450,10 +2450,8 @@ export function createPlayer({ root, ship, read, borrow }){
         get: (_, key)=>(typeof key === 'string' ? ()=>replies[replied++] : undefined),
     });
     const reader = createReader({ ref: objectAt, service: ()=>standIn });
-    /** What a call carries none of: guest memory, lent or sent. */
+    /** What a call carries none of: guest memory sent. */
     const NO_MEMORY = /** @type {readonly { address: number, bytes: Uint8Array }[]} */ (NOTHING);
-    const NO_LENDS = /** @type {readonly { address: number, length: number, slot: number }[]} */ (
-        NOTHING);
 
     /** @param {object} object */
     const bind = object=>{
@@ -2538,9 +2536,11 @@ export function createPlayer({ root, ship, read, borrow }){
                 {
                     throw new Error('remote: guest memory lent to a side that cannot read it');
                 }
-                for (const { address, length, slot } of call.lent ?? NO_LENDS)
+                // Three words a lend, in the reader's words: no object a lend.
+                const lent = /** @type {Uint32Array} */ (call.lent);
+                for (let at = 0; at < call.lentCount * 3; at += 3)
                 {
-                    borrow(slot, address, length, bytes=>ship(address, bytes));
+                    borrow(lent[at + 2], lent[at], lent[at + 1], ship);
                 }
                 return undefined;
             }
@@ -2951,7 +2951,9 @@ export function createMirror(){
                 const at = (address + done) >>> 0;
                 const offset = at & (SIZE - 1);
                 const take = Math.min(SIZE - offset, bytes.length - done);
-                pageOf(at >>> SHIFT).set(bytes.subarray(done, done + take), offset);
+                // Most writes lie in one page: set whole, no view of a part.
+                pageOf(at >>> SHIFT).set(take === bytes.length ? bytes
+                    : bytes.subarray(done, done + take), offset);
                 done += take;
             }
         },

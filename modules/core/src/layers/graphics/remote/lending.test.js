@@ -20,7 +20,8 @@ function pair(){
     const read = (slot, address, length)=>{
         /** @type {number[]} */
         let seen = [];
-        borrow(slot, address, length, bytes=>{
+        borrow(slot, address, length, (at, bytes)=>{
+            assert.equal(at, address, 'the lend\'s address handed with its bytes');
             seen = [...bytes];
         });
         return seen;
@@ -159,4 +160,22 @@ test('a claim on a lend the played side is reading waits for the read to finish'
     assert.equal(lender.diagnostics().waited, 1);
     assert.equal(lender.diagnostics().stashed, 0);
     await thread.terminate();
+});
+
+test('a lend\'s bytes are handed with its address, so one function takes every lend', ()=>{
+    // A function made for every lend to carry its address was a measured part
+    // of the played side's garbage.
+    const buffers = createLendingBuffers();
+    const memory = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    const lender = createLender({ ...buffers, memory });
+    const borrow = createBorrower({ ...buffers, memory });
+    memory.set([1, 2], 0x100);
+    memory.set([3, 4, 5], 0x200);
+    /** @type {[number, number[]][]} */
+    const shipped = [];
+    /** @param {number} address @param {Uint8Array} bytes */
+    const ship = (address, bytes)=>shipped.push([address, [...bytes]]);
+    borrow(lender.lend(0x100, 2), 0x100, 2, ship);
+    borrow(lender.lend(0x200, 3), 0x200, 3, ship);
+    assert.deepEqual(shipped, [[0x100, [1, 2]], [0x200, [3, 4, 5]]]);
 });

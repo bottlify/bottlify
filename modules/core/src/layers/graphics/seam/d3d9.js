@@ -3710,6 +3710,7 @@ export function createDirect3D9Seam(
                 ringBytes,
                 allocate,
                 readMemory: memory.windowMemory ?? memory.readMemory,
+                shared: memory.sharedMemory,
                 readU32: memory.readU32,
                 writeMemory: memory.writeMemory,
                 fillMemory: memory.fillMemory,

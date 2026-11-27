@@ -101,11 +101,40 @@ export function placeCommandRing(block, ring, writeMemory, bytes = COMMAND_RING_
  * @param {(address: number) => number} [deps.loadU32]  the memory's atomic read: a
  *     record's length, which the routines publish with `xchg`, read so the record's
  *     words and what the program wrote before the call are seen after it
+ * @param {() => Uint8Array | null} [deps.shared]  the RAM over shared memory, byte 0 at
+ *     address 0 (the memory layer's `shared`): the block and the ring read where they
+ *     lie, the records handed on as the RAM's own bytes
  */
 export function createCommandReader(deps){
-    const { block, ring, readWord, readWords, writeMemory, fillMemory, take, refuse,
+    const { block, ring, writeMemory, fillMemory, take, refuse,
         bytes = COMMAND_RING_BYTES, compareExchangeU32 } = deps;
-    const lengthAt = deps.loadU32 ?? readWord;
+    /**
+     * The RAM's words and bytes where the block and the ring lie in shared
+     * memory, made once: a window of the memory per word read and per take,
+     * each a view and a view of words over it, was the largest share of the
+     * engine's garbage in a menu of Doom 3. A shared buffer is never taken
+     * back, and one the memory grew into still holds every byte it held.
+     */
+    const ram = deps.shared?.() ?? null;
+    const inPlace = ram !== null && (ram.byteOffset & 3) === 0
+        && ram.byteLength >= Math.max(block + SHADOW.SIZE, ring + bytes);
+    const ramWords = inPlace ? new Int32Array(ram.buffer, ram.byteOffset, ram.byteLength >>> 2)
+        : null;
+    /** @param {number} address */
+    const wordAt = address=>(ramWords !== null ? Atomics.load(ramWords, address >>> 2) >>> 0
+        : deps.readWord(address));
+    const readWord = ramWords !== null ? wordAt : deps.readWord;
+    const lengthAt = ramWords !== null ? wordAt : deps.loadU32 ?? deps.readWord;
+    /**
+     * The ring's words from `from`, `count` of them: in place, the word at
+     * `from + i` being `ramWords[base + i]`, or read through the memory.
+     *
+     * @param {number} from @param {number} count
+     * @returns {{ words: Uint32Array | Int32Array, base: number }}
+     */
+    const ringWords = (from, count)=>(ramWords !== null
+        ? { words: ramWords, base: (ring + from) >>> 2 }
+        : { words: deps.readWords(ring + from, count), base: 0 });
     let tail = 0;
     let taken = 0;
     const zero = new Uint8Array(4);
@@ -163,9 +192,16 @@ export function createCommandReader(deps){
             }
             if (whole > 0)
             {
-                const words = readWords(ring + tail, whole);
                 before?.();
-                taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
+                if (ram !== null && ramWords !== null)
+                {
+                    taken += take(ram.subarray(ring + tail, ring + tail + whole * 4));
+                }
+                else
+                {
+                    const words = deps.readWords(ring + tail, whole);
+                    taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
+                }
             }
             tail += whole * 4;
             if (tail === head && head > bytes - COMMAND_SLACK)
@@ -209,10 +245,11 @@ export function createCommandReader(deps){
             {
                 return false;
             }
-            const words = readWords(ring + tail, (head - tail) >>> 2);
-            for (let at = 0; at < words.length; at++)
+            const count = (head - tail) >>> 2;
+            const { words, base } = ringWords(tail, count);
+            for (let at = 0; at < count; at++)
             {
-                if (test(words[at]))
+                if (test(words[base + at] >>> 0))
                 {
                     return true;
                 }
@@ -230,11 +267,12 @@ export function createCommandReader(deps){
             {
                 return 0;
             }
-            const words = readWords(ring + tail, (head - tail) >>> 2);
+            const count = (head - tail) >>> 2;
+            const { words, base } = ringWords(tail, count);
             let records = 0;
-            for (let at = 0; at < words.length;)
+            for (let at = 0; at < count;)
             {
-                const length = words[at + (COMMAND.BYTES >>> 2)] >>> 2;
+                const length = words[base + at + (COMMAND.BYTES >>> 2)] >>> 2;
                 if (length < (COMMAND.ARGS >>> 2))
                 {
                     break;
@@ -371,6 +409,8 @@ export function settledAfter(shadow, call){
  * @property {(address: number) => number} [readU32]
  *     A dword read in place, for the words looked at on every call: a view
  *     per call was a measured share of a frame.
+ * @property {() => Uint8Array | null} [shared]  the RAM over shared memory, byte 0 at
+ *     address 0: the command ring read where it lies (`createCommandReader`)
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
  *     A dword swapped only if it holds `expected`, indivisible against the
  *     guest's threads on the process's other executors; answers what it held.
@@ -1514,7 +1554,7 @@ export function createShadow(deps){
                 {
                     placeCommandRing(address, commands, deps.writeMemory, ringBytes);
                     commandReader = createCommandReader({ block: address, ring: commands,
-                        readWord, readWords, writeMemory: deps.writeMemory,
+                        readWord, readWords, shared: deps.shared, writeMemory: deps.writeMemory,
                         fillMemory: deps.fillMemory,
                         compareExchangeU32: deps.compareExchangeU32, loadU32: deps.loadU32,
                         take: /** @type {ShadowCommands} */ (deps.commands).take,
