@@ -17,6 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from './vfs.js';
 import { createFileFunctions } from './files.js';
@@ -40,7 +41,7 @@ const PATH = 'C:\\data.bin';
 const CONTENTS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 async function setup(){
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const volume = /** @type {any} */ (createVolume(fs));
     const seeded = volume.open(PATH, { read: true, write: true, create: true });
     volume.write(seeded, 0, new Uint8Array(CONTENTS));

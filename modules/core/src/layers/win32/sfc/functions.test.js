@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { CATALOG_STORE, SFC_ORDINALS, createSfcFunctions } from './functions.js';
@@ -16,7 +17,7 @@ const ERROR_SERVICE_DISABLED = 1058;
 async function machine(){
     const bytes = new Uint8Array(0x400);
     const view = new DataView(bytes.buffer);
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const volume = /** @type {any} */ (createVolume(fs));
     const fns = createSfcFunctions({
         writeMemory: (address, data)=>bytes.set(data, address),

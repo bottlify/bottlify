@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMemoryStore } from './memory-store.js';
+import { createMemoryStore } from './memory-store.fixture.js';
 import { createOverlay } from './tree.js';
 import { createUnionSource } from './union-source.js';
 

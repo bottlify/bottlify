@@ -24,7 +24,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createFilesystemModule } from '../module.js';
 import { ErrorCode } from './errors.js';
-import { createMemoryStore } from './memory-store.js';
+import { createMemoryStore } from './memory-store.fixture.js';
 import { createPageFile } from './page-file.js';
 import { pieceSpace } from './page-space.fixture.js';
 import { cacheSpace } from '../../cache/module.js';
@@ -104,10 +104,9 @@ const onC = components=>`C:\\${components.join('\\')}`;
 
 /**
  * @param {number} seed
- * @param {import('./page-file.js').PageFile | null} [pageFile]  the run's writable
- *     layers on a page file rather than in memory
+ * @param {import('./page-file.js').PageFile} pageFile  where the run's writable layers are
  */
-async function run(seed, pageFile = null){
+async function run(seed, pageFile){
     const r = random(seed);
     /** @type {Record<string, string>} */
     const source = {};
@@ -241,7 +240,8 @@ async function run(seed, pageFile = null){
 test('the tree and its stores agree after every step, whatever a program spells how', async()=>{
     for (let seed = 1; seed <= 300; seed++)
     {
-        await run(seed);
+        const { space } = await pieceSpace(cacheSpace, { budget: 16 << 20 });
+        await run(seed, createPageFile(space));
     }
 });
 

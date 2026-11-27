@@ -16,6 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../process/page-file.fixture.js';
 import { win32Module } from './module.js';
 import { filesystemModule } from '../filesystem/module.js';
 import { createMemoryModule } from '../memory/module.js';
@@ -267,7 +268,7 @@ test('the synchronisation calls leave their failures as the thread\'s last error
 });
 
 test('a structure written to a profile is read from guest memory and read back', async()=>{
-    const filesystem = await filesystemModule.create({});
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
     const thread = { id: 1 };
     const { bytes, libraries, lastError } = await build({
         filesystem,
@@ -296,7 +297,7 @@ test('msvcrt\'s descriptors and kernel32\'s file handles are handles in one tabl
     // _get_osfhandle gives a handle kernel32's calls take, at the descriptor's
     // position; _open_osfhandle takes CreateFile's; the descriptor closes
     // either through the CloseHandle a program calls.
-    const filesystem = await filesystemModule.create({});
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
     /** @type {Map<number, { type: string, object: any }>} */
     const entries = new Map();
     let next = 0x100;
@@ -377,7 +378,7 @@ test('a file msvcrt opened to be deleted on close is gone once the process ends'
     ];
     for (const [how, end] of endings)
     {
-        const filesystem = await filesystemModule.create({});
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
         const { bytes, libraries, exitCode } = await build({
             filesystem, kernel: { currentThread: ()=>({ id: 1 }) },
             modules: { processDetach: ()=>[] },
@@ -395,7 +396,7 @@ test('a file msvcrt opened to be deleted on close is gone once the process ends'
 });
 
 test('msvcrt\'s __int64 answers reach EDX through the processor\'s registers', async()=>{
-    const filesystem = await filesystemModule.create({});
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
     /** @type {Record<string, number>} */
     const written = {};
     const { bytes, libraries } = await build({
@@ -644,7 +645,7 @@ test('MsgWaitForMultipleObjectsEx with MWMO_INPUTAVAILABLE wakes for a message s
 
 test('SETUPAPI finds an INF on the volume by bare name and registers into advapi32\'s hive',
     async()=>{
-        const filesystem = await filesystemModule.create({});
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
         const thread = { id: 1 };
         const { bytes, view, libraries, lastError } = await build({
             filesystem,
@@ -740,7 +741,7 @@ function handleTable(){
 test('mmio opens a file by the handle kernel32 gave the program, and closes it with its own',
     async()=>{
         // mmio.c test_mmioSeek: the file is read from where the handle stands.
-        const filesystem = await filesystemModule.create({});
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
         const handles = handleTable();
         const thread = { id: 1 };
         const { bytes, view, libraries } = await build({
@@ -880,7 +881,7 @@ test('a PROPVARIANT\'s BSTR and SAFEARRAY are copied and freed by oleaut32\'s ow
 
 test('WINTRUST reads the file from the volume and judges it against the configured roots',
     async()=>{
-        const filesystem = await filesystemModule.create({});
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
         const thread = { id: 1 };
         const chain = certificates();
         const { bytes, view, libraries, lastError } = await build({
@@ -920,7 +921,7 @@ test('WINTRUST reads the file from the volume and judges it against the configur
 test('a \\\\?\\ path reaches the volume\'s files as the plain path does', async()=>{
     // A program that builds its paths in the Win32 file namespace -- a profile folder under
     // My Documents, created a level at a time -- finds and makes what a plain path finds.
-    const filesystem = await filesystemModule.create({});
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
     const thread = { id: 1 };
     const { bytes, libraries, lastError } = await build({
         filesystem,

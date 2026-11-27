@@ -6,7 +6,7 @@
 
 import { ErrorCode, fsError } from './internal/errors.js';
 import { Disposition, SeekFrom, createFileTable, createSharing } from './internal/handles.js';
-import { bytesOf, createMemoryStore, piecesOf } from './internal/memory-store.js';
+import { bytesOf, piecesOf } from './internal/memory-store.js';
 import { createPageFileStore } from './internal/page-file.js';
 import { createOverlay } from './internal/tree.js';
 import {
@@ -219,14 +219,19 @@ export function createFilesystemModule(){
             const shared = config?.volume ?? null;
             /**
              * Where a writable layer made here keeps its pieces: the run's page
-             * file, in the run's cache, or this thread's memory where there is
-             * none (a machine built alone).
+             * file, in the run's cache. A volume handed none has nowhere to keep
+             * what a program writes, and a writable layer is refused.
              *
              * @type {import('./internal/page-file.js').PageFile | null}
              */
             const pageFile = shared?.pageFile ?? config?.pageFile ?? null;
-            const newWritable = ()=>(pageFile
-                ? createPageFileStore(pageFile) : createMemoryStore());
+            const newWritable = ()=>{
+                if (!pageFile)
+                {
+                    throw new Error('filesystem: no page file to keep a writable layer in');
+                }
+                return createPageFileStore(pageFile);
+            };
             // Every process's open files, which sharing is settled against:
             // a file one process holds on terms that share nothing is refused
             // to every other, as CreateFile's terms are the system's.
@@ -344,8 +349,7 @@ export function createFilesystemModule(){
                 // Read-only media has a writable layer only because the overlay
                 // is built around one; nothing ever lands in it, and it is not
                 // the one a later writable mount of the letter finds.
-                const writable = readOnly
-                    ? createMemoryStore()
+                const writable = readOnly ? newWritable()
                     : stores?.writable ?? state.writables.get(key) ?? newWritable();
                 if (!readOnly)
                 {

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { announceSteamClient, createSteamclientFunctions, steamClientDll, steamFilesOf }
     from './functions.js';
 import { INTERFACES } from './interfaces.js';
@@ -382,7 +383,7 @@ test('a cloud file a session has not read yet is fetched before it is answered',
     // A saved session is read lazily: the first read of its file misses, and a
     // read that could not wait for the fetch stopped the game at its first
     // cloud file on every start after the one that wrote it.
-    const fs = await filesystemModule.create(undefined);
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const folder = 'C:\\Program Files (x86)\\Steam\\userdata\\1\\620\\remote';
     steamFilesOf(fs, createVolume(fs)).write(`${folder}\\modindex`, Uint8Array.of(7, 8, 9));
     let resident = false;
@@ -404,7 +405,7 @@ test('a cloud file a session has not read yet is fetched before it is answered',
 });
 
 test('the guest\'s files hold a cloud file in folders made for it, and list it below', async()=>{
-    const fs = await filesystemModule.create(undefined);
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const files = steamFilesOf(fs, createVolume(fs));
     const folder = 'C:\\Program Files (x86)\\Steam\\userdata\\1\\620\\remote';
     assert.deepEqual(files.list(folder), [], 'no folder, nothing');

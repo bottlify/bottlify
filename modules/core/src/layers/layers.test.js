@@ -6,6 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../process/page-file.fixture.js';
+import { roomy } from './cache/testing.fixture.js';
 import { assembleModules } from '../core.js';
 
 const ALL_LAYERS = [
@@ -31,7 +33,8 @@ const IMPLEMENTED = [
 ];
 
 test('a default build contains every layer, in dependency order', async()=>{
-    const core = await assembleModules({});
+    const core = await assembleModules({ filesystem: { pageFile: await testPageFile() },
+        cache: { reader: roomy.reader } });
     const diag = core.diagnostics();
     assert.deepEqual(diag.map(d=>d.name), ALL_LAYERS);
 
@@ -49,7 +52,8 @@ test('a default build contains every layer, in dependency order', async()=>{
 });
 
 test('building the graph costs nothing: the engine is not started', async()=>{
-    const core = await assembleModules({});
+    const core = await assembleModules({ filesystem: { pageFile: await testPageFile() },
+        cache: { reader: roomy.reader } });
     const cpu = core.api('cpu');
 
     assert.equal(cpu.booted(), false);
@@ -67,19 +71,22 @@ test('a layer that is not built refuses loudly', async()=>{
     // layer now has an implementation, and the stub is what a module something
     // still requires is replaced by when it is switched off. That is the same
     // mechanism and the one that will still exist in a finished engine.
-    const core = await assembleModules({ win32: false });
+    const core = await assembleModules({ win32: false, filesystem: { pageFile: await testPageFile() },
+        cache: { reader: roomy.reader } });
     assert.throws(()=>core.api('win32').anything(), { code: 'NOT_IMPLEMENTED' });
 });
 
 test('disabling a leaf nobody requires removes it from the build', async()=>{
-    const core = await assembleModules({ graphics: false });
+    const core = await assembleModules({ graphics: false, filesystem: { pageFile: await testPageFile() },
+        cache: { reader: roomy.reader } });
     const names = core.diagnostics().map(d=>d.name);
     assert.ok(!names.includes('graphics'));
     assert.throws(()=>core.api('graphics'), /not part of this build/);
 });
 
 test('disabling a required module installs a stub in its place', async()=>{
-    const core = await assembleModules({ win32: false });
+    const core = await assembleModules({ win32: false, filesystem: { pageFile: await testPageFile() },
+        cache: { reader: roomy.reader } });
     const win32 = core.diagnostics().find(d=>d.name === 'win32');
     assert.ok(win32);
     assert.equal(win32.status, 'stub');
@@ -93,7 +100,8 @@ test('configuration errors propagate', async()=>{
 });
 
 test('dispose resolves and keeps the instance queryable', async()=>{
-    const core = await assembleModules({});
+    const core = await assembleModules({ filesystem: { pageFile: await testPageFile() },
+        cache: { reader: roomy.reader } });
     await core.dispose();
     assert.equal(core.diagnostics().length, ALL_LAYERS.length);
 });
@@ -109,9 +117,11 @@ test('two graphs in one realm each answer for their own layers, and one going le
     /** @param {any} core */
     const shape = core=>core.diagnostics().map((/** @type {any} */ layer)=>
         [layer.name, layer.status, Object.keys(layer.metrics ?? {}).sort()]);
-    const parent = await assembleModules({});
+    const parent = await assembleModules({ filesystem: { pageFile: await testPageFile() },
+        cache: { reader: roomy.reader } });
     const before = shape(parent);
-    const child = await assembleModules({});
+    const child = await assembleModules({ filesystem: { pageFile: await testPageFile() },
+        cache: { reader: roomy.reader } });
     child.api('graphics');
 
     await child.dispose();
@@ -127,7 +137,8 @@ test('two graphs in one realm each answer for their own layers, and one going le
 });
 
 test('a build is taken down once however many times it is disposed', async()=>{
-    const core = await assembleModules({});
+    const core = await assembleModules({ filesystem: { pageFile: await testPageFile() },
+        cache: { reader: roomy.reader } });
     /** @type {Map<string, number>} */
     const calls = new Map();
     for (const module of core.modules)

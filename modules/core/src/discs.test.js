@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from './process/page-file.fixture.js';
 import { discReader, freeLetter, mountDiscs } from './discs.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { buildIso } from './layers/filesystem/internal/iso/build.js';
@@ -74,7 +75,7 @@ test('bytes and a synchronous reader are taken as they are', async()=>{
 });
 
 test('mounted discs are CD-ROM drives, and a letter asked for must be free', async()=>{
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     /** @type {any[]} */
     const emitted = [];
     const events = { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>

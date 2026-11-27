@@ -11,6 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from './process/page-file.fixture.js';
 import {
     createMacrotask, pacedYield, pageIsHidden, timedWait, divergenceReporter, pagePacing,
     PAGE_YIELD_MS, PENDING_YIELD_MS, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound,
@@ -48,7 +49,7 @@ import { createBundleSource } from './layers/filesystem/internal/bundle/source.j
 import { createBlockCache } from './layers/filesystem/internal/bundle/cache.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
-import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
+import { createMemoryStore } from './layers/filesystem/internal/memory-store.fixture.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { parsePe } from './layers/loader/internal/pe.js';
 import { createAccessors } from './layers/memory/internal/accessors.js';
@@ -638,7 +639,7 @@ test('a library missing beside the program is read from system32', async()=>{
     // installer's `DXSETUP` put it. A search that stopped beside the
     // executable would report every one of them missing.
     const d3dx = new Uint8Array([1, 2, 3, 4]);
-    const filesystem = await filesystemModule.create({
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile(),
         drives: { C: { source: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }) } },
     });
     const read = shippedLibraryReader(filesystem, null, IMAGE);
@@ -651,7 +652,7 @@ test('a library missing beside the program is read from system32', async()=>{
 test('a file beside the program still wins over system32', async()=>{
     const beside = new Uint8Array([9]);
     const system = new Uint8Array([7]);
-    const filesystem = await filesystemModule.create({
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile(),
         drives: { C: { source: createMemoryStore({
             'WINDOWS\\system32\\d3dx9_26.dll': system, 'App\\d3dx9_26.dll': beside,
         }) } },
@@ -680,6 +681,7 @@ test('an import the engine answers is its own over a file in system32, not over 
             isSystem: ours,
             isKnownDll: (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll',
             readLibrary: shippedLibraryReader(await filesystemModule.create({
+                pageFile: await testPageFile(),
                 drives: { C: { source: createMemoryStore(files) } } }), null, IMAGE, ours),
         });
 
@@ -721,7 +723,7 @@ function movable(file){
  *        `bits`: the process's machine.
  */
 async function mapBeside(files, executable, space){
-    const filesystem = await filesystemModule.create({
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile(),
         drives: { C: { source: createMemoryStore(Object.fromEntries(
             Object.entries(files).map(([name, bytes])=>[`App\\${name}`, bytes]))) } },
     });

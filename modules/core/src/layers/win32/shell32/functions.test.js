@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { SHELL32_ORDINALS, createShellFunctions } from './functions.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
@@ -599,7 +600,7 @@ test('a notification icon is kept by its window and id until it is deleted', ()=
  *     past it: memory refuses a read across it.
  */
 async function machineWithVolume(extra = {}, allocationEnd = 0){
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const volume = /** @type {any} */ (createVolume(fs));
     volume.mkdir('C:\\work');
     volume.setCurrentDirectory('C:\\work');

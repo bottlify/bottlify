@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PIECE_SIZE, bytesOf, createMemoryStore } from './memory-store.js';
+import { PIECE_SIZE, bytesOf } from './memory-store.js';
+import { createMemoryStore } from './memory-store.fixture.js';
 import { assembled } from './read-into.fixture.js';
 
 const bytes = Uint8Array.from([1, 2, 3]);

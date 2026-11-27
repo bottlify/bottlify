@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { PIECE_SIZE, bytesOf, createMemoryStore } from './memory-store.js';
+import { PIECE_SIZE, bytesOf } from './memory-store.js';
+import { createMemoryStore } from './memory-store.fixture.js';
 import { createPageFile, createPageFileStore } from './page-file.js';
 import { assembled } from './read-into.fixture.js';
 import { pieceSpace } from './page-space.fixture.js';

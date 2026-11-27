@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PIECE_SIZE, createMemoryStore } from './memory-store.js';
+import { PIECE_SIZE } from './memory-store.js';
+import { createMemoryStore } from './memory-store.fixture.js';
 import { createOverlay } from './tree.js';
 
 /** @param {string} text */

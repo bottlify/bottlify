@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import {
@@ -45,7 +46,7 @@ const DE_FILEDESTISFLD = 0x80;
 
 /** init_shfo_tests: the files and directories every case starts from. */
 async function workspace(){
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const volume = /** @type {any} */ (createVolume(fs));
     volume.mkdir('C:\\work');
     volume.setCurrentDirectory('C:\\work');

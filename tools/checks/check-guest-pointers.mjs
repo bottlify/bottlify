@@ -54,6 +54,7 @@ import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { isMain } from '../lib/common.mjs';
 import { noCache } from '../../modules/core/src/layers/cache/module.js';
+import { testPageFile } from '../../modules/core/src/process/page-file.fixture.js';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -358,7 +359,7 @@ async function build(){
         }
     };
     const filesystemModule = createFilesystemModule();
-    const filesystem = await filesystemModule.create({});
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
 
     const thread = { id: 1, tebAddress: 0 };
     /** @type {Map<number, { type: string, object: any }>} */

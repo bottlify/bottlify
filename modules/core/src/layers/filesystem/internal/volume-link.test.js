@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { Worker } from 'node:worker_threads';
 import { createFilesystemModule } from '../module.js';
 import { createLinkMemory, openLink } from '../../../system/link.js';
@@ -18,7 +19,8 @@ const bytes = text=>new TextEncoder().encode(text);
 
 test('a process in another thread stands on the run\'s volume: it reads and writes what this'
     + ' one does, and the sharing both agreed to holds across them', { timeout: 30000 }, async()=>{
-    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+    const run = { pageFile: await testPageFile(), drives: new Map(), volumes: new Map(),
+        writables: new Map(),
         watchers: new Set() };
     const layer = createFilesystemModule();
     const here_ = await layer.create({ volume: run });
@@ -98,9 +100,11 @@ test('a process on the run\'s volume from afar reports its drives as the run\'s,
 
 test('what a process reads of a drive from afar it keeps until the drive changes, and reads'
     + ' again after', async()=>{
-    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+    const run = { pageFile: await testPageFile(), drives: new Map(), volumes: new Map(),
+        writables: new Map(),
         watchers: new Set(), revisions: new Int32Array(new SharedArrayBuffer(26 * 4)) };
-    const here_ = await createFilesystemModule().create({ volume: run });
+    const here_ = await createFilesystemModule().create({ pageFile: await testPageFile(),
+        volume: run });
     const file = here_.open('C:\\data.bin', { write: true,
         disposition: here_.Disposition.CREATE_NEW });
     here_.write(file, new Uint8Array(3000).fill(1));
@@ -141,7 +145,8 @@ test('what a process reads of a drive from afar it keeps until the drive changes
 
 test('a process on the run\'s volume from afar links a file as one standing on it does: one file'
     + ' under both names, for both of them', async()=>{
-    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+    const run = { pageFile: await testPageFile(), drives: new Map(), volumes: new Map(),
+        writables: new Map(),
         watchers: new Set() };
     const layer = createFilesystemModule();
     const local = await layer.create({ volume: run });
@@ -164,7 +169,8 @@ test('a process on the run\'s volume from afar links a file as one standing on i
 test('a process on the run\'s volume from afar makes a junction the run\'s volume holds', async()=>{
     // fusion in a setup's process of its own makes the GAC folder a junction
     // to WinSxS; under concurrency that process stands on the volume from afar.
-    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+    const run = { pageFile: await testPageFile(), drives: new Map(), volumes: new Map(),
+        writables: new Map(),
         watchers: new Set() };
     const layer = createFilesystemModule();
     const local = await layer.create({ volume: run });

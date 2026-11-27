@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { buildIso } from '../../filesystem/internal/iso/build.js';
 import { openIso } from '../../filesystem/internal/iso/iso9660.js';
@@ -52,7 +53,7 @@ async function setup(){
         },
         hidden: ['Hidden.dat'],
     });
-    const fs = await filesystemModule.create({});
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
     const iso = await openIso((offset, length)=>image.subarray(offset, offset + length));
     fs.mount('D', { source: createIsoSource(iso), readOnly: true,
         volume: { kind: 'cdrom', label: iso.volume.label } });
