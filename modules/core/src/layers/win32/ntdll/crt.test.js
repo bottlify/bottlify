@@ -111,8 +111,7 @@ const memoryIo = ()=>{
 test('the wide readings skip the Latin-1 blanks alone, msvcrt\'s reading otherwise', ()=>{
     const { memory, view, io } = memoryIo();
     const msvcrt = /** @type {Record<string, any>} */ (createConversionFunctions(
-        /** @type {any} */ ({ ...io, pointerSize: 4,
-            readCString: ()=>'' })));
+        /** @type {any} */ ({ ...io, pointerSize: 4, guest: guestWindow(memory) })));
     const ntdll = /** @type {Record<string, any>} */ (createNtdllCrt({ ...io, crt: msvcrt }));
     /** @param {string} text */
     const put = text=>{

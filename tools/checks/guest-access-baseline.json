@@ -681,12 +681,6 @@
    "accessor i32": 1,
    "accessor u32": 1
   },
-  "msvcrt/convert.js": {
-   "accessor writeInt": 1,
-   "string readString": 1,
-   "string writeString": 1,
-   "string writeWideString": 1
-  },
   "msvcrt/functions.js": {
    "string readString": 1,
    "string readWide": 1,
