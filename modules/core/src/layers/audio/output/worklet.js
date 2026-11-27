@@ -629,6 +629,34 @@ function mixBlock({ global, slots, seams, block, blockFrames, outputRate, arena 
     return maxProduced;
 }
 
+/**
+ * A track table's parts as views of where it lies - a view of memory the run
+ * holds, a span of its cache's segment, so every view starts at its offset:
+ * the global header, each slot's header and ring, and the DMA voices'
+ * mirrors after the last slot (null for a table made without them, whose
+ * buffers play through queues alone). One reading of the layout for every
+ * side that maps the table.
+ *
+ * @param {Uint8Array} table
+ */
+function tableViews(table){
+    const { buffer, byteOffset } = table;
+    const slots = [];
+    for (let slot = 0; slot < SLOTS; slot++)
+    {
+        slots.push({
+            header: new Int32Array(buffer, byteOffset + slotHeaderOffset(slot), SLOT_HEADER_INT32),
+            pcm: new Uint8Array(buffer, byteOffset + slotPcmOffset(slot), SLOT_BYTES),
+        });
+    }
+    return {
+        global: new Int32Array(buffer, byteOffset, GLOBAL_HEADER_INT32),
+        slots,
+        arena: table.byteLength >= ARENA_OFFSET + ARENA_BYTES
+            ? new Uint8Array(buffer, byteOffset + ARENA_OFFSET, ARENA_BYTES) : null,
+    };
+}
+
 /* WORKLET-SHARED:END */
 
 /**
@@ -646,24 +674,7 @@ function mixBlock({ global, slots, seams, block, blockFrames, outputRate, arena 
  * @returns {PlayedTable}
  */
 function playedTable(table){
-    const { buffer, byteOffset } = table;
-    const slots = [];
-    const seams = [];
-    for (let slot = 0; slot < SLOTS; slot++)
-    {
-        slots.push({
-            header: new Int32Array(buffer, byteOffset + slotHeaderOffset(slot), SLOT_HEADER_INT32),
-            pcm: new Uint8Array(buffer, byteOffset + slotPcmOffset(slot), SLOT_BYTES),
-        });
-        seams.push(createSeam());
-    }
-    return {
-        global: new Int32Array(buffer, byteOffset, GLOBAL_HEADER_INT32),
-        slots,
-        seams,
-        arena: table.byteLength >= ARENA_OFFSET + ARENA_BYTES
-            ? new Uint8Array(buffer, byteOffset + ARENA_OFFSET, ARENA_BYTES) : null,
-    };
+    return { ...tableViews(table), seams: Array.from({ length: SLOTS }, ()=>createSeam()) };
 }
 
 class BottlifyOutput extends AudioWorkletProcessor {

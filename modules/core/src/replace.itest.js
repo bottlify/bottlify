@@ -21,7 +21,7 @@ import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import {
-    slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, PCM_MASK,
+    tableViews, PCM_MASK,
     STATE, STATE_OPEN, RATE, CHANNELS, BITS, GAIN, GAIN_SCALE, WRITTEN, READ,
 } from './layers/audio/output/mix.js';
 
@@ -222,8 +222,7 @@ test('the reader keeps its level, its cursor and its sink across a child it star
         // the way `worklet.js`'s `resampleInto` would -- so the cursor the
         // reader holds is not at zero.
         const table = app.audio.table();
-        const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
-        const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+        const { header, pcm } = tableViews(table).slots[0];
         Atomics.store(header, STATE, STATE_OPEN);
         Atomics.store(header, RATE, 48000);
         Atomics.store(header, CHANNELS, 2);
@@ -295,11 +294,10 @@ test('the reader keeps its level, its cursor and its sink across a child it star
         // rather than making one of its own that nobody would read.
         const childTable = app.audio.table();
         assert.equal(childTable, table, 'the same table');
-        const childHeader = new Int32Array(childTable, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        const { header: childHeader, pcm: childPcm } = tableViews(childTable).slots[0];
         assert.equal(Atomics.load(childHeader, READ), consumed,
             'the read cursor continued, not reset');
 
-        const childPcm = new Uint8Array(childTable, slotPcmOffset(0), SLOT_BYTES);
         const writtenBefore = Atomics.load(childHeader, WRITTEN);
         childPcm.set([0, 12, 0, 12], writtenBefore & PCM_MASK);
         Atomics.store(childHeader, WRITTEN, writtenBefore + 4);

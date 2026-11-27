@@ -107,14 +107,8 @@ const WHDR_INQUEUE = 16;
  */
 async function deviceOf(mixer){
     const mix = await import('../../audio/output/mix.js');
-    const table = mixer.table;
-    const global = new Int32Array(table, 0, mix.GLOBAL_HEADER_INT32);
-    const slots = Array.from({ length: mix.SLOTS }, (_, slot)=>({
-        header: new Int32Array(table, mix.slotHeaderOffset(slot), mix.SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, mix.slotPcmOffset(slot), mix.SLOT_BYTES),
-    }));
+    const { global, slots, arena } = mix.tableViews(mixer.table);
     const seams = slots.map(()=>mix.createSeam());
-    const arena = new Uint8Array(table, mix.ARENA_OFFSET, mix.ARENA_BYTES);
     return {
         /** @param {number} frames */
         read(frames){

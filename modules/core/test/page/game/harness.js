@@ -31,10 +31,7 @@ import { DEFAULT_MEMORY_SIZE } from '../../../src/layers/cpu/module.js';
 import { gpuFeaturesOf, gpuLimitsOf } from '../../../src/layers/graphics/webgpu/features.js';
 import { createFakeDevice } from '../../../src/layers/graphics/webgpu/internal/fake-device.js';
 import { createInputRoute } from '../../../src/layers/input/route.js';
-import {
-    SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES, ARENA_OFFSET, ARENA_BYTES,
-    slotHeaderOffset, slotPcmOffset, createSeam, mixBlock,
-} from '../../../src/layers/audio/output/mix.js';
+import { createSeam, mixBlock, tableViews } from '../../../src/layers/audio/output/mix.js';
 
 /** How much of each unbounded collection survives the trip back out. */
 const LIMITS = {
@@ -534,7 +531,7 @@ const DRAIN_CAP_FRAMES = 16384;
  * @param {any} app
  * @param {{ fromMs: number, toMs: number, blocks: Int16Array[] } | null} [capture]
  *     what was mixed between two moments of the run, kept to be written out
- * @param {((table: ArrayBufferLike, sampleRate: number) => void) | undefined} [elsewhere]
+ * @param {((table: Uint8Array, sampleRate: number) => void) | undefined} [elsewhere]
  *     who reads the table instead, on a thread of its own: the page, when the
  *     engine runs in a worker, as a launcher's worklet reads it off the engine's
  * @returns {string} how the sound is read
@@ -560,26 +557,14 @@ function drainSound(app, capture = null, elsewhere = undefined){
  * timer on the page's own thread instead of the audio-rendering thread. See
  * {@link drainSound}.
  *
- * @param {ArrayBufferLike} table @param {number} sampleRate
+ * @param {Uint8Array} table  the track table, a view of where it lies @param {number} sampleRate
  * @param {{ fromMs: number, toMs: number, blocks: Int16Array[] } | null} capture
  */
 export function drainTable(table, sampleRate, capture){
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
-    /** @type {{ header: Int32Array, pcm: Uint8Array }[]} */
-    const slots = [];
-    /** @type {ReturnType<typeof createSeam>[]} */
-    const seams = [];
-    for (let slot = 0; slot < SLOTS; slot++)
-    {
-        slots.push({
-            header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-            pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
-        });
-        seams.push(createSeam());
-    }
     // The voices' mirrors, which a playing buffer is read from as a device
-    // reads its DMA region.
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    // reads its DMA region, with the header and the slots (`tableViews`).
+    const { global, slots, arena } = tableViews(table);
+    const seams = slots.map(()=>createSeam());
     const block = new Float32Array(DRAIN_CAP_FRAMES * 2);
     const started = performance.now();
     let readAt = started;
@@ -1515,7 +1500,7 @@ function filesUnder(app, directory){
 /**
  * @param {any} canvas   Where the last frame is shown: the page's, or an
  *     OffscreenCanvas of it inside a worker.
- * @param {{ drainElsewhere?: (table: ArrayBufferLike, sampleRate: number) => void }} [how]
+ * @param {{ drainElsewhere?: (table: Uint8Array, sampleRate: number) => void }} [how]
  *     Where the sound is read, when not on this thread.
  * @returns {Harness}
  */

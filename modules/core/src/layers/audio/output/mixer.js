@@ -5,13 +5,13 @@
  */
 
 import {
-    SLOTS, SLOT_BYTES, PCM_MASK, SLOT_HEADER_INT32, GLOBAL_HEADER_INT32, TABLE_BYTES,
+    SLOT_BYTES, PCM_MASK, TABLE_BYTES,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO, MIXED_FRAMES,
     LEFT_CUT, RIGHT_CUT, KIND, KIND_QUEUE, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
-    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES, DEVICE_LEAD_MS,
+    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_BYTES, DEVICE_LEAD_MS,
     STATE_FREE, STATE_OPEN, STATE_CLOSING, GAIN_SCALE,
     OUTPUT_RATE, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES,
-    slotHeaderOffset, slotPcmOffset, FLOAT_SAMPLES, pcmSample, sampleBytes,
+    FLOAT_SAMPLES, pcmSample, sampleBytes, tableViews,
 } from './mix.js';
 
 /**
@@ -236,34 +236,21 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, mad
     const table = kept.table;
     /** What lets the memory go, where this mixer's output was made over it (`release`). */
     let owned = kept === made ? made.release : undefined;
-    const { buffer, byteOffset } = table;
+    const { global, slots, arena } = tableViews(table);
     if (isFresh)
     {
         // Memory held for it may hold what was there before: every header a
         // reader goes by begins empty. A ring's or the arena's bytes are read
         // only where a header says they were written, and are left untouched,
         // so a page of them is memory only once a voice writes it.
-        new Int32Array(buffer, byteOffset, GLOBAL_HEADER_INT32).fill(0);
-        for (let slot = 0; slot < SLOTS; slot++)
+        global.fill(0);
+        for (const { header } of slots)
         {
-            new Int32Array(buffer, byteOffset + slotHeaderOffset(slot), SLOT_HEADER_INT32).fill(0);
+            header.fill(0);
         }
-    }
-    const global = new Int32Array(buffer, byteOffset, GLOBAL_HEADER_INT32);
-    if (isFresh)
-    {
         Atomics.store(global, OUTPUT_RATE, sampleRate);
     }
 
-    /** @type {{ header: Int32Array, pcm: Uint8Array }[]} */
-    const slots = [];
-    for (let slot = 0; slot < SLOTS; slot++)
-    {
-        slots.push({
-            header: new Int32Array(buffer, byteOffset + slotHeaderOffset(slot), SLOT_HEADER_INT32),
-            pcm: new Uint8Array(buffer, byteOffset + slotPcmOffset(slot), SLOT_BYTES),
-        });
-    }
     if (!isFresh && !beside)
     {
         // A process replacement, not a device replacement: the parent's track
@@ -288,10 +275,9 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, mad
     const openVoices = new Set();
     let fallbackTracks = 0;
 
-    // The arena behind the slots: the DMA voices' mirrors. A table made before
-    // it had one has none, and every sound buffer then plays through a queue.
-    const arena = table.byteLength >= ARENA_OFFSET + ARENA_BYTES
-        ? new Uint8Array(buffer, byteOffset + ARENA_OFFSET, ARENA_BYTES) : null;
+    // The arena behind the slots, the DMA voices' mirrors (`tableViews`): a
+    // table made before it had one has none, and every sound buffer then
+    // plays through a queue.
     /**
      * Its free spans, [offset, bytes], in offset order. A voice takes the first
      * that fits, rounded to sixteen bytes; closing one gives its span back and

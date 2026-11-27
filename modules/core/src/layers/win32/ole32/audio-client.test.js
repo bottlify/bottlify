@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createAudioClients, readStreamFormat, validateFormat } from './audio-client.js';
 import { LONG_RSP, callLong } from '../../bridge/internal/long-machine.fixture.js';
 import { createMixer } from '../../audio/output/mixer.js';
-import { READ, WRITTEN, SLOT_HEADER_INT32, slotHeaderOffset } from '../../audio/output/mix.js';
+import { READ, WRITTEN, tableViews } from '../../audio/output/mix.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -481,8 +481,7 @@ function fed(halves, deviceRate, burstMs, lateMs){
     assert.equal(s.call(client, 'Start'), S_OK);
     const [track] = s.tracks;
     // The audio thread's end of the slot: what it read, against what was written.
-    const header = new Int32Array(/** @type {any} */ (s.table).table, slotHeaderOffset(track.slot),
-        SLOT_HEADER_INT32);
+    const { header } = tableViews(/** @type {any} */ (s.table).table).slots[track.slot];
     const pull = /** @type {()=>boolean} */ (s.whens[0]);
     const every = s.timers[0].delay;
     const period = RATE / 100;
