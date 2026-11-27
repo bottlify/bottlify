@@ -284,6 +284,15 @@ test('a rectangle lock in a 64-bit process writes the address whole', ()=>{
         { SwapEffect: 1, hDeviceWindow: -1, Windowed: 1 });
     assert.equal(view.getBigInt64(0x80 + D3DPRESENT_PARAMETERS9_64.hDeviceWindow, true), -1n);
     assert.equal(view.getUint32(0x80 + D3DPRESENT_PARAMETERS9_64.Windowed, true), 1);
+    // GetCreationParameters in a 64-bit process: the focus window whole, its
+    // high dword the engine's handle widened, never what the buffer held.
+    createFields(memory).writeStruct(0x100, D3DDEVICE_CREATION_PARAMETERS64,
+        { AdapterOrdinal: 0, DeviceType: 1, hFocusWindow: 0x10020, BehaviorFlags: 0x40 });
+    assert.equal(view.getBigUint64(0x100 + D3DDEVICE_CREATION_PARAMETERS64.hFocusWindow, true),
+        0x10020n);
+    assert.equal(view.getUint32(0x100 + D3DDEVICE_CREATION_PARAMETERS64.BehaviorFlags, true),
+        0x40);
+    assert.equal(view.getUint32(0x100 + 0x14, true), 0xcdcdcdcd, 'the tail padding is left');
 });
 
 test('the Direct3D and DirectDraw structures have their headers\' sizes', ()=>{

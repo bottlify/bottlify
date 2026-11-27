@@ -49,8 +49,8 @@ import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
 import { D3DDEVTYPE, D3DFMT, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
 import { DISPLAY_DRIVER, REFRESH_HZ, displayModes, refreshRatesOf, registryMode }
     from '../../win32/user32/display.js';
-import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
-    D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
+import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DADAPTER_IDENTIFIER8_FIELDS,
+    D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
 import { vertexCountOf } from '../d3d8/render.js';
 import { PALETTE_BYTES } from '../d3d9/device.js';
@@ -2802,7 +2802,7 @@ export function createDirect3D8Seam(
      */
     const writeAdapterIdentifier = (address, flags)=>{
         const { vendorId, deviceId, description } = describeAdapter(identity?.() ?? null);
-        const block = new Uint8Array(D3DADAPTER_IDENTIFIER8.FIELDS);
+        const block = new Uint8Array(D3DADAPTER_IDENTIFIER8_FIELDS);
         /** @param {string} text @param {number} at */
         const ascii = (text, at)=>{
             for (let index = 0; index < Math.min(text.length, ADAPTER_STRING_LENGTH - 1); index++)

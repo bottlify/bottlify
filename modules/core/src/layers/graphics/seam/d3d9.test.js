@@ -34,8 +34,8 @@ import {
     D3DDISPLAYMODE, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9, createFields,
 } from './structs.js';
 import {
-    D3DADAPTER_IDENTIFIER9, D3DCAPS9, D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER, D3DSURFACE_DESC9,
-    D3DVERTEXELEMENT9, D3DVIEWPORT9, D3DVOLUME_DESC9,
+    D3DADAPTER_IDENTIFIER9, D3DADAPTER_IDENTIFIER9_FIELDS, D3DCAPS9, D3DDISPLAYMODEEX,
+    D3DDISPLAYMODEFILTER, D3DSURFACE_DESC9, D3DVERTEXELEMENT9, D3DVIEWPORT9, D3DVOLUME_DESC9,
 } from '../d3d9/structs.js';
 import {
     IDIRECT3DCUBETEXTURE9_SLOTS, IDIRECT3DDEVICE9_SLOTS, IDIRECT3DQUERY9_SLOTS,
@@ -2015,7 +2015,7 @@ test('the adapter a Direct3D 9 program is told about is the one every generation
         16)], [...ADAPTER_GUID]);
     assert.equal(text(D3DADAPTER_IDENTIFIER9.Driver), 'bottlifyumd.dll');
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.WHQLLevel), 1);
-    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.FIELDS), 0xcdcdcdcd,
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9_FIELDS), 0xcdcdcdcd,
         'the padding after the fields is not written');
     h.box.call(root, 2, []);
 });
