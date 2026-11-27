@@ -6891,10 +6891,7 @@ export function createWin32Module(){
 
                 'OLEAUT32.dll': ()=>createAutomationFunctions({
                     errorSlots,
-                    pointerSize,
-                    readMemory,
-                    writeMemory,
-                    fillMemory,
+                    guest,
                     heap,
                     // A date written without a year is in this one.
                     systemTimeMs: ()=>kernel.clock.wallClock(),

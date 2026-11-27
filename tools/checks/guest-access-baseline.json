@@ -1051,18 +1051,6 @@
    "accessor writeU32": 1,
    "string readWide": 1
   },
-  "oleaut32/functions.js": {
-   "accessor readU16": 1,
-   "accessor readU32": 1,
-   "accessor readWords": 1,
-   "accessor writeDouble": 1,
-   "accessor writeU16": 1,
-   "accessor writeU32": 1,
-   "accessor writeWords": 1,
-   "copy readMemory().slice()": 25,
-   "string ansi": 1,
-   "string wideAt": 1
-  },
   "oleaut32/invoke.js": {
    "accessor readU32": 1,
    "accessor writeU32": 1,
