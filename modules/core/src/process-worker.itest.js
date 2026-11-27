@@ -244,9 +244,43 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
         /** @type {any[]} */
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>started.push(event.worker));
-        assert.equal(await app.run({ timeoutMs: 90_000 }), 0, divergences.join('\n'));
+        /** @type {string[]} */
+        const losses = [];
+        app.on('loss', (/** @type {any} */ seen)=>losses.push(`${seen.api}: ${seen.detail}`));
+        // The run's cache as the processes stand: the owners each is given there.
+        // The run's own (its presenter's scratches) are out before any process.
+        const runs = Object.keys(app.runCache().ownersOut);
+        const owners = { out: new Set(), served: 0 };
+        const watching = setInterval(()=>{
+            const figures = app.runCache();
+            Object.keys(figures.ownersOut).forEach(prefix=>owners.out.add(prefix));
+            owners.served = Math.max(owners.served, figures.served);
+        }, 5);
+        try
+        {
+            assert.equal(await app.run({ timeoutMs: 90_000 }), 0, divergences.join('\n'));
+        }
+        finally
+        {
+            clearInterval(watching);
+        }
         assert.deepEqual(started, [true, true], 'the program and its child, each in a worker');
         assert.deepEqual(divergences, []);
+        assert.ok([...owners.out].filter(prefix=>!runs.includes(prefix)
+            && prefix.startsWith('scratch/')).length >= 2,
+        `each process's scratches under names of its own: ${[...owners.out]}`);
+        assert.ok(owners.served >= 2, 'the backend\'s names and the child\'s root\'s, by channel');
+        for (let turns = 0; turns < 200 && app.runCache().served > 1; turns++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 5));
+        }
+        const after = app.runCache();
+        assert.equal(after.served, 1, 'the root gone with its process, the backend\'s for the run');
+        assert.deepEqual(Object.keys(after.ownersOut), runs,
+            'nothing of the processes\' owners out, the run\'s own as they were');
+        assert.equal(after.spaces.texels?.bodies ?? 0, 0, 'no texels left');
+        assert.equal(after.ownerTails.owners, 0, 'and no tail');
+        assert.deepEqual(losses, []);
         const frames = fromWorker.filter(message=>message.type === 'frame');
         assert.ok(frames.length >= 1, 'the child\'s device presented on the graphics worker');
         assert.deepEqual([frames[0].width, frames[0].height], [64, 32],

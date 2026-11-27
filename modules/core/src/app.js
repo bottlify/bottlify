@@ -22,7 +22,7 @@ import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js'
 import {
     baseOf, compositionPlan, needsComposing,
 } from './layers/graphics/webgpu/internal/compose.js';
-import { connectGraphicsWorker } from './layers/graphics/remote/connect.js';
+import { connectGraphicsWorker, lendBackend } from './layers/graphics/remote/connect.js';
 import {
     DIR_EXPORT, imageKind, parseExportDirectory, parsePe, readExports, readImports, rvaToFileOffset,
 } from './layers/loader/internal/pe.js';
@@ -3999,6 +3999,12 @@ export async function createApp(options){
     if (runCache)
     {
         system.volume.pageFile = openRunPageFile(events, runCache.reader);
+    }
+    // The run's graphics worker keeps its backend's scratches under names of
+    // its own there, as the presenter below does here.
+    if (runCache && options.device?.worker)
+    {
+        lendBackend(options.device.worker, runCache);
     }
 
     // The presenter is a service of the run too, and for the same reason: a

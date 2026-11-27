@@ -95,8 +95,9 @@ flowchart TB
   the ring and zeroed when the ring is made, and the picture the presenter converts a surface
   in guest memory into on its way up (`webgpu/internal/presenter.js`) are scratches the same
   way, where the graphics layer made them; the run's presenter, which the run makes outside
-  the layer, holds them under names of the run's own (`RunCache.scratch`), and a backend in
-  the graphics worker keeps them in plain memory, kept the same way. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
+  the layer, holds them under names of the run's own (`RunCache.scratch`), and the backend in
+  the graphics worker under names the run hands it when the run starts (`remote/connect.js`
+  `lendBackend`), plain memory until then. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
   it while the level is unchanged. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of

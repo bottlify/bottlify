@@ -228,6 +228,31 @@ export function portEnd(port){
 }
 
 /**
+ * Hands the run's graphics worker its backend's own names in the run's cache,
+ * which its scratches are held under (`worker.js`): an owner of the run's,
+ * numbered by the keeper, and the segments made and let go of after, told to
+ * it until `leave`. By the thread that holds the keeper, once a run: what it
+ * holds goes with the run, or with the worker's end of the channel. Nothing
+ * where the run has no cache to serve.
+ *
+ * @param {{ postMessage: (message: any) => void }} worker
+ * @param {{ join: import('../../cache/module.js').Join,
+ *     serve: import('../../cache/module.js').Serve }} cache
+ * @returns {{ prefix: string, leave: () => void } | null}
+ */
+export function lendBackend(worker, cache){
+    const served = cache.serve('scratch');
+    const joined = served && cache.join(message=>worker.postMessage({ type: 'cache', message }));
+    if (!served || !joined)
+    {
+        return null;
+    }
+    worker.postMessage({ type: 'backend',
+        cache: { shared: joined.shared, segments: joined.segments, ...served } });
+    return { prefix: served.prefix, leave: joined.leave };
+}
+
+/**
  * @typedef {Object} Connection
  * @property {() => boolean} drew   whether a root of its plays on the worker
  * @property {(data: any) => void} frame
