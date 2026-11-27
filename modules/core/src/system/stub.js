@@ -46,6 +46,15 @@ export function createStubApi(moduleName){
 }
 
 /**
+ * Whether `api` is a stub (`createStubApi`): a layer that takes something
+ * of another may choose its own stand-in once, rather than calling the stub
+ * and catching what it throws.
+ *
+ * @param {any} api
+ */
+export const isStub = api=>typeof api?.marker === 'string' && api.marker.startsWith('[stub:');
+
+/**
  * Builds a stub module definition following the BottlifyModule contract.
  *
  * @param {string} name
