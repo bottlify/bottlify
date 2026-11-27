@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { allowMemory64 } from '../../cork/src/testing/memory64.js';
 import { createApp } from './app.js';
+import { fixedPastFourGiB } from './fixed-base.fixture.js';
 
 const FIXTURE = new URL('../test/fixtures/hello64.exe', import.meta.url);
 
@@ -80,15 +81,9 @@ test('fed every slice, as a program that presents frames is, a 64-bit process\'s
 test('linked at 0x140000000 with no relocations, it runs there, over an 8 GiB window',
     { timeout: 120000 }, async t=>{
         allowMemory64();
-        // The fixture as a 64-bit game ships: its relocations stripped, its base fixed.
-        const bytes = new Uint8Array(await readFile(FIXTURE));
+        const bytes = fixedPastFourGiB(new Uint8Array(await readFile(FIXTURE)));
         const view = new DataView(bytes.buffer);
-        const pe = view.getUint32(0x3c, true);
-        const optional = pe + 24;
-        assert.equal(view.getBigUint64(optional + 24, true), 0x140000000n);
-        view.setUint16(pe + 22, view.getUint16(pe + 22, true) | 1, true); // RELOCS_STRIPPED
-        view.setBigUint64(optional + 112 + 5 * 8, 0n, true); // no base relocation directory
-        view.setUint16(optional + 70, view.getUint16(optional + 70, true) & ~0x40, true);
+        assert.equal(view.getBigUint64(view.getUint32(0x3c, true) + 24 + 24, true), 0x140000000n);
         const app = await createApp({ executable: bytes });
         t.after(()=>app.dispose());
         /** @type {string[]} */

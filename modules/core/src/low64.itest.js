@@ -26,26 +26,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { allowMemory64 } from '../../cork/src/testing/memory64.js';
 import { createApp } from './app.js';
+import { fixedPastFourGiB } from './fixed-base.fixture.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 
 /** @param {string} name */
 const fixture = name=>new URL(`../test/fixtures/${name}.exe`, import.meta.url);
-
-/**
- * The fixture as a game ships: no relocations, its base fixed past 4 GiB.
- *
- * @param {Uint8Array} bytes
- */
-function stripRelocations(bytes){
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
-    const pe = view.getUint32(0x3c, true);
-    const optional = pe + 24;
-    assert.ok(view.getBigUint64(optional + 24, true) >= 2n ** 32n, 'linked past 4 GiB');
-    view.setUint16(pe + 22, view.getUint16(pe + 22, true) | 1, true); // RELOCS_STRIPPED
-    view.setBigUint64(optional + 112 + 5 * 8, 0n, true); // no base relocation directory
-    view.setUint16(optional + 70, view.getUint16(optional + 70, true) & ~0x40, true);
-    return bytes;
-}
 
 /**
  * @param {Uint8Array} executable @param {string} name @param {Record<string, unknown>} [more]
@@ -81,7 +66,7 @@ for (const stripped of [false, true])
         { timeout: 150000 }, async t=>{
             allowMemory64();
             const bytes = new Uint8Array(await readFile(fixture('low64')));
-            const { code, lines, app } = await run(stripped ? stripRelocations(bytes) : bytes,
+            const { code, lines, app } = await run(stripped ? fixedPastFourGiB(bytes) : bytes,
                 'low64', standInDevice());
             t.after(()=>app.dispose());
             assert.deepEqual(lines.filter(line=>!line.startsWith('ok   ')),
@@ -95,7 +80,7 @@ for (const stripped of [false, true])
 test('Direct3D 9\'s device, buffer and locked pointer lie below 4 GiB over a wide window',
     { timeout: 150000 }, async t=>{
         allowMemory64();
-        const bytes = stripRelocations(new Uint8Array(await readFile(fixture('d3d9_64'))));
+        const bytes = fixedPastFourGiB(new Uint8Array(await readFile(fixture('d3d9_64'))));
         const { code, lines, app } = await run(bytes, 'd3d9_64', standInDevice());
         t.after(()=>app.dispose());
         assert.deepEqual(lines.filter(line=>!line.startsWith('ok   ')), [], lines.join('\n'));
