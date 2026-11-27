@@ -101,16 +101,13 @@ function plainOf(services){
  *     mirrored: number | null,
  *     handoff: { frames: number, waitedMs: number, worstWaitedMs: number, thereMs: number,
  *         worstThereMs: number, showMs: number, worstShowMs: number,
- *         back: { count: number, ms: number, maxMs: number } | null,
- *         buffers: ReturnType<import('./frame-rotation.js').FrameRotation['figures']>
- *             | null } | null }}
+ *         back: { count: number, ms: number, maxMs: number } | null } | null }}
  *     diagnostics  `handoff`: the frames the worker sent here, how long they waited there
  *     for the one before to be shown, their way here, showing them, and the answers' way
- *     back, and the buffers frames sent as bytes crossed in, made and handed back (null
- *     while none came as bytes); null before a frame has come with its times;
- *     `phases`: where the worker's thread spent its time on this process's batches, summed
- *     over the roots that have presented or answered a diagnostics ask (null before any
- *     has, or in a build that times nothing); `latency`: each root's bound on the
+ *     back (null before a frame has come with its times); `phases`: where the worker's
+ *     thread spent its time on this process's
+ *     batches, summed over the roots that have presented or answered a diagnostics ask
+ *     (null before any has, or in a build that times nothing); `latency`: each root's bound on the
  *     frames the worker's GPU may still be drawing, with the presents that waited for it
  *     (`held`, `heldMs`), summed over the roots that have said it (null before any has);
  *     `waits`: what the program's thread waited on the worker for, by call;
@@ -263,6 +260,7 @@ export function lendBackend(worker, cache){
  *     the device gone, with the last things it was asked to make
  * @property {(message: string, seen: number) => void} refused  the worker's GPU
  *     refused a command buffer, and with it a frame
+ * @property {(message: string) => void} unshown  a frame the worker made is not shown
  */
 
 /**
@@ -317,26 +315,7 @@ const shownWordFor = worker=>{
 };
 
 /**
- * Tells the worker a frame is on this thread's queue. A frame sent as bytes
- * was copied onto the device as it was shown, so its buffer goes back with
- * the answer for a later frame to be written into (`frame-rotation.js`).
- *
- * @param {{ postMessage: (message: any, transfer?: Transferable[]) => void }} worker
- * @param {any} data  the frame's message
- */
-const answerShown = (worker, data)=>{
-    const answer = { type: 'shown', at: sharedNow(), serial: data.serial };
-    const buffer = data.pixels?.buffer;
-    if (buffer instanceof ArrayBuffer && buffer.byteLength > 0)
-    {
-        worker.postMessage({ ...answer, pixels: buffer }, [buffer]);
-        return;
-    }
-    worker.postMessage(answer);
-};
-
-/**
- * @param {{ postMessage: (message: any, transfer?: Transferable[]) => void,
+ * @param {{ postMessage: (message: any) => void,
  *     addEventListener: (type: 'message', listener: (event: { data: any }) => void) => void,
  *     removeEventListener: (type: 'message', listener: (event: { data: any }) => void) => void }}
  *     worker
@@ -362,14 +341,18 @@ function join(worker, connection){
                     {
                         Atomics.store(word, 0, data.serial);
                     }
-                    // The worker sends the next once this one is on this thread's queue.
-                    answerShown(worker, data);
+                    // The worker sends the next once this one is on this thread's queue,
+                    // and lets go of the memory a frame sent as bytes was held in.
+                    worker.postMessage({ type: 'shown', at: sharedNow(), serial: data.serial });
                     break;
                 case 'lost':
                     for (const each of [...connections])
                     {
                         each.lost(data.reason, data.message, data.recent);
                     }
+                    break;
+                case 'unshown':
+                    showing(connections)?.unshown(data.message);
                     break;
                 case 'refused':
                     // One GPU, told once, by whichever connection shows it.
@@ -533,8 +516,6 @@ export function connectGraphicsWorker(options){
         showMs: 0, worstShowMs: 0 };
     /** The answers' way back, as the worker said with its last frame. @type {any} */
     let back = null;
-    /** The buffers frames come in as bytes, as the worker said with its last such frame. @type {any} */
-    let buffers = null;
     /** @param {any} data @param {number} arrived @param {number} took */
     const handed = (data, arrived, took)=>{
         const waited = Math.max(0, Number(data.waitedMs) || 0);
@@ -547,7 +528,6 @@ export function connectGraphicsWorker(options){
         handoff.showMs += took;
         handoff.worstShowMs = Math.max(handoff.worstShowMs, took);
         back = data.back ?? back;
-        buffers = data.buffers ?? buffers;
     };
     /** @param {number} ms */
     const rounded = ms=>Math.round(ms * 100) / 100;
@@ -573,6 +553,7 @@ export function connectGraphicsWorker(options){
                 + (recent?.length ? `; last made: ${recent.join('; ')}` : ''), 'loss');
             lost?.();
         },
+        unshown: message=>divergence?.('graphics', message, 'loss'),
         refused: (message, seen)=>divergence?.('graphics', `the GPU refused a frame: ${message}`
             + (seen > 1 ? ` (x${seen})` : ''), 'loss'),
     };
@@ -726,7 +707,6 @@ export function connectGraphicsWorker(options){
                     showMs: rounded(handoff.showMs),
                     worstShowMs: rounded(handoff.worstShowMs),
                     back,
-                    buffers,
                 },
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
                 phases: phasesOf(senders),

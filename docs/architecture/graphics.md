@@ -98,12 +98,11 @@ flowchart TB
   the layer, holds them under names of the run's own (`RunCache.scratch`), and the backend in
   the graphics worker under names the run hands it when the run starts (`remote/connect.js`
   `lendBackend`), plain memory until then. A picture sent to another thread as bytes - a
-  process in a worker of its own, or the graphics worker's frames where the page cannot take a
-  picture from it - is transferred, and the thread that shows it hands the buffer back with its
-  answer once it is copied onto its device: the next frame of that size is written into it, so
-  two or three buffers carry every frame (`remote/frame-rotation.js`), a new one made only while
-  none has come back, and counted (`sent` in the presenter's report, `handoff.buffers` in the
-  graphics worker's). A Direct3D 8 or 9 frame's uniform arena, which its
+  process in a worker of its own (`host/process.worker.js` `sendFrames`), or the graphics
+  worker's frames where the page cannot take a picture from it - is written into memory held in
+  the run's cache, and the message carries the view of it, which the thread that shows it reads
+  in place onto its device; its answer (`shown`) lets the hold go, and the cache takes the room
+  back. One with no room there is not sent, and is a loss (`unsent` in the presenter's report). A Direct3D 8 or 9 frame's uniform arena, which its
   draws take their blocks from and its replay reads, is memory held in the run's cache
   (`d3d8/render.js` `createUniformArena`, `cache/scratch.js` `hold`), one hold a generation:
   outgrown mid-frame, it holds a larger one and lets the old go only at its next reset, after

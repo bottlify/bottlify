@@ -350,7 +350,7 @@
  * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number,
  *     guestCode?: boolean, guestTraps?: string[], worker?: any,
  *     driverRules?: 'legacy' | 'current', display?: { send: (frame: any) => void,
- *     bytes?: (length: number) => Uint8Array, figures?: () => Record<string, number> } }}
+ *     bytes: (length: number) => Uint8Array | null, figures?: () => Record<string, number> } }}
  *           [graphics]
  *           The graphics layer's configuration (docs/core/configuration.md,
  *           graphics), forwarded to it as given: `compressedTextures`

@@ -31,11 +31,10 @@ import { remoteStore } from '../layers/cpu/internal/store-link.js';
 import { ringPacing } from './ring-pacing.js';
 import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
-import { createFrameRotation } from '../layers/graphics/remote/frame-rotation.js';
 import { plainEvent } from '../system/events-across.js';
 import { handedFiles } from '../system/inherited-files.js';
 import { remoteCacheOwners, remoteCacheReader } from '../process/run-cache.js';
-import { relayedJoin } from '../layers/cache/module.js';
+import { ownedSpace, relayedJoin } from '../layers/cache/module.js';
 
 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
 {
@@ -67,25 +66,82 @@ const heapNow = ()=>{
 
 /**
  * The pictures of this process's surfaces, sent on `port` as the graphics
- * worker sends its frames, for the thread with the GPU to show. What it says
- * back once one is shown is not waited on: this thread blocks while it idles,
- * and a picture painted just before would wait with it. The answer carries
- * the frame's buffer back, which a later frame is written into
- * (`frame-rotation.js`); until one has come back a frame takes a new one.
+ * worker sends its frames, for the thread with the GPU to show. Each is
+ * written into memory held in the run's cache (`hold`), and the message
+ * carries the view of it, which the other thread reads in place - the
+ * segment is shared, so nothing is copied or transferred. Its answer, once
+ * the picture is on that thread's device, lets the hold go, and the cache
+ * takes the room back; it is not waited on, since this thread blocks while
+ * it idles and a picture painted just before would wait with it: a frame
+ * sent meanwhile takes a hold of its own. One the cache has no room for is
+ * not sent, and said (`lost`).
  *
  * @param {MessagePort} port
+ * @param {import('../layers/cache/scratch.js').Hold | null} hold  the process's frame names
+ * @param {(detail: string) => void} lost
  */
-export const sendFrames = port=>{
-    const rotation = createFrameRotation();
-    port.onmessage = ({ data })=>rotation.give(data?.pixels);
+export const sendFrames = (port, hold, lost)=>{
+    /** What lets each frame sent and not yet shown go, the oldest first. @type {(() => void)[]} */
+    const shown = [];
+    /** @type {{ bytes: Uint8Array, release: () => void } | null} */
+    let writing = null;
+    /**
+     * The names frames in flight are held under, `frame/<n>` the lowest free:
+     * a name held anew takes back at once the room its last frame let go of,
+     * where a new name would leave it to the keeper's next sweep.
+     */
+    const names = new Set();
+    /** The name the frame being written is held under. */
+    let slot = 0;
     let frameIndex = 0;
+    const counts = { held: 0, heldBytes: 0, refused: 0 };
+    // The receiver answers every frame, in order.
+    port.onmessage = ({ data })=>{
+        if (data?.type === 'shown')
+        {
+            shown.shift()?.();
+        }
+    };
     return {
-        bytes: rotation.bytes,
+        /** @param {number} length @returns {Uint8Array | null} */
+        bytes: length=>{
+            writing?.release();
+            slot = 0;
+            while (names.has(slot))
+            {
+                slot++;
+            }
+            writing = hold?.(`frame/${slot}`, length) ?? null;
+            if (writing === null)
+            {
+                if (counts.refused++ === 0)
+                {
+                    lost(`a picture of ${length} bytes found no room in the run's cache, and`
+                        + ' is not shown');
+                }
+                return null;
+            }
+            return writing.bytes;
+        },
         /** @param {{ pixels: Uint8Array, width: number, height: number, bytesPerRow: number,
          *     format: string }} frame */
-        send: frame=>port.postMessage({ type: 'frame', ...frame, frameIndex: ++frameIndex },
-            [frame.pixels.buffer]),
-        figures: rotation.figures,
+        send: frame=>{
+            const sent = /** @type {{ bytes: Uint8Array, release: () => void }} */ (writing);
+            writing = null;
+            const length = sent.bytes.byteLength;
+            const name = slot;
+            names.add(name);
+            counts.held++;
+            counts.heldBytes += length;
+            shown.push(()=>{
+                names.delete(name);
+                counts.held--;
+                counts.heldBytes -= length;
+                sent.release();
+            });
+            port.postMessage({ type: 'frame', ...frame, frameIndex: ++frameIndex });
+        },
+        figures: ()=>({ ...counts }),
     };
 };
 
@@ -179,6 +235,11 @@ export async function serveProcess(start){
     {
         cacheReaders.add(cacheRelay);
     }
+    // The names its pictures are held under while the run's thread shows them.
+    const framesOwned = display && cacheReader !== null ? cacheOwners?.own('frames') ?? null
+        : null;
+    const frames = framesOwned ? ownedSpace(/** @type {any} */ (cacheReader), framesOwned)
+        : null;
     const system = remoteSystem(ask, handlers, (target, method, args)=>
         link.call(target, method, args), volume, windowCells);
     // A wait on another process's object ended there: its word comes in
@@ -278,7 +339,9 @@ export async function serveProcess(start){
                 handle=>ask('inherited', 'position', [handle]),
                 (handle, at)=>ask('inherited', 'setPosition', [handle, at])),
             graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
-                display: display ? sendFrames(display) : undefined },
+                display: display ? sendFrames(display, frames?.space.hold ?? null,
+                    detail=>link.call('events', 'emit', ['loss', { api: 'graphics', detail }])
+                        .catch(()=>{})) : undefined },
             system,
             // Its output is written in order with its calls, below; the rest is
             // told as it happens, and not waited on.
@@ -309,6 +372,7 @@ export async function serveProcess(start){
     }
     catch (e){
         madeNow();
+        await frames?.close();
         if (cacheRelay !== null)
         {
             cacheReaders.delete(cacheRelay);
@@ -366,6 +430,7 @@ export async function serveProcess(start){
     finally
     {
         await app.dispose();
+        await frames?.close();
         if (cacheRelay !== null)
         {
             cacheReaders.delete(cacheRelay);

@@ -103,38 +103,6 @@ test('a frame the worker sends back is presented as one drawn here, its texture 
     assert.ok(device.calls.includes('destroy'));
 });
 
-test('a frame sent as bytes goes back with its answer once copied, for the next to be written '
-    + 'into; a picture and a frame of shared bytes do not', ()=>{
-    /** @type {any[][]} */
-    const answers = [];
-    const worker = Object.assign(fakeWorker(), {
-        /** @param {any} message @param {Transferable[]} [transfer] */
-        postMessage: (message, transfer)=>answers.push([message, transfer]),
-    });
-    const device = fakeDevice();
-    const end = connectGraphicsWorker({ worker, device, presentTo: ()=>{} });
-    const pixels = new Uint8Array(256 * 2);
-    const shared = new Uint8Array(new SharedArrayBuffer(256 * 2));
-    const buffers = { made: 2, reused: 5, returned: 6, dropped: 0, spare: 1 };
-    worker.answer({ type: 'frame', pixels, bytesPerRow: 256, width: 2, height: 2, frameIndex: 1,
-        format: 'bgra8unorm', sentAt: sharedNow(), buffers });
-    worker.answer({ type: 'frame', bitmap: { width: 2, height: 2 }, frameIndex: 2,
-        format: 'bgra8unorm' });
-    worker.answer({ type: 'frame', pixels: shared, bytesPerRow: 256, width: 2, height: 2,
-        frameIndex: 3, format: 'bgra8unorm' });
-    const shown = answers.filter(([message])=>message.type === 'shown');
-    assert.equal(shown.length, 3);
-    assert.equal(shown[0][0].pixels, pixels.buffer, 'the buffer the frame came in');
-    assert.deepEqual(shown[0][1], [pixels.buffer], 'transferred back, not copied');
-    const writes = device.calls.filter(call=>call[0] === 'writeTexture');
-    assert.equal(writes[0][2], pixels, 'copied onto the device before it went');
-    assert.deepEqual(shown.slice(1).map(([message, transfer])=>[message.pixels, transfer]),
-        [[undefined, undefined], [undefined, undefined]]);
-    assert.deepEqual(end.diagnostics().handoff?.buffers, buffers,
-        'what the worker said of its buffers, in the report');
-    end.dispose();
-});
-
 test('a frame\'s way from the worker is timed: waiting there, coming here, shown, answered',
     ()=>{
         const worker = fakeWorker();

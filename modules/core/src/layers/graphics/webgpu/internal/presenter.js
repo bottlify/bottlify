@@ -390,15 +390,15 @@ export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt =
  *        under the windows.
  * @param {{ send: (frame: { pixels: Uint8Array, width: number, height: number,
  *     bytesPerRow: number, format: string }) => void,
- *     bytes?: (length: number) => Uint8Array,
+ *     bytes: (length: number) => Uint8Array | null,
  *     figures?: () => Record<string, number> }} [options.display]
  *        Where a process with no GPU of its own - one in a worker of its own -
  *        sends a surface's picture, in the bytes an upload would carry, for
- *        the thread that has the GPU to show (`send`). The receiver takes
- *        each frame's bytes; `bytes` answers the buffer the next is written
- *        into, one handed back by the receiver where one has come
- *        (`remote/frame-rotation.js`), a new array each frame where absent;
- *        `figures` counts them for the report.
+ *        the thread that has the GPU to show (`send`): written into memory
+ *        held in the run's cache (`bytes`, null where it has no room, the
+ *        frame then not sent and counted `unsent`), which the receiver reads
+ *        in place (`host/process.worker.js` `sendFrames`); `figures` counts
+ *        the holds for the report.
  * @param {(name: string) => import('../../../cache/scratch.js').Scratch} [options.scratches]
  *        Memory the presenter keeps between frames, held in the run's cache:
  *        where a surface in guest memory is converted on its way up. Plain
@@ -486,13 +486,13 @@ export function createPresenter(options = {}){
     /**
      * Where a surface is converted on its way up, kept from frame to frame:
      * the upload copies it before it returns. A frame sent elsewhere
-     * (`display`) is bytes the receiver takes, and hands back.
+     * (`display`) is written into memory of its own, held until it is shown.
      */
     const converted = (options.scratches ?? (name=>plainScratches.scratch(name)))(
         'present/converted');
     const counters = {
         presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0, gammaShown: 0,
-        dropped: 0, layered: 0, composed: 0, unshown: 0, veiled: 0,
+        dropped: 0, layered: 0, composed: 0, unshown: 0, veiled: 0, unsent: 0,
     };
     /**
      * Canvas copies by the label of the surface shown: a Direct3D target, a
@@ -712,8 +712,12 @@ export function createPresenter(options = {}){
         const { display } = options;
         if (display)
         {
-            const length = surface.width * 4 * surface.height;
-            const pixels = display.bytes ? display.bytes(length) : new Uint8Array(length);
+            const pixels = display.bytes(surface.width * 4 * surface.height);
+            if (pixels === null)
+            {
+                counters.unsent++;
+                return undefined;
+            }
             convert(from, surface, pixels);
             counters.uploads++;
             counters.bytes += pixels.byteLength;
@@ -1378,7 +1382,7 @@ export function createPresenter(options = {}){
                 attached: attachments.length - 1,
                 failures: [...failures],
                 latency: latency.diagnostics(),
-                // The buffers frames were sent in: made, and handed back to be reused.
+                // The memory the frames sent and not yet shown are held in.
                 sent: options.display?.figures?.() ?? null,
                 disposed,
             };
