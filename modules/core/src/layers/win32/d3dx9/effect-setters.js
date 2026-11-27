@@ -851,7 +851,7 @@ export function SetMatrixTransposePointerArray({ u32, setU32, callStd, host, poi
 
 /**
  * The record of the parameter a name given for a handle names, or 0 for none:
- * the name hashed (FNV-1a over its bytes, as `nameHash` in `effect.js`) and
+ * the name hashed (FNV-1a over its bytes, as `fnv1aLowBytes` in `system/hash.js`) and
  * looked up in the effect's table of names, its bytes compared whole. A name
  * longer than any parameter's is none. Called by the setters through the
  * block's RESOLVE.

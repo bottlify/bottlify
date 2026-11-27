@@ -9,7 +9,7 @@
  * describes the format, with LZXD streams from the cabinet's test encoder.
  */
 
-import { crc32 } from '../../filesystem/internal/bundle/crc32.js';
+import { crc32 } from '../../../system/hash.js';
 import { positionSlots } from '../cabinet/lzx.js';
 import { encoder, lzxdStream, writer } from '../cabinet/lzx.fixture.js';
 

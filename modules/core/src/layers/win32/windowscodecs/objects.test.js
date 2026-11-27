@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
 import { parseGuid } from '../../../system/guid.js';
+import { crc32 } from '../../../system/hash.js';
 import { createWindowscodecs } from './functions.js';
 import { GUID, INTERFACES } from './layout.js';
 import { WINCODEC } from './frames.js';
@@ -215,23 +216,6 @@ test('a memory stream seeks, reads and refuses what does not fit as Windows does
 
 /** A 2x2 PNG of 8-bit grey with a transparent level 0, rows 0,255 and 255,0. */
 function greyPng(){
-    const crcTable = Array.from({ length: 256 }, (_, n)=>{
-        let c = n;
-        for (let k = 0; k < 8; k++)
-        {
-            c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-        }
-        return c >>> 0;
-    });
-    /** @param {Uint8Array} data */
-    const crc = data=>{
-        let c = 0xffffffff;
-        for (const b of data)
-        {
-            c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
-        }
-        return (c ^ 0xffffffff) >>> 0;
-    };
     /** @param {string} type @param {number[]} data */
     const chunk = (type, data)=>{
         const body = Uint8Array.from([...type].map(c=>c.charCodeAt(0)).concat(data));
@@ -239,7 +223,7 @@ function greyPng(){
         const view = new DataView(out.buffer);
         view.setUint32(0, data.length, false);
         out.set(body, 4);
-        view.setUint32(8 + data.length, crc(body), false);
+        view.setUint32(8 + data.length, crc32(body), false);
         return [...out];
     };
     // Stored (uncompressed) deflate: filter byte 0 before each row.

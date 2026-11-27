@@ -20,7 +20,7 @@
 import {
     Codec, DEFAULT_BLOCK_SIZE, FORMAT_VERSION, HEADER_SIZE, MAGIC,
 } from './layers/filesystem/internal/bundle/format.js';
-import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
+import { crc32 } from './system/hash.js';
 import { createSha256 } from './layers/win32/crypto/digest.js';
 import { writeAll } from './system/opfs-file.js';
 

@@ -28,6 +28,7 @@
  */
 
 import { openSync, replaceWhole, writeAll, writeAt } from '../../../system/opfs-file.js';
+import { fnv1aString } from '../../../system/hash.js';
 import { frame, plain, unframe, unframeLater } from './record-frame.js';
 
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
@@ -349,18 +350,18 @@ const LIMITS = { keepSessions: 2, compactFloor: 64 << 20, cap: 512 << 20, indexF
 const generationName = (base, generation)=>(generation === 0 ? base : `${base}.${generation}`);
 
 /**
- * A record name for a key.
+ * A record name for a key: FNV-1a beside a second lane of its own (an add
+ * and a golden-ratio multiply), the pair kept as it is because the names are
+ * on OPFS from earlier runs.
  *
  * @param {string} key
  */
 export function fileNameOf(key){
-    let a = 0x811c9dc5;
+    const a = fnv1aString(key);
     let b = 0x1000193;
     for (let i = 0; i < key.length; i++)
     {
-        const c = key.charCodeAt(i);
-        a = Math.imul(a ^ c, 0x01000193) >>> 0;
-        b = Math.imul(b + c, 0x9e3779b1) >>> 0;
+        b = Math.imul(b + key.charCodeAt(i), 0x9e3779b1) >>> 0;
     }
     return `${a.toString(16).padStart(8, '0')}${b.toString(16).padStart(8, '0')}.cork`;
 }

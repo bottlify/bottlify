@@ -29,6 +29,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import { fnv1a } from '../../../system/hash.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createLevelLocks, createShadow, settledAfter } from './shadow.js';
 import { commandCode } from './routines/command.js';
@@ -112,14 +113,7 @@ const random = seed=>{
 };
 
 /** FNV-1a of some bytes, as hex: what a draw or an update saw, told apart. @param {Uint8Array} bytes */
-const digest = bytes=>{
-    let hash = 0x811c9dc5;
-    for (const byte of bytes)
-    {
-        hash = Math.imul(hash ^ byte, 0x01000193);
-    }
-    return (hash >>> 0).toString(16);
-};
+const digest = bytes=>fnv1a(bytes).toString(16);
 
 /**
  * @typedef {{ left: number, top: number, right: number, bottom: number,

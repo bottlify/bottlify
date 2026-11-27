@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { crc32 } from './crc32.js';
+import { crc32 } from '../../../../system/hash.js';
 
 /**
  * The .btl container, read.

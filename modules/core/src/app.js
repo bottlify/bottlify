@@ -92,28 +92,15 @@ import {
     LIBRARY_ALIGN, RT_MANIFEST, exportTables, libraryCandidates, moduleKeyOf, pathDirectories,
     placeLibrary, readWholeFile, resourceOfImage, startDirectoryOf,
 } from './process/libraries.js';
+import { FNV_OFFSET, fnv1aString, fnv1aWord } from './system/hash.js';
 
-/** FNV-1a, 32 bits: a call's number for telling its repeats apart in the journal. */
-const FNV_OFFSET = 0x811c9dc5;
-/** @param {number} hash @param {number} word */
-const hashWord = (hash, word)=>{
-    let h = hash;
-    for (let shift = 0; shift < 32; shift += 8)
-    {
-        h = Math.imul(h ^ ((word >>> shift) & 0xff), 0x01000193);
-    }
-    return h >>> 0;
-};
-/** @param {number} hash @param {string} text */
-const hashText = (hash, text)=>{
-    let h = hash;
-    for (let at = 0; at < text.length; at++)
-    {
-        h = Math.imul(h ^ text.charCodeAt(at), 0x01000193);
-    }
-    // The length too, so "ab" then "c" is not "a" then "bc".
-    return hashWord(h >>> 0, text.length);
-};
+/**
+ * A text into a call's number for telling its repeats apart in the journal;
+ * its length too, so "ab" then "c" is not "a" then "bc".
+ *
+ * @param {number} hash @param {string} text
+ */
+const hashText = (hash, text)=>fnv1aWord(text.length, fnv1aString(text, hash));
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -1000,13 +987,10 @@ export function shippedLibraryReader(filesystem, blocks, imagePath, ours = ()=>f
  * @param {{ long: boolean, start: number, end: number, windows: string }} window
  */
 export function tablesFingerprint(libraries, faces, ordinals, window){
-    let hash = 0x811c9dc5;
+    let hash = FNV_OFFSET;
     /** @param {string} text */
     const mix = text=>{
-        for (let index = 0; index < text.length; index++)
-        {
-            hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
-        }
+        hash = fnv1aString(text, hash);
     };
     mix(`${window.long}|${window.start}|${window.end}|${window.windows}`);
     for (const name of libraries)
@@ -1017,7 +1001,7 @@ export function tablesFingerprint(libraries, faces, ordinals, window){
     {
         mix(`|face:${name}:${JSON.stringify(ordinals[name] ?? {})}:${shapeOf(table)}`);
     }
-    return (hash >>> 0).toString(16);
+    return hash.toString(16);
 }
 
 /** What an LdrRegisterDllNotification callback is told: a library loaded, or unloaded. */
@@ -2117,9 +2101,9 @@ async function buildApp(options){
         for (let at = 0; at < values.length; at++)
         {
             const text = call.strings?.[at];
-            key = text ? hashText(key, String(text)) : hashWord(key, values[at] >>> 0);
+            key = text ? hashText(key, String(text)) : fnv1aWord(values[at], key);
         }
-        key = typeof call.result === 'number' ? hashWord(key, call.result >>> 0)
+        key = typeof call.result === 'number' ? fnv1aWord(call.result, key)
             : hashText(key, String(call.result));
         const { write, said } = callRepeats.note(thread, key);
         if (said)

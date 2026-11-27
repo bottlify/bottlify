@@ -19,7 +19,7 @@ import { COMPILED } from './effect-setters.x86.js';
 import { COMPILED as LONG } from './effect-setters.x64.js';
 import * as sources from './effect-setters.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
-import { nameHash } from './effect.js';
+import { fnv1aLowBytes } from '../../../system/hash.js';
 
 const { same } = equivalence(COMPILED, sources);
 const { sameAt64 } = equivalence(COMPILED, sources, undefined, /** @type {any} */ (LONG));
@@ -109,12 +109,12 @@ function layout(next, pointer = 4){
     put(BLOCK + 52, RESOLVE);
     put(NAMES, 7);
     KNOWN.forEach((name, i)=>{
-        let slot = nameHash(name) & 7;
+        let slot = fnv1aLowBytes(name) & 7;
         while (view.getUint32(NAMES + 4 + 12 * slot + 8 - DATA, true) !== 0)
         {
             slot = (slot + 1) & 7;
         }
-        [nameHash(name), TEXTS + 32 * i, ARENA + 32 * (next() % RECORDS)]
+        [fnv1aLowBytes(name), TEXTS + 32 * i, ARENA + 32 * (next() % RECORDS)]
             .forEach((value, k)=>put(NAMES + 4 + 12 * slot + 4 * k, value));
     });
     return bytes;

@@ -16,16 +16,7 @@ import { test } from 'node:test';
 import { GifError, decodeGif, isGif } from './gif.js';
 import { TiffError, decodeTiff, isTiff } from './tiff.js';
 import { PICTURES } from './pictures.fixture.js';
-
-/** @param {ArrayLike<number>} bytes */
-const fnv = bytes=>{
-    let hash = 0x811c9dc5;
-    for (let i = 0; i < bytes.length; i++)
-    {
-        hash = Math.imul(hash ^ bytes[i], 0x01000193) >>> 0;
-    }
-    return hash;
-};
+import { fnv1a } from '../../../system/hash.js';
 
 /** @param {string} b64 */
 const bytesOf = b64=>Uint8Array.from(Buffer.from(b64, 'base64'));
@@ -42,7 +33,7 @@ for (const [name, picture] of Object.entries(PICTURES))
         {
             assert.deepEqual([...decoded.rgba], picture.rgba);
         }
-        assert.equal(fnv(decoded.rgba), picture.hash);
+        assert.equal(fnv1a(decoded.rgba), picture.hash);
     });
 }
 
