@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { IOINFO_LAYOUTS, createDescriptors, createIoFunctions, ioinfoExport } from './io.js';
 import { fakeHandles, fakeMemory, fakeVolume } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const O_RDONLY = 0x0000;
 const O_WRONLY = 0x0001;
@@ -1127,4 +1128,35 @@ test('_utime64 and _utime32 set a file\'s modification time; null is now; no fil
     assert.equal(stamps.at(-1)?.[1], 1234000);
     assert.equal(fns._futime64.handler([99, times]), -1);
     assert.equal(errno.at(-1), 9, 'EBADF');
+});
+
+test('at 64 bits past 4 GiB: a wide path is read where it lies, and a block whose low dword is'
+    + ' zero is a block', ()=>{
+    const base = 2 ** 32;
+    const bytes = new Uint8Array(0x1000);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    const files = fakeVolume({ 'C:\\game\\data.bin': bytesOf('data') },
+        { directories: ['C:\\', 'C:\\game'], modified: Date.UTC(2001, 0, 2) });
+    /** @type {[string, number][]} */
+    const stamps = [];
+    /** @type {any} */ (files).setModified = (/** @type {string} */ path,
+        /** @type {number} */ ms)=>void stamps.push([path, ms]);
+    const descriptors = createDescriptors({ files, errno: ()=>{}, fmode: ()=>0,
+        write: ()=>{} });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({ guest, files,
+        errno: ()=>{} }, descriptors));
+    guest.writeWide(base + 0x100, 'C:\\game\\data.bin');
+    // The stat at the block's very start, its path past it.
+    assert.equal(fns._wstat64.handler([base + 0x100, base]), 0);
+    assert.equal(Number(guest.i64(base + 24)), 4, 'its size, where _stat64 keeps it');
+    const fd = fns._wopen.handler([base + 0x100, O_RDONLY | O_BINARY, 0]);
+    assert.ok(fd >= 3, 'opened by its wide name');
+    assert.equal(fns._read.handler([fd, base, 4]), 4);
+    assert.equal(guest.cstr(base, 4), 'data', 'read into the block where it lies');
+    guest.set64(base + 0x200, 100n);
+    guest.set64(base + 0x208, 1700000000n);
+    assert.equal(fns._wutime64.handler([base + 0x100, base + 0x200]), 0);
+    assert.deepEqual(stamps.at(-1), ['C:\\game\\data.bin', 1700000000000]);
+    assert.equal(fns._pipe.handler([base, 64, O_BINARY]), 0);
+    assert.notEqual(guest.i32(base), guest.i32(base + 4), 'two descriptors, at the start');
 });

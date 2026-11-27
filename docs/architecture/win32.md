@@ -258,7 +258,10 @@ flowchart TD
 - **The C runtimes share msvcrt's functions** and differ where Windows' do: an argument a function
   of `MSVCR80.dll` or `ucrtbase.dll` refuses calls that runtime's invalid-parameter handler, or
   with none set ends the process with 0xC0000417 and an error naming the call; msvcrt.dll answers
-  EINVAL alone (decisions.md A255, `msvcrt/invalid-parameter.js`).
+  EINVAL alone (decisions.md A255, `msvcrt/invalid-parameter.js`). In a 64-bit process
+  `time_t` is an `__int64`: `time`, `localtime`, `gmtime`, `mktime`, `_mkgmtime`, `ctime`,
+  `_wctime`, `difftime` and `_ftime` are the 64-bit forms there, as a 64-bit msvcrt.dll exports
+  them, and `_tzname` and `__lc_time_data` hold pointers of the process's width.
 - **Where `LoadLibrary` looks:** the `.exe` folder, then `C:\WINDOWS\system32\`, `C:\WINDOWS\` and
   the current folder. A relative name with a folder in it (`plugins\x.dll`) is looked for under
   each of those in turn; a full path, one from a drive's current folder (`C:x.dll`) or one that

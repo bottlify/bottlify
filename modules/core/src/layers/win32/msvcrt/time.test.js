@@ -10,6 +10,7 @@ import {
     createTimeFunctions, strftime, asctime, parseTz, TM, C_TIME_NAMES, LC_TIME_DATA,
 } from './time.js';
 import { fakeMemory, fakeFpu } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /** 2003-07-03T12:34:56Z, a Thursday. */
 const WALL = Date.UTC(2003, 6, 3, 12, 34, 56);
@@ -445,4 +446,63 @@ test('%V and %G are ISO 8601\'s week and its year, across the turn of a year', (
     assert.equal(iso(day(2002, 2, 364)), '2003 01 03');
     // 1 January 1970, a Thursday: week one of its own year.
     assert.equal(iso(day(1970, 4, 0)), '1970 01 70');
+});
+
+test('at 64 bits past 4 GiB: time_t is an __int64, the names\' pointers are quadwords, and a'
+    + ' block whose low dword is zero is a block', ()=>{
+    // A wide window's block at 0x100000000: its low dword alone is null.
+    const base = 2 ** 32;
+    const bytes = new Uint8Array(0x2000);
+    const view = new DataView(bytes.buffer);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    let next = base + 0x1000;
+    /** @type {number[]} */
+    const high = [];
+    const table = /** @type {Record<string, any>} */ (createTimeFunctions({
+        guest,
+        allocate: size=>{
+            const at = next;
+            next += size + 15 & ~15;
+            return at;
+        },
+        systemTimeMs: ()=>WALL,
+        now: ()=>0,
+        setRegisters: ({ edx })=>void high.push(edx),
+    }));
+    /** @param {number} at */
+    const quad = at=>Number(view.getBigInt64(at - base, true));
+
+    // time and localtime are _time64 and _localtime64 here.
+    assert.equal(table.time.handler([base]), Math.floor(WALL / 1000));
+    assert.equal(quad(base), Math.floor(WALL / 1000), 'eight bytes, at the block\'s start');
+    view.setBigInt64(0x10, BigInt(Date.UTC(2200, 0, 1) / 1000), true);
+    const tm = table.localtime.handler([base + 0x10]);
+    assert.equal(guest.i32(tm + TM.YEAR), 300, 'a time past 2038, read whole');
+    view.setBigInt64(0x10, BigInt(WALL / 1000), true);
+    assert.match(guest.cstr(table.ctime.handler([base + 0x10]), 64), /2003/);
+
+    // strftime's buffer at the block's start; its format and tm past it.
+    guest.writeAnsi(base + 0x100, '%Y-%m-%d');
+    guest.set32s(base + 0x200, [56, 34, 12, 3, 6, 103, 4, 183, 0]);
+    assert.equal(table.strftime.handler([base, 32, base + 0x100, base + 0x200]), 10);
+    assert.equal(guest.cstr(base, 32), '2003-07-03');
+
+    // _tzname: two pointers of eight bytes each, to the two names - the
+    // machine's zone's, which the first conversion read.
+    const tzname = table._tzname.data();
+    assert.equal(tzname.length, 16);
+    const zone = new DataView(tzname.buffer, tzname.byteOffset);
+    assert.equal(guest.cstr(Number(zone.getBigUint64(0, true)), 64), 'UTC');
+    assert.equal(guest.cstr(Number(zone.getBigUint64(8, true)), 64), 'UTC');
+    assert.notEqual(zone.getBigUint64(0, true), zone.getBigUint64(8, true), 'two buffers');
+
+    // __lc_time_data at 64 bits: its 43 pointers quadwords, then its ints.
+    const names = table._Gettnames.handler([]);
+    assert.equal(guest.cstr(guest.ptr(names), 8), 'Sun');
+    assert.equal(guest.cstr(guest.ptr(names + 42 * 8), 16), 'HH:mm:ss');
+    assert.equal(guest.u32(names + 43 * 8 + 4), 1, 'the Gregorian calendar after them');
+    guest.writeAnsi(base + 0x140, '%a %B');
+    assert.equal(table._Strftime.handler([base + 0x300, 32, base + 0x140, base + 0x200,
+        names]), 'Thu July'.length);
+    assert.equal(guest.cstr(base + 0x300, 32), 'Thu July');
 });

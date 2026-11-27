@@ -10,7 +10,7 @@ import { createMsvcrtFunctions } from './functions.js';
 import { INVALID_PARAMETERS, createInvalidParameterRuntime, watchedExports }
     from './invalid-parameter.js';
 import { doubleSlots, fakeMemory, fakeVolume } from './harness.test.js';
-import { guestThrough } from './guest-window.fixture.js';
+import { guestThrough, guestWindow } from './guest-window.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { COMPILED } from './inguest.x86.js';
 
@@ -1196,4 +1196,29 @@ test('every function the runtime exports is cdecl, a C++ member\'s thiscall asid
         && !(entry.convention === undefined && 'code' in entry && !('handler' in entry))
         && entry.convention !== 'cdecl').map(([name])=>name);
     assert.deepEqual(wrong, []);
+});
+
+test('at 64 bits past 4 GiB: a printer\'s buffer whose low dword is zero is a buffer, and its'
+    + ' format is read where it lies', ()=>{
+    // A wide window's block at 0x100000000: its low dword alone is null.
+    const base = 2 ** 32;
+    const bytes = new Uint8Array(0x1000);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    const fns = /** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(), guest,
+        pointerSize: 8, write: ()=>{}, callGuest: async()=>0 }));
+    guest.writeAnsi(base + 0x100, 'narrow');
+    guest.writeWide(base + 0x200, 'wide');
+    assert.equal(fns._snprintf.handler([base, 16, base + 0x100]), 6);
+    assert.equal(guest.cstr(base, 16), 'narrow', 'into the block at its very start');
+    assert.equal(fns.sprintf_s.handler([base, 4, base + 0x100]), -1, 'too long for four');
+    assert.equal(guest.u8(base), 0, 'the buffer emptied');
+    assert.equal(fns.sprintf_s.handler([base, 16, base + 0x100]), 6);
+    assert.equal(guest.cstr(base, 16), 'narrow');
+    assert.equal(fns._snwprintf.handler([base, 16, base + 0x200]), 4);
+    assert.equal(guest.wstr(base, 16), 'wide');
+    assert.equal(fns.swprintf.handler([base + 0x300, base + 0x200]), 4);
+    assert.equal(guest.wstr(base + 0x300, 16), 'wide');
+    guest.set32(base, 0xcccccccc);
+    assert.equal(fns._get_fmode.handler([base]), 0);
+    assert.equal(guest.u32(base), 0, '_get_fmode\'s int at the block\'s start');
 });

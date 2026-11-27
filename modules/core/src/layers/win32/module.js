@@ -4781,7 +4781,6 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         fillMemory,
-                        readCString,
                         scanCString,
                         setLastError: setError,
                         // The `va_list` window stops at the end of its region: a

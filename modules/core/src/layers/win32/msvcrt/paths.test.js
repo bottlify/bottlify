@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createPathFunctions, splitPath, fullPath } from './paths.js';
 import { fakeMemory, fakeVolume as fakeFiles } from './harness.test.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /** A volume with the handful of operations the path functions reach for. */
 function fakeVolume(existing = ['C:\\game', 'C:\\game\\data.mpq']){
@@ -499,7 +500,7 @@ test('a path operation refuses no path with -1 and EINVAL, reading nothing', ()=
     const errno = [];
     const table = /** @type {Record<string, any>} */ (createPathFunctions({
         ...memory,
-        readCString: ()=>assert.fail('address zero read'),
+        guest: { ...memory.guest, cstr: ()=>assert.fail('address zero read') },
         files: fakeVolume(),
         errno: code=>void errno.push(code),
     }));
@@ -689,4 +690,35 @@ test('_mktemp fills six closing X\'s with a free letter and digits, or answers n
     assert.match(memory.text(second), /^testb\d{5}$/, 'the next letter while a name is taken');
     const stars = memory.put('**XXXXXX');
     assert.equal(table._mktemp.handler([stars]), stars);
+});
+
+test('at 64 bits past 4 GiB: a buffer whose low dword is zero is a buffer, and each path is'
+    + ' read and written where it lies', ()=>{
+    // A wide window's block at 0x100000000: its low dword alone is null, and
+    // every other address in it names another place 4 GiB below.
+    const base = 2 ** 32;
+    const bytes = new Uint8Array(0x1000);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({ guest,
+        files: fakeVolume(), allocate: ()=>base + 0x800, errno: ()=>{} }));
+    guest.writeAnsi(base + 0x100, 'C:\\game\\war.exe');
+    table._splitpath.handler([base + 0x100, base, base + 0x20, base + 0x40, base + 0x60]);
+    assert.deepEqual([0, 0x20, 0x40, 0x60].map(at=>guest.cstr(base + at, 64)),
+        ['C:', '\\game\\', 'war', '.exe'], 'the drive into the block at its very start');
+
+    guest.writeWide(base + 0x200, 'D:\\maps\\one.map');
+    assert.equal(table._wsplitpath_s.handler([base + 0x200, base, 8, base + 0x20, 32,
+        base + 0x60, 16, base + 0x80, 16]), 0);
+    assert.deepEqual([0, 0x20, 0x60, 0x80].map(at=>guest.wstr(base + at, 64)),
+        ['D:', '\\maps\\', 'one', '.map']);
+
+    guest.writeAnsi(base + 0x2a0, 'C');
+    guest.writeAnsi(base + 0x2c0, 'save');
+    assert.equal(table._makepath_s.handler([base, 64, base + 0x2a0, 0, base + 0x2c0, 0]), 0);
+    assert.equal(guest.cstr(base, 64), 'C:save');
+
+    assert.equal(table._wtempnam.handler([0, 0]), base + 0x800, 'its name, allocated');
+    assert.match(guest.wstr(base + 0x800, 256), /^C:\\game\\/);
+    guest.writeWide(base + 0x300, 'C:\\game\\data.mpq');
+    assert.equal(table._waccess.handler([base + 0x300, 0]), 0, 'a wide path read whole');
 });

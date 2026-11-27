@@ -24,7 +24,6 @@
 import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 /** The last errors DeleteFile and RemoveDirectory leave. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -200,8 +199,8 @@ export const splitSearch = spec=>{
 
 /**
  * @typedef {Object} PathHost
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  The process's memory, read
+ *           and written in place at its pointer width (`host.guest`).
  * @property {(bytes: number) => number} allocate
  * @property {() => string[]} [drives]  Letters the filesystem has mounted.
  * @property {any} files  The volume: stat, list, remove, rename, mkdir and the
@@ -211,8 +210,6 @@ export const splitSearch = spec=>{
  *           kernel32's last error, which a removal leaves as DeleteFile and
  *           RemoveDirectory, which the runtime calls, leave it: a C++ library
  *           over the runtime reads its error code there.
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- *           For a wide pattern. Absent, the wide finds stay unexported.
  * @property {(name: string) => string | null} [getenv]
  *           The runtime's own environment, where `_tempnam` finds TMP and
  *           `_searchenv` the list of directories it is named.
@@ -224,17 +221,30 @@ export const splitSearch = spec=>{
  * @param {PathHost} host
  */
 export function createPathFunctions(host){
-    /** @param {number} pointer */
-    const readString = pointer=>host.readCString(pointer, MAX_STRING);
+    const { guest } = host;
 
-    /** In the ANSI page a path is read in. @param {number} pointer @param {string} text */
-    const writeString = (pointer, text)=>{
-        if ((pointer >>> 0) === 0)
-        {
-            return;
-        }
-        host.writeMemory(pointer, encodeAnsi(`${text}\0`));
+    /**
+     * A path as each width reads and writes it where it lies: ANSI in the page
+     * a path is read in, or UTF-16, at most MAX_STRING characters. A write to
+     * no buffer writes nothing, as `_splitpath` leaves a part it is given no
+     * room for.
+     *
+     * @type {Record<'ansi' | 'utf16', { read: (pointer: number) => string,
+     *     write: (pointer: number, text: string) => void }>}
+     */
+    const widths = {
+        ansi: {
+            read: pointer=>guest.cstr(wholeAddress(pointer), MAX_STRING),
+            write: (pointer, text)=>void (wholeAddress(pointer) !== 0
+                && guest.writeAnsi(wholeAddress(pointer), text)),
+        },
+        utf16: {
+            read: pointer=>guest.wstr(wholeAddress(pointer), MAX_STRING * 2),
+            write: (pointer, text)=>void (wholeAddress(pointer) !== 0
+                && guest.writeWide(wholeAddress(pointer), text)),
+        },
     };
+    const { ansi, utf16 } = widths;
 
     /** @param {number} code */
     const fail = code=>{
@@ -255,7 +265,8 @@ export function createPathFunctions(host){
         argBytes,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
-            const code = args.slice(0, paths).some(path=>(path >>> 0) === 0) ? EINVAL : act(args);
+            const code = args.slice(0, paths).some(path=>wholeAddress(path) === 0) ? EINVAL
+                : act(args);
             if (code === 0)
             {
                 return 0;
@@ -264,15 +275,6 @@ export function createPathFunctions(host){
             return -1;
         },
     });
-
-    /** @param {number} pointer @param {string} text */
-    const writeWide = (pointer, text)=>{
-        if ((pointer >>> 0) === 0)
-        {
-            return;
-        }
-        host.writeMemory(pointer, utf16z(text));
-    };
 
     /**
      * A directory and a name in it, one separator between.
@@ -344,7 +346,7 @@ export function createPathFunctions(host){
      * @param {boolean} wide
      */
     const writeSecure = (pointer, size, text, wide)=>{
-        if ((pointer >>> 0) === 0 || (size >>> 0) === 0 || text === null)
+        if (wholeAddress(pointer) === 0 || (size >>> 0) === 0 || text === null)
         {
             fail(EINVAL);
             return EINVAL;
@@ -365,7 +367,7 @@ export function createPathFunctions(host){
                 bytes[at] = unit;
             }
         });
-        host.writeMemory(pointer, bytes);
+        guest.setBytes(wholeAddress(pointer), bytes);
         if (fits)
         {
             return 0;
@@ -387,13 +389,13 @@ export function createPathFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [file, variable, result, size])=>{
-            if ((file >>> 0) === 0 || (result >>> 0) === 0 || (size >>> 0) === 0)
+            if (wholeAddress(file) === 0 || wholeAddress(result) === 0 || (size >>> 0) === 0)
             {
                 fail(EINVAL);
                 return EINVAL;
             }
             const found = searchEnvironment(read(file),
-                (variable >>> 0) === 0 ? '' : read(variable));
+                wholeAddress(variable) === 0 ? '' : read(variable));
             const length = found === null ? 0
                 : unit === 1 ? encodeAnsi(found).length : found.length;
             if (found === null || length + 1 > (size >>> 0))
@@ -448,26 +450,6 @@ export function createPathFunctions(host){
     let nextSearch = 1;
 
     /**
-     * A wide string, read a character at a time up to its terminator.
-     *
-     * @param {number} pointer
-     */
-    const readWide = pointer=>{
-        let text = '';
-        for (let at = wholeAddress(pointer); text.length < MAX_STRING; at += 2)
-        {
-            const unit = host.readMemory?.(at, 2) ?? new Uint8Array(2);
-            const code = unit[0] | unit[1] << 8;
-            if (code === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(code);
-        }
-        return text;
-    };
-
-    /**
      * Fills a whole `_finddata_t`, `_finddatai64_t` or `_wfinddatai64_t`.
      * The volume keeps one time per file, the last write, and it stands for
      * all three.
@@ -510,7 +492,7 @@ export function createPathFunctions(host){
         {
             bytes.set(encodeAnsi(name), layout.NAME);
         }
-        host.writeMemory(wholeAddress(address), bytes);
+        guest.setBytes(wholeAddress(address), bytes);
     };
 
     /**
@@ -527,13 +509,13 @@ export function createPathFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([spec, data])=>{
-            if ((spec >>> 0) === 0 || (data >>> 0) === 0)
+            if (wholeAddress(spec) === 0 || wholeAddress(data) === 0)
             {
                 fail(EINVAL);
                 return -1;
             }
             const { directory, pattern } = splitSearch(
-                layout.WIDE_NAME ? readWide(spec) : readString(spec));
+                layout.WIDE_NAME ? utf16.read(spec) : ansi.read(spec));
             const holder = host.files.stat(directory);
             // "." and ".." first in every folder but a drive's root, as the
             // FindFirstFile this wraps on Windows lists them (kernel32/files.js).
@@ -643,8 +625,8 @@ export function createPathFunctions(host){
         argBytes: 36,
         /** @param {number[]} args */
         handler: ([path, ...buffers])=>{
-            const pairs = [0, 2, 4, 6].map(at=>[buffers[at] >>> 0, buffers[at + 1] >>> 0]);
-            if ((path >>> 0) === 0 || pairs.some(([at, size])=>(at === 0) !== (size === 0)))
+            const pairs = [0, 2, 4, 6].map(at=>[wholeAddress(buffers[at]), buffers[at + 1] >>> 0]);
+            if (wholeAddress(path) === 0 || pairs.some(([at, size])=>(at === 0) !== (size === 0)))
             {
                 fail(EINVAL);
                 return EINVAL;
@@ -675,11 +657,11 @@ export function createPathFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([path, drive, directory, name, extension])=>{
-                const parts = splitPath(readString(path), host.isLead);
-                writeString(drive, parts.drive);
-                writeString(directory, parts.directory);
-                writeString(name, parts.name);
-                writeString(extension, parts.extension);
+                const parts = splitPath(ansi.read(path), host.isLead);
+                ansi.write(drive, parts.drive);
+                ansi.write(directory, parts.directory);
+                ansi.write(name, parts.name);
+                ansi.write(extension, parts.extension);
                 return 0;
             },
         },
@@ -689,7 +671,7 @@ export function createPathFunctions(host){
          *     char *dir, size_t dirSize, char *fname, size_t nameSize, char *ext,
          *     size_t extSize)
          */
-        _splitpath_s: splitSecure(readString, writeString, false),
+        _splitpath_s: splitSecure(ansi.read, ansi.write, false),
 
         /**
          * void _makepath(char *path, const char *drive, const char *dir,
@@ -701,8 +683,8 @@ export function createPathFunctions(host){
             /** @param {number[]} args */
             handler: ([path, drive, directory, name, extension])=>{
                 const read = (/** @type {number} */ pointer)=>(
-                    (pointer >>> 0) === 0 ? '' : readString(pointer));
-                writeString(path, makePath(read(drive), read(directory), read(name),
+                    wholeAddress(pointer) === 0 ? '' : ansi.read(pointer));
+                ansi.write(path, makePath(read(drive), read(directory), read(name),
                     read(extension)));
                 return 0;
             },
@@ -719,157 +701,156 @@ export function createPathFunctions(host){
             /** @param {number[]} args */
             handler: ([path, size, drive, directory, name, extension])=>{
                 const read = (/** @type {number} */ pointer)=>(
-                    (pointer >>> 0) === 0 ? '' : readString(pointer));
+                    wholeAddress(pointer) === 0 ? '' : ansi.read(pointer));
                 const text = wholeAddress(path) === 0 || (size >>> 0) === 0 ? null
                     : makePath(read(drive), read(directory), read(name), read(extension));
                 return writeSecure(path, size, text, false);
             },
         },
 
-        ...host.readMemory ? {
-            /**
-             * void _wmakepath(wchar_t *path, const wchar_t *drive, const wchar_t *dir,
-             *                 const wchar_t *fname, const wchar_t *ext)
-             */
-            _wmakepath: {
-                convention: 'cdecl',
-                argBytes: 20,
-                /** @param {number[]} args */
-                handler: ([path, drive, directory, name, extension])=>{
-                    const read = (/** @type {number} */ pointer)=>(
-                        (pointer >>> 0) === 0 ? '' : readWide(pointer));
-                    writeWide(path, makePath(read(drive), read(directory), read(name),
-                        read(extension)));
-                    return 0;
-                },
-            },
-
-            /**
-             * void _wsplitpath(const wchar_t *path, wchar_t *drive, wchar_t *dir,
-             *                  wchar_t *fname, wchar_t *ext)
-             *
-             * _splitpath's parts in UTF-16; a null part is not written.
-             */
-            _wsplitpath: {
-                convention: 'cdecl',
-                argBytes: 20,
-                /** @param {number[]} args */
-                handler: ([path, drive, directory, name, extension])=>{
-                    const parts = splitPath(readWide(path), undefined, true);
-                    writeWide(drive, parts.drive);
-                    writeWide(directory, parts.directory);
-                    writeWide(name, parts.name);
-                    writeWide(extension, parts.extension);
-                    return 0;
-                },
-            },
-
-            /** errno_t _wsplitpath_s(...): `_splitpath_s` in UTF-16. */
-            _wsplitpath_s: splitSecure(readWide, writeWide, true),
-
-            /**
-             * wchar_t *_wgetcwd(wchar_t *buffer, int size): `_getcwd` in
-             * UTF-16, `size` counted in characters.
-             */
-            _wgetcwd: {
-                returns: 'pointer',
-                convention: 'cdecl',
-                argBytes: 8,
-                /** @param {number[]} args */
-                handler: ([buffer, size])=>{
-                    const text = host.files.currentDirectory();
-                    if (wholeAddress(buffer) === 0)
-                    {
-                        const allocated = host.allocate(Math.max(text.length + 1, size | 0) * 2);
-                        writeWide(allocated, text);
-                        return allocated;
-                    }
-                    if (text.length + 1 > (size | 0))
-                    {
-                        fail(ERANGE);
-                        return 0;
-                    }
-                    writeWide(buffer, text);
-                    return buffer;
-                },
-            },
-
-            /** int _wchdir(const wchar_t *path) */
-            _wchdir: operation(4, ([path])=>{
-                const text = readWide(path);
-                if (!exists(text))
-                {
-                    return ENOENT;
-                }
-                host.files.setCurrentDirectory(text);
+        /**
+         * void _wmakepath(wchar_t *path, const wchar_t *drive, const wchar_t *dir,
+         *                 const wchar_t *fname, const wchar_t *ext)
+         */
+        _wmakepath: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([path, drive, directory, name, extension])=>{
+                const read = (/** @type {number} */ pointer)=>(
+                    wholeAddress(pointer) === 0 ? '' : utf16.read(pointer));
+                utf16.write(path, makePath(read(drive), read(directory), read(name),
+                    read(extension)));
                 return 0;
-            }),
-
-            /**
-             * wchar_t *_wfullpath(wchar_t *absolute, const wchar_t *relative, size_t max)
-             *
-             * _fullpath in UTF-16, `max` counted in characters; a null
-             * destination is one allocated for the caller to free.
-             */
-            _wfullpath: {
-                returns: 'pointer',
-                convention: 'cdecl',
-                argBytes: 12,
-                sizes: [2],
-                /** @param {number[]} args */
-                handler: ([destination, relative, max])=>{
-                    const text = fullPath(readWide(relative), host.files.currentDirectory());
-                    if (wholeAddress(destination) === 0)
-                    {
-                        const allocated = host.allocate((text.length + 1) * 2);
-                        writeWide(allocated, text);
-                        return allocated;
-                    }
-                    if (text.length + 1 > (max >>> 0))
-                    {
-                        return 0;
-                    }
-                    writeWide(destination, text);
-                    return destination;
-                },
             },
+        },
 
-            /** void _wsearchenv(const wchar_t *file, const wchar_t *variable, wchar_t *result) */
-            _wsearchenv: {
-                convention: 'cdecl',
-                argBytes: 12,
-                /** @param {number[]} args */
-                handler: ([file, variable, result])=>{
-                    writeWide(result, searchEnvironment(readWide(file), readWide(variable)) ?? '');
+        /**
+         * void _wsplitpath(const wchar_t *path, wchar_t *drive, wchar_t *dir,
+         *                  wchar_t *fname, wchar_t *ext)
+         *
+         * _splitpath's parts in UTF-16; a null part is not written.
+         */
+        _wsplitpath: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([path, drive, directory, name, extension])=>{
+                const parts = splitPath(utf16.read(path), undefined, true);
+                utf16.write(drive, parts.drive);
+                utf16.write(directory, parts.directory);
+                utf16.write(name, parts.name);
+                utf16.write(extension, parts.extension);
+                return 0;
+            },
+        },
+
+        /** errno_t _wsplitpath_s(...): `_splitpath_s` in UTF-16. */
+        _wsplitpath_s: splitSecure(utf16.read, utf16.write, true),
+
+        /**
+         * wchar_t *_wgetcwd(wchar_t *buffer, int size): `_getcwd` in
+         * UTF-16, `size` counted in characters.
+         */
+        _wgetcwd: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, size])=>{
+                const text = host.files.currentDirectory();
+                if (wholeAddress(buffer) === 0)
+                {
+                    const allocated = host.allocate(Math.max(text.length + 1, size | 0) * 2);
+                    utf16.write(allocated, text);
+                    return allocated;
+                }
+                if (text.length + 1 > (size | 0))
+                {
+                    fail(ERANGE);
                     return 0;
-                },
+                }
+                utf16.write(buffer, text);
+                return buffer;
             },
+        },
 
-            /**
-             * errno_t _wmakepath_s(wchar_t *path, size_t size, const wchar_t *drive,
-             *                      const wchar_t *dir, const wchar_t *fname,
-             *                      const wchar_t *ext)
-             */
-            _wmakepath_s: {
-                convention: 'cdecl',
-                argBytes: 24,
-                sizes: [1],
-                /** @param {number[]} args */
-                handler: ([path, size, drive, directory, name, extension])=>{
-                    const read = (/** @type {number} */ pointer)=>(
-                        (pointer >>> 0) === 0 ? '' : readWide(pointer));
-                    const text = wholeAddress(path) === 0 || (size >>> 0) === 0 ? null
-                        : makePath(read(drive), read(directory), read(name), read(extension));
-                    return writeSecure(path, size, text, true);
-                },
+        /** int _wchdir(const wchar_t *path) */
+        _wchdir: operation(4, ([path])=>{
+            const text = utf16.read(path);
+            if (!exists(text))
+            {
+                return ENOENT;
+            }
+            host.files.setCurrentDirectory(text);
+            return 0;
+        }),
+
+        /**
+         * wchar_t *_wfullpath(wchar_t *absolute, const wchar_t *relative, size_t max)
+         *
+         * _fullpath in UTF-16, `max` counted in characters; a null
+         * destination is one allocated for the caller to free.
+         */
+        _wfullpath: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 12,
+            sizes: [2],
+            /** @param {number[]} args */
+            handler: ([destination, relative, max])=>{
+                const text = fullPath(utf16.read(relative), host.files.currentDirectory());
+                if (wholeAddress(destination) === 0)
+                {
+                    const allocated = host.allocate((text.length + 1) * 2);
+                    utf16.write(allocated, text);
+                    return allocated;
+                }
+                if (text.length + 1 > (max >>> 0))
+                {
+                    return 0;
+                }
+                utf16.write(destination, text);
+                return destination;
             },
+        },
 
-            /**
-             * errno_t _wsearchenv_s(const wchar_t *file, const wchar_t *variable,
-             *                       wchar_t *result, size_t size)
-             */
-            _wsearchenv_s: searchSecure(readWide, writeWide, 2),
-        } : {},
+        /** void _wsearchenv(const wchar_t *file, const wchar_t *variable, wchar_t *result) */
+        _wsearchenv: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([file, variable, result])=>{
+                utf16.write(result,
+                    searchEnvironment(utf16.read(file), utf16.read(variable)) ?? '');
+                return 0;
+            },
+        },
+
+        /**
+         * errno_t _wmakepath_s(wchar_t *path, size_t size, const wchar_t *drive,
+         *                      const wchar_t *dir, const wchar_t *fname,
+         *                      const wchar_t *ext)
+         */
+        _wmakepath_s: {
+            convention: 'cdecl',
+            argBytes: 24,
+            sizes: [1],
+            /** @param {number[]} args */
+            handler: ([path, size, drive, directory, name, extension])=>{
+                const read = (/** @type {number} */ pointer)=>(
+                    wholeAddress(pointer) === 0 ? '' : utf16.read(pointer));
+                const text = wholeAddress(path) === 0 || (size >>> 0) === 0 ? null
+                    : makePath(read(drive), read(directory), read(name), read(extension));
+                return writeSecure(path, size, text, true);
+            },
+        },
+
+        /**
+         * errno_t _wsearchenv_s(const wchar_t *file, const wchar_t *variable,
+         *                       wchar_t *result, size_t size)
+         */
+        _wsearchenv_s: searchSecure(utf16.read, utf16.write, 2),
 
         /**
          * void _searchenv(const char *file, const char *variable, char *result)
@@ -883,7 +864,7 @@ export function createPathFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([file, variable, result])=>{
-                writeString(result, searchEnvironment(readString(file), readString(variable))
+                ansi.write(result, searchEnvironment(ansi.read(file), ansi.read(variable))
                     ?? '');
                 return 0;
             },
@@ -893,7 +874,7 @@ export function createPathFunctions(host){
          * errno_t _searchenv_s(const char *file, const char *variable, char *result,
          *                      size_t size)
          */
-        _searchenv_s: searchSecure(readString, writeString, 1),
+        _searchenv_s: searchSecure(ansi.read, ansi.write, 1),
 
         /**
          * char *_fullpath(char *absolute, const char *relative, size_t max)
@@ -907,18 +888,18 @@ export function createPathFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, relative, max])=>{
-                const text = fullPath(readString(relative), host.files.currentDirectory());
+                const text = fullPath(ansi.read(relative), host.files.currentDirectory());
                 if (wholeAddress(destination) === 0)
                 {
                     const allocated = host.allocate(text.length + 1);
-                    writeString(allocated, text);
+                    ansi.write(allocated, text);
                     return allocated;
                 }
                 if (text.length + 1 > (max >>> 0))
                 {
                     return 0;
                 }
-                writeString(destination, text);
+                ansi.write(destination, text);
                 return destination;
             },
         },
@@ -940,7 +921,7 @@ export function createPathFunctions(host){
                 if (wholeAddress(buffer) === 0)
                 {
                     const allocated = host.allocate(Math.max(text.length + 1, size | 0));
-                    writeString(allocated, text);
+                    ansi.write(allocated, text);
                     return allocated;
                 }
                 if (text.length + 1 > (size | 0))
@@ -948,7 +929,7 @@ export function createPathFunctions(host){
                     fail(ERANGE);
                     return 0;
                 }
-                writeString(buffer, text);
+                ansi.write(buffer, text);
                 return buffer;
             },
         },
@@ -966,10 +947,10 @@ export function createPathFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dir, prefix])=>{
-                const text = temporaryName(wholeAddress(dir) === 0 ? null : readString(dir),
-                    wholeAddress(prefix) === 0 ? '' : readString(prefix));
+                const text = temporaryName(wholeAddress(dir) === 0 ? null : ansi.read(dir),
+                    wholeAddress(prefix) === 0 ? '' : ansi.read(prefix));
                 const address = host.allocate(encodeAnsi(text).length + 1);
-                writeString(address, text);
+                ansi.write(address, text);
                 return address;
             },
         },
@@ -994,12 +975,12 @@ export function createPathFunctions(host){
                     fail(EINVAL);
                     return 0;
                 }
-                const name = uniqueName(readString(template));
+                const name = uniqueName(ansi.read(template));
                 if (name === null)
                 {
                     return 0;
                 }
-                writeString(template, name);
+                ansi.write(template, name);
                 return template;
             },
         },
@@ -1016,12 +997,12 @@ export function createPathFunctions(host){
                     fail(EINVAL);
                     return 0;
                 }
-                const name = uniqueName(readWide(template));
+                const name = uniqueName(utf16.read(template));
                 if (name === null)
                 {
                     return 0;
                 }
-                writeWide(template, name);
+                utf16.write(template, name);
                 return template;
             },
         },
@@ -1057,38 +1038,33 @@ export function createPathFunctions(host){
                 }
                 if (at !== 0)
                 {
-                    writeString(at, name);
+                    ansi.write(at, name);
                 }
                 return at;
             },
         },
 
-        ...host.readMemory ? {
-            /** wchar_t *_wtempnam(const wchar_t *dir, const wchar_t *prefix) */
-            _wtempnam: {
-                returns: 'pointer',
-                convention: 'cdecl',
-                argBytes: 8,
-                /** @param {number[]} args */
-                handler: ([dir, prefix])=>{
-                    const text = temporaryName(wholeAddress(dir) === 0 ? null : readWide(dir),
-                        wholeAddress(prefix) === 0 ? '' : readWide(prefix));
-                    const bytes = new Uint8Array((text.length + 1) * 2);
-                    [...text].forEach((c, at)=>new DataView(bytes.buffer)
-                        .setUint16(at * 2, c.charCodeAt(0), true));
-                    const address = host.allocate(bytes.length);
-                    if (address !== 0)
-                    {
-                        host.writeMemory(address, bytes);
-                    }
-                    return address;
-                },
+        /** wchar_t *_wtempnam(const wchar_t *dir, const wchar_t *prefix) */
+        _wtempnam: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([dir, prefix])=>{
+                const text = temporaryName(wholeAddress(dir) === 0 ? null : utf16.read(dir),
+                    wholeAddress(prefix) === 0 ? '' : utf16.read(prefix));
+                const address = host.allocate((text.length + 1) * 2);
+                if (address !== 0)
+                {
+                    guest.writeWide(address, text);
+                }
+                return address;
             },
-        } : {},
+        },
 
         /** int _chdir(const char *path) */
         _chdir: operation(4, ([path])=>{
-            const text = readString(path);
+            const text = ansi.read(path);
             if (!exists(text))
             {
                 return ENOENT;
@@ -1099,7 +1075,7 @@ export function createPathFunctions(host){
 
         /** int _mkdir(const char *path) -- EEXIST for any name already taken. */
         _mkdir: operation(4, ([path])=>{
-            const text = readString(path);
+            const text = ansi.read(path);
             if (host.files.mkdir(text) === true)
             {
                 return 0;
@@ -1113,13 +1089,13 @@ export function createPathFunctions(host){
          * ENOTEMPTY covers every refusal of a name that is there: not a
          * directory, not empty, or the one the process stands in.
          */
-        _rmdir: operation(4, ([path])=>removal(readString(path), ENOTEMPTY)),
+        _rmdir: operation(4, ([path])=>removal(ansi.read(path), ENOTEMPTY)),
 
         /** int _unlink(const char *path) -- EACCES for a directory or a read-only file. */
-        _unlink: operation(4, ([path])=>removal(readString(path), EACCES)),
+        _unlink: operation(4, ([path])=>removal(ansi.read(path), EACCES)),
 
         /** int remove(const char *path) */
-        remove: operation(4, ([path])=>removal(readString(path), EACCES)),
+        remove: operation(4, ([path])=>removal(ansi.read(path), EACCES)),
 
         /**
          * int rename(const char *from, const char *to)
@@ -1128,8 +1104,8 @@ export function createPathFunctions(host){
          * which is what the new name already existing is.
          */
         rename: operation(8, ([from, to])=>{
-            const source = readString(from);
-            if (host.files.rename(source, readString(to)) === true)
+            const source = ansi.read(from);
+            if (host.files.rename(source, ansi.read(to)) === true)
             {
                 return 0;
             }
@@ -1144,7 +1120,7 @@ export function createPathFunctions(host){
          * whether the path exists -- and a write check against a read-only file
          * would need a permission bit the filesystem does not carry.
          */
-        _access: operation(8, ([path])=>(exists(readString(path)) ? 0 : ENOENT)),
+        _access: operation(8, ([path])=>(exists(ansi.read(path)) ? 0 : ENOENT)),
 
         /**
          * int _chmod(const char *path, int mode)
@@ -1153,7 +1129,7 @@ export function createPathFunctions(host){
          * for has nowhere to go -- the filesystem carries no permissions, as
          * _access says -- so a path that exists takes it and answers 0.
          */
-        _chmod: operation(8, ([path])=>(exists(readString(path)) ? 0 : ENOENT)),
+        _chmod: operation(8, ([path])=>(exists(ansi.read(path)) ? 0 : ENOENT)),
 
         /**
          * unsigned long _getdrives(void)
@@ -1196,56 +1172,50 @@ export function createPathFunctions(host){
         /** int _findnext64i32(intptr_t handle, struct _finddata64i32_t *fileinfo) */
         _findnext64i32: findNext(FINDDATA64I32),
 
-        // A wide pattern is read from memory as it lies, which needs the
-        // bytes themselves rather than the narrow string reader.
-        ...(host.readMemory
-            ? {
-                /** int _wmkdir(const wchar_t *path) -- `_mkdir`, the path wide. */
-                _wmkdir: operation(4, ([path])=>{
-                    const text = readWide(path);
-                    if (host.files.mkdir(text) === true)
-                    {
-                        return 0;
-                    }
-                    return exists(text) ? EEXIST : ENOENT;
-                }),
-
-                /** int _wrmdir(const wchar_t *path) */
-                _wrmdir: operation(4, ([path])=>removal(readWide(path), ENOTEMPTY)),
-
-                /** int _wunlink(const wchar_t *path) / int _wremove(const wchar_t *path) */
-                _wunlink: operation(4, ([path])=>removal(readWide(path), EACCES)),
-                _wremove: operation(4, ([path])=>removal(readWide(path), EACCES)),
-
-                /** int _wrename(const wchar_t *from, const wchar_t *to) */
-                _wrename: operation(8, ([from, to])=>{
-                    const source = readWide(from);
-                    if (host.files.rename(source, readWide(to)) === true)
-                    {
-                        return 0;
-                    }
-                    return exists(source) ? EACCES : ENOENT;
-                }, 2),
-
-                /** intptr_t _wfindfirst(const wchar_t *filespec, struct _wfinddata_t *fileinfo) */
-                _wfindfirst: findFirst(WFINDDATA),
-
-                /** int _wfindnext(intptr_t handle, struct _wfinddata_t *fileinfo) */
-                _wfindnext: findNext(WFINDDATA),
-
-                /**
-                 * intptr_t _wfindfirsti64(const wchar_t *filespec,
-                 *                         struct _wfinddatai64_t *fileinfo)
-                 */
-                _wfindfirsti64: findFirst(WFINDDATAI64),
-
-                /** int _wfindnexti64(intptr_t handle, struct _wfinddatai64_t *fileinfo) */
-                _wfindnexti64: findNext(WFINDDATAI64),
-
-                /** int _waccess(const wchar_t *path, int mode) -- `_access`, wide. */
-                _waccess: operation(8, ([path])=>(exists(readWide(path)) ? 0 : ENOENT)),
+        /** int _wmkdir(const wchar_t *path) -- `_mkdir`, the path wide. */
+        _wmkdir: operation(4, ([path])=>{
+            const text = utf16.read(path);
+            if (host.files.mkdir(text) === true)
+            {
+                return 0;
             }
-            : {}),
+            return exists(text) ? EEXIST : ENOENT;
+        }),
+
+        /** int _wrmdir(const wchar_t *path) */
+        _wrmdir: operation(4, ([path])=>removal(utf16.read(path), ENOTEMPTY)),
+
+        /** int _wunlink(const wchar_t *path) / int _wremove(const wchar_t *path) */
+        _wunlink: operation(4, ([path])=>removal(utf16.read(path), EACCES)),
+        _wremove: operation(4, ([path])=>removal(utf16.read(path), EACCES)),
+
+        /** int _wrename(const wchar_t *from, const wchar_t *to) */
+        _wrename: operation(8, ([from, to])=>{
+            const source = utf16.read(from);
+            if (host.files.rename(source, utf16.read(to)) === true)
+            {
+                return 0;
+            }
+            return exists(source) ? EACCES : ENOENT;
+        }, 2),
+
+        /** intptr_t _wfindfirst(const wchar_t *filespec, struct _wfinddata_t *fileinfo) */
+        _wfindfirst: findFirst(WFINDDATA),
+
+        /** int _wfindnext(intptr_t handle, struct _wfinddata_t *fileinfo) */
+        _wfindnext: findNext(WFINDDATA),
+
+        /**
+         * intptr_t _wfindfirsti64(const wchar_t *filespec,
+         *                         struct _wfinddatai64_t *fileinfo)
+         */
+        _wfindfirsti64: findFirst(WFINDDATAI64),
+
+        /** int _wfindnexti64(intptr_t handle, struct _wfinddatai64_t *fileinfo) */
+        _wfindnexti64: findNext(WFINDDATAI64),
+
+        /** int _waccess(const wchar_t *path, int mode) -- `_access`, wide. */
+        _waccess: operation(8, ([path])=>(exists(utf16.read(path)) ? 0 : ENOENT)),
 
         /** int _findclose(intptr_t handle) -- EBADF for a handle not open. */
         _findclose: operation(4, ([handle])=>(searches.delete(handle | 0) ? 0 : EBADF), 0),

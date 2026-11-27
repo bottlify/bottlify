@@ -61,16 +61,10 @@ import { createEnvironment } from './environ.js';
 import { createMultiBytePage } from './mbcs.js';
 import { createLocaleFunctions } from './locale.js';
 import { createProcessFunctions } from './process.js';
-import { O_UNICODE, unitsOfText, wideStringAt } from './widetext.js';
-import { bytesOfUnits, utf16z } from '../common/utf16.js';
+import { MAX_WIDE, O_UNICODE, unitsOfText } from './widetext.js';
+import { bytesOfUnits } from '../common/utf16.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
-
-/** A string's terminator, where a string ends: never itself written. */
-const NUL = new Uint8Array(1);
-
-/** A wide string's terminator, where a string ends: never itself written. */
-const WIDE_NUL = new Uint8Array(2);
 
 /** A double the code reads as its two halves, which a 64-bit caller passes in XMM0. */
 const DOUBLE_HALVES = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
@@ -217,7 +211,6 @@ const seededCode = (made, long, argBytes, handler)=>({
  *     Sets a range to one byte value in place, with no host buffer holding
  *     the pattern: the lengths are the program's, and a clear of a megabyte
  *     through writeMemory costs an allocation and two extra passes.
- * @property {(address: number, maxLength: number) => string} readCString
  * @property {(code: number) => void} [setLastError]  kernel32's, for what the
  *           runtime's file calls leave there as Windows' leave it.
  * @property {(address: number, limit: number, wanted: Uint8Array) =>
@@ -315,32 +308,45 @@ export function createMsvcrtFunctions(host){
     /** What `rand` draws from next; where this runtime starts before any srand. */
     let randomSeed = 1;
 
-    /** @param {number} pointer */
-    const readString = pointer=>host.readCString(pointer, MAX_STRING);
-
-    /** @param {number} pointer */
-    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
-
-    /** Where %Z reads and %n writes. */
-    const memoryAccess = guestAccess(host.guest);
+    const { guest } = host;
 
     /**
-     * Text in the ANSI page the text was read in, a byte a character, so a
-     * string a program passed is written back as its own bytes; and the
-     * terminator after it when `terminated` says so.
+     * Text where it lies, each width's: ANSI in the page the text was read
+     * in, a byte a character, so a string a program passed is written back as
+     * its own bytes; UTF-16 at most MAX_WIDE units. A write puts the
+     * terminator after it.
+     *
+     * @type {Record<'ansi' | 'utf16', { read: (pointer: number) => string,
+     *     write: (pointer: number, text: string) => void }>}
+     */
+    const widths = {
+        ansi: {
+            read: pointer=>guest.cstr(wholeAddress(pointer), MAX_STRING),
+            write: (pointer, text)=>void guest.writeAnsi(wholeAddress(pointer), text),
+        },
+        utf16: {
+            read: pointer=>guest.wstr(wholeAddress(pointer), MAX_WIDE * 2),
+            write: (pointer, text)=>void guest.writeWide(wholeAddress(pointer), text),
+        },
+    };
+    const { ansi, utf16 } = widths;
+
+    /** Where %Z reads and %n writes. */
+    const memoryAccess = guestAccess(guest);
+
+    /**
+     * ANSI text, and the terminator after it when `terminated` says so.
      *
      * @param {number} pointer @param {string} text @param {boolean} terminated
      */
     const putText = (pointer, text, terminated)=>{
-        host.writeMemory(pointer, encodeAnsi(text));
         if (terminated)
         {
-            host.fillMemory(pointer + text.length, 0, 1);
+            ansi.write(pointer, text);
+            return;
         }
+        guest.setBytes(wholeAddress(pointer), encodeAnsi(text));
     };
-
-    /** @param {number} pointer @param {string} text */
-    const writeString = (pointer, text)=>putText(pointer, text, true);
 
     /** What `_set_output_format` was given: `_TWO_DIGIT_EXPONENT` or nothing. */
     let outputFormat = 0;
@@ -369,8 +375,8 @@ export function createMsvcrtFunctions(host){
      *
      * @param {number} format @param {number[]} values
      */
-    const narrowText = (format, values)=>formatToString(readString(format), values, readString,
-        { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
+    const narrowText = (format, values)=>formatToString(ansi.read(format), values, ansi.read,
+        { readWideString: utf16.read, cLocale: true, decodeBytes: decodeAnsi,
             style: printStyle(), ...memoryAccess });
 
     /** @param {number[]} args @param {number} fixed */
@@ -387,7 +393,7 @@ export function createMsvcrtFunctions(host){
      */
     const countedPrint = (buffer, count, text)=>{
         const limit = count >>> 0;
-        if ((buffer >>> 0) === 0)
+        if (wholeAddress(buffer) === 0)
         {
             if (limit === 0)
             {
@@ -406,8 +412,8 @@ export function createMsvcrtFunctions(host){
      *
      * @param {number} format @param {number[]} values
      */
-    const wideText = (format, values)=>formatToString(readWide(format), values, readString,
-        { readWideString: readWide, wide: true, style: printStyle(),
+    const wideText = (format, values)=>formatToString(utf16.read(format), values, ansi.read,
+        { readWideString: utf16.read, wide: true, style: printStyle(),
             ...memoryAccess });
 
     /**
@@ -417,12 +423,12 @@ export function createMsvcrtFunctions(host){
      * @param {number} format @param {number[]} values @param {boolean} wide
      */
     const positionalText = (format, values, wide)=>{
-        const text = wide ? readWide(format) : readString(format);
+        const text = wide ? utf16.read(format) : ansi.read(format);
         const reordered = sequentialArguments(text, values);
-        return formatToString(reordered?.format ?? text, reordered?.slots ?? values, readString,
-            wide ? { readWideString: readWide, wide: true, style: printStyle(),
+        return formatToString(reordered?.format ?? text, reordered?.slots ?? values, ansi.read,
+            wide ? { readWideString: utf16.read, wide: true, style: printStyle(),
                 ...memoryAccess }
-                : { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
+                : { readWideString: utf16.read, cLocale: true, decodeBytes: decodeAnsi,
                     style: printStyle(), ...memoryAccess });
     };
 
@@ -434,13 +440,13 @@ export function createMsvcrtFunctions(host){
      */
     const cutWide = (buffer, size, text)=>{
         const room = size >>> 0;
-        if ((buffer >>> 0) === 0 || room === 0)
+        if (wholeAddress(buffer) === 0 || room === 0)
         {
             errno(EINVAL);
             return -1;
         }
         const kept = text.slice(0, room - 1);
-        host.writeMemory(buffer, utf16z(kept));
+        utf16.write(buffer, kept);
         return text.length < room ? text.length : -1;
     };
 
@@ -456,18 +462,19 @@ export function createMsvcrtFunctions(host){
      */
     const countedWide = (buffer, count, format, values)=>{
         const limit = count >>> 0;
-        if ((format >>> 0) === 0 || ((buffer >>> 0) === 0 && limit !== 0))
+        if (wholeAddress(format) === 0 || (wholeAddress(buffer) === 0 && limit !== 0))
         {
             errno(EINVAL);
             return -1;
         }
         const text = wideText(format, values);
-        if ((buffer >>> 0) === 0)
+        if (wholeAddress(buffer) === 0)
         {
             return text.length;
         }
         const units = unitsOfText(text.slice(0, limit));
-        host.writeMemory(buffer, bytesOfUnits(text.length < limit ? [...units, 0] : units));
+        guest.setBytes(wholeAddress(buffer),
+            bytesOfUnits(text.length < limit ? [...units, 0] : units));
         return text.length > limit ? -1 : text.length;
     };
 
@@ -478,7 +485,7 @@ export function createMsvcrtFunctions(host){
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
             const text = wideText(args[1], args.slice(2));
-            host.writeMemory(args[0], utf16z(text));
+            utf16.write(args[0], text);
             return text.length;
         },
     };
@@ -519,7 +526,7 @@ export function createMsvcrtFunctions(host){
             // _itoa(100, buffer, 100) is "10" (Wine's msvcrt test__itoa_s).
             const text = radix === 10 ? (value | 0).toString(10)
                 : radixDigits(value >>> 0, radix);
-            writeString(buffer, text);
+            ansi.write(buffer, text);
             return buffer;
         },
     };
@@ -549,7 +556,7 @@ export function createMsvcrtFunctions(host){
      */
     const boundedPrint = (buffer, size, format, values)=>{
         const room = size >>> 0;
-        if ((buffer >>> 0) === 0 || (format >>> 0) === 0 || room === 0)
+        if (wholeAddress(buffer) === 0 || wholeAddress(format) === 0 || room === 0)
         {
             errno(EINVAL);
             return -1;
@@ -566,11 +573,11 @@ export function createMsvcrtFunctions(host){
     const boundedText = (buffer, room, text)=>{
         if (text.length + 1 > room)
         {
-            host.writeMemory(buffer, NUL);
+            guest.set8(wholeAddress(buffer), 0);
             errno(ERANGE);
             return -1;
         }
-        writeString(buffer, text);
+        ansi.write(buffer, text);
         return text.length;
     };
 
@@ -606,7 +613,7 @@ export function createMsvcrtFunctions(host){
         /** @param {number[]} args */
         handler: ([buffer, format, list])=>{
             const text = narrowText(format, varargsAt(list));
-            writeString(buffer, text);
+            ansi.write(buffer, text);
             return text.length;
         },
     });
@@ -633,7 +640,7 @@ export function createMsvcrtFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([buffer, size, format, list])=>
-            boundedPrint(buffer, size, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
+            boundedPrint(buffer, size, format, wholeAddress(format) === 0 ? [] : varargsAt(list)),
     });
 
     /**
@@ -650,7 +657,7 @@ export function createMsvcrtFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([buffer, count, format, list])=>
-            countedWide(buffer, count, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
+            countedWide(buffer, count, format, wholeAddress(format) === 0 ? [] : varargsAt(list)),
     });
 
     /**
@@ -663,7 +670,7 @@ export function createMsvcrtFunctions(host){
         /** @param {number[]} args */
         handler: ([buffer, format, list])=>{
             const text = wideText(format, varargsAt(list));
-            host.writeMemory(buffer, utf16z(text));
+            utf16.write(buffer, text);
             return text.length;
         },
     });
@@ -723,10 +730,10 @@ export function createMsvcrtFunctions(host){
                 {
                     return 0;
                 }
-                if (locale !== 0 && readString(locale) !== 'C' && readString(locale) !== '')
+                if (locale !== 0 && ansi.read(locale) !== 'C' && ansi.read(locale) !== '')
                 {
                     host.divergence?.('setlocale',
-                        `locale "${readString(locale)}" is not carried; only "C" is`);
+                        `locale "${ansi.read(locale)}" is not carried; only "C" is`);
                     return 0;
                 }
                 if (currentLocale === 0)
@@ -734,7 +741,7 @@ export function createMsvcrtFunctions(host){
                     currentLocale = allocate(2);
                     if (currentLocale !== 0)
                     {
-                        writeString(currentLocale, 'C');
+                        ansi.write(currentLocale, 'C');
                     }
                 }
                 return currentLocale;
@@ -894,7 +901,7 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: args=>{
                 const text = render(args, 2);
-                writeString(args[0], text);
+                ansi.write(args[0], text);
                 return text.length;
             },
         }),
@@ -976,7 +983,7 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, format, , list])=>{
                 const text = wideText(format, varargsAt(list));
-                host.writeMemory(buffer, utf16z(text));
+                utf16.write(buffer, text);
                 return text.length;
             },
         },
@@ -1017,7 +1024,7 @@ export function createMsvcrtFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([format, list])=>{
-                if ((format >>> 0) === 0)
+                if (wholeAddress(format) === 0)
                 {
                     errno(EINVAL);
                     return -1;
@@ -1052,12 +1059,12 @@ export function createMsvcrtFunctions(host){
                 const limit = truncate ? room - 1 : Math.min(count >>> 0, room - 1);
                 if (!truncate && (count >>> 0) > room - 1 && text.length > room - 1)
                 {
-                    host.writeMemory(buffer, WIDE_NUL);
+                    guest.set16(wholeAddress(buffer), 0);
                     errno(ERANGE);
                     return -1;
                 }
                 const kept = text.slice(0, limit);
-                host.writeMemory(buffer, utf16z(kept));
+                utf16.write(buffer, kept);
                 return text.length > limit ? -1 : text.length;
             },
         },
@@ -1363,9 +1370,7 @@ export function createMsvcrtFunctions(host){
                     errno(EINVAL);
                     return EINVAL;
                 }
-                const bytes = new Uint8Array(4);
-                new DataView(bytes.buffer).setInt32(0, globals.get('fmode'), true);
-                host.writeMemory(pointer, bytes);
+                guest.set32(wholeAddress(pointer), globals.get('fmode'));
                 return 0;
             },
         },
@@ -1422,7 +1427,7 @@ export function createMsvcrtFunctions(host){
                     errno(EINVAL);
                     return EINVAL;
                 }
-                host.writeMemory(pointer, crypto.getRandomValues(new Uint8Array(4)));
+                guest.set32(wholeAddress(pointer), crypto.getRandomValues(new Uint32Array(1))[0]);
                 return 0;
             },
         },
@@ -1476,9 +1481,8 @@ export function createMsvcrtFunctions(host){
         __RTDynamicCast: guestEntry(inGuestRtti.__RTDynamicCast, RTTI_CODE.__RTDynamicCast, host),
         ...createProcessFunctions({
             errno,
-            readCString: readString,
-            readU32: at=>new DataView(host.readMemory(wholeAddress(at), 4).buffer)
-                .getUint32(0, true),
+            readCString: ansi.read,
+            readU32: at=>guest.u32(wholeAddress(at)),
             allocate,
             writeMemory: host.writeMemory,
             ...host.launch ? { launch: host.launch } : {},
@@ -1562,9 +1566,7 @@ export function createMsvcrtFunctions(host){
             : {}),
         ...(host.systemTimeMs && host.now
             ? createTimeFunctions({
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
-                readCString: host.readCString,
+                guest: host.guest,
                 allocate,
                 systemTimeMs: host.systemTimeMs,
                 now: host.now,
@@ -1578,9 +1580,7 @@ export function createMsvcrtFunctions(host){
             : {}),
         ...(host.files
             ? createPathFunctions({
-                readCString: host.readCString,
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
+                guest: host.guest,
                 allocate,
                 drives: host.drives,
                 files: host.files,
@@ -1592,9 +1592,7 @@ export function createMsvcrtFunctions(host){
             : {}),
         ...(descriptors
             ? createIoFunctions({
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
-                readCString: host.readCString,
+                guest: host.guest,
                 files,
                 errno,
                 doserrno: code=>globals.set('doserrno', code),
@@ -1617,8 +1615,7 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: ([message])=>{
                 const lead =
-                    wholeAddress(message) === 0 ? '' : host.readCString(wholeAddress(message),
-                        4096);
+                    wholeAddress(message) === 0 ? '' : guest.cstr(wholeAddress(message), 4096);
                 const line = `${lead ? `${lead}: ` : ''}${messageOf(globals.get(errnoName()))}\n`;
                 const stderr = descriptors?.get(2);
                 if (stderr)
@@ -1657,8 +1654,7 @@ export function createMsvcrtFunctions(host){
                 const console = descriptors?.get(1);
                 if (console)
                 {
-                    descriptors?.put(console, encodeAnsi(host.readCString(wholeAddress(text),
-                        1 << 20)));
+                    descriptors?.put(console, encodeAnsi(ansi.read(text)));
                 }
                 return 0;
             },
@@ -1690,7 +1686,7 @@ export function createMsvcrtFunctions(host){
                     /** @param {number[]} args */
                     handler: ([text])=>{
                         const match = /^[ \t\n\v\f\r]*([+-]?)(\d*)/
-                            .exec(host.readCString(wholeAddress(text), 4096));
+                            .exec(guest.cstr(wholeAddress(text), 4096));
                         const digits = match?.[2] ?? '';
                         let value = digits ? BigInt(digits) : 0n;
                         if (match?.[1] === '-')
