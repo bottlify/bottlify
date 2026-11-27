@@ -255,6 +255,20 @@ test('what a keeper saved is read without opening anything for writing', async()
     assert.equal(await savedBlocks(origin.root, 'nothing-00000000'), null, 'no cache yet');
 });
 
+test('a saved index the origin refuses to open is not a miss: the refusal comes through', async()=>{
+    const refused = new DOMException('the origin is not allowed', 'SecurityError');
+    const root = { getDirectoryHandle: async()=>{
+        throw refused;
+    } };
+    await assert.rejects(savedBlocks(root, NAME), refused);
+    const folder = { getFileHandle: async()=>{
+        throw new DOMException('held elsewhere', 'NoModificationAllowedError');
+    } };
+    const blocks = { getDirectoryHandle: async()=>folder };
+    await assert.rejects(savedBlocks({ getDirectoryHandle: async()=>blocks }, NAME),
+        { name: 'NoModificationAllowedError' }, 'a file of it refused, too');
+});
+
 test('what of a bundle is here is read off its saved index, the seed aside', async()=>{
     // Blocks 0, 1, 2, 30 and the last are put; the last two are the
     // translation seed.

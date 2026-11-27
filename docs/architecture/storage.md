@@ -58,7 +58,8 @@ flowchart TD
 
 Where to look in the code: [`core/src/layers/filesystem/internal/bundle/cache.js`](../../modules/core/src/layers/filesystem/internal/bundle/cache.js) (blocks),
 [`core/src/layers/filesystem/internal/opfs-disk.js`](../../modules/core/src/layers/filesystem/internal/opfs-disk.js) (the keeper's disk),
-[`core/src/layers/filesystem/internal/bundle/saved.js`](../../modules/core/src/layers/filesystem/internal/bundle/saved.js) (what a page reads of it),
+[`core/src/layers/filesystem/internal/bundle/saved.js`](../../modules/core/src/layers/filesystem/internal/bundle/saved.js) (what a page reads of it:
+a file or folder not there is no block, any other refusal of the origin's rejects),
 [`core/src/layers/filesystem/internal/page-file.js`](../../modules/core/src/layers/filesystem/internal/page-file.js) (the page file),
 [`core/src/layers/filesystem/internal/run-folder.js`](../../modules/core/src/layers/filesystem/internal/run-folder.js) (the run's folder),
 [`core/src/process/run-cache.js`](../../modules/core/src/process/run-cache.js) (the run cache),
