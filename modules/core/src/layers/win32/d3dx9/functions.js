@@ -187,6 +187,9 @@ withLongCode(QUATERNION, QUATERNION_LONG);
  * @property {import('../../cache/module.js').CacheSpace} [compiles]
  *           Where shader compiles done are kept: the run's cache, for every process of
  *           the run. None: a compile asked again is done again.
+ * @property {import('../../cache/module.js').CacheSpace} [images]
+ *           Where the texture loaders keep the images they decoded: the run's cache,
+ *           for every process of the run. None: a file is decoded at every create.
  * @property {(path: string, bytes: Uint8Array) => Promise<boolean> | boolean} [writeFile]
  *           A file written whole, for D3DXSaveTextureToFile: false when it could not be.
  * @property {(module: number, name: string | number, type: number) =>

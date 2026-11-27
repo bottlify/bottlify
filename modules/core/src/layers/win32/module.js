@@ -5842,6 +5842,8 @@ export function createWin32Module(){
                         shaderCompiled: config?.shaderCompiled,
                         // Compiles done, for every process of the run to answer again.
                         compiles: host.requireApi('cache').space('d3dx-compiles'),
+                        // Images decoded, read in place at the next create of the same file.
+                        images: host.requireApi('cache').space('d3dx-images'),
                         // The font engine GDI draws with, for D3DX's font.
                         fontMetrics: (/** @type {any} */ font)=>
                             config?.graphics?.fontMetrics?.(font) ?? null,

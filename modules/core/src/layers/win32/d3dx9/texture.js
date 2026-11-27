@@ -12,6 +12,7 @@ import {
     layoutOf, resample,
 } from './pixels.js';
 import { wholeAddress } from '../common/pointers.js';
+import { createImageCache, decodedFrom, plainDecoded } from './image-cache.js';
 
 /**
  * D3DX's texture loaders: an image file made into a texture, a cube texture
@@ -72,6 +73,9 @@ const RT_RCDATA = 10;
  * @property {(module: number, name: string | number, type: number) =>
  *     Promise<Uint8Array | null> | Uint8Array | null} [resource]
  *     A module's resource, for the FromResource loaders.
+ * @property {import('../../cache/module.js').CacheSpace} [images]
+ *     Where the loaders keep the images they decoded: the run's cache, for every
+ *     process of it (`image-cache.js`); none decodes a file again at every create.
  */
 
 /** @typedef {(object: number, slot: number, rest: number[]) => Promise<number>} GuestMethod */
@@ -144,17 +148,23 @@ function formatFromFile(file){
  */
 export function createTextureLoader(host){
     const { u32, putU32s, putPointer, lockedRect, method: call, string } = createDeviceCalls(host);
+    const images = createImageCache(host.images);
+
+    /**
+     * D3DXIMAGE_INFO's words for an image.
+     *
+     * @param {import('./images.js').Image} image @returns {number[]}
+     */
+    const infoOf = image=>[image.width, image.height, image.depth ?? 1, image.mipLevels,
+        image.format, image.depth ? D3DRTYPE_VOLUMETEXTURE : image.faces ? D3DRTYPE_CUBETEXTURE
+            : D3DRTYPE_TEXTURE, image.fileFormat];
 
     /**
      * Writes D3DXIMAGE_INFO.
      *
      * @param {number} at @param {import('./images.js').Image} image
      */
-    const writeInfo = (at, image)=>{
-        putU32s(at, [image.width, image.height, image.depth ?? 1, image.mipLevels, image.format,
-            image.depth ? D3DRTYPE_VOLUMETEXTURE : image.faces ? D3DRTYPE_CUBETEXTURE
-                : D3DRTYPE_TEXTURE, image.fileFormat]);
-    };
+    const writeInfo = (at, image)=>putU32s(at, infoOf(image));
 
     /**
      * A string argument, a path or a resource's name, narrow or wide.
@@ -314,6 +324,65 @@ export function createTextureLoader(host){
     };
 
     /**
+     * The levels a create writes into the texture it makes: read in place
+     * where the run's cache keeps the decode of the same file asked the same
+     * way, else decoded from the file by `plan` (and kept, where it decoded
+     * anything). A level the cache let go of between the find and its read
+     * is decoded again from the file, the whole of it once.
+     *
+     * @param {string} api @param {Uint8Array | null | Promise<Uint8Array | null>} found
+     * @param {string} asked  every argument the decode depends on
+     * @param {(image: import('./images.js').Image) => import('./image-cache.js').Plain | number}
+     *     plan  the image's texture, or the answer refusing it
+     * @returns {Promise<import('./image-cache.js').Decoded | number>}
+     */
+    const decodedOf = async(api, found, asked, plan)=>{
+        const file = await found;
+        if (!file)
+        {
+            return D3DXERR_INVALIDDATA;
+        }
+        /** @returns {import('./image-cache.js').Plain | number} */
+        const planned = ()=>{
+            const image = read(api, file);
+            return typeof image === 'number' ? image : plan(image);
+        };
+        const kept = images.find(asked, file);
+        if (kept)
+        {
+            /** @type {import('./image-cache.js').Decoded | null} */
+            let again = null;
+            return { ...kept, read: (face, level, write)=>{
+                if (again === null && kept.read(face, level, write))
+                {
+                    return true;
+                }
+                if (again === null)
+                {
+                    const plain = planned();
+                    // The same bytes, decoded once already the same way.
+                    if (typeof plain === 'number')
+                    {
+                        throw new Error(`${api}: a file decoded before failed to decode again`);
+                    }
+                    again = plainDecoded(plain);
+                }
+                return again.read(face, level, write);
+            } };
+        }
+        const plain = planned();
+        if (typeof plain === 'number')
+        {
+            return plain;
+        }
+        if (decodedFrom(plain, file))
+        {
+            images.keep(asked, file, plain);
+        }
+        return plainDecoded(plain);
+    };
+
+    /**
      * Every loader's work, once its handler has returned: the image read, a
      * texture (or cube texture) of what was asked made of it, and its levels
      * written.
@@ -324,20 +393,39 @@ export function createTextureLoader(host){
      * @returns {Promise<number>}
      */
     const build = async(api, device, found, ask, cube, thread)=>{
-        const image = await flatImageOf(api, found);
-        if (typeof image === 'number')
+        const decoded = await decodedOf(api, found, [cube ? 'cube' : 'texture', ask.width,
+            ask.height, ask.mips, ask.format, ask.colorKey].join(':'),
+        image=>textureOf(api, image, ask, cube));
+        if (typeof decoded === 'number')
         {
-            return image;
+            return decoded;
+        }
+        if (ask.info !== 0)
+        {
+            putU32s(ask.info, decoded.info);
+        }
+        return upload(device, decoded, { usage: ask.usage, pool: ask.pool, out: ask.out, thread });
+    };
+
+    /**
+     * The texture (or cube texture) of what was asked an image makes, its
+     * levels in the texture's format, or the answer refusing it.
+     *
+     * @param {string} api @param {import('./images.js').Image} image
+     * @param {TextureAsk} ask @param {boolean} cube
+     * @returns {import('./image-cache.js').Plain | number}
+     */
+    const textureOf = (api, image, ask, cube)=>{
+        if (image.depth)
+        {
+            host.divergence?.(api, 'answered D3DXERR_INVALIDDATA: a volume: not a 2D texture');
+            return D3DXERR_INVALIDDATA;
         }
         if (cube !== Boolean(image.faces))
         {
             host.divergence?.(api, `answered D3DXERR_INVALIDDATA: ${cube
                 ? 'the file is not a cube map' : 'a cube map: not a 2D texture'}`);
             return D3DXERR_INVALIDDATA;
-        }
-        if (ask.info !== 0)
-        {
-            writeInfo(ask.info, image);
         }
         const w = sizeOf(ask.width, image.width);
         const h = cube ? w : sizeOf(ask.height, image.height);
@@ -355,8 +443,7 @@ export function createTextureLoader(host){
             : mips === D3DX_FROM_FILE ? Math.min(full, image.mipLevels) : Math.min(full, mips);
         const faces = (image.faces ?? [image.levels]).map(levels=>
             levelsOf(levels, w, h, count, target, ask.colorKey));
-        return upload(device, { w, h, depth: 0, count, usage: ask.usage, pool: ask.pool,
-            target, faces, out: ask.out, cube, thread });
+        return { info: infoOf(image), w, h, depth: 0, count, target, cube, faces };
     };
 
     /**
@@ -370,20 +457,33 @@ export function createTextureLoader(host){
      * @returns {Promise<number>}
      */
     const buildVolume = async(api, device, found, ask, thread)=>{
-        const image = await imageOf(api, found);
-        if (typeof image === 'number')
+        const decoded = await decodedOf(api, found, ['volume', ask.width, ask.height, ask.depth,
+            ask.mips, ask.format].join(':'), image=>volumeOf(api, image, ask));
+        if (typeof decoded === 'number')
         {
-            return image;
+            return decoded;
         }
+        if (ask.info !== 0)
+        {
+            putU32s(ask.info, decoded.info);
+        }
+        return upload(device, decoded, { usage: ask.usage, pool: ask.pool, out: ask.out, thread });
+    };
+
+    /**
+     * The volume texture an image makes: its levels, each its slices packed,
+     * in the format asked; or the answer refusing it.
+     *
+     * @param {string} api @param {import('./images.js').Image} image
+     * @param {TextureAsk & { depth: number }} ask
+     * @returns {import('./image-cache.js').Plain | number}
+     */
+    const volumeOf = (api, image, ask)=>{
         if (!image.depth || !image.volume)
         {
             host.divergence?.(api, `answered D3DXERR_INVALIDDATA: ${image.depth
                 ? `a volume of format ${image.format}, not read` : 'not a volume'}`);
             return D3DXERR_INVALIDDATA;
-        }
-        if (ask.info !== 0)
-        {
-            writeInfo(ask.info, image);
         }
         /** @param {number} asked @param {number} file */
         const kept = (asked, file)=>asked === 0 || asked === file || asked >= D3DX_FROM_FILE;
@@ -402,7 +502,16 @@ export function createTextureLoader(host){
             const converted = slices.map(slice=>(target === slice.format ? slice.data
                 : encodeTexels(target, decodeTexels(slice.format, slice.data, slice.width,
                     slice.height), slice.width, slice.height)));
-            const out = new Uint8Array(converted.reduce((sum, d)=>sum + d.length, 0));
+            // A level the file holds in the format asked goes as it is, a view
+            // of the file's bytes, its slices one after another there.
+            const [first] = converted;
+            const length = converted.reduce((sum, d)=>sum + d.length, 0);
+            if (converted.every((d, z)=>d.buffer === first.buffer
+                && d.byteOffset === first.byteOffset + z * first.length))
+            {
+                return new Uint8Array(first.buffer, first.byteOffset, length);
+            }
+            const out = new Uint8Array(length);
             let at = 0;
             for (const d of converted)
             {
@@ -411,8 +520,8 @@ export function createTextureLoader(host){
             }
             return out;
         })];
-        return upload(device, { w: image.width, h: image.height, depth: image.depth, count,
-            usage: ask.usage, pool: ask.pool, target, faces, out: ask.out, cube: false, thread });
+        return { info: infoOf(image), w: image.width, h: image.height, depth: image.depth, count,
+            target, cube: false, faces };
     };
 
     /**
@@ -541,13 +650,11 @@ export function createTextureLoader(host){
      * The texture made on the device and its levels written: a cube
      * texture's face by face, a volume's level by level, each its slices.
      *
-     * @param {number} device
-     * @param {{ w: number, h: number, depth: number, count: number, usage: number,
-     *     pool: number, target: number, faces: Uint8Array[][], out: number, cube: boolean,
-     *     thread: any }} plan  `depth` 0 but for a volume.
+     * @param {number} device @param {import('./image-cache.js').Decoded} plan
+     * @param {{ usage: number, pool: number, out: number, thread: any }} asked
      * @returns {Promise<number>}
      */
-    const upload = async(device, plan)=>{
+    const upload = async(device, plan, { usage, pool, out, thread })=>{
         // The bridge places a call into the guest below the host call in flight,
         // and this one is in flight only once its handler has returned its promise.
         await null;
@@ -561,19 +668,19 @@ export function createTextureLoader(host){
             return E_OUTOFMEMORY;
         }
         /** @param {number} object @param {number} slot @param {number[]} rest */
-        const method = (object, slot, rest)=>call(plan.thread, object, slot, rest);
+        const method = (object, slot, rest)=>call(thread, object, slot, rest);
         let failed = D3D_OK;
-        /** @param {number} usage @param {number} pool @returns {Promise<number | null>} */
-        const create = async(usage, pool)=>{
+        /** @param {number} given @param {number} into @returns {Promise<number | null>} */
+        const create = async(given, into)=>{
             putPointer(scratch, 0);
             const answer = plan.cube
-                ? await method(device, DEVICE.CreateCubeTexture, [plan.w, plan.count, usage,
-                    plan.target, pool, scratch, 0])
+                ? await method(device, DEVICE.CreateCubeTexture, [plan.w, plan.count, given,
+                    plan.target, into, scratch, 0])
                 : plan.depth
                     ? await method(device, DEVICE.CreateVolumeTexture, [plan.w, plan.h,
-                        plan.depth, plan.count, usage, plan.target, pool, scratch, 0])
+                        plan.depth, plan.count, given, plan.target, into, scratch, 0])
                     : await method(device, DEVICE.CreateTexture, [plan.w, plan.h, plan.count,
-                        usage, plan.target, pool, scratch, 0]);
+                        given, plan.target, into, scratch, 0]);
             if (answer !== D3D_OK)
             {
                 failed = answer;
@@ -583,14 +690,14 @@ export function createTextureLoader(host){
         };
         try
         {
-            const lockable = plan.pool !== D3DPOOL_DEFAULT || (plan.usage & D3DUSAGE_DYNAMIC) !== 0;
-            const filled = await create(lockable ? plan.usage : 0,
-                lockable ? plan.pool : D3DPOOL_SYSTEMMEM);
+            const lockable = pool !== D3DPOOL_DEFAULT || (usage & D3DUSAGE_DYNAMIC) !== 0;
+            const filled = await create(lockable ? usage : 0,
+                lockable ? pool : D3DPOOL_SYSTEMMEM);
             if (filled === null)
             {
                 return failed;
             }
-            for (let face = 0; face < plan.faces.length; face++)
+            for (let face = 0; face < (plan.cube ? 6 : 1); face++)
             {
                 // A cube texture's LockRect and UnlockRect name the face first.
                 const which = plan.cube ? [face] : [];
@@ -611,26 +718,28 @@ export function createTextureLoader(host){
                     const bits = plan.depth ? u32(locked + 8) : lockedRect(locked).bits;
                     const { rowBytes, rows } = layoutOf(plan.target, Math.max(1, plan.w >> level),
                         Math.max(1, plan.h >> level));
-                    const bytes = plan.faces[face][level];
                     const slices = plan.depth ? Math.max(1, plan.depth >> level) : 1;
-                    for (let z = 0; z < slices; z++)
-                    {
-                        for (let row = 0; row < rows; row++)
+                    // Written from where the decode is, in place.
+                    plan.read(face, level, bytes=>{
+                        for (let z = 0; z < slices; z++)
                         {
-                            const from = (z * rows + row) * rowBytes;
-                            host.writeMemory(bits + z * slicePitch + row * pitch,
-                                bytes.subarray(from, from + rowBytes));
+                            for (let row = 0; row < rows; row++)
+                            {
+                                const from = (z * rows + row) * rowBytes;
+                                host.writeMemory(bits + z * slicePitch + row * pitch,
+                                    bytes.subarray(from, from + rowBytes));
+                            }
                         }
-                    }
+                    });
                     await method(filled, TEXTURE.UnlockRect, [...which, level]);
                 }
             }
             if (lockable)
             {
-                putPointer(plan.out, filled);
+                putPointer(out, filled);
                 return D3D_OK;
             }
-            const placed = await create(plan.usage, plan.pool);
+            const placed = await create(usage, pool);
             if (placed === null)
             {
                 await method(filled, UNKNOWN_RELEASE, []);
@@ -643,7 +752,7 @@ export function createTextureLoader(host){
                 await method(placed, UNKNOWN_RELEASE, []);
                 return answer;
             }
-            putPointer(plan.out, placed);
+            putPointer(out, placed);
             return D3D_OK;
         }
         finally
