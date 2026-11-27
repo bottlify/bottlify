@@ -30,7 +30,7 @@ import {
     DDBLT_KEYSRC, DDBLT_KEYSRCOVERRIDE, DDBLT_ROP, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT,
     DDERR_NORASTEROPHW, DDERR_UNSUPPORTED, DD_OK, ROP,
 } from './constants.js';
-import { compressedBytes, decodeS3tc, encodeS3tc } from '../webgpu/internal/s3tc.js';
+import { compressedBytes, decodeS3tc, encodeS3tc } from '../../media/internal/s3tc.js';
 
 /**
  * @typedef {Object} BlitSurface
@@ -43,7 +43,7 @@ import { compressedBytes, decodeS3tc, encodeS3tc } from '../webgpu/internal/s3tc
  * @property {number} [keyMask]       The bits a colour key compares; the whole pixel if absent.
  * @property {boolean} [depth]        A depth buffer, which holds no colour to fill.
  * @property {number} [depthMask]     A depth buffer's depth bits; the whole pixel if absent.
- * @property {import('../webgpu/internal/s3tc.js').S3tcKind} [compressed]
+ * @property {import('../../media/internal/s3tc.js').S3tcKind} [compressed]
  *     A DXTn surface's block kind: its bytes are blocks from `buffer` on, not rows.
  * @property {{ red: number, green: number, blue: number, alpha: number }} [channels]
  *     An RGB surface's channel masks (`alpha` 0 where it has none): what a
@@ -498,7 +498,7 @@ const DECODED = Object.freeze({
  * @returns {boolean} false when the surface's bytes are too few for its blocks
  */
 function snapshotCompressed(memory, src, rect, dest){
-    const kind = /** @type {import('../webgpu/internal/s3tc.js').S3tcKind} */ (src.compressed);
+    const kind = /** @type {import('../../media/internal/s3tc.js').S3tcKind} */ (src.compressed);
     const blocks = Math.ceil(src.width / 4) * Math.ceil(src.height / 4)
         * (kind === 'dxt1' ? 8 : 16);
     const texels = decodeS3tc(memory.readMemory(src.buffer, blocks), kind, src.width, src.height);
@@ -581,7 +581,7 @@ const DECODED_AT = 2 ** 32;
  */
 function bltIntoBlocks(request){
     const { memory, dest } = request;
-    const kind = /** @type {import('../webgpu/internal/s3tc.js').S3tcKind} */ (dest.compressed);
+    const kind = /** @type {import('../../media/internal/s3tc.js').S3tcKind} */ (dest.compressed);
     // readMemory answers bytes of their own, and decoding them keeps none.
     const blocks = memory.readMemory(dest.buffer,
         compressedBytes(kind, dest.width, dest.height));

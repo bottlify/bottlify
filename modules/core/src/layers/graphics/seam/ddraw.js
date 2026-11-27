@@ -366,7 +366,7 @@ function versionOf(id){
  * The DXTn FOURCCs whose blocks a copy decodes, by the S3TC kind they share;
  * DXT2 and DXT4 are their unmultiplied siblings' blocks.
  *
- * @type {Readonly<Record<number, import('../webgpu/internal/s3tc.js').S3tcKind>>}
+ * @type {Readonly<Record<number, import('../../media/internal/s3tc.js').S3tcKind>>}
  */
 const S3TC_OF_FOURCC = Object.freeze({
     0x31545844: 'dxt1',
@@ -879,7 +879,7 @@ export function createDirectDrawSeam(
      * for every other format.
      *
      * @param {any} surface
-     * @returns {import('../webgpu/internal/s3tc.js').S3tcKind | null}
+     * @returns {import('../../media/internal/s3tc.js').S3tcKind | null}
      */
     const compressedKind = surface=>{
         const format = surface.pixelFormat;

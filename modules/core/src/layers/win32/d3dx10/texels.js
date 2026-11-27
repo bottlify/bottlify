@@ -24,8 +24,8 @@
  * piecewise sRGB one.
  */
 
-import { FMT, decodeAlphaBlock, decodeTexels, encodeAlphaBlock, encodeTexels }
-    from '../d3dx9/pixels.js';
+import { FMT, decodeTexels, encodeTexels } from '../d3dx9/pixels.js';
+import { decodeAlphaBlock, encodeAlphaBlock } from '../../media/internal/s3tc.js';
 import { fromHalf, toHalf } from '../../../system/floats.js';
 
 /** D3DX10_FILTER_FLAG (D3DX11's are the same numbers). */

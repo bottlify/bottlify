@@ -10,11 +10,15 @@
  * D3DFMT_A8R8G8B8 is in memory). A loader decodes a file into it, scales and
  * filters it, and encodes it into the format the texture was made in.
  *
- * The block-compressed formats are decoded as their specification describes
- * them (the DXTn layouts in the Direct3D 9 documentation) and encoded with a
- * range fit -- each block's colours between its two most distant ones -- which
- * is what a loader without a quality setting owes.
+ * The block-compressed formats go through the S3TC codec every drawing API
+ * shares (media/internal/s3tc.js): decoded as the specification states them,
+ * encoded with a range fit, which is what a loader without a quality setting
+ * owes.
  */
+
+import { compressedBytes, decodeS3tc, encodeS3tc } from '../../media/internal/s3tc.js';
+
+/** @typedef {import('../../media/internal/s3tc.js').S3tcKind} S3tcKind */
 
 /** D3DFORMAT values. */
 export const FMT = Object.freeze({
@@ -318,71 +322,23 @@ export function encodeTexels(format, bgra, width, height){
 const luminance = (/** @type {number} */ r, /** @type {number} */ g, /** @type {number} */ b)=>
     Math.min(255, Math.round(r * 0.2125 + g * 0.7154 + b * 0.0721));
 
-/** @param {number} c  A 565 colour. @returns {number[]} r, g, b */
-const rgb565 = c=>[expand(c >> 11, 5), expand(c >> 5 & 63, 6), expand(c & 31, 5)];
+/** The S3TC kind each DXTn format's blocks are: DXT2 and DXT4 are DXT3's and DXT5's bits. */
+const KIND = new Map(/** @type {[number, S3tcKind][]} */ ([
+    [FMT.DXT1, 'dxt1'], [FMT.DXT2, 'dxt3'], [FMT.DXT3, 'dxt3'], [FMT.DXT4, 'dxt5'],
+    [FMT.DXT5, 'dxt5']]));
 
 /**
- * The sixteen values of an eight-byte block of two ends and 3-bit indices:
- * DXT5's alpha, and each channel of BC4 and BC5. Ends in falling order give
- * six steps between them, in rising order four and then 0 and 255.
+ * Swaps the first and third byte of every texel: the working form's BGRA and
+ * the codec's RGBA, either way.
  *
- * @param {Uint8Array} data @param {number} at
- * @returns {number[]}
+ * @param {Uint8Array} texels
  */
-export function decodeAlphaBlock(data, at){
-    const a0 = data[at];
-    const a1 = data[at + 1];
-    const levels = [a0, a1];
-    for (let k = 1; k < (a0 > a1 ? 7 : 5); k++)
+function swapRedBlue(texels){
+    for (let at = 0; at < texels.length; at += 4)
     {
-        levels.push(Math.round(a0 > a1 ? ((7 - k) * a0 + k * a1) / 7
-            : ((5 - k) * a0 + k * a1) / 5));
-    }
-    if (a0 <= a1)
-    {
-        levels.push(0, 255);
-    }
-    let bits = 0n;
-    for (let k = 5; k >= 0; k--)
-    {
-        bits = bits << 8n | BigInt(data[at + 2 + k]);
-    }
-    return Array.from({ length: 16 }, (_, k)=>levels[Number(bits >> BigInt(k * 3) & 7n)]);
-}
-
-/**
- * Sixteen values into such a block: the largest and smallest as its ends,
- * each value the nearest of the eight steps.
- *
- * @param {number[]} values @param {Uint8Array} out @param {number} at
- */
-export function encodeAlphaBlock(values, out, at){
-    const a0 = Math.max(...values);
-    const a1 = Math.min(...values);
-    out[at] = a0;
-    out[at + 1] = a1;
-    const levels = [a0, a1];
-    for (let k = 1; k < 7; k++)
-    {
-        levels.push(((7 - k) * a0 + k * a1) / 7);
-    }
-    let bits = 0n;
-    values.forEach((value, k)=>{
-        let best = 0;
-        if (a0 !== a1)
-        {
-            levels.forEach((level, i)=>{
-                if (Math.abs(level - value) < Math.abs(levels[best] - value))
-                {
-                    best = i;
-                }
-            });
-        }
-        bits |= BigInt(best) << BigInt(k * 3);
-    });
-    for (let k = 0; k < 6; k++)
-    {
-        out[at + 2 + k] = Number(bits >> BigInt(k * 8) & 0xffn);
+        const red = texels[at];
+        texels[at] = texels[at + 2];
+        texels[at + 2] = red;
     }
 }
 
@@ -391,56 +347,11 @@ export function encodeAlphaBlock(values, out, at){
  * @param {Uint8Array} out
  */
 function decodeBlocks(format, data, width, height, out){
-    const size = blockBytes(format);
-    const across = Math.max(1, Math.ceil(width / 4));
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    for (let by = 0; by < Math.ceil(height / 4); by++)
+    if (decodeS3tc(data, /** @type {S3tcKind} */ (KIND.get(format)), width, height, out) === null)
     {
-        for (let bx = 0; bx < across; bx++)
-        {
-            const at = (by * across + bx) * size;
-            const colourAt = format === FMT.DXT1 ? at : at + 8;
-            const c0 = view.getUint16(colourAt, true);
-            const c1 = view.getUint16(colourAt + 2, true);
-            const p0 = rgb565(c0);
-            const p1 = rgb565(c1);
-            const four = format !== FMT.DXT1 || c0 > c1;
-            const palette = [[...p0, 255], [...p1, 255],
-                four ? [0, 1, 2].map(k=>Math.round((2 * p0[k] + p1[k]) / 3)).concat(255)
-                    : [0, 1, 2].map(k=>Math.round((p0[k] + p1[k]) / 2)).concat(255),
-                four ? [0, 1, 2].map(k=>Math.round((p0[k] + 2 * p1[k]) / 3)).concat(255)
-                    : [0, 0, 0, 0]];
-            const indices = view.getUint32(colourAt + 4, true);
-            /** @type {number[]} */
-            let alphas = [];
-            if (format === FMT.DXT3 || format === FMT.DXT2)
-            {
-                for (let k = 0; k < 16; k++)
-                {
-                    alphas.push(expand(data[at + (k >> 1)] >> ((k & 1) * 4) & 15, 4));
-                }
-            }
-            else if (format === FMT.DXT5 || format === FMT.DXT4)
-            {
-                alphas = decodeAlphaBlock(data, at);
-            }
-            for (let k = 0; k < 16; k++)
-            {
-                const x = bx * 4 + (k & 3);
-                const y = by * 4 + (k >> 2);
-                if (x >= width || y >= height)
-                {
-                    continue;
-                }
-                const texel = palette[indices >>> (k * 2) & 3];
-                const o = (y * width + x) * 4;
-                out[o] = texel[2];
-                out[o + 1] = texel[1];
-                out[o + 2] = texel[0];
-                out[o + 3] = alphas.length > 0 ? alphas[k] : texel[3];
-            }
-        }
+        throw new Error(`a ${width}x${height} level of format ${format} in ${data.length} bytes`);
     }
+    swapRedBlue(out);
 }
 
 /**
@@ -448,99 +359,11 @@ function decodeBlocks(format, data, width, height, out){
  * @returns {Uint8Array}
  */
 function encodeBlocks(format, bgra, width, height){
-    const size = blockBytes(format);
-    const across = Math.max(1, Math.ceil(width / 4));
-    const down = Math.max(1, Math.ceil(height / 4));
-    const out = new Uint8Array(across * down * size);
-    const view = new DataView(out.buffer);
-    /** @param {number[]} p */
-    const to565 = p=>reduce(p[0], 5) << 11 | reduce(p[1], 6) << 5 | reduce(p[2], 5);
-    for (let by = 0; by < down; by++)
-    {
-        for (let bx = 0; bx < across; bx++)
-        {
-            /** @type {number[][]} r, g, b, a of the block's texels, edges repeated */
-            const texels = [];
-            for (let k = 0; k < 16; k++)
-            {
-                const x = Math.min(width - 1, bx * 4 + (k & 3));
-                const y = Math.min(height - 1, by * 4 + (k >> 2));
-                const o = (y * width + x) * 4;
-                texels.push([bgra[o + 2], bgra[o + 1], bgra[o], bgra[o + 3]]);
-            }
-            const at = (by * across + bx) * size;
-            const punch = format === FMT.DXT1 && texels.some(t=>t[3] < 128);
-            const lit = texels.filter(t=>!punch || t[3] >= 128);
-            // The two farthest apart: a bounding box's corners miss colours whose
-            // channels run against each other.
-            let ends = [lit[0] ?? [0, 0, 0], lit[0] ?? [0, 0, 0]];
-            let spread = -1;
-            for (const p of lit)
-            {
-                for (const q of lit)
-                {
-                    const d = (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2;
-                    if (d > spread)
-                    {
-                        spread = d;
-                        ends = [p, q];
-                    }
-                }
-            }
-            let c0 = to565(ends[0]);
-            let c1 = to565(ends[1]);
-            // Four colours want c0 > c1, three and transparent c0 <= c1.
-            if (punch ? c0 > c1 : c0 < c1)
-            {
-                [c0, c1] = [c1, c0];
-            }
-            if (!punch && c0 === c1 && c1 > 0)
-            {
-                c1--;
-            }
-            const p0 = rgb565(c0);
-            const p1 = rgb565(c1);
-            const palette = punch
-                ? [p0, p1, [0, 1, 2].map(k=>(p0[k] + p1[k]) / 2)]
-                : [p0, p1, [0, 1, 2].map(k=>(2 * p0[k] + p1[k]) / 3),
-                    [0, 1, 2].map(k=>(p0[k] + 2 * p1[k]) / 3)];
-            let indices = 0;
-            texels.forEach((t, k)=>{
-                let best = 0;
-                if (punch && t[3] < 128)
-                {
-                    best = 3;
-                }
-                else
-                {
-                    let bestError = Infinity;
-                    palette.forEach((p, i)=>{
-                        const error = (p[0] - t[0]) ** 2 + (p[1] - t[1]) ** 2 + (p[2] - t[2]) ** 2;
-                        if (error < bestError)
-                        {
-                            bestError = error;
-                            best = i;
-                        }
-                    });
-                }
-                indices |= best << (k * 2);
-            });
-            const colourAt = format === FMT.DXT1 ? at : at + 8;
-            view.setUint16(colourAt, c0, true);
-            view.setUint16(colourAt + 2, c1, true);
-            view.setUint32(colourAt + 4, indices >>> 0, true);
-            if (format === FMT.DXT3 || format === FMT.DXT2)
-            {
-                texels.forEach((t, k)=>{
-                    out[at + (k >> 1)] |= reduce(t[3], 4) << ((k & 1) * 4);
-                });
-            }
-            else if (format === FMT.DXT5 || format === FMT.DXT4)
-            {
-                encodeAlphaBlock(texels.map(t=>t[3]), out, at);
-            }
-        }
-    }
+    const kind = /** @type {S3tcKind} */ (KIND.get(format));
+    const rgba = bgra.slice();
+    swapRedBlue(rgba);
+    const out = new Uint8Array(compressedBytes(kind, width, height));
+    encodeS3tc(rgba, kind, width, height, out);
     return out;
 }
 

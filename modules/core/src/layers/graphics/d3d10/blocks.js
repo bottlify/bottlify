@@ -12,12 +12,12 @@
  * subresource at a time, when the device cannot sample the format as it is.
  * The block-compressed formats are decoded where the adapter has no BC
  * sampling -- BC1 to BC3 through the decoder the other APIs share, BC4 and BC5
- * (one and two channels of the same interpolated block) here -- and an
+ * (one and two channels of DXT5's interpolated block, signed or not) here -- and an
  * alpha-only texture is widened to four channels with its colour zero, which
  * is what sampling one answers.
  */
 
-import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { alphaLevels, decodeS3tc } from '../../media/internal/s3tc.js';
 import { decodeBc67 } from './bc67.js';
 
 /** @typedef {'bc1' | 'bc2' | 'bc3' | 'bc4u' | 'bc4s' | 'bc5u' | 'bc5s' | 'bc6hu' | 'bc6hs'
@@ -142,24 +142,6 @@ export function sixteenBitFromFloats(conversion, floats){
 }
 
 /**
- * The eight values a BC4 block's endpoints stand for: eight interpolated when
- * the first endpoint is the larger, otherwise six and the two extremes.
- *
- * @param {number} e0
- * @param {number} e1
- * @param {number} low   The extreme of the signed or unsigned range.
- * @param {number} high
- * @returns {number[]}
- */
-function endpointTable(e0, e1, low, high){
-    if (e0 > e1)
-    {
-        return [e0, e1, ...[6, 5, 4, 3, 2, 1].map(k=>Math.round((k * e0 + (7 - k) * e1) / 7))];
-    }
-    return [e0, e1, ...[4, 3, 2, 1].map(k=>Math.round((k * e0 + (5 - k) * e1) / 5)), low, high];
-}
-
-/**
  * One channel of BC4 blocks into every `stride`-th byte of `out`, starting at
  * `channel`.
  *
@@ -180,14 +162,14 @@ function decodeChannel(bytes, blockStride, blockOffset, signed, width, height, o
     const down = Math.ceil(height / 4);
     /** @param {number} byte */
     const endpoint = byte=>(signed ? Math.max(-127, (byte << 24) >> 24) : byte);
+    const table = [0, 0, 0, 0, 0, 0, 0, 0];
     for (let by = 0; by < down; by++)
     {
         for (let bx = 0; bx < across; bx++)
         {
             const at = (by * across + bx) * blockStride + blockOffset;
-            const table = signed
-                ? endpointTable(endpoint(bytes[at]), endpoint(bytes[at + 1]), -127, 127)
-                : endpointTable(bytes[at], bytes[at + 1], 0, 255);
+            alphaLevels(endpoint(bytes[at]), endpoint(bytes[at + 1]), signed ? -127 : 0,
+                signed ? 127 : 255, table);
             for (let i = 0; i < 16; i++)
             {
                 const x = bx * 4 + (i & 3);

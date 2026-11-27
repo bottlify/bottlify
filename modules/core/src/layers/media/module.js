@@ -22,6 +22,11 @@ import { createIjlLibrary } from './internal/ijl.js';
  * built by another machine -- the process this one replaced -- is handed in as
  * `config.instance` and used without instantiating, and `dispose` closes only
  * the clips this machine opened, leaving the instance for the next one.
+ *
+ * Beside it, internal/ holds the still-image and texture codecs (JPEG, GIF,
+ * TIFF, S3TC) as plain functions: the layers that require
+ * media - win32's imaging and D3DX, the drawing APIs - import them, so each
+ * format is read and written in one place.
  */
 
 /** The media layer's module for one graph; see `defaultModules`. */

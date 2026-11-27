@@ -469,7 +469,9 @@ export function createGraphicsModule(){
     return {
         name: 'graphics',
         version: '0.1.0',
-        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory', 'cache', 'log']),
+        requires: /** @type {readonly string[]} */ ([
+            'win32', 'bridge', 'memory', 'media', 'cache', 'log',
+        ]),
 
         /**
          * @param {any} config
