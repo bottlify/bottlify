@@ -700,9 +700,6 @@
    "accessor writeU32": 1,
    "string readWide": 1
   },
-  "msvcrt/float.js": {
-   "accessor readDouble": 1
-  },
   "msvcrt/functions.js": {
    "string readString": 1,
    "string readWide": 1,

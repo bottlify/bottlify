@@ -19,7 +19,7 @@
  * documents. Handing back a fresh allocation each time would leak.
  */
 
-import { readDouble, returningDouble } from './float.js';
+import { doubleArg, returningDouble } from './float.js';
 import { EINVAL, ERANGE } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
@@ -681,7 +681,7 @@ export function createConversionFunctions(host){
         /** @param {number[]} args */
         handler: args=>{
             const { digits, point, negative } = cvtDigits(
-                { value: readDouble(args, 0), low: args[0] >>> 0, high: args[1] >>> 0 },
+                { value: doubleArg(args, 0), low: args[0] >>> 0, high: args[1] >>> 0 },
                 args[2] | 0, fixed);
             const buffer = cvtBuffer();
             writeInt(args[3], point);
@@ -722,7 +722,7 @@ export function createConversionFunctions(host){
      * @param {number[]} slots @param {number} digits
      */
     const gcvtText = (slots, digits)=>{
-        const value = readDouble(slots, 0);
+        const value = doubleArg(slots, 0);
         if (!Number.isFinite(value))
         {
             return String(value);
@@ -762,7 +762,7 @@ export function createConversionFunctions(host){
                 host.errno?.(EINVAL);
                 return EINVAL;
             }
-            const answer = cvtDigits({ value: readDouble([low, high], 0), low: low >>> 0,
+            const answer = cvtDigits({ value: doubleArg([low, high], 0), low: low >>> 0,
                 high: high >>> 0 }, count | 0, fixed);
             writeInt(point, answer.point);
             writeInt(sign, answer.negative ? 1 : 0);

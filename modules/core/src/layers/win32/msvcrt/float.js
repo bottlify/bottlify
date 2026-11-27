@@ -47,7 +47,7 @@
  * @param {number[]} args
  * @param {number} at   Index of the low half.
  */
-export function readDouble(args, at){
+export function doubleArg(args, at){
     SCRATCH.setUint32(0, (args[at] ?? 0) >>> 0, true);
     SCRATCH.setUint32(4, (args[at + 1] ?? 0) >>> 0, true);
     return SCRATCH.getFloat64(0, true);
