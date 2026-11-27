@@ -255,11 +255,13 @@ export function createRuntime(host){
      */
     const engineCall = (pass, answer = 0)=>({
         argBytes: 12,
+        addresses: [0, 1, 2],
         /** @param {number[]} args */
         handler: ([message, memory, format])=>{
             const thread = host.callerThread();
             return raising(thread, async()=>{
-                await pass({ message: message >>> 0, thread }, memory >>> 0, format >>> 0);
+                await pass({ message: wholeAddress(message), thread }, wholeAddress(memory),
+                    wholeAddress(format));
                 return answer;
             });
         },
@@ -268,12 +270,13 @@ export function createRuntime(host){
     /** (message, ppMemory, format, fMustAlloc): an unmarshal entry point. */
     const unmarshalCall = {
         argBytes: 16,
+        addresses: [0, 1, 2],
         /** @param {number[]} args */
         handler: ([message, ppMemory, format, mustAlloc])=>{
             const thread = host.callerThread();
             return raising(thread, async()=>{
-                await ndr.unmarshall({ message: message >>> 0, thread }, ppMemory >>> 0,
-                    format >>> 0, (mustAlloc & 0xff) !== 0);
+                await ndr.unmarshall({ message: wholeAddress(message), thread },
+                    wholeAddress(ppMemory), wholeAddress(format), (mustAlloc & 0xff) !== 0);
                 return 0;
             });
         },

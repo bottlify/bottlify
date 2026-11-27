@@ -555,3 +555,17 @@ test('an engine entry point that fails raises its status on the calling thread',
     await runtime.NdrPointerBufferSize.handler([message, 0, format]);
     assert.deepEqual(g.raised, [{ code: 1780, later: true }], 'RPC_X_NULL_REF_POINTER');
 });
+
+test('the engine\'s entry points take the stub message, the memory and the format whole', ()=>{
+    const { runtime } = guest();
+    /** @type {Record<string, any>} */
+    const specs = runtime;
+    const family = new Set(['BufferSize', 'Marshall', 'Unmarshall', 'Free']
+        .map(pass=>specs[`NdrPointer${pass}`]));
+    const passes = Object.keys(specs).filter(name=>family.has(specs[name]));
+    assert.ok(passes.length >= 30, `${passes.length} entry points`);
+    for (const name of passes)
+    {
+        assert.deepEqual(specs[name].addresses, [0, 1, 2], name);
+    }
+});

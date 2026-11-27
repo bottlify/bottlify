@@ -17,7 +17,12 @@
  * representation. Every wire form starts at a four-byte boundary with a tag:
  * WDT_INPROC_CALL for a value that only means something inside the process,
  * WDT_REMOTE_CALL for one sent with its contents. Which a type uses depends
- * on the context:
+ * on the context. In a 64-bit process the variable a routine is handed is
+ * pointer-sized, and a type whose wire union (wtypes.idl) has an __int64 arm
+ * - an HGLOBAL, a metafile picture, which are addresses here - goes
+ * in-process as WDT_INPROC64_CALL and the value whole, the union on its
+ * 8-byte alignment; a window's or a menu's RemotableHandle has no such arm,
+ * and a handle's low dword is the whole of it:
  *
  * - window, menu, accelerator, icon, brush, DC and palette handles go as the
  *   handle anywhere but to another machine, which is refused;
@@ -35,23 +40,27 @@
 import { GUID_NULL, formatGuid } from '../../../system/guid.js';
 import { OBJREF_BYTES, decodeObjref } from './objref.js';
 import { IID_ISTORAGE, IID_ISTREAM } from './storage.js';
+import { METAFILEPICT } from './oleutil.js';
 import { WHOLE } from '../common/guest.js';
 import { utf16z } from '../common/utf16.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { struct } from '../../../system/layout.js';
 
 const WDT_INPROC_CALL = 0x48746457;
 const WDT_REMOTE_CALL = 0x52746457;
+const WDT_INPROC64_CALL = 0x50746457;
 /** 'User': NDR's mark ahead of an embedded pointer to a user-marshaled type. */
 const USER_MARSHAL_PTR_PREFIX = 0x72657355;
 /** 'USRC', USER_MARSHAL_CB.Signature: the flags word is the head of a real one. */
 const USER_MARSHAL_CB_SIGNATURE = 0x55535243;
 
-/** USER_MARSHAL_CB: Flags, pStubMsg, pReserve, Signature. */
-const UMCB_STUB_MESSAGE = 4;
-const UMCB_SIGNATURE = 12;
-/** MIDL_STUB_MESSAGE's pfnAllocate and pfnFree, on x86. */
-const STUB_ALLOCATE = 0x48;
-const STUB_FREE = 0x4c;
+/** USER_MARSHAL_CB as rpcndr.h declares it, up to its signature. */
+const USER_MARSHAL_CB = struct([['Flags', 'u32'], ['pStubMsg', 'ptr'], [null, 'ptr'],
+    ['Signature', 'u32']]);
+/** MIDL_STUB_MESSAGE as rpcndr.h declares it, up to its allocator and its free. */
+const STUB_MESSAGE = struct([[null, 'ptr', 5], [null, 'u32', 2], [null, 'ptr'], [null, 'u8', 2],
+    [null, 'u16'], [null, 'i32'], [null, 'ptr', 2], [null, 'i32'], [null, 'ptr'], [null, 'u8', 2],
+    [null, 'u16'], [null, 'ptr'], [null, 'u32', 2], ['pfnAllocate', 'ptr'], ['pfnFree', 'ptr']]);
 
 const MSHCTX_DIFFERENTMACHINE = 2;
 const MSHCTX_INPROC = 3;
@@ -81,12 +90,8 @@ const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 const SLOT_QUERY_INTERFACE = 0;
 const SLOT_RELEASE = 2;
 
-/** STGMEDIUM: tymed, the union, pUnkForRelease. */
-const MEDIUM_VALUE = 4;
-const MEDIUM_RELEASE = 8;
-/** METAFILEPICT: mm, xExt, yExt, hMF. */
-const METAFILEPICT_BYTES = 16;
-const METAFILEPICT_HANDLE = 12;
+/** STGMEDIUM as objidl.h declares it: the union a handle or a pointer, as wide. */
+const STGMEDIUM = struct([['tymed', 'u32'], ['value', 'ptr'], ['pUnkForRelease', 'ptr']]);
 /** A BITMAP up to bmBits, which is what the wire carries ahead of the bits. */
 const BITMAP_HEADER_BYTES = 20;
 
@@ -169,8 +174,16 @@ const fault = code=>{
     throw new WireFault(code);
 };
 
-/** @param {number} value */
-const align = value=>((value + 3) & ~3) >>> 0;
+/** @param {number} value @param {number} [to] */
+const align = (value, to = 4)=>Math.ceil(value / to) * to;
+
+/**
+ * A pointer's mark on the wire, where NDR keeps a referent's 32-bit ID: zero
+ * for NULL, else nonzero, whatever the address's low dword is.
+ *
+ * @param {number} value
+ */
+const referent = value=>(value === 0 ? 0 : value % 2 ** 32 || 1);
 
 /**
  * `then` of a value, or of what a promise of one settles to.
@@ -188,6 +201,11 @@ const after = (value, then)=>(value instanceof Promise ? value.then(then) : then
  */
 export function createUserMarshalFunctions(host){
     const { guest } = host;
+    const wide = guest.pointerSize === 8;
+    const UMCB = USER_MARSHAL_CB.at(guest.pointerSize);
+    const STUB = STUB_MESSAGE.at(guest.pointerSize);
+    const MEDIUM = STGMEDIUM.at(guest.pointerSize);
+    const PICTURE = METAFILEPICT.at(guest.pointerSize);
     /** @param {number} flags */
     const context = flags=>guest.u32(flags) & 0xffff;
     /** @param {number} flags */
@@ -224,8 +242,8 @@ export function createUserMarshalFunctions(host){
                 'no call into the program: a reference it is owed is not taken or given back');
             return Promise.resolve(0);
         }
-        return call(guest.u32(guest.u32(object) + slot * 4), [object >>> 0, ...args], thread)
-            .then(answer=>answer | 0);
+        return call(guest.ptr(guest.ptr(object) + slot * guest.pointerSize), [object, ...args],
+            thread).then(answer=>answer | 0);
     };
     /** @param {number} object @param {unknown} thread */
     const release = (object, thread)=>callMethod(object, SLOT_RELEASE, [], thread);
@@ -239,22 +257,22 @@ export function createUserMarshalFunctions(host){
      * @param {number} flags @param {number} offset
      */
     const stubRoutine = (flags, offset)=>{
-        if (!host.call || guest.u32(flags + UMCB_SIGNATURE) !== USER_MARSHAL_CB_SIGNATURE)
+        if (!host.call || guest.u32(flags + UMCB.Signature) !== USER_MARSHAL_CB_SIGNATURE)
         {
             return 0;
         }
-        const message = guest.u32(flags + UMCB_STUB_MESSAGE);
-        return message === 0 ? 0 : guest.u32(message + offset);
+        const message = guest.ptr(flags + UMCB.pStubMsg);
+        return message === 0 ? 0 : guest.ptr(message + offset);
     };
     /**
      * @param {number} flags @param {number} bytes @param {unknown} thread
      * @returns {number | Promise<number>}
      */
     const stubAllocate = (flags, bytes, thread)=>{
-        const routine = stubRoutine(flags, STUB_ALLOCATE);
+        const routine = stubRoutine(flags, STUB.pfnAllocate);
         if (routine !== 0 && host.call)
         {
-            return host.call(routine, [bytes], thread).then(address=>address >>> 0);
+            return host.call(routine, [bytes], thread).then(wholeAddress);
         }
         return wholeAddress(host.heap.allocate(bytes));
     };
@@ -263,12 +281,101 @@ export function createUserMarshalFunctions(host){
      * @returns {unknown}
      */
     const stubFree = (flags, address, thread)=>{
-        const routine = stubRoutine(flags, STUB_FREE);
+        const routine = stubRoutine(flags, STUB.pfnFree);
         if (routine !== 0 && host.call)
         {
             return host.call(routine, [address], thread);
         }
         return host.heap.free(address);
+    };
+
+    /**
+     * The in-process arm of a type's wire union, its tag and the value: a
+     * dword, or - `whole`, a union with an __int64 arm, in a 64-bit process -
+     * WDT_INPROC64_CALL and the value's eight bytes, the union on an 8-byte
+     * boundary, which its other arms then start on too.
+     *
+     * @param {boolean} whole
+     */
+    const inprocOf = whole=>{
+        const long = whole && wide;
+        const bytes = long ? 16 : 8;
+        const tag = long ? WDT_INPROC64_CALL : WDT_INPROC_CALL;
+        /** Where the union starts. @param {number} buffer */
+        const start = buffer=>align(buffer, long ? 8 : 4);
+        return {
+            start,
+            /** @param {number} from */
+            size: from=>start(from) + bytes,
+            /** @param {number} buffer @param {number} value */
+            put: (buffer, value)=>{
+                const at = start(buffer);
+                guest.set32s(at, [tag, long ? 0 : value]);
+                if (long)
+                {
+                    guest.setPtr(at + 8, value);
+                }
+                return at + bytes;
+            },
+            /** The value of a union holding this arm, and its end; null for another. @param {number} at */
+            read: at=>(guest.u32(at) !== tag ? null
+                : { value: long ? guest.ptr(at + 8) : guest.u32(at + 4), end: at + bytes }),
+        };
+    };
+    const INPROC = inprocOf(false);
+    const INPROC_WHOLE = inprocOf(true);
+    /**
+     * A handle into a variable of its type: a dword, or at 64 bits its low
+     * dword sign-extended, as LongToHandle widens one.
+     *
+     * @param {number} slot @param {number} handle
+     */
+    const setHandle = (slot, handle)=>(wide ? guest.set64(slot, BigInt(handle | 0))
+        : guest.set32(slot, handle));
+
+    /**
+     * Reads a union into `slot` where its arm says all - the in-process value,
+     * or a remote NULL - and answers where it ends; else the remote arm's
+     * handle mark and where it starts, for the type to read its contents.
+     *
+     * @param {ReturnType<typeof inprocOf>} inproc @param {number} buffer @param {number} slot
+     * @param {(slot: number, value: number) => void} set
+     * @returns {number | { handle: number, at: number }}
+     */
+    const armAt = (inproc, buffer, slot, set)=>{
+        const at = inproc.start(buffer);
+        const read = inproc.read(at);
+        if (read)
+        {
+            set(slot, read.value);
+            return read.end;
+        }
+        if (guest.u32(at) !== WDT_REMOTE_CALL)
+        {
+            fault(RPC_S_INVALID_TAG);
+        }
+        const handle = guest.u32(at + 4);
+        if (handle === 0)
+        {
+            set(slot, 0);
+            return at + 8;
+        }
+        return { handle, at };
+    };
+    /**
+     * Writes a union whose arm says all - the in-process value where `local`,
+     * or a remote NULL - and answers where it ends; null where the remote arm
+     * has contents for the type to write.
+     *
+     * @param {ReturnType<typeof inprocOf>} inproc @param {number} buffer
+     * @param {number} handle @param {boolean} local
+     */
+    const shortArm = (inproc, buffer, handle, local)=>{
+        if (local)
+        {
+            return inproc.put(buffer, handle);
+        }
+        return handle === 0 ? guest.set32s(inproc.start(buffer), [WDT_REMOTE_CALL, 0]) : null;
     };
 
     /**
@@ -296,20 +403,16 @@ export function createUserMarshalFunctions(host){
         return {
             size: (flags, start)=>{
                 reachable(flags, 'UserSize');
-                return align(start) + 8;
+                return INPROC.size(start);
             },
             marshal: (flags, buffer, slot)=>{
                 reachable(flags, 'UserMarshal');
-                return guest.set32s(align(buffer), [WDT_INPROC_CALL, guest.u32(slot)]);
+                return INPROC.put(buffer, guest.ptr(slot));
             },
             unmarshal: (flags, buffer, slot)=>{
-                const at = align(buffer);
-                if (guest.u32(at) !== WDT_INPROC_CALL)
-                {
-                    fault(RPC_X_BAD_STUB_DATA);
-                }
-                guest.set32(slot, guest.u32(at + 4));
-                return at + 8;
+                const inproc = INPROC.read(INPROC.start(buffer)) ?? fault(RPC_X_BAD_STUB_DATA);
+                setHandle(slot, inproc.value);
+                return inproc.end;
             },
             free: ()=>0,
         };
@@ -326,26 +429,23 @@ export function createUserMarshalFunctions(host){
      */
     const hglobalWire = {
         size: (flags, start, slot)=>{
-            const handle = guest.u32(slot);
+            const handle = guest.ptr(slot);
             if (inProcess(flags) || handle === 0)
             {
-                return align(start) + 8;
+                return INPROC_WHOLE.size(start);
             }
-            return align(start) + 20 + globalSize(handle);
+            return INPROC_WHOLE.start(start) + 20 + globalSize(handle);
         },
         marshal: (flags, buffer, slot)=>{
-            const at = align(buffer);
-            const handle = guest.u32(slot);
-            if (inProcess(flags))
+            const handle = guest.ptr(slot);
+            const short = shortArm(INPROC_WHOLE, buffer, handle, inProcess(flags));
+            if (short !== null)
             {
-                return guest.set32s(at, [WDT_INPROC_CALL, handle]);
-            }
-            if (handle === 0)
-            {
-                return guest.set32s(at, [WDT_REMOTE_CALL, 0]);
+                return short;
             }
             const bytes = globalSize(handle);
-            const end = guest.set32s(at, [WDT_REMOTE_CALL, handle, bytes, handle, bytes]);
+            const end = guest.set32s(INPROC_WHOLE.start(buffer), [WDT_REMOTE_CALL,
+                referent(handle), bytes, referent(handle), bytes]);
             if (bytes > 0)
             {
                 guest.copy(end, handle, bytes);
@@ -353,23 +453,12 @@ export function createUserMarshalFunctions(host){
             return end + bytes;
         },
         unmarshal: (flags, buffer, slot)=>{
-            const at = align(buffer);
-            const tag = guest.u32(at);
-            const handle = guest.u32(at + 4);
-            if (tag === WDT_INPROC_CALL)
+            const arm = armAt(INPROC_WHOLE, buffer, slot, guest.setPtr);
+            if (typeof arm === 'number')
             {
-                guest.set32(slot, handle);
-                return at + 8;
+                return arm;
             }
-            if (tag !== WDT_REMOTE_CALL)
-            {
-                fault(RPC_S_INVALID_TAG);
-            }
-            if (handle === 0)
-            {
-                guest.set32(slot, 0);
-                return at + 8;
-            }
+            const { handle, at } = arm;
             const bytes = guest.u32(at + 8);
             if (guest.u32(at + 12) !== handle || guest.u32(at + 16) !== bytes)
             {
@@ -384,11 +473,11 @@ export function createUserMarshalFunctions(host){
             {
                 guest.copy(block, at + 20, bytes);
             }
-            guest.set32(slot, block);
+            guest.setPtr(slot, block);
             return at + 20 + bytes;
         },
         free: (flags, slot)=>{
-            const handle = guest.u32(slot);
+            const handle = guest.ptr(slot);
             if (!inProcess(flags) && handle !== 0)
             {
                 host.heap.free(handle);
@@ -429,28 +518,25 @@ export function createUserMarshalFunctions(host){
         const byValue = flags=>!inProcess(flags) && read() !== undefined;
         return {
             size: (flags, start, slot)=>{
-                const handle = guest.u32(slot);
+                const handle = guest.ptr(slot);
                 const bits = read();
                 if (!byValue(flags) || handle === 0 || !bits)
                 {
-                    return align(start) + 8;
+                    return INPROC.size(start);
                 }
                 return align(start) + 16 + (bits(handle)?.length ?? 0);
             },
             marshal: (flags, buffer, slot)=>{
-                const at = align(buffer);
-                const handle = guest.u32(slot);
+                const handle = guest.ptr(slot);
                 const bits = inProcess(flags) ? undefined : lent(read(), `${type}_UserMarshal`);
-                if (!bits)
+                const short = shortArm(INPROC, buffer, handle, !bits);
+                if (short !== null || !bits)
                 {
-                    return guest.set32s(at, [WDT_INPROC_CALL, handle]);
-                }
-                if (handle === 0)
-                {
-                    return guest.set32s(at, [WDT_REMOTE_CALL, 0]);
+                    return /** @type {number} */ (short);
                 }
                 const data = bits(handle) ?? new Uint8Array(0);
-                const end = guest.set32s(at, [WDT_REMOTE_CALL, handle, data.length, data.length]);
+                const end = guest.set32s(align(buffer),
+                    [WDT_REMOTE_CALL, handle, data.length, data.length]);
                 if (data.length > 0)
                 {
                     guest.setBytes(end, data);
@@ -458,34 +544,23 @@ export function createUserMarshalFunctions(host){
                 return end + data.length;
             },
             unmarshal: (flags, buffer, slot)=>{
-                const at = align(buffer);
-                const tag = guest.u32(at);
-                const handle = guest.u32(at + 4);
-                if (tag === WDT_INPROC_CALL)
+                const arm = armAt(INPROC, buffer, slot, setHandle);
+                if (typeof arm === 'number')
                 {
-                    guest.set32(slot, handle);
-                    return at + 8;
+                    return arm;
                 }
-                if (tag !== WDT_REMOTE_CALL)
-                {
-                    fault(RPC_S_INVALID_TAG);
-                }
-                if (handle === 0)
-                {
-                    guest.set32(slot, 0);
-                    return at + 8;
-                }
+                const { at } = arm;
                 const length = guest.u32(at + 8);
                 if (guest.u32(at + 12) !== length)
                 {
                     fault(RPC_X_BAD_STUB_DATA);
                 }
                 const make = lent(host.gdi ? maker(host.gdi) : undefined, `${type}_UserUnmarshal`);
-                guest.set32(slot, make ? make(guest.bytes(at + 16, length)) >>> 0 : 0);
+                setHandle(slot, make ? make(guest.bytes(at + 16, length)) : 0);
                 return at + 16 + length;
             },
             free: (flags, slot)=>{
-                const handle = guest.u32(slot);
+                const handle = guest.ptr(slot);
                 if (!inProcess(flags) && handle !== 0 && host.gdi)
                 {
                     deleter(host.gdi)?.(handle);
@@ -507,32 +582,28 @@ export function createUserMarshalFunctions(host){
      */
     const hbitmapWire = {
         size: (flags, start, slot)=>{
-            const handle = guest.u32(slot);
+            const handle = guest.ptr(slot);
             const bitmap = host.gdi?.bitmap;
             if (inProcess(flags) || handle === 0 || !bitmap)
             {
-                return align(start) + 8;
+                return INPROC.size(start);
             }
             return align(start) + 12 + BITMAP_HEADER_BYTES + (bitmap(handle)?.bits.length ?? 0);
         },
         marshal: (flags, buffer, slot)=>{
-            const at = align(buffer);
-            const handle = guest.u32(slot);
+            const handle = guest.ptr(slot);
             const bitmap = inProcess(flags) ? undefined
                 : lent(host.gdi?.bitmap, 'HBITMAP_UserMarshal');
-            if (!bitmap)
+            const short = shortArm(INPROC, buffer, handle, !bitmap);
+            if (short !== null || !bitmap)
             {
-                return guest.set32s(at, [WDT_INPROC_CALL, handle]);
-            }
-            if (handle === 0)
-            {
-                return guest.set32s(at, [WDT_REMOTE_CALL, 0]);
+                return /** @type {number} */ (short);
             }
             const contents = bitmap(handle);
             const bits = contents?.bits ?? new Uint8Array(0);
             const header = new Uint8Array(BITMAP_HEADER_BYTES);
             header.set((contents?.header ?? header).subarray(0, BITMAP_HEADER_BYTES));
-            const end = guest.set32s(at, [WDT_REMOTE_CALL, handle, bits.length]);
+            const end = guest.set32s(align(buffer), [WDT_REMOTE_CALL, handle, bits.length]);
             guest.setBytes(end, header);
             if (bits.length > 0)
             {
@@ -541,32 +612,21 @@ export function createUserMarshalFunctions(host){
             return end + BITMAP_HEADER_BYTES + bits.length;
         },
         unmarshal: (flags, buffer, slot)=>{
-            const at = align(buffer);
-            const tag = guest.u32(at);
-            const handle = guest.u32(at + 4);
-            if (tag === WDT_INPROC_CALL)
+            const arm = armAt(INPROC, buffer, slot, setHandle);
+            if (typeof arm === 'number')
             {
-                guest.set32(slot, handle);
-                return at + 8;
+                return arm;
             }
-            if (tag !== WDT_REMOTE_CALL)
-            {
-                fault(RPC_S_INVALID_TAG);
-            }
-            if (handle === 0)
-            {
-                guest.set32(slot, 0);
-                return at + 8;
-            }
+            const { at } = arm;
             const length = guest.u32(at + 8);
             const header = guest.bytes(at + 12, BITMAP_HEADER_BYTES);
             const bits = guest.bytes(at + 12 + BITMAP_HEADER_BYTES, length);
             const make = lent(host.gdi?.createBitmap, 'HBITMAP_UserUnmarshal');
-            guest.set32(slot, make ? make(header, bits) >>> 0 : 0);
+            setHandle(slot, make ? make(header, bits) : 0);
             return at + 12 + BITMAP_HEADER_BYTES + length;
         },
         free: (flags, slot)=>{
-            const handle = guest.u32(slot);
+            const handle = guest.ptr(slot);
             if (!inProcess(flags) && handle !== 0)
             {
                 host.gdi?.deleteObject?.(handle);
@@ -583,60 +643,48 @@ export function createUserMarshalFunctions(host){
      */
     const hmetafilepictWire = {
         size: (flags, start, slot)=>{
-            const handle = guest.u32(slot);
+            const handle = guest.ptr(slot);
             if (inProcess(flags) || handle === 0)
             {
-                return align(start) + 8;
+                return INPROC_WHOLE.size(start);
             }
-            return hmetafileWire.size(flags, align(start) + 24, handle + METAFILEPICT_HANDLE);
+            return hmetafileWire.size(flags, INPROC_WHOLE.start(start) + 24,
+                handle + PICTURE.hMF);
         },
         marshal: (flags, buffer, slot, thread)=>{
-            const at = align(buffer);
-            const handle = guest.u32(slot);
-            if (inProcess(flags))
+            const handle = guest.ptr(slot);
+            const short = shortArm(INPROC_WHOLE, buffer, handle, inProcess(flags));
+            if (short !== null)
             {
-                return guest.set32s(at, [WDT_INPROC_CALL, handle]);
+                return short;
             }
-            if (handle === 0)
-            {
-                return guest.set32s(at, [WDT_REMOTE_CALL, 0]);
-            }
-            const end = guest.set32s(at, [WDT_REMOTE_CALL, handle, guest.u32(handle),
-                guest.u32(handle + 4), guest.u32(handle + 8), USER_MARSHAL_PTR_PREFIX]);
-            return hmetafileWire.marshal(flags, end, handle + METAFILEPICT_HANDLE, thread);
+            const end = guest.set32s(INPROC_WHOLE.start(buffer), [WDT_REMOTE_CALL,
+                referent(handle), guest.u32(handle + PICTURE.mm),
+                guest.u32(handle + PICTURE.xExt), guest.u32(handle + PICTURE.yExt),
+                USER_MARSHAL_PTR_PREFIX]);
+            return hmetafileWire.marshal(flags, end, handle + PICTURE.hMF, thread);
         },
         unmarshal: (flags, buffer, slot, thread)=>{
-            const at = align(buffer);
-            const tag = guest.u32(at);
-            const handle = guest.u32(at + 4);
-            if (tag === WDT_INPROC_CALL)
+            const arm = armAt(INPROC_WHOLE, buffer, slot, guest.setPtr);
+            if (typeof arm === 'number')
             {
-                guest.set32(slot, handle);
-                return at + 8;
+                return arm;
             }
-            if (tag !== WDT_REMOTE_CALL)
-            {
-                fault(RPC_S_INVALID_TAG);
-            }
-            if (handle === 0)
-            {
-                guest.set32(slot, 0);
-                return at + 8;
-            }
-            const block = wholeAddress(host.heap.allocate(METAFILEPICT_BYTES));
+            const { at } = arm;
+            const block = wholeAddress(host.heap.allocate(PICTURE.SIZE));
             if (block === 0)
             {
                 fault(RPC_X_NO_MEMORY);
             }
-            guest.set32s(block, [guest.u32(at + 8), guest.u32(at + 12), guest.u32(at + 16), 0]);
-            guest.set32(slot, block);
-            return hmetafileWire.unmarshal(flags, at + 24, block + METAFILEPICT_HANDLE, thread);
+            guest.set32s(block, [guest.u32(at + 8), guest.u32(at + 12), guest.u32(at + 16)]);
+            guest.setPtr(slot, block);
+            return hmetafileWire.unmarshal(flags, at + 24, block + PICTURE.hMF, thread);
         },
         free: (flags, slot, thread)=>{
-            const handle = guest.u32(slot);
+            const handle = guest.ptr(slot);
             if (!inProcess(flags) && handle !== 0)
             {
-                hmetafileWire.free(flags, handle + METAFILEPICT_HANDLE, thread);
+                hmetafileWire.free(flags, handle + PICTURE.hMF, thread);
                 host.heap.free(handle);
             }
         },
@@ -768,11 +816,11 @@ export function createUserMarshalFunctions(host){
         {
             fault(made.hr);
         }
-        const previous = guest.u32(slot);
+        const previous = guest.ptr(slot);
         const wanted = riid === 0 ? GUID_NULL : guest.guid(riid);
         if (wanted === GUID_NULL || wanted === carried)
         {
-            guest.set32(slot, made.pointer);
+            guest.setPtr(slot, made.pointer);
         }
         else
         {
@@ -798,9 +846,9 @@ export function createUserMarshalFunctions(host){
      * @returns {Wire}
      */
     const interfaceArm = iid=>({
-        size: (flags, start, slot)=>pointerSize(start, guest.u32(slot)),
+        size: (flags, start, slot)=>pointerSize(start, guest.ptr(slot)),
         marshal: (flags, buffer, slot, thread)=>
-            pointerMarshal(buffer, guest.u32(slot), iid, thread),
+            pointerMarshal(buffer, guest.ptr(slot), iid, thread),
         unmarshal: (flags, buffer, slot, thread)=>pointerUnmarshal(buffer, slot, 0, thread),
         free: ()=>0,
     });
@@ -812,9 +860,9 @@ export function createUserMarshalFunctions(host){
      * @type {Wire}
      */
     const fileArm = {
-        size: (flags, start, slot)=>align(start) + 12 + (wideUnits(guest.u32(slot)) + 1) * 2,
+        size: (flags, start, slot)=>align(start) + 12 + (wideUnits(guest.ptr(slot)) + 1) * 2,
         marshal: (flags, buffer, slot)=>{
-            const name = guest.u32(slot);
+            const name = guest.ptr(slot);
             const units = wideUnits(name) + 1;
             const end = guest.set32s(align(buffer), [units, 0, units]);
             guest.copy(end, name, units * 2);
@@ -834,7 +882,7 @@ export function createUserMarshalFunctions(host){
                 fault(RPC_X_NO_MEMORY);
             }
             guest.copy(block, at + 12, units * 2);
-            guest.set32(slot, block);
+            guest.setPtr(slot, block);
             return at + 12 + units * 2;
         },
         free: ()=>0,
@@ -877,7 +925,7 @@ export function createUserMarshalFunctions(host){
         [TYMED_MFPICT, { wire: hmetafilepictWire, dispose: (value, owned)=>{
             if (owned)
             {
-                host.gdi?.deleteMetaFile?.(guest.u32(value + METAFILEPICT_HANDLE));
+                host.gdi?.deleteMetaFile?.(guest.u32(value + PICTURE.hMF));
                 host.heap.free(value);
             }
         } }],
@@ -918,8 +966,8 @@ export function createUserMarshalFunctions(host){
      */
     const releaseMedium = (medium, thread)=>{
         const tymed = guest.u32(medium);
-        const value = guest.u32(medium + MEDIUM_VALUE);
-        const unknown = guest.u32(medium + MEDIUM_RELEASE);
+        const value = guest.ptr(medium + MEDIUM.value);
+        const unknown = guest.ptr(medium + MEDIUM.pUnkForRelease);
         const disposed = tymed === TYMED_NULL || value === 0 ? 0
             : tymed === TYMED_GDI ? disposeGdi(value, unknown === 0)
                 : arms.get(tymed)?.dispose(value, unknown === 0, thread);
@@ -957,21 +1005,22 @@ export function createUserMarshalFunctions(host){
             if (tymed !== TYMED_NULL)
             {
                 size += 4;
-                if (guest.u32(medium + MEDIUM_VALUE) !== 0)
+                if (guest.ptr(medium + MEDIUM.value) !== 0)
                 {
-                    size = armOf(tymed).wire.size(flags, size, medium + MEDIUM_VALUE);
+                    size = armOf(tymed).wire.size(flags, size, medium + MEDIUM.value);
                 }
             }
-            return pointerSize(size, guest.u32(medium + MEDIUM_RELEASE));
+            return pointerSize(size, guest.ptr(medium + MEDIUM.pUnkForRelease));
         },
         marshal: (flags, buffer, medium, thread)=>{
             const tymed = guest.u32(medium);
-            const value = guest.u32(medium + MEDIUM_VALUE);
-            const unknown = guest.u32(medium + MEDIUM_RELEASE);
+            const value = guest.ptr(medium + MEDIUM.value);
+            const unknown = guest.ptr(medium + MEDIUM.pUnkForRelease);
             const wire = tymed === TYMED_NULL ? null : armOf(tymed).wire;
-            const marks = wire ? [tymed, value, unknown] : [tymed, unknown];
+            const marks = wire ? [tymed, referent(value), referent(unknown)]
+                : [tymed, referent(unknown)];
             const at = guest.set32s(align(buffer), marks);
-            const end = wire && value !== 0 ? wire.marshal(flags, at, medium + MEDIUM_VALUE, thread)
+            const end = wire && value !== 0 ? wire.marshal(flags, at, medium + MEDIUM.value, thread)
                 : at;
             return after(end, next=>pointerMarshal(next, unknown, IID_IUNKNOWN, thread));
         },
@@ -981,16 +1030,16 @@ export function createUserMarshalFunctions(host){
             const wire = tymed === TYMED_NULL ? null : armOf(tymed).wire;
             const content = wire ? guest.u32(at + 4) : 0;
             const unknown = guest.u32(at + (wire ? 8 : 4));
-            const slot = medium + MEDIUM_VALUE;
+            const slot = medium + MEDIUM.value;
             const previousTymed = guest.u32(medium);
-            const previous = guest.u32(slot);
+            const previous = guest.ptr(slot);
             const held = holdsInterface(previousTymed) && previous !== 0;
             // An interface read over the same arm gives the old one back
             // itself, once the new one is in hand.
             const inPlace = held && content !== 0 && tymed === previousTymed;
             if (!inPlace)
             {
-                guest.set32(slot, 0);
+                guest.setPtr(slot, 0);
             }
             guest.set32(medium, tymed);
             const start = at + (wire ? 12 : 8);
@@ -999,7 +1048,7 @@ export function createUserMarshalFunctions(host){
                 ? after(end, next=>release(previous, thread).then(()=>next))
                 : end;
             return after(released, next=>(unknown === 0 ? next
-                : pointerUnmarshal(next, medium + MEDIUM_RELEASE, 0, thread)));
+                : pointerUnmarshal(next, medium + MEDIUM.pUnkForRelease, 0, thread)));
         },
         free: (flags, medium, thread)=>releaseMedium(medium, thread),
     };
@@ -1012,10 +1061,10 @@ export function createUserMarshalFunctions(host){
      */
     const snbNames = snb=>{
         const names = [];
-        for (let at = snb, address = snb && guest.u32(at); address !== 0; address = guest.u32(at))
+        for (let at = snb, address = snb && guest.ptr(at); address !== 0; address = guest.ptr(at))
         {
             names.push({ address, units: wideUnits(address) + 1 });
-            at += 4;
+            at += guest.pointerSize;
         }
         return names;
     };
@@ -1030,9 +1079,9 @@ export function createUserMarshalFunctions(host){
      */
     const snbWire = {
         size: (flags, start, slot)=>align(start) + 12
-            + snbNames(guest.u32(slot)).reduce((sum, name)=>sum + name.units, 0) * 2,
+            + snbNames(guest.ptr(slot)).reduce((sum, name)=>sum + name.units, 0) * 2,
         marshal: (flags, buffer, slot)=>{
-            const names = snbNames(guest.u32(slot));
+            const names = snbNames(guest.ptr(slot));
             const units = names.reduce((sum, name)=>sum + name.units, 0);
             let at = guest.set32s(align(buffer), [units, names.length, units]);
             for (const name of names)
@@ -1052,7 +1101,7 @@ export function createUserMarshalFunctions(host){
             }
             if (units === 0)
             {
-                guest.set32(slot, 0);
+                guest.setPtr(slot, 0);
                 return at + 12;
             }
             const characters = guest.bytes(at + 12, units * 2);
@@ -1066,20 +1115,21 @@ export function createUserMarshalFunctions(host){
                     from = index + 1;
                 }
             }
-            const table = (starts.length + 1) * 4;
+            const table = (starts.length + 1) * guest.pointerSize;
             return after(stubAllocate(flags, table + units * 2, thread), block=>{
                 if (block === 0)
                 {
                     fault(RPC_X_NO_MEMORY);
                 }
-                guest.set32s(block, [...starts.map(from=>block + table + from * 2), 0]);
+                guest.setBytes(block, pointerWidth(guest.pointerSize).array(
+                    starts.map(from=>block + table + from * 2)));
                 guest.setBytes(block + table, characters);
-                guest.set32(slot, block);
+                guest.setPtr(slot, block);
                 return at + 12 + units * 2;
             });
         },
         free: (flags, slot, thread)=>{
-            const snb = guest.u32(slot);
+            const snb = guest.ptr(slot);
             return snb === 0 ? 0 : stubFree(flags, snb, thread);
         },
     };
@@ -1087,12 +1137,15 @@ export function createUserMarshalFunctions(host){
     /**
      * An export over a routine that may raise: before it has waited on
      * anything the raise is made at once, after it on the thread it resumes.
+     * Its answer, a size or the buffer's next byte, is whole.
      *
      * @param {number} argBytes
      * @param {(args: number[], thread: unknown) => number | Promise<number>} body
+     * @param {number[]} [addresses]  where no signature comment names them
      */
-    const entry = (argBytes, body)=>({
+    const entry = (argBytes, body, addresses = undefined)=>({
         argBytes,
+        ...addresses ? { addresses } : {},
         /** @param {number[]} args @returns {number | Promise<any>} */
         handler: args=>{
             const thread = host.callerThread?.();
@@ -1101,9 +1154,9 @@ export function createUserMarshalFunctions(host){
                 const answer = body(args.map(wholeAddress), thread);
                 if (typeof answer === 'number')
                 {
-                    return answer >>> 0;
+                    return wholeAddress(answer);
                 }
-                return answer.then(value=>value >>> 0, e=>{
+                return answer.then(wholeAddress, e=>{
                     if (e instanceof WireFault)
                     {
                         return host.raiseLater(e.code, thread);
@@ -1128,16 +1181,17 @@ export function createUserMarshalFunctions(host){
      */
     const exportsOf = (type, wire)=>({
         /** ULONG X_UserSize(ULONG *pFlags, ULONG StartingSize, X *pX) */
-        [`${type}_UserSize`]: entry(12, ([flags, start, slot])=>wire.size(flags, start, slot)),
+        [`${type}_UserSize`]: entry(12, ([flags, start, slot])=>wire.size(flags, start, slot),
+            [0, 2]),
         /** unsigned char *X_UserMarshal(ULONG *pFlags, unsigned char *pBuffer, X *pX) */
-        [`${type}_UserMarshal`]: entry(12, ([flags, buffer, slot], thread)=>
-            wire.marshal(flags, buffer, slot, thread)),
+        [`${type}_UserMarshal`]: { ...entry(12, ([flags, buffer, slot], thread)=>
+            wire.marshal(flags, buffer, slot, thread), [0, 1, 2]), returns: 'pointer' },
         /** unsigned char *X_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, X *pX) */
-        [`${type}_UserUnmarshal`]: entry(12, ([flags, buffer, slot], thread)=>
-            wire.unmarshal(flags, buffer, slot, thread)),
+        [`${type}_UserUnmarshal`]: { ...entry(12, ([flags, buffer, slot], thread)=>
+            wire.unmarshal(flags, buffer, slot, thread), [0, 1, 2]), returns: 'pointer' },
         /** void X_UserFree(ULONG *pFlags, X *pX) */
         [`${type}_UserFree`]: entry(8, ([flags, slot], thread)=>
-            after(wire.free(flags, slot, thread), ()=>0)),
+            after(wire.free(flags, slot, thread), ()=>0), [0, 1]),
     });
 
     return {
@@ -1201,7 +1255,7 @@ export function createUserMarshalFunctions(host){
          */
         ReleaseStgMedium: entry(4, ([medium], thread)=>(medium === 0 ? 0
             : after(releaseMedium(medium, thread), ()=>{
-                guest.set32s(medium, [TYMED_NULL, 0, 0]);
+                guest.fill(medium, TYMED_NULL, MEDIUM.SIZE);
                 return 0;
             }))),
     };
