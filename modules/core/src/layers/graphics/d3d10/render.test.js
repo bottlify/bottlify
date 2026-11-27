@@ -1172,6 +1172,25 @@ test('a 16-bit normalised texture on a GPU without texture-formats-tier1 is kept
         h.divergences.join(' / '));
 });
 
+test('a 16-bit normalised volume is converted slice by slice, each in its place, in one upload',
+    ()=>{
+        const h = harness();
+        /** @type {{ resource?: any }} */
+        const volume = {};
+        // 2 by 1 by 3: a slice's codes are its index's, so a slice out of place shows.
+        const codes = Uint16Array.of(0, 65535, 1, 2, 32768, 3);
+        assert.equal(h.device.CreateTexture3D({ Width: 2, Height: 1, Depth: 3, MipLevels: 1,
+            Format: DXGI_FORMAT.R16_UNORM, Usage: D3D10_USAGE.DEFAULT, BindFlags: 0,
+            CPUAccessFlags: 0, MiscFlags: 0 },
+        [{ pSysMem: new Uint8Array(codes.buffer), SysMemPitch: 4, SysMemSlicePitch: 4 }], volume),
+        S_OK);
+        const [upload] = h.gpu.of('writeTexture');
+        assert.deepEqual([...new Float32Array(upload.bytes.slice().buffer)],
+            [...codes].map(code=>Math.fround(code / 65535)));
+        assert.equal(upload.layout.bytesPerRow, 8);
+        assert.deepEqual(upload.size, { width: 2, height: 1, depthOrArrayLayers: 3 });
+    });
+
 test('UpdateSubresource lands a box at its offset and uploads that box alone', ()=>{
     const h = harness();
     const { device } = h;

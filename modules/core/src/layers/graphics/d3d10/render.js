@@ -1590,7 +1590,12 @@ export function createRenderer(services){
         {
             return { data: bytes, bytesPerRow: geometry.rowPitch };
         }
-        const slices = [];
+        const bytesPerRow = geometry.width * convertedTexelBytes(conversion);
+        // A slice is converted into bytes of the call's own, which the upload
+        // copies before it returns; a level of one slice goes up in them as
+        // they are, and only a volume's slices are gathered into one run.
+        /** @type {Uint8Array | null} */
+        let data = null;
         for (let z = 0; z < geometry.depth; z++)
         {
             const converted = convertTexels(conversion,
@@ -1600,15 +1605,14 @@ export function createRenderer(services){
             {
                 return null;
             }
-            slices.push(converted);
+            if (geometry.depth === 1)
+            {
+                return { data: converted, bytesPerRow };
+            }
+            data ??= new Uint8Array(converted.length * geometry.depth);
+            data.set(converted, z * converted.length);
         }
-        const texel = convertedTexelBytes(conversion);
-        const data = new Uint8Array(slices.reduce((total, slice)=>total + slice.length, 0));
-        slices.reduce((at, slice)=>{
-            data.set(slice, at);
-            return at + slice.length;
-        }, 0);
-        return { data, bytesPerRow: geometry.width * texel };
+        return data ? { data, bytesPerRow } : null;
     };
 
     /**
