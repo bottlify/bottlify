@@ -495,7 +495,8 @@ export function createStringFunctions(host){
     };
 
     /** const unsigned short *__pctype_func(void): `_pctype`'s value, through a call. */
-    table.__pctype_func = { convention: 'cdecl', argBytes: 0, handler: publishedTable };
+    table.__pctype_func = { convention: 'cdecl', returns: 'pointer', argBytes: 0,
+        handler: publishedTable };
 
     return table;
 }

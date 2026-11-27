@@ -29,7 +29,9 @@
  *
  * Each handler is called once per argument place, that argument a pointer at
  * the window's data and every other a small count: a pointer read as a size
- * or a flag would itself differ by the base. A call that reaches a stand-in
+ * or a flag would itself differ by the base. One whose signature has no
+ * address among its arguments is called once with small counts alone, for
+ * its answer and what it writes. A call that reaches a stand-in
  * on either side is not measured. The two layers keep their state from call
  * to call; a handler that answered otherwise may part their arenas for the
  * calls after it, which is why only the dwords a call itself writes are
@@ -336,23 +338,44 @@ export function signatures(){
 const MANGLED_NUMBERS = /^(?:[CDEFGHIJKMNO]|_[JKN])/;
 
 /**
- * The address places of a global function by its MSVC name
- * (`??2@YAPAXI@Z`, operator new(unsigned int)): such a name carries no
- * comment the gate can read, but its parameter types are in it. A pointer
- * or reference (`P`, `Q`, `A`, `E` for __ptr64, a qualifier, the type it
- * points at) is an address; a number is none. Null for a name read otherwise
- * (a class, a back reference, a member): every place is then tried.
+ * The address places of a function by its MSVC name (`??2@YAPAXI@Z`,
+ * operator new(unsigned int); `?allocate@?$allocator@D@std@@QEAAPEAD_K@Z`,
+ * a member): such a name carries no comment the gate can read, but its
+ * parameter types are in it. A pointer or reference (`P`, `Q`, `A`, `E` for
+ * __ptr64, a qualifier, the type it points at) is an address, and so is a
+ * member's `this`, its first argument; a number is none. Null for a name read
+ * otherwise (a class, a back reference, a constructor, which has no return
+ * type): every place is then tried.
  *
  * @param {string} name
  * @returns {number[] | null}
  */
 export function mangledPointers(name){
-    const head = /^\?[^@]*@Y[A-Z]/.exec(name);
-    if (!head)
+    const global = /^\?[^@]*@Y[A-Z]/.exec(name);
+    if (global)
     {
-        return null;
+        return mangledPlaces(name, global[0].length, false);
     }
-    let at = head[0].length;
+    // A member's scope ends at an `@@` an access, `this`'s qualifiers and a
+    // calling convention follow; one inside a template argument is tried and
+    // fails to read.
+    for (const one of name.matchAll(/@@[ABEFIJMNQRUV]E?[A-D][A-H]/g))
+    {
+        const places = mangledPlaces(name, (one.index ?? 0) + one[0].length, true);
+        if (places)
+        {
+            return places;
+        }
+    }
+    return null;
+}
+
+/**
+ * @param {string} name @param {number} at  where the return type starts
+ * @param {boolean} member  a `this` first
+ * @returns {number[] | null}
+ */
+function mangledPlaces(name, at, member){
     /** @returns {boolean | null} whether the type at `at` is an address; null for one not read */
     const type = ()=>{
         const number = MANGLED_NUMBERS.exec(name.slice(at));
@@ -377,8 +400,9 @@ export function mangledPointers(name){
     {
         return null;
     }
-    const places = [];
-    for (let place = 0; name.slice(at) !== '@Z' && name.slice(at) !== 'Z'; place += 1)
+    const places = member ? [0] : [];
+    for (let place = places.length; name.slice(at) !== '@Z' && name.slice(at) !== 'Z';
+        place += 1)
     {
         const pointer = type();
         if (pointer === null)
@@ -617,6 +641,13 @@ export async function compare(low, high, only = null, rebuild = null){
             const shapes = places.map(place=>[
                 `argument ${place + 1} a pointer`,
                 Array.from({ length: count }, (__, i)=>(i === place ? 'p' : SMALL))]);
+            // A function whose signature has no address in it is still called
+            // once, for its answer: `long *__p__dstbias(void)` answers an
+            // address of the window, which differs by the base or not at all.
+            if (shapes.length === 0)
+            {
+                shapes.push(['no argument a pointer', Array.from({ length: count }, ()=>SMALL)]);
+            }
             for (const [label, shape] of shapes)
             {
                 calls++;
