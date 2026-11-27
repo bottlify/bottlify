@@ -561,7 +561,7 @@ From `node tools/checks/duplicate-code.mjs --top 4 on this repository, 2026-11-2
 
 ### `fixtures/`
 
-- [`fixtures/allocation.mjs`](fixtures/allocation.mjs) - How many bytes a function allocates a call, for the tests that hold a hot path to making no garbage
+- [`fixtures/allocation.mjs`](fixtures/allocation.mjs) - How many bytes a function allocates a call, JS heap and ArrayBuffer backing stores apart, for the tests that hold a hot path to making no garbage
 - [`fixtures/make-pe.mjs`](fixtures/make-pe.mjs) - Build PE programs for the packages' tests
 - [`fixtures/tone-program.mjs`](fixtures/tone-program.mjs) - Programs that play a tone of a known pitch and length through WASAPI, waveOut and DirectSound, for the sound delivery test
 - [`fixtures/sound-delivery-run.mjs`](fixtures/sound-delivery-run.mjs) - One run of the sound delivery test in a worker of its own: the engine, the real audio worklet on its own clock, and what it played measured
