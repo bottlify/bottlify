@@ -1184,11 +1184,6 @@ export function createWin32Module(){
             const kernel32Export = name=>modules.find('kernel32.dll')?.addressOf?.(name) ?? 0;
             /** The C runtime image the program loaded (`CRT_IMAGES`), or null before it has one. */
             const crtImage = ()=>CRT_IMAGES.map(name=>modules.find(name)).find(Boolean) ?? null;
-            // The scan under the C string functions whose answer is a position
-            // rather than a text: it walks the same chunks readCString does and
-            // never materialises the string.
-            const scanCString = (/** @type {number} */ address, /** @type {number} */ limit,
-                /** @type {Uint8Array} */ wanted)=>memory.scanCString(address, limit, wanted);
             /** A NUL-terminated string's units before its terminator, 1- or 2-byte units,
              * as far as its region goes. @param {number} address @param {number} unit */
             const stringLength = (address, unit)=>(unit === 1
@@ -4778,10 +4773,6 @@ export function createWin32Module(){
                     ...createMsvcrtFunctions({
                         guest,
                         pointerSize,
-                        readMemory,
-                        writeMemory,
-                        fillMemory,
-                        scanCString,
                         setLastError: setError,
                         // The `va_list` window stops at the end of its region: a
                         // thread formatting from just below its stack's top is

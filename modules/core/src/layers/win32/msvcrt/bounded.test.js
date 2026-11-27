@@ -28,23 +28,6 @@ const build = ()=>{
         ...memory,
         // The region ends at the fence: a read past it faults there.
         guest: guestWindow(memory.bytes.subarray(0, FENCE)),
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>{
-            if (address + length > FENCE)
-            {
-                throw new Error(`Unmapped read at 0x${address.toString(16)} (${length} bytes)`);
-            }
-            return memory.readMemory(address, length);
-        },
-        /** @param {number} address @param {number} limit */
-        readCString: (address, limit)=>{
-            const end = memory.bytes.indexOf(0, address);
-            if (end === -1 || end >= FENCE)
-            {
-                throw new Error(`Unmapped read at 0x${FENCE.toString(16)}`);
-            }
-            return memory.readCString(address, limit);
-        },
     };
     /** Units at the very end of the region, no terminator after them. @param {string} text */
     const atEnd = (text, unit = 2)=>{
