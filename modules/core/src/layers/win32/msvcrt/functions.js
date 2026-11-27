@@ -1439,9 +1439,6 @@ export function createMsvcrtFunctions(host){
         __strncnt: secure.strnlen,
         ...createConversionFunctions({
             guest: host.guest,
-            pointerSize: host.pointerSize,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
             allocate,
             fpu: host.fpu,
             errno,
