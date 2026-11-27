@@ -20,6 +20,9 @@
  */
 
 import { createReader, openClient } from '@bottlify/cellar';
+import { createScratches, plainScratches } from './scratch.js';
+
+/** @typedef {import('./scratch.js').Scratch} Scratch */
 
 /**
  * One layer's names in the cache.
@@ -66,7 +69,8 @@ const NOTHING = Object.freeze({
  * reader: for a test or a tool that builds a layer alone.
  */
 export const noCache = Object.freeze({ space: ()=>NOTHING, join: /** @type {Join} */ (()=>null),
-    serve: /** @type {Serve} */ (()=>null), owner: /** @type {Owner} */ (()=>null) });
+    serve: /** @type {Serve} */ (()=>null), owner: /** @type {Owner} */ (()=>null),
+    scratch: /** @type {(name: string) => Scratch} */ (name=>plainScratches.scratch(name)) });
 
 /**
  * Names of the run's cache an owner on this thread holds alone (`ownedSpace`),
@@ -545,6 +549,13 @@ export function createCacheModule(){
     /** @type {Reader | null} */
     let reader = null;
     let made = false;
+    /**
+     * The scratches of this process's layers (`scratch.js`): held in the run's
+     * cache under `scratch/...`, or plain memory where there is none.
+     *
+     * @type {ReturnType<typeof createScratches> | null}
+     */
+    let scratches = null;
 
     return {
         name: 'cache',
@@ -562,15 +573,22 @@ export function createCacheModule(){
          *     disk?: 'kept' | 'run' | 'never', idle?: 'go' | 'stay' }) => CacheSpace,
          *     join: Join,
          *     serve: Serve,
-         *     owner: Owner }>}
+         *     owner: Owner,
+         *     scratch: (name: string) => Scratch }>}
+         *     `scratch`: memory a layer keeps between calls, held in the run's cache
+         *     (`scratch.js`)
          */
         async create(config){
             reader = config?.reader ?? null;
             made = true;
             const given = reader;
+            const own = createScratches(given ? cacheSpace(given, 'scratch').hold ?? null : null);
+            scratches = own;
+            /** @param {string} name */
+            const scratch = name=>own.scratch(name);
             if (given === null)
             {
-                return noCache;
+                return { ...noCache, scratch };
             }
             const join = config?.join ?? null;
             const serve = config?.serve ?? null;
@@ -584,6 +602,7 @@ export function createCacheModule(){
                     const served = serve?.(name) ?? null;
                     return served ? ownedSpace(given, served) : null;
                 },
+                scratch,
             };
         },
 
@@ -597,12 +616,18 @@ export function createCacheModule(){
                     // there; this process holds none of its own.
                     bytesHeld: {},
                     reader: reader?.figures() ?? 'no cache: every read is a miss',
+                    // What the layers keep between calls: held in the run's cache,
+                    // or plain memory where it had no room or there is none.
+                    scratch: scratches?.figures() ?? 'not made',
                 },
                 issues: [],
             };
         },
 
         async dispose(){
+            // A scratch its layer did not let go of is the process's: it goes
+            // with it, its room the cache's again.
+            scratches?.releaseAll();
             reader = null;
         },
     };
