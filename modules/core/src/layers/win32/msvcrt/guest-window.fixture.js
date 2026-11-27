@@ -33,6 +33,9 @@ export function guestWindow(bytes, { base = 0, closed = 0, pointerSize = 4 } = {
         writePhysical: (address, data)=>bytes.set(data, address - base),
         readU32: address=>view.getUint32(address - base, true),
         writeU32Data: (address, value)=>view.setUint32(address - base, value >>> 0, true),
+        // In place, as a run's RAM fills: a fill makes no buffer of its length.
+        fillData: (address, value, length)=>void bytes.fill(value, address - base,
+            address - base + length),
     } });
     return createGuest(accessors, pointerSize);
 }

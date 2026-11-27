@@ -45,7 +45,7 @@ import { COMPILED as SCAN } from './inguest-scan.x86.js';
 import { COMPILED as SCAN_LONG } from './inguest-scan.x64.js';
 import { setSingle } from './float.js';
 import { wholeAddress } from '../common/pointers.js';
-import { writeMade } from '../common/guest.js';
+import { createGuest, writeMade } from '../common/guest.js';
 
 /** How much of a long copy is read before it is written. */
 const MOVE_CHUNK = 0x10000;
@@ -266,16 +266,22 @@ function x87Words(fpu){
 
 /**
  * @typedef {Object} GuestHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory  The bytes copied before it
- *     returns: the helpers write every scalar from one buffer.
+ * @property {import('../common/guest.js').Guest} [guest]  The process's view
+ *     (`host.guest`), read and written in place at its pointer width: what
+ *     win32's libraries hand. Without it, `readMemory` and `writeMemory`.
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ *     What a library outside win32's view hands (glu's, a test's): the view is
+ *     made over it and `writeMemory`.
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]  The bytes copied
+ *     before it returns: the view writes every scalar from one buffer.
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
  *     A range set to one byte in place, with no buffer of the length made.
  * @property {(fn: number, args: number[]) => number} [call]
  *     A guest function run to its return, synchronously: a test's stand-in.
  *     The engine has none -- running the guest from the host is a wait --
  *     so a function that calls one has no handler, only its x86.
- * @property {number} [pointerSize]  8 in a 64-bit process: what `ptr` and `setPtr` move.
+ * @property {number} [pointerSize]  8 in a 64-bit process, with the two raw
+ *     accessors: what `ptr` and `setPtr` move. A view carries its own.
  */
 
 /**
@@ -286,37 +292,77 @@ function x87Words(fpu){
  *     | 'mxcsr' | 'setMxcsr' | 'pointerBytes'>} GuestMemory
  */
 
+/** Where a long copy's chunk is held between its read and its write. */
+const moving = new Uint8Array(MOVE_CHUNK);
+
 /**
- * The guest's memory as the helpers read and write it.
+ * win32's view made over a raw reader and writer, as far as guest code reads
+ * and writes through it: its scalars, bytes and fills. No string is read
+ * through it: a `@guestCode` function reads its strings a byte at a time.
+ *
+ * @param {GuestHost} host
+ * @returns {import('../common/guest.js').Guest}
+ */
+function rawView(host){
+    const readMemory = /** @type {(address: number, length: number) => Uint8Array} */ (
+        host.readMemory);
+    const writeMemory = /** @type {(address: number, bytes: Uint8Array) => void} */ (
+        host.writeMemory);
+    // A scalar written goes through one buffer, its bytes copied out by the
+    // write: a handler answering a call that stores a character at a time
+    // made two objects a store.
+    const scratch = new Uint8Array(4);
+    const scratchView = new DataView(scratch.buffer);
+    /** @param {number} address @param {number} length */
+    const view = (address, length)=>{
+        const bytes = readMemory(address, length);
+        return new DataView(bytes.buffer, bytes.byteOffset, length);
+    };
+    /** @returns {never} */
+    const noStrings = ()=>{
+        throw new Error('guest code: no string is read through raw accessors');
+    };
+    return createGuest({
+        readU8: address=>readMemory(address, 1)[0],
+        readU16: address=>view(address, 2).getUint16(0, true),
+        readU32: address=>view(address, 4).getUint32(0, true),
+        writeU8: (address, value)=>{
+            scratch[0] = value;
+            writeMemory(address, scratch.subarray(0, 1));
+        },
+        writeU16: (address, value)=>{
+            scratchView.setUint16(0, value, true);
+            writeMemory(address, scratch.subarray(0, 2));
+        },
+        writeU32: (address, value)=>{
+            scratchView.setUint32(0, value >>> 0, true);
+            writeMemory(address, scratch);
+        },
+        readBytes: readMemory,
+        window: readMemory,
+        writeBytes: writeMemory,
+        // A chunk at a time where no fill is handed: the count is the
+        // program's, and no buffer of it is made on the host.
+        fillBytes: host.fillMemory ?? ((address, value, length)=>writeMade(writeMemory, address,
+            length, chunk=>void chunk.fill(value & 0xff))),
+        readCString: noStrings,
+        readWideString: noStrings,
+    }, host.pointerSize === 8 ? 8 : 4);
+}
+
+/**
+ * The guest's memory as the helpers read and write it: through the
+ * process's view where one is handed, every address wrapped as the code
+ * computed it -- a dword in a 32-bit process, as the i386 wraps it; whole in
+ * a 64-bit one, past 4 GiB (`ptr`).
  *
  * @param {GuestHost} host
  * @returns {GuestMemory}
  */
 export function guestMemory(host){
-    const wide = host.pointerSize === 8;
-    // An address as the code computed it: a dword wraps in a 32-bit process,
-    // as the i386 does; a 64-bit one's past 4 GiB is whole (`ptr`).
-    const at = wide ? wholeAddress : (/** @type {number} */ address)=>address >>> 0;
-    /** @param {number} address @param {number} length */
-    const view = (address, length)=>{
-        const bytes = host.readMemory(at(address), length);
-        return new DataView(bytes.buffer, bytes.byteOffset, length);
-    };
-    // A scalar written goes through one buffer, its bytes copied out by the
-    // write: a handler answering a call that stores a character at a time
-    // (MultiByteToWideChar, a sort's swaps) made two objects a store, and in a
-    // 64-bit process, where these handlers answer every such call, that was
-    // most of what the call cost.
-    const scratch = new Uint8Array(8);
-    const scratchView = new DataView(scratch.buffer);
-    /** By length, the buffer's first bytes. @type {Record<number, Uint8Array>} */
-    const pieces = { 1: scratch.subarray(0, 1), 2: scratch.subarray(0, 2),
-        4: scratch.subarray(0, 4), 8: scratch };
-    /** @param {number} address @param {1 | 2 | 4 | 8} length @param {(v: DataView) => void} fill */
-    const write = (address, length, fill)=>{
-        fill(scratchView);
-        host.writeMemory(at(address), pieces[length]);
-    };
+    const guest = host.guest ?? rawView(host);
+    const at = guest.pointerSize === 8 ? wholeAddress
+        : (/** @type {number} */ address)=>address >>> 0;
     /**
      * A run of the program's length moved a chunk at a time, no buffer of it
      * made on the host: each chunk read whole before it is written, from the
@@ -331,40 +377,31 @@ export function guestMemory(host){
         {
             const size = Math.min(MOVE_CHUNK, length - done);
             const offset = down ? length - done - size : done;
-            host.writeMemory(at(destination + offset), host.readMemory(at(source + offset), size));
+            guest.setBytes(at(destination + offset),
+                guest.bytes(at(source + offset), size, moving.subarray(0, size)));
         }
     };
     /** @param {number} address */
-    const u8 = address=>host.readMemory(at(address), 1)[0];
+    const u8 = address=>guest.u8(at(address));
     /** @param {number} address @param {number} value */
-    const setU8 = (address, value)=>{
-        scratch[0] = value;
-        host.writeMemory(at(address), pieces[1]);
-    };
+    const setU8 = (address, value)=>guest.set8(at(address), value);
     return {
         u8,
-        i8: address=>view(address, 1).getInt8(0),
-        u16: address=>view(address, 2).getUint16(0, true),
-        i16: address=>view(address, 2).getInt16(0, true),
-        u32: address=>view(address, 4).getUint32(0, true),
-        i32: address=>view(address, 4).getInt32(0, true),
-        f32: address=>view(address, 4).getFloat32(0, true),
-        f64: address=>view(address, 8).getFloat64(0, true),
+        i8: address=>guest.i8(at(address)),
+        u16: address=>guest.u16(at(address)),
+        i16: address=>guest.i16(at(address)),
+        u32: address=>guest.u32(at(address)),
+        i32: address=>guest.i32(at(address)),
+        f32: address=>guest.f32(at(address)),
+        f64: address=>guest.f64(at(address)),
         ...FLOAT_BIT_HELPERS,
         setU8,
-        setU16: (address, value)=>write(address, 2, v=>v.setUint16(0, value, true)),
-        setU32: (address, value)=>write(address, 4, v=>v.setUint32(0, value, true)),
-        setF32: (address, value)=>write(address, 4, v=>v.setFloat32(0, value, true)),
-        setF64: (address, value)=>write(address, 8, v=>v.setFloat64(0, value, true)),
-        ptr: address=>{
-            const held = view(address, wide ? 8 : 4);
-            return held.getUint32(0, true) + (wide ? held.getUint32(4, true) * 2 ** 32 : 0);
-        },
-        setPtr: (address, value)=>write(address, wide ? 8 : 4, v=>{
-            const high = Math.floor(value / 2 ** 32);
-            v.setUint32(0, value - high * 2 ** 32, true);
-            v.setUint32(4, high, true);
-        }),
+        setU16: (address, value)=>guest.set16(at(address), value),
+        setU32: (address, value)=>guest.set32(at(address), value),
+        setF32: (address, value)=>guest.setF32(at(address), value),
+        setF64: (address, value)=>guest.setF64(at(address), value),
+        ptr: address=>guest.ptr(at(address)),
+        setPtr: (address, value)=>guest.setPtr(at(address), value),
         copyUp: (destination, source, count)=>{
             const length = count >>> 0;
             // Apart, or the destination below: a copy of the whole reads the
@@ -391,23 +428,13 @@ export function guestMemory(host){
                 setU8(destination + i, u8(source + i));
             }
         },
-        fill: (destination, value, count)=>{
-            if (host.fillMemory)
-            {
-                host.fillMemory(at(destination), value & 0xff, count >>> 0);
-                return;
-            }
-            // A chunk at a time: the count is the program's, and no buffer
-            // of it is made on the host.
-            writeMade(host.writeMemory, at(destination), count >>> 0,
-                chunk=>void chunk.fill(value & 0xff));
-        },
+        fill: (destination, value, count)=>guest.fill(at(destination), value & 0xff, count >>> 0),
         // One thread's reference: the host answers it with nothing else running.
         compareExchange: (address, expected, value)=>{
-            const held = view(address, 4).getUint32(0, true);
+            const held = guest.u32(at(address));
             if (held === expected >>> 0)
             {
-                write(address, 4, v=>v.setUint32(0, value >>> 0, true));
+                guest.set32(at(address), value >>> 0);
             }
             return held;
         },
@@ -434,8 +461,11 @@ export function guestMemory(host){
 
 /**
  * @typedef {Object} EntryHost
+ * @property {import('../common/guest.js').Guest} [guest]  The process's view,
+ *     wanted by a function that takes the guest's helpers: win32's libraries
+ *     hand it, and its width is the process's.
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
- *     With writeMemory, wanted by a function that takes the guest's helpers.
+ *     With writeMemory, the same wanted from a library outside win32's view.
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
  * @property {import('./float.js').FloatHost} [fpu]
@@ -446,7 +476,7 @@ export function guestMemory(host){
  *     A guest function run to its return, synchronously; without it a
  *     function that calls one has no handler.
  * @property {number} [pointerSize]  8 in a 64-bit process, the `pointerBytes`
- *     its handler runs the source with; absent, 4.
+ *     its handler runs the source with; absent, the view's, or 4.
  */
 
 /**
@@ -579,23 +609,25 @@ export function guestEntry(source, compiled, host, fallback){
         throw new Error('guest code: a function that calls the guest has no handler here '
             + '(guestExport)');
     }
-    const { readMemory, writeMemory, fillMemory, call } = host;
+    const memory = host.guest ?? (host.readMemory && host.writeMemory);
     const memoryUsed = uses.some(use=>use !== 'host' && use !== 'pointerBytes'
         && !X87_WORDS.includes(use) && !FLOAT_BITS.includes(use));
-    if (memoryUsed && (!readMemory || !writeMemory))
+    if (memoryUsed && !memory)
     {
         throw new Error('guest code: a function that reads the guest wants its memory');
     }
+    const pointerBytes = (host.pointerSize ?? host.guest?.pointerSize) === 8 ? 8 : 4;
     const words = uses.some(use=>X87_WORDS.includes(use)) ? x87Words(host.fpu) : {};
     const bits = {
         ...uses.some(use=>FLOAT_BITS.includes(use)) ? FLOAT_BIT_HELPERS : {},
-        ...uses.includes('pointerBytes') ? { pointerBytes: host.pointerSize === 8 ? 8 : 4 } : {},
+        ...uses.includes('pointerBytes') ? { pointerBytes } : {},
     };
     /** @type {Guest | null} */
-    const guest = uses.length === 0 ? null : readMemory && writeMemory
-        ? /** @type {Guest} */ ({ ...guestMemory({ readMemory, writeMemory,
-            ...fillMemory ? { fillMemory } : {}, ...call ? { call } : {},
-            ...host.pointerSize === 8 ? { pointerSize: 8 } : {} }), ...words, ...bits })
+    const guest = uses.length === 0 ? null : memory
+        ? /** @type {Guest} */ ({ ...guestMemory({ guest: host.guest,
+            readMemory: host.readMemory, writeMemory: host.writeMemory,
+            fillMemory: host.fillMemory, call: host.call, pointerSize: pointerBytes }),
+            ...words, ...bits })
         : /** @type {Guest} */ (/** @type {unknown} */ ({ ...words, ...bits,
             host: ()=>{
                 throw new Error('guest code: host() is answered only in a handler with a '
