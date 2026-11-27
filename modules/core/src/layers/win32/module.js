@@ -1185,11 +1185,6 @@ export function createWin32Module(){
             const kernel32Export = name=>modules.find('kernel32.dll')?.addressOf?.(name) ?? 0;
             /** The C runtime image the program loaded (`CRT_IMAGES`), or null before it has one. */
             const crtImage = ()=>CRT_IMAGES.map(name=>modules.find(name)).find(Boolean) ?? null;
-            // The scan under the C string functions whose answer is a position
-            // rather than a text: it walks the same chunks readCString does and
-            // never materialises the string.
-            const scanCString = (/** @type {number} */ address, /** @type {number} */ limit,
-                /** @type {Uint8Array} */ wanted)=>memory.scanCString(address, limit, wanted);
             /** A NUL-terminated string's units before its terminator, 1- or 2-byte units,
              * as far as its region goes. @param {number} address @param {number} unit */
             const stringLength = (address, unit)=>(unit === 1
@@ -4779,10 +4774,6 @@ export function createWin32Module(){
                     ...createMsvcrtFunctions({
                         guest,
                         pointerSize,
-                        readMemory,
-                        writeMemory,
-                        fillMemory,
-                        scanCString,
                         setLastError: setError,
                         // The `va_list` window stops at the end of its region: a
                         // thread formatting from just below its stack's top is
@@ -5847,8 +5838,10 @@ export function createWin32Module(){
                         // The font engine GDI draws with, for D3DX's font.
                         fontMetrics: (/** @type {any} */ font)=>
                             config?.graphics?.fontMetrics?.(font) ?? null,
-                        glyph: (/** @type {number} */ code, /** @type {any} */ font)=>
-                            config?.graphics?.glyph?.(code, font) ?? null,
+                        glyph: (/** @type {number} */ code, /** @type {any} */ font,
+                            /** @type {(glyph: any, arg: any) => any} */ read,
+                            /** @type {any} */ arg)=>
+                            config?.graphics?.glyph?.(code, font, read, arg) ?? null,
                         callGuest: call=>bridge.callGuest(call),
                         drive: steps=>bridge.drive(steps),
                         currentThread: ()=>kernel.currentThread(),
@@ -6036,7 +6029,8 @@ export function createWin32Module(){
                         metrics: font=>config?.graphics?.fontMetrics?.(font) ?? null,
                         textWidth: (font, text)=>config?.graphics?.textWidth?.(font, text)
                             ?? null,
-                        glyph: (code, font)=>config?.graphics?.glyph?.(code, font) ?? null,
+                        glyph: (code, font, read, arg)=>config?.graphics?.glyph?.(code, font, read,
+                            arg) ?? null,
                     },
                     gdi: (name, args)=>libraries['GDI32.dll'][name].handler(args) >>> 0 }),
                 // The monitor configuration API: one physical monitor, no DDC/CI.
@@ -7209,13 +7203,13 @@ export function createWin32Module(){
                     files: volume }),
             }));
             lazyLibraries.define('MSVCR80.dll', ()=>createMsvcr80Functions(libraries['msvcrt.dll'],
-                { guest, readMemory, writeMemory, pointerSize,
+                { guest,
                     // What calls the program's invalid-parameter handler.
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     currentThread: ()=>kernel.currentThread() }));
             // And its C++ library, over that runtime's operator new and delete.
             lazyLibraries.define('MSVCP80.dll', ()=>createMsvcp80Functions(libraries['MSVCR80.dll'],
-                { guest, readMemory, writeMemory, fillMemory,
+                { guest,
                     ...floatResults ? { fpu: floatResults } : {} }));
             // Visual C++ 2003's: msvcrt's functions and the filter its DLLs
             // start under, and the C++ library's strings, laid out as 2005's.
@@ -7224,9 +7218,6 @@ export function createWin32Module(){
             lazyLibraries.define('ucrtbase.dll', ()=>createUcrtbaseFunctions(
                 libraries['MSVCR80.dll'], {
                     guest,
-                    pointerSize,
-                    readMemory,
-                    writeMemory,
                     commandLine: {
                         narrow: ()=>libraries['KERNEL32.dll'].GetCommandLineA.handler([]),
                         wide: ()=>libraries['KERNEL32.dll'].GetCommandLineW.handler([]),
@@ -7263,16 +7254,16 @@ export function createWin32Module(){
             // no copy in the bottle finds them here, as on a Windows the
             // redistributable was installed on.
             lazyLibraries.define('MSVCR90.dll', ()=>createMsvcr80Functions(libraries['msvcrt.dll'],
-                { guest, readMemory, writeMemory, pointerSize, library: 'MSVCR90.dll',
+                { guest, library: 'MSVCR90.dll',
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     currentThread: ()=>kernel.currentThread() }));
             lazyLibraries.define('MSVCP90.dll', ()=>createMsvcp80Functions(libraries['MSVCR90.dll'],
-                { guest, readMemory, writeMemory, fillMemory,
+                { guest,
                     ...floatResults ? { fpu: floatResults } : {} }));
             lazyLibraries.define('MSVCR71.dll', ()=>({ ...libraries['msvcrt.dll'],
                 __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter }));
             lazyLibraries.define('MSVCP71.dll', ()=>createMsvcp80Functions(libraries['MSVCR71.dll'],
-                { guest, readMemory, writeMemory, fillMemory,
+                { guest,
                     ...floatResults ? { fpu: floatResults } : {} }));
             // Visual C++ 6's C++ library, which Windows itself carries: its
             // strings are shared by count, as that compiler's headers inline.

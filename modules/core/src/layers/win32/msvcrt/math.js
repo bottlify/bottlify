@@ -99,14 +99,14 @@ function nextAfter(x, y){
 
 /**
  * @typedef {Object} MathHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  What the handlers and the
+ *     routines in the guest read and write, at the process's width: a 64-bit
+ *     runtime has the float forms and passes a structure of sixteen bytes by
+ *     its address.
  * @property {import('./float.js').FloatHost} fpu
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *     Where `_ftol`'s handler puts EDX; without it `_ftol` is its x86 alone.
  * @property {(code: number) => void} [errno]  The calling thread's errno.
- * @property {number} [pointerSize]  8 in a 64-bit process, whose runtime has
- *     the float forms and passes a structure of sixteen bytes by its address.
  */
 
 /**
@@ -359,12 +359,12 @@ export function createMathFunctions(host){
      * _hypot's two arguments are, so the one code serves both. At 64 bits a
      * structure of sixteen bytes is passed by its address.
      */
-    const read = host.readMemory;
-    handlers._cabs = host.pointerSize === 8 && read
+    const { guest } = host;
+    const wide = guest.pointerSize === 8;
+    handlers._cabs = wide
         ? returningDouble(fpu, 4, ([at])=>{
-            const parts = new DataView(read(wholeAddress(at), 16).buffer);
-            const real = parts.getFloat64(0, true);
-            const imaginary = parts.getFloat64(8, true);
+            const real = guest.f64(wholeAddress(at));
+            const imaginary = guest.f64(wholeAddress(at) + 8);
             return answer([real, imaginary], Math.hypot(real, imaginary));
         })
         : handlers._hypot;
@@ -393,7 +393,7 @@ export function createMathFunctions(host){
     // is and rounded to a float, errno as it sets it.
     /** @type {Record<string, ReturnType<typeof returningSingle>>} */
     const singles = {};
-    if (host.pointerSize === 8)
+    if (wide)
     {
         for (const name of SINGLE_FORMS)
         {
@@ -441,9 +441,8 @@ export function createMathFunctions(host){
         }
     }
 
-    const guest = {
-        readMemory: host.readMemory,
-        writeMemory: host.writeMemory,
+    const floatHost = {
+        guest,
         fpu,
         ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
     };
@@ -452,7 +451,7 @@ export function createMathFunctions(host){
     const inTheGuest = {};
     for (const name of [...Object.keys(handlers), 'frexp', 'modf'])
     {
-        if (name === '_cabs' && host.pointerSize === 8)
+        if (name === '_cabs' && wide)
         {
             continue;
         }
@@ -465,7 +464,7 @@ export function createMathFunctions(host){
             ?? /** @type {Record<string, any>} */ (FLOAT_CODE)[code];
         if (source && compiled)
         {
-            inTheGuest[name] = guestEntry(source, compiled, guest, handlers[name]);
+            inTheGuest[name] = guestEntry(source, compiled, floatHost, handlers[name]);
         }
     }
 
@@ -532,10 +531,10 @@ export function createMathFunctions(host){
          * double _copysign(double x, double y) -- in the guest, which reads y's
          * sign bit from its bits (`doubleHigh`); a 64-bit caller passes it in XMM1.
          */
-        _copysign: { ...guestEntry(inGuestFloat._copysign, FLOAT_CODE._copysign, guest),
+        _copysign: { ...guestEntry(inGuestFloat._copysign, FLOAT_CODE._copysign, floatHost),
             floats: TWO_DOUBLES },
 
         /** double _chgsign(double x) -- in the guest */
-        _chgsign: guestEntry(inGuestFloat._chgsign, FLOAT_CODE._chgsign, guest),
+        _chgsign: guestEntry(inGuestFloat._chgsign, FLOAT_CODE._chgsign, floatHost),
     };
 }

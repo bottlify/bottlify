@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeUnits, encodeUnits, foldUnits, markIn, wideStringAt } from './widetext.js';
+import { decodeUnits, encodeUnits, foldUnits, markIn, textOfUnits, unitsAt } from './widetext.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 test('a character past U+FFFF is two units that go to UTF-8 and back as one', ()=>{
     const pair = [0xd83d, 0xde00];
@@ -35,29 +36,27 @@ test('folding stops before a character it has room for only half of', ()=>{
     assert.deepEqual(foldUnits(decoded, 3), { units: [0x61, 0xd83d, 0xde00], consumed: 5 });
 });
 
-test('a wide string is read to its terminator and not past the line it ends in', ()=>{
-    const memory = new Uint8Array(0x100);
-    /** @param {number} at @param {string} text */
-    const place = (at, text)=>[...text, '\0'].forEach((character, index)=>{
-        memory[at + index * 2] = character.charCodeAt(0) & 0xff;
-        memory[at + index * 2 + 1] = character.charCodeAt(0) >> 8;
-    });
-    /** @type {[number, number][]} */
-    const reads = [];
-    /** @param {number} at @param {number} length */
-    const readMemory = (at, length)=>{
-        reads.push([at, length]);
-        if (at + length > 0x80)
-        {
-            throw new Error('read past the region');
-        }
-        return memory.slice(at, at + length);
-    };
-    place(0x80 - 8, 'ab☺');
-    assert.equal(wideStringAt(readMemory, 0x80 - 8), 'ab☺', 'ending where the region does');
-    place(0x51, 'odd');
-    assert.equal(wideStringAt(readMemory, 0x51), 'odd', 'a unit across a stretch is whole');
-    assert.ok(reads.every(([at, length])=>Math.floor(at / 64) === Math.floor((at + length - 1) / 64)));
+test('a string\'s units are read to its terminator or its count, never past its region', ()=>{
+    for (const base of [0, 0x100000000])
+    {
+        // The region ends at 0x80: a read past it faults.
+        const memory = new Uint8Array(0x80);
+        const guest = guestWindow(memory, { base, pointerSize: 8 });
+        /** @param {number} at @param {string} text */
+        const place = (at, text)=>[...text, '\0'].forEach((character, index)=>{
+            memory[at + index * 2] = character.charCodeAt(0) & 0xff;
+            memory[at + index * 2 + 1] = character.charCodeAt(0) >> 8;
+        });
+        place(0x80 - 8, 'ab☺');
+        assert.equal(textOfUnits([...unitsAt(guest, base + 0x80 - 8, 2, 100)]), 'ab☺',
+            `at ${base}: ending where the region does`);
+        place(0x51, 'odd');
+        assert.equal(textOfUnits([...unitsAt(guest, base + 0x51, 2, 100)]), 'odd',
+            `at ${base}: a unit at an odd address is whole`);
+        memory.fill(0x41, 0x70);
+        assert.deepEqual([...unitsAt(guest, base + 0x70, 1, 16)], new Array(16).fill(0x41),
+            `at ${base}: a count ending with the region, no terminator in it`);
+    }
 });
 
 test('folding a line stops after its LF, a CR LF counted whole', ()=>{

@@ -59,6 +59,9 @@ const P_OVERLAY = 2;
 /** The most argument strings read off a list with no NULL in reach. */
 const MOST_ARGUMENTS = 1024;
 
+/** The most of a string an argument is read to: a command line's own most. */
+const MOST_TEXT = 32767;
+
 /**
  * @typedef {Object} ProcessHost
  * @property {(code: number) => void} errno
@@ -73,10 +76,11 @@ const MOST_ARGUMENTS = 1024;
  *           the record, with `handle` and `threadHandle` open on it, or null
  *           when the image is not there.
  * @property {(handle: number) => void} [closeHandle]
- * @property {(address: number) => string} [readCString]
- * @property {(address: number) => number} [readU32]
+ * @property {import('../common/guest.js').Guest} [guest]  The process's memory at
+ *           its pointer width: an argv's pointers and `_pxcptinfoptrs`'s are
+ *           eight bytes in a 64-bit process. Absent, no image is started and
+ *           no cell is made.
  * @property {(bytes: number) => number} [allocate]
- * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  */
 
 /**
@@ -130,13 +134,15 @@ export function createProcessFunctions(host){
      *     string pointers, argv[0] first, up to the NULL
      */
     const spawn = (mode, name, args)=>{
-        const { launch, readCString } = host;
-        if (mode === P_WAIT || !launch || !readCString)
+        const { launch, guest } = host;
+        if (mode === P_WAIT || !launch || !guest)
         {
             return noWait.handler();
         }
-        const line = args.map(at=>readCString(at)).join(' ');
-        const made = launch(readCString(name), line, 0);
+        /** @param {number} at */
+        const text = at=>guest.cstr(wholeAddress(at), MOST_TEXT);
+        const line = args.map(text).join(' ');
+        const made = launch(text(name), line, 0);
         if (made === null)
         {
             host.errno(ENOENT);
@@ -171,7 +177,7 @@ export function createProcessFunctions(host){
         const found = [];
         for (let index = 0; index < most; index++)
         {
-            const value = read(index) >>> 0;
+            const value = wholeAddress(read(index));
             if (value === 0)
             {
                 break;
@@ -192,27 +198,18 @@ export function createProcessFunctions(host){
     const exceptionPointers = ()=>{
         const thread = host.currentThread?.() ?? null;
         let cell = pointerCells.get(thread) ?? 0;
-        if (cell === 0 && host.allocate && host.writeMemory)
+        if (cell === 0 && host.allocate && host.guest)
         {
-            cell = host.allocate(4);
+            cell = host.allocate(host.guest.pointerSize);
             if (cell !== 0)
             {
-                writeCell(cell, 0);
+                host.guest.setPtr(cell, 0);
                 pointerCells.set(thread, cell);
             }
         }
         return cell;
     };
 
-    /** @param {number} cell */
-    const readCell = cell=>host.readU32?.(cell) ?? 0;
-
-    /** @param {number} cell @param {number} value */
-    const writeCell = (cell, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory?.(cell, bytes);
-    };
 
     const table = {
         /**
@@ -289,15 +286,16 @@ export function createProcessFunctions(host){
                 // A signal an exception raises sees no exception's pointers
                 // while its handler runs: there was none, raise is a call.
                 const pointers = EXCEPTION_SIGNALS.has(number) ? exceptionPointers() : 0;
-                const kept = pointers === 0 ? 0 : readCell(pointers);
+                const { guest } = host;
+                const kept = pointers === 0 || !guest ? 0 : guest.ptr(pointers);
                 if (pointers !== 0)
                 {
-                    writeCell(pointers, 0);
+                    guest?.setPtr(pointers, 0);
                 }
                 await host.callGuest(action, args, host.currentThread?.());
                 if (pointers !== 0)
                 {
-                    writeCell(pointers, kept);
+                    guest?.setPtr(pointers, kept);
                 }
                 return 0;
             },
@@ -376,9 +374,10 @@ export function createProcessFunctions(host){
                     host.errno(EINVAL);
                     return 0xffffffff;
                 }
-                const { readU32 } = host;
-                const list = wholeAddress(argv) === 0 || !readU32 ? []
-                    : untilNull(index=>readU32(wholeAddress(argv) + index * 4), MOST_ARGUMENTS);
+                const { guest } = host;
+                const list = wholeAddress(argv) === 0 || !guest ? []
+                    : untilNull(index=>guest.ptr(wholeAddress(argv) + index * guest.pointerSize),
+                        MOST_ARGUMENTS);
                 return spawn(mode >>> 0, name, list);
             },
         },

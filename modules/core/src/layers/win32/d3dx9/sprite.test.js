@@ -121,10 +121,14 @@ function rig(){
         heap, callGuest,
         vtables: { publish: ()=>(published += 4) },
         // A font engine whose every glyph is a 2x3 block, fully inked, 5 wide.
-        glyph: (/** @type {number} */ code)=>(code === 32
-            ? { advance: 5, left: 0, top: 0, width: 0, height: 0, coverage: new Uint8Array(0) }
-            : { advance: 5, left: 1, top: 2, width: 2, height: 3,
-                coverage: new Uint8Array(6).fill(200) }),
+        // Read in place: the coverage at an offset into bytes of its own.
+        glyph: (/** @type {number} */ code, /** @type {any} */ font,
+            /** @type {(glyph: any, arg: any) => any} */ read, /** @type {any} */ arg)=>read(
+            code === 32
+                ? { advance: 5, left: 0, top: 0, width: 0, height: 0, bytes: new Uint8Array(0),
+                    offset: 0 }
+                : { advance: 5, left: 1, top: 2, width: 2, height: 3,
+                    bytes: Uint8Array.of(1, 200, 200, 200, 200, 200, 200), offset: 1 }, arg),
         fontMetrics: ()=>({ height: 10, ascent: 8, descent: 2, internalLeading: 0,
             externalLeading: 0, aveCharWidth: 5, maxCharWidth: 5 }),
     };

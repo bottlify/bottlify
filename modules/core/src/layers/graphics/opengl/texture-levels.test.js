@@ -244,6 +244,64 @@ test('a list replays a sized image as it was given, whatever the unpack state th
         GL.FLOAT).buffer)), [0.5, 2]);
 });
 
+test('a list replays a compressed rectangle from its blocks, as the call wrote it', ()=>{
+    // One DXT1 block of each colour pair: the rectangle a list writes must be
+    // the one the direct call writes, in S3TC and in RGTC, from guest memory
+    // and from an unpack buffer the program writes again after compiling.
+    const formats = [[GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, 8], [TEX.COMPRESSED_RED_RGTC1, 8]];
+    for (const [format, size] of formats)
+    {
+        for (const fromBuffer of [false, true])
+        {
+            /** @param {boolean} listed */
+            const written = listed=>{
+                const { context, bytes } = gl();
+                const [name] = context.glGenTextures(1);
+                context.glBindTexture(GL.TEXTURE_2D, name);
+                context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0, format, 8, 4, 0, size * 2,
+                    new Uint8Array(size * 2));
+                const block = Uint8Array.from([0x1f, 0xf8, 0xe0, 0x07, 0x1b, 0x6c, 0xb1, 0xc6]);
+                let data = /** @type {number | Uint8Array} */ (block);
+                if (fromBuffer)
+                {
+                    const [buffer] = context.glGenBuffersARB(1);
+                    context.glBindBufferARB(GL.PIXEL_UNPACK_BUFFER, buffer);
+                    bytes.set(block, 0x100);
+                    context.glBufferDataARB(GL.PIXEL_UNPACK_BUFFER, size, 0x100, GL.STATIC_DRAW);
+                    data = 0;
+                }
+                const sub = ()=>context.glCompressedTexSubImage2DARB(GL.TEXTURE_2D, 0, 4, 0, 4, 4,
+                    format, size, data);
+                if (listed)
+                {
+                    const list = context.glGenLists(1);
+                    context.glNewList(list, GL.COMPILE);
+                    sub();
+                    context.glEndList();
+                    if (fromBuffer)
+                    {
+                        // The buffer written again: the list keeps what the call read.
+                        bytes.fill(0, 0x100, 0x100 + size);
+                        context.glBufferSubDataARB(GL.PIXEL_UNPACK_BUFFER, 0, size, 0x100);
+                    }
+                    context.glBindBufferARB(GL.PIXEL_UNPACK_BUFFER, 0);
+                    context.glCallList(list);
+                }
+                else
+                {
+                    sub();
+                    context.glBindBufferARB(GL.PIXEL_UNPACK_BUFFER, 0);
+                }
+                assert.equal(context.glGetError(), GL.NO_ERROR);
+                const answer = context.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE);
+                return Array.from(answer instanceof Uint8Array ? answer : answer.packed);
+            };
+            assert.deepEqual(written(true), written(false),
+                `format ${format.toString(16)}${fromBuffer ? ', from a buffer' : ''}`);
+        }
+    }
+});
+
 test('RGTC blocks are kept as blocks and decode for the processor', ()=>{
     const { context } = gl();
     const [name] = context.glGenTextures(1);

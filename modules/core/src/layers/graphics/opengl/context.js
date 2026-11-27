@@ -84,6 +84,7 @@ import {
 } from './context-legacy.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { GL_COMMANDS } from './commands.js';
+import { plainScratches } from '../../cache/scratch.js';
 
 /**
  * What this implementation answers glGetString with, but for the versions,
@@ -306,9 +307,13 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  *           has the data sent there with each call and never reads it again.
  *           Such a context reads a level back (glGetTexImage) as black.
  * @property {import('./processor-levels.js').ProcessorLevels} [levels]
- *           Where the processor path keeps its levels' RGBA and hands the levels no
- *           draw samples to the texel store (`processor-levels.js`), shared by the
- *           root's contexts; absent, the RGBA is plain memory and nothing moves.
+ *           Where the processor path hands the levels no draw samples to the texel
+ *           store (`processor-levels.js`), shared by the root's contexts; absent,
+ *           nothing moves.
+ * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
+ *           Memory held in the run's cache for as long as what keeps it lives: the
+ *           RGBA a level's data or blocks make for the processor's rasteriser, which
+ *           it samples in place every draw. Plain memory if absent.
  * @property {boolean} [keepPrimitives]
  *           Every primitive drawn is kept, with its vertices, for
  *           `submittedPrimitives` to answer -- what a test reads back to see
@@ -438,11 +443,13 @@ export function createGlContext(options = {}){
             // caller that hands over a scratch it reuses on its next call
             // (the fixed-count vector readers do, for a program parameter or
             // a matrix) must not have this call's copy overwritten by that
-            // one before the list is ever played back.
+            // one before the list is ever played back, nor bytes read where
+            // the program writes again (an unpack buffer's, guest memory's).
             compiling.commands.push({
                 call: name,
                 args: args.map(/** @param {any} arg */ arg=>(
-                    arg instanceof Float32Array || arg instanceof Float64Array)
+                    arg instanceof Float32Array || arg instanceof Float64Array
+                    || arg instanceof Uint8Array)
                     ? arg.slice() : arg),
             });
             return compileMode === GL.COMPILE_AND_EXECUTE;
@@ -585,6 +592,7 @@ export function createGlContext(options = {}){
         gpuBacked: ()=>gpu !== null && attached,
         keepTexels: options.keepTexels !== false,
         levels: gpu ? null : options.levels ?? null,
+        holdTexels: length=>(options.holds ?? plainScratches.hold)('gl/rgba', length),
         currentVertex,
         currentAttributes,
         side: {},

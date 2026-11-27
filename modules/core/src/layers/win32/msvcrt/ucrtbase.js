@@ -72,13 +72,11 @@ const PROCESS_DETACH = 0;
 
 /**
  * @typedef {Object} UcrtHost
- * @property {import('../common/guest.js').Guest} guest  At the process's pointer width.
- * @property {(address: number, length: number) => Uint8Array} readMemory  For the
- *           functions whose code runs in the guest (`guestEntry`) and the math.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  At the process's pointer
+ *           width: what the handlers, the functions whose code runs in the
+ *           guest (`guestEntry`) and the math read and write.
  * @property {(entry: number, args: number[], thread?: any) => any} callGuest
  * @property {() => any} [currentThread]
- * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  * @property {{ narrow: () => number, wide: () => number }} [commandLine]  Where
  *     GetCommandLineA and GetCommandLineW keep the process's command line.
  * @property {import('./float.js').FloatHost} [fpu]  Absent, nothing that
@@ -150,7 +148,7 @@ export function createUcrtbaseFunctions(crt, host){
      * @param {number} length @param {number} buffer @param {number} count
      */
     const refused = (length, buffer, count)=>{
-        if (length >= 0 && (buffer >>> 0) === 0 && (count >>> 0) === 0)
+        if (length >= 0 && wholeAddress(buffer) === 0 && (count >>> 0) === 0)
         {
             return length;
         }
@@ -177,7 +175,7 @@ export function createUcrtbaseFunctions(crt, host){
      */
     const narrowCounted = (options, buffer, count, format, list)=>{
         const length = crt._vscprintf.handler([format, list]) | 0;
-        if (length < 0 || (buffer >>> 0) === 0)
+        if (length < 0 || wholeAddress(buffer) === 0)
         {
             // No buffer is how a caller asks how much room the text needs.
             return refused(length, buffer, count);
@@ -209,7 +207,7 @@ export function createUcrtbaseFunctions(crt, host){
      */
     const wideCounted = (options, buffer, count, format, list)=>{
         const length = crt._vsnwprintf.handler([0, 0, format, list]) | 0;
-        if (length < 0 || (buffer >>> 0) === 0)
+        if (length < 0 || wholeAddress(buffer) === 0)
         {
             return refused(length, buffer, count);
         }
@@ -255,7 +253,7 @@ export function createUcrtbaseFunctions(crt, host){
      * @param {number} line  The command line. @param {number} unit  1 or 2 bytes.
      */
     const pastProgramName = (line, unit)=>{
-        if ((line >>> 0) === 0)
+        if (wholeAddress(line) === 0)
         {
             return 0;
         }
@@ -323,7 +321,7 @@ export function createUcrtbaseFunctions(crt, host){
         ...crt,
         ...host.fpu ? createUcrtMathFunctions({ fpu: host.fpu, errno: code=>{
             fail(code);
-        }, readMemory: host.readMemory, writeMemory: host.writeMemory, pointerSize: pointer,
+        }, guest,
         ...host.readXmm && host.writeXmm ? { readXmm: host.readXmm, writeXmm: host.writeXmm }
             : {} }) : {},
 

@@ -502,11 +502,10 @@ const LIST_TYPES = new Map([
  *           Indices of uncompressed uploads whose texels the diagnostics carry.
  * @property {boolean} [compressedTextures]
  * @property {boolean} [astcTextures]
+ * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
+ *     memory held in the run's cache for an object's life, on a root drawn on this thread
  * @property {import('./gpu.js').GpuServices['texelCache']} [texelCache]  the names in the
  *     run's cache a root drawn on this thread keeps its texels under
- * @property {import('../../cache/scratch.js').Hold | null} [hold]  memory of the run's
- *     cache held for an object's life, null where there is no room: the RGBA a context
- *     on the processor samples
  *           The device has `texture-compression-bc`: an S3TC texture whose
  *           every level kept its blocks uploads them as blocks instead of
  *           the four-to-eight-times-larger texels the context decoded.
@@ -599,7 +598,7 @@ export function createOpengl(services){
         compressedTextures: services.compressedTextures,
         astcTextures: services.astcTextures,
         texelCache: services.texelCache,
-        hold: services.hold,
+        holds: services.holds,
         dumpDraws: services.dumpDraws,
         maxDraws: services.maxDraws,
         skipTexture: services.skipTexture,

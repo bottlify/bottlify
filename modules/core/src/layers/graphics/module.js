@@ -721,15 +721,6 @@ export function createGraphicsModule(){
                 return owned;
             };
             /**
-             * An OpenGL root's names in the run's cache, where it draws here:
-             * the levels it keeps there, and the RGBA its processor contexts
-             * sample held under them.
-             */
-            const openglTexels = ()=>{
-                const owned = remote ? null : ownTexels();
-                return { texelCache: owned, hold: owned?.space.hold ?? null };
-            };
-            /**
              * A Direct3D 8 or 9 root, drawn here or in the graphics worker.
              *
              * @param {'d3d8' | 'd3d9'} name @param {(services: any) => any} factory
@@ -737,7 +728,8 @@ export function createGraphicsModule(){
              */
             const direct3d = (name, factory, services)=>(remote
                 ? remote.root(name, factory, services, cache)
-                : factory({ ...services, texelCache: device ? ownTexels() : null, scratches }));
+                : factory({ ...services, texelCache: device ? ownTexels() : null, scratches,
+                    holds }));
             /**
              * Direct3D 10's root, drawn here or in the graphics worker.
              *
@@ -1018,7 +1010,9 @@ export function createGraphicsModule(){
                     // Made only where the contexts draw here, on a device or on
                     // the processor: a root in the graphics worker is given names
                     // of its own there.
-                    ...openglTexels(),
+                    texelCache: remote ? null : ownTexels(),
+                    // The RGBA a context drawn on the processor here samples.
+                    holds: remote ? undefined : holds,
                     presenter: ()=>state.shown,
                     frameQueued,
                     // The same per-draw account the Direct3D 8 device takes, on
@@ -1450,8 +1444,15 @@ export function createGraphicsModule(){
              * The font engine: the browser's own faces through a canvas, when the
              * platform has one. Made once for every context and every font, so a
              * glyph rasterised for one dialog is the same bitmap in the next.
+             * Its glyphs are pages of the run's cache (`glyphs/...`), named by
+             * what they hold, so the run's processes share them; a page the
+             * cache lets go of is drawn again.
              */
-            const fonts = createFontEngine();
+            const fonts = createFontEngine({
+                space: typeof cache?.space === 'function' && !isStub(cache)
+                    ? cache.space('glyphs') : null,
+                scratch: scratches('gdi/glyph-page'),
+            });
             /**
              * The cell a font measures as, with its glyphs, so an extent asked
              * without a device context is summed the way a drawn string is.
@@ -1465,7 +1466,7 @@ export function createGraphicsModule(){
                     cellWidth: measured.aveCharWidth,
                     cellHeight: measured.height,
                     ascent: measured.ascent,
-                    glyphs: code=>fonts.glyph(code, font),
+                    glyphs: (code, read, arg)=>fonts.glyph(code, font, read, arg),
                 } : null;
             };
 
@@ -1677,13 +1678,11 @@ export function createGraphicsModule(){
                  */
                 fontMetrics: font=>fonts.metrics(font),
                 /**
-                 * One character's coverage in a font, or null without an engine:
+                 * One character's coverage in a font, read in place
+                 * (`gdi/fonts.js` `GlyphReader`), or null without an engine:
                  * what D3DX's font draws its text from, as GDI does.
-                 *
-                 * @param {number} code
-                 * @param {import('../win32/gdi32/structs.js').LogFontFields} font
                  */
-                glyph: (code, font)=>fonts.glyph(code, font),
+                glyph: fonts.glyph,
                 /**
                  * A program's own font, under its family name, for as long as
                  * the run lasts: AddFontMemResourceEx's.

@@ -42,8 +42,6 @@ function library(base){
     };
     const table = createMsvcp80Functions(crt, {
         guest: guestWindow(memory, { base, pointerSize: 8 }),
-        readMemory: (address, length)=>memory.slice(address - base, address - base + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address - base),
     });
     /** @param {number} at @param {string} text */
     const put = (at, text)=>memory.set([...text].map(c=>c.charCodeAt(0)).concat(0), at - base);

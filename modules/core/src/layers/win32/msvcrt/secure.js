@@ -24,12 +24,12 @@ import { LOWER, UPPER } from './inguest.js';
 import { guestEntry } from './guest-code.js';
 import { COMPILED } from './inguest.x86.js';
 import { unitsAt } from './widetext.js';
-import { writeMade, writeZeros } from '../common/guest.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} SecureHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  What the handlers and
+ *     the routines in the guest read and write, at the process's pointer width.
  * @property {(code: number) => void} [errno]
  */
 
@@ -48,6 +48,7 @@ const MAX_STRING = 1 << 20;
  *     copy and append on the host, the path the guest's is gated against.
  */
 export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
+    const { guest } = host;
     /** @param {number} code */
     const fail = code=>{
         host.errno?.(code);
@@ -65,7 +66,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
      */
     const readUnits = (pointer, unit, limit)=>{
         const most = Math.min(limit, MAX_STRING);
-        const units = [...unitsAt(host.readMemory, pointer, /** @type {1 | 2} */ (unit), most)];
+        const units = [...unitsAt(guest, pointer, /** @type {1 | 2} */ (unit), most)];
         return { units, terminated: units.length < most };
     };
 
@@ -83,7 +84,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
                 bytes[index * 2 + 1] = value >>> 8 & 0xff;
             }
         });
-        host.writeMemory(pointer, bytes);
+        guest.setBytes(wholeAddress(pointer), bytes);
     };
 
     /** The first character cleared. @param {number} pointer @param {number} unit */
@@ -102,14 +103,14 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
      */
     const copyUnits = (destination, source, unit, limit)=>{
         const most = Math.min(limit, MAX_STRING);
-        const gap = (destination >>> 0) - (source >>> 0);
+        const gap = wholeAddress(destination) - wholeAddress(source);
         if (gap <= 0 || gap >= most * unit)
         {
             const { units, terminated } = readUnits(source, unit, most);
             writeUnits(destination, unit, terminated ? [...units, 0] : units);
             return terminated;
         }
-        const window = host.readMemory(source, gap + most * unit);
+        const window = guest.bytes(wholeAddress(source), gap + most * unit);
         for (let index = 0; index < most; index++)
         {
             const from = index * unit;
@@ -121,11 +122,11 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
             }
             if (zero)
             {
-                host.writeMemory(destination, window.subarray(gap, gap + from + unit));
+                guest.setBytes(wholeAddress(destination), window.subarray(gap, gap + from + unit));
                 return true;
             }
         }
-        host.writeMemory(destination, window.subarray(gap, gap + most * unit));
+        guest.setBytes(wholeAddress(destination), window.subarray(gap, gap + most * unit));
         return false;
     };
 
@@ -140,11 +141,11 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [destination, size, source])=>{
             const room = size >>> 0;
-            if ((destination >>> 0) === 0 || room === 0)
+            if (wholeAddress(destination) === 0 || room === 0)
             {
                 return fail(EINVAL);
             }
-            if ((source >>> 0) === 0)
+            if (wholeAddress(source) === 0)
             {
                 clear(destination, unit);
                 return fail(EINVAL);
@@ -186,11 +187,11 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [destination, size, source])=>{
             const room = size >>> 0;
-            if ((destination >>> 0) === 0 || room === 0)
+            if (wholeAddress(destination) === 0 || room === 0)
             {
                 return fail(EINVAL);
             }
-            if ((source >>> 0) === 0)
+            if (wholeAddress(source) === 0)
             {
                 clear(destination, unit);
                 return fail(EINVAL);
@@ -250,15 +251,15 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
         handler: (/** @type {number[]} */ [destination, size, source, count])=>{
             const room = size >>> 0;
             const wanted = count >>> 0;
-            if (wanted === 0 && (destination >>> 0) === 0 && room === 0)
+            if (wanted === 0 && wholeAddress(destination) === 0 && room === 0)
             {
                 return 0;
             }
-            if ((destination >>> 0) === 0 || room === 0)
+            if (wholeAddress(destination) === 0 || room === 0)
             {
                 return fail(EINVAL);
             }
-            if ((source >>> 0) === 0)
+            if (wholeAddress(source) === 0)
             {
                 clear(destination, unit);
                 return wanted === 0 ? 0 : fail(EINVAL);
@@ -285,11 +286,11 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
         handler: (/** @type {number[]} */ [destination, size, source, count])=>{
             const room = size >>> 0;
             const wanted = count >>> 0;
-            if ((destination >>> 0) === 0 || room === 0)
+            if (wholeAddress(destination) === 0 || room === 0)
             {
                 return fail(EINVAL);
             }
-            if ((source >>> 0) === 0)
+            if (wholeAddress(source) === 0)
             {
                 if (wanted === 0)
                 {
@@ -325,7 +326,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
         argBytes: 8,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [string, size])=>{
-            if ((string >>> 0) === 0)
+            if (wholeAddress(string) === 0)
             {
                 return fail(EINVAL);
             }
@@ -356,11 +357,11 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
         handler: (/** @type {number[]} */ [string, size, character, count])=>{
             const room = size >>> 0;
             const most = counted ? count >>> 0 : TRUNCATE;
-            if ((string >>> 0) === 0 && room === 0 && counted && most === 0)
+            if (wholeAddress(string) === 0 && room === 0 && counted && most === 0)
             {
                 return 0;
             }
-            if ((string >>> 0) === 0 || room === 0)
+            if (wholeAddress(string) === 0 || room === 0)
             {
                 return fail(EINVAL);
             }
@@ -395,7 +396,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
             const buffer = args[valueSlots];
             const room = args[valueSlots + 1] >>> 0;
             const radix = args[valueSlots + 2] | 0;
-            if ((buffer >>> 0) === 0 || room === 0)
+            if (wholeAddress(buffer) === 0 || room === 0)
             {
                 return fail(EINVAL);
             }
@@ -466,19 +467,19 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
                 {
                     return 0;
                 }
-                if ((destination >>> 0) === 0)
+                if (wholeAddress(destination) === 0)
                 {
                     return fail(EINVAL);
                 }
-                if ((source >>> 0) === 0 || length > room)
+                if (wholeAddress(source) === 0 || length > room)
                 {
                     // The room is the program's: zeroed a chunk at a time, no
                     // buffer of it made on the host.
-                    writeZeros(host.writeMemory, destination, room);
-                    return fail((source >>> 0) === 0 ? EINVAL : ERANGE);
+                    guest.fill(wholeAddress(destination), 0, room);
+                    return fail(wholeAddress(source) === 0 ? EINVAL : ERANGE);
                 }
-                writeMade(host.writeMemory, destination, length,
-                    (chunk, offset)=>chunk.set(host.readMemory(source + offset, chunk.length)));
+                guest.setMade(wholeAddress(destination), length, (chunk, offset)=>
+                    void guest.bytes(wholeAddress(source) + offset, chunk.length, chunk));
                 return 0;
             },
         }),
@@ -497,7 +498,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
                 {
                     return 0;
                 }
-                if ((destination >>> 0) === 0 || (source >>> 0) === 0)
+                if (wholeAddress(destination) === 0 || wholeAddress(source) === 0)
                 {
                     return fail(EINVAL);
                 }
@@ -505,7 +506,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
                 {
                     return fail(ERANGE);
                 }
-                host.writeMemory(destination, host.readMemory(source, length));
+                guest.copy(wholeAddress(destination), wholeAddress(source), length);
                 return 0;
             },
         }),

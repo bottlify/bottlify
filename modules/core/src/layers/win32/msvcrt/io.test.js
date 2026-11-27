@@ -874,8 +874,8 @@ test('__pioinfo holds each descriptor of its first block as a program reads it i
     const TABLE = 0x80000;
     let placed = 0;
     const descriptors = createDescriptors({
-        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory,
-        ioinfo: ()=>(placed === 0 ? [] : [{ at: placed, layout: IOINFO_LAYOUTS.msvcrt }]),
+        files, handles, errno: ()=>{}, guest: memory.guest,
+        ioinfo: ()=>(placed === 0 ? [] : [{ at: placed, layout: IOINFO_LAYOUTS.msvcrt.at(4) }]),
     });
     const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
         descriptors));
@@ -928,14 +928,14 @@ test('MSVCR80\'s __pioinfo is 64-byte entries: the lock made, then textmode and 
         { directories: ['C:\\', 'C:\\game'] });
     const handles = fakeHandles(files);
     const [OLD, NEW] = [0x80000, 0x90000];
-    const tables = [{ at: OLD, layout: IOINFO_LAYOUTS.msvcrt },
-        { at: NEW, layout: IOINFO_LAYOUTS.msvcr80 }];
+    const tables = [{ at: OLD, layout: IOINFO_LAYOUTS.msvcrt.at(4) },
+        { at: NEW, layout: IOINFO_LAYOUTS.msvcr80.at(4) }];
     const descriptors = createDescriptors({
-        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory, ioinfo: ()=>tables,
+        files, handles, errno: ()=>{}, guest: memory.guest, ioinfo: ()=>tables,
     });
     const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
         descriptors));
-    const later = ioinfoExport(descriptors, IOINFO_LAYOUTS.msvcr80);
+    const later = ioinfoExport(descriptors, IOINFO_LAYOUTS.msvcr80.at(4));
     assert.equal(later.data().length, 256 + 32 * 64);
     memory.writeMemory(OLD, fns.__pioinfo.data());
     memory.writeMemory(NEW, later.data());
@@ -965,6 +965,55 @@ test('MSVCR80\'s __pioinfo is 64-byte entries: the lock made, then textmode and 
     const utf8 = open(O_U8TEXT);
     assert.deepEqual([entry(utf8).lock, entry(utf8).mode], [1, 1]);
 });
+
+test('at 64 bits past 4 GiB: __pioinfo[i][j].osfhnd is the handle, the table laid out at 8',
+    ()=>{
+        // x64's ioinfo: an intptr_t handle, wxflag at 8, exflag at 12, a
+        // 40-byte critical section from 16: 56 bytes, MSVCR80's 88 with
+        // textmode at 56; __pioinfo's 64 block pointers eight bytes each.
+        const base = 0x100000000;
+        const bytes = new Uint8Array(0x4000);
+        const guest = guestWindow(bytes, { base, pointerSize: 8 });
+        const files = fakeVolume({ 'C:\\game\\info.tst': new Uint8Array(0) },
+            { directories: ['C:\\', 'C:\\game'] });
+        const handles = fakeHandles(files);
+        const [OLD, NEW] = [base, base + 0x1000];
+        const old = IOINFO_LAYOUTS.msvcrt.at(8);
+        const later = IOINFO_LAYOUTS.msvcr80.at(8);
+        assert.deepEqual([old.SIZE, old.osfhnd, old.wxflag, old.exflag, old.crit],
+            [56, 0, 8, 12, 16]);
+        assert.deepEqual([later.SIZE, later.textmode], [88, 56]);
+        const descriptors = createDescriptors({ files, handles, errno: ()=>{}, guest,
+            ioinfo: ()=>[{ at: OLD, layout: old }, { at: NEW, layout: later }] });
+        const fns = /** @type {Record<string, any>} */ (createIoFunctions({ guest,
+            files }, descriptors));
+        // Placed as the loader places them, the first block pointer whole.
+        for (const [at, made] of [[OLD, fns.__pioinfo], [NEW, ioinfoExport(descriptors, later)]])
+        {
+            assert.deepEqual(made.pointers, [{ at: 0, to: '__pioinfo', offset: 512 }]);
+            guest.setBytes(at, made.data());
+            guest.setPtr(at, at + made.pointers[0].offset);
+        }
+        /** __pioinfo[fd >> 5][fd & 31] of a table. @param {number} table @param {number} fd */
+        const osfhnd = (table, fd)=>{
+            const layout = table === OLD ? old : later;
+            const entry = guest.ptr(table + (fd >> 5) * 8) + (fd & 31) * layout.SIZE;
+            return { handle: guest.u32(entry) + guest.u32(entry + 4) * 2 ** 32,
+                wxflag: guest.u8(entry + layout.wxflag) };
+        };
+        assert.deepEqual(osfhnd(OLD, 1), { handle: 2, wxflag: 0x01 | 0x40 | 0x80 }, 'stdout');
+        assert.equal(osfhnd(NEW, 7).handle, 2 ** 64 - 1, 'not open: INVALID_HANDLE_VALUE whole');
+        guest.writeAnsi(base + 0x3000, 'C:\\game\\info.tst');
+        const opened = fns._open.handler([base + 0x3000,
+            O_CREAT | O_TRUNC | O_WRONLY | O_WTEXT, 0]);
+        const handle = fns._get_osfhandle.handler([opened]);
+        for (const table of [OLD, NEW])
+        {
+            assert.deepEqual(osfhnd(table, opened), { handle, wxflag: 0x01 | 0x80 });
+        }
+        assert.equal(guest.u8(NEW + 512 + opened * 88 + 56), 0x82, 'textmode past the lock');
+        assert.equal(guest.u32(OLD + 512 + opened * 56 + 12), 0x0e, 'exflag at 12');
+    });
 
 test('_wopen, _sopen and _wsopen open as _open does, the share flag ignored', ()=>{
     const { memory, fns, files, errno } = build({ 'C:\\game\\caf\u00e9.bin': bytesOf('xyz') });
@@ -1159,4 +1208,57 @@ test('at 64 bits past 4 GiB: a wide path is read where it lies, and a block whos
     assert.deepEqual(stamps.at(-1), ['C:\\game\\data.bin', 1700000000000]);
     assert.equal(fns._pipe.handler([base, 64, O_BINARY]), 0);
     assert.notEqual(guest.i32(base), guest.i32(base + 4), 'two descriptors, at the start');
+});
+
+test('in a 64-bit process _stat is _stat64i32, _stati64 _stat64 and _utime _utime64: time_t'
+    + ' whole', ()=>{
+    // A 64-bit msvcrt.dll's time_t is an __int64: _stat64i32 has its size a
+    // long at 20 and its times at 24, 32 and 40; _stat64 its size whole at
+    // 24 and its times at 32, 40 and 48; a _utimbuf two __time64_t.
+    const base = 2 ** 32;
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    // A time past 2038, which only a 64-bit time_t holds.
+    const modified = Date.UTC(2040, 0, 1);
+    const seconds = BigInt(modified / 1000);
+    const files = fakeVolume({ 'C:\\game\\data.bin': bytesOf('data') },
+        { directories: ['C:\\', 'C:\\game'], modified });
+    /** @type {[string, number][]} */
+    const stamps = [];
+    /** @type {any} */ (files).setModified = (/** @type {string} */ path,
+        /** @type {number} */ ms)=>void stamps.push([path, ms]);
+    const descriptors = createDescriptors({ files, errno: ()=>{}, fmode: ()=>0,
+        write: ()=>{} });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({ guest, files,
+        errno: ()=>{} }, descriptors));
+    guest.writeAnsi(base + 0x800, 'C:\\game\\data.bin');
+    guest.writeWide(base + 0x900, 'C:\\game\\data.bin');
+    const fd = fns._open.handler([base + 0x800, O_RDONLY | O_BINARY, 0]);
+    /** @param {string} name @param {number[]} args @param {boolean} long */
+    const stat = (name, args, long)=>{
+        bytes.fill(0xcc, 0, 0x100);
+        assert.equal(fns[name].handler([...args, base]), 0, name);
+        assert.equal(long ? view.getBigInt64(24, true) : BigInt(view.getInt32(20, true)), 4n,
+            `${name}: the size`);
+        assert.deepEqual((long ? [32, 40, 48] : [24, 32, 40]).map(at=>view.getBigInt64(at, true)),
+            [seconds, seconds, seconds], `${name}: the three times whole`);
+        assert.equal(bytes[long ? 56 : 48], 0xcc, `${name}: nothing past the record`);
+    };
+    stat('_stat', [base + 0x800], false);
+    stat('_wstat', [base + 0x900], false);
+    stat('_fstat', [fd], false);
+    stat('_stati64', [base + 0x800], true);
+    stat('_wstati64', [base + 0x900], true);
+    stat('_fstati64', [fd], true);
+    guest.set64(base + 0x200, 100n);
+    guest.set64(base + 0x208, 2208988800n);
+    for (const [name, target] of [['_utime', base + 0x800], ['_wutime', base + 0x900],
+        ['_futime', fd]])
+    {
+        stamps.length = 0;
+        assert.equal(fns[name].handler([target, base + 0x200]), 0, name);
+        assert.deepEqual(stamps, [['C:\\game\\data.bin', 2208988800000]],
+            `${name}: the modification time, an __int64 after the access time's`);
+    }
 });

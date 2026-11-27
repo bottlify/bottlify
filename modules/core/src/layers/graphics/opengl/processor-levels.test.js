@@ -26,6 +26,7 @@ import { createProcessorLevels } from './processor-levels.js';
 import { openRunCache } from '../../../process/run-cache.js';
 import { channelSpace } from '../../cache/module.js';
 import { testCache } from '../../cache/testing.fixture.js';
+import { createScratches } from '../../cache/scratch.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -100,17 +101,16 @@ async function run(seed, arm){
         const joined = runCache.join(message=>texels?.adopt(message));
         texels = channelSpace(joined, runCache.serve('texels'));
     }
-    // Held memory as the engine's thread holds it, from the cache layer
-    // whose keeper answers on this thread (`channelSpace`'s hold asks a keeper
-    // on another thread, and waits for it).
-    // Starved, the cache has room for no hold at all.
-    const hold = arm === 'plain' ? null : arm === 'cached'
-        ? (await testCache()).space('scratch').hold ?? null : ()=>null;
+    // The RGBA the rasteriser samples, held as the engine's thread holds it
+    // (`channelSpace`'s hold asks a keeper on another thread, and waits for
+    // it); starved, the cache has room for no hold at all.
+    const holds = arm === 'plain' ? undefined : createScratches(arm === 'cached'
+        ? (await testCache()).space('scratch').hold ?? null : ()=>null).hold;
     /** @type {string[]} */
     const said = [];
-    const levels = createProcessorLevels({ cache: texels, hold,
+    const levels = createProcessorLevels({ cache: texels,
         divergence: detail=>said.push(detail) });
-    const gl = /** @type {any} */ (createGlContext({ levels }));
+    const gl = /** @type {any} */ (createGlContext({ levels, holds }));
     gl.attach({ width: 16, height: 16, doubleBuffered: false, depthBits: 24 });
     gl.glPixelStorei(GL.UNPACK_ALIGNMENT, 1);
     gl.glEnable(GL.TEXTURE_2D);
@@ -189,16 +189,12 @@ test('gate: the processor\'s levels draw and read back the same with every idle 
             assert.deepEqual(other.said, [], `${name}: nothing lost`);
         }
         assert.equal(plain.figures.spills.levels, 0, 'no cache: nothing moves');
-        assert.equal(plain.figures.rgbaHeld, 0);
         // A different path in fact: levels moved and taken back, RGBA held.
         assert.ok(cached.figures.store.moved > 0, `seed ${seed}: idle levels moved`);
         assert.ok(cached.figures.spills.back > 0, `seed ${seed}: and taken back`);
-        assert.ok(cached.figures.rgbaHeld > 0, `seed ${seed}: RGBA held in the cache`);
-        assert.equal(cached.figures.held, 0, 'every hold let go of with its texture');
         // The starved arm runs the accessors with the bodies refused room.
         assert.ok(starved.figures.spills.levels > 0, `seed ${seed}: levels handed over`);
         assert.equal(starved.figures.store.moved, 0, 'none moved: no room');
-        assert.equal(starved.figures.rgbaHeld, 0, 'no RGBA held: no room');
     }
 });
 
@@ -212,7 +208,7 @@ test('a context on the processor of a root looks for idle levels every 60 swaps,
         try
         {
             const root = createOpenglRoot({ texelCache: texels,
-                hold: (await testCache()).space('scratch').hold ?? null });
+                holds: createScratches((await testCache()).space('scratch').hold ?? null).hold });
             const gl = /** @type {any} */ (root.CreateContext({ processor: true }));
             gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
             const [name] = gl.glGenTextures(1);
@@ -241,52 +237,3 @@ test('a context on the processor of a root looks for idle levels every 60 swaps,
             texels.close();
         }
     });
-
-test('a write in place into a level whose RGBA is held takes a copy of its own: the hold let go'
-    + ' and held again by another level leaves it as written', async()=>{
-    const hold = (await testCache()).space('scratch').hold ?? null;
-    const levels = createProcessorLevels({ hold });
-    const gl = /** @type {any} */ (createGlContext({ levels }));
-    gl.attach({ width: 4, height: 4, doubleBuffered: false, depthBits: 24 });
-    gl.glPixelStorei(GL.UNPACK_ALIGNMENT, 1);
-    gl.glEnable(GL.TEXTURE_2D);
-    const [first, second] = gl.glGenTextures(2);
-    const draw = (/** @type {number} */ name)=>{
-        gl.glBindTexture(GL.TEXTURE_2D, name);
-        gl.glBegin(GL.TRIANGLES);
-        gl.glTexCoord2f(0, 0);
-        gl.glVertex2f(-1, -1);
-        gl.glTexCoord2f(1, 0);
-        gl.glVertex2f(1, -1);
-        gl.glTexCoord2f(0, 1);
-        gl.glVertex2f(-1, 1);
-        gl.glEnd();
-    };
-    // S3TC levels: what the rasteriser samples is decoded from the blocks and
-    // held, and a write in place turns the level into texels of its own.
-    for (const [name, fill] of [[first, 0], [second, 0x22]])
-    {
-        gl.glBindTexture(GL.TEXTURE_2D, name);
-        gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
-        const blocks = new Uint8Array(SIZE * SIZE / 2).fill(fill);
-        gl.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0, GL.COMPRESSED_RGB_S3TC_DXT1_EXT, SIZE,
-            SIZE, 0, blocks.length, blocks);
-    }
-    draw(first);
-    assert.equal(levels.figures().rgbaHeld, 1, 'its RGBA held in the cache');
-    gl.glBindTexture(GL.TEXTURE_2D, first);
-    gl.glTexSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
-        new Uint8Array([1, 2, 3, 4]));
-    const written = gl.shareGroup.textures.objects.get(first).levels.get(0);
-    assert.ok(!(written.texels.buffer instanceof SharedArrayBuffer),
-        'the level\'s texels are its own, not the cache\'s memory let go of');
-    assert.equal(levels.figures().held, 0, 'and its hold let go of');
-    // The second's RGBA held, perhaps in the room the first let go of.
-    draw(second);
-    gl.glBindTexture(GL.TEXTURE_2D, first);
-    const read = gl.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE);
-    const bytes = read?.packed ?? read;
-    assert.deepEqual([...bytes.subarray(0, 8)], [1, 2, 3, 255, 0, 0, 0, 255]);
-    levels.dispose();
-    assert.equal(levels.figures().held, 0);
-});

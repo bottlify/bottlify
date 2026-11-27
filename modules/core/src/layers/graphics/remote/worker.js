@@ -723,8 +723,8 @@ export function serveGraphics(scope, deps){
                 ...options,
                 cacheLink: undefined,
                 texelCache,
-                // As the rooms are held: plain memory on a root that lends.
-                hold: texelCache && !lending ? texelCache.space.hold ?? null : null,
+                // The RGBA its contexts on the processor sample, held as the rooms are.
+                holds: roomServices.holds,
                 liveDump,
                 backend: ()=>backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),

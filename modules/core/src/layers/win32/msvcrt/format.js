@@ -656,6 +656,8 @@ function convertFloat(argument, spec, style){
 function convert(spec, source, produced, writeCount){
     const { take, takeWide, takeDouble, readText, readCounted, character } = source;
     const longSlots = source.slotWords === 2;
+    /** A pointer argument: its slot's two dwords whole in a 64-bit caller's. */
+    const pointer = ()=>(longSlots ? Number(BigInt.asUintN(64, takeWide())) : take() >>> 0);
     /** An integer's value, 64 bits or 32, or `h`'s 16. @param {boolean} signed */
     const integer = signed=>{
         if (spec.sixtyFour || spec.pointerSized && longSlots)
@@ -680,15 +682,15 @@ function convert(spec, source, produced, writeCount){
         }
         case 's':
         case 'S': {
-            const pointer = take() >>> 0;
-            const text = pointer === 0 ? NULL_STRING : readText(pointer, wideText(spec));
+            const at = pointer();
+            const text = at === 0 ? NULL_STRING : readText(at, wideText(spec));
             const body = spec.precision >= 0 ? text.slice(0, spec.precision) : text;
             return { prefix: '', body, zeroable: true };
         }
         case 'Z': {
             // A counted string: ANSI_STRING, or UNICODE_STRING with `w`.
-            const pointer = take() >>> 0;
-            const text = pointer === 0 ? null : readCounted(pointer, spec.wide);
+            const at = pointer();
+            const text = at === 0 ? null : readCounted(at, spec.wide);
             const whole = text ?? NULL_STRING;
             const body = spec.precision >= 0 ? whole.slice(0, spec.precision) : whole;
             return { prefix: '', body, zeroable: true };
@@ -749,7 +751,7 @@ function convert(spec, source, produced, writeCount){
         case 'n': {
             // The only conversion that writes rather than reads. It produces no
             // output, which is why it returns an empty body rather than null.
-            writeCount(take() >>> 0, produced);
+            writeCount(pointer(), produced);
             return { prefix: '', body: '', zeroable: false };
         }
         default:
@@ -868,8 +870,7 @@ const slotWordsOf = values=>(/** @type {{ slotWords?: number }} */ (values).slot
  */
 export function guestAccess(guest){
     return {
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>guest.bytes(address, length),
+        guest,
         /** @param {number} pointer @param {number} value */
         writeCount: (pointer, value)=>{
             if (pointer !== 0)
@@ -891,10 +892,9 @@ export function guestAccess(guest){
  *        Reads a UTF-16 guest string, for %ls and %S. Absent means a wide
  *        string is read as bytes, which is wrong but visible, rather than
  *        refused.
- * @param {(address: number, length: number) => Uint8Array} [options.readMemory]
- *        Bytes of the caller's own, as `MsvcrtHost.readMemory` gives them.
- *        Where %Z reads its counted string's length and buffer. Absent, %Z
- *        prints "(null)".
+ * @param {import('../common/guest.js').Guest} [options.guest]
+ *        Where %Z reads its counted string's length and buffer, at the
+ *        process's width. Absent, %Z prints "(null)".
  * @param {(pointer: number, value: number) => void} [options.writeCount]
  *        Where %n stores the count. Absent means %n produces nothing and
  *        writes nothing, which is what a runtime with %n disabled does.
@@ -976,25 +976,25 @@ export function formatToString(format, varargs, readString, options = {}){
         return narrowed(options.readWideString(pointer));
     };
     /**
-     * An ANSI_STRING or UNICODE_STRING: its length in bytes, and its buffer.
+     * An ANSI_STRING or UNICODE_STRING: its length in bytes, and its buffer
+     * on the pointer's alignment after the two lengths, eight bytes in at 64.
      *
      * @param {number} pointer @param {boolean} asWide
      */
     const readCounted = (pointer, asWide)=>{
-        const read = options.readMemory;
-        if (!read)
+        const { guest } = options;
+        if (!guest)
         {
             return null;
         }
-        const head = read(pointer, 8);
-        const header = new DataView(head.buffer, head.byteOffset, 8);
-        const length = header.getUint16(0, true);
-        const buffer = header.getUint32(4, true);
+        const at = wholeAddress(pointer);
+        const length = guest.u16(at);
+        const buffer = guest.ptr(at + guest.pointerSize);
         if (buffer === 0)
         {
             return null;
         }
-        const bytes = read(buffer, length);
+        const bytes = guest.bytes(buffer, length);
         if (!asWide)
         {
             return decode(bytes);

@@ -45,12 +45,11 @@ function conversionHandlers(){
                 }
                 return decodeAnsi(memory.subarray(address, end));
             } },
-            writeMemory: (address, bytes)=>memory.set(bytes, address),
             allocate: ()=>{
                 throw new Error('nothing here allocates');
             },
             errno: code=>void errno.push(code),
-        }));
+        }, { inGuest: false }));
     /** @param {string} name */
     const host = name=>(/** @type {Uint8Array} */ at, /** @type {number[]} */ args)=>{
         memory = at;
