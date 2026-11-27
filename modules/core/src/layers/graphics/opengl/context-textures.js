@@ -3693,12 +3693,14 @@ export function installTextureCalls(context, kernel){
             return;
         }
         const bytes = guestBytes(data ?? null, size);
-        const texels = bytes ? decodeS3tc(bytes, format, width, height) : null;
-        const args = [target, level, x0, y0, width, height, format, size, texels];
-        if (!enter(name, args))
+        // A list keeps the blocks, which it replays through this call again:
+        // the decoded texels are four to eight times their bytes, and a
+        // replay would take them for blocks.
+        if (!enter(name, [target, level, x0, y0, width, height, format, size, bytes]))
         {
             return;
         }
+        const texels = bytes ? decodeS3tc(bytes, format, width, height) : null;
         if (texels)
         {
             writeSubImage(existing, x0, y0, width, height, texels);

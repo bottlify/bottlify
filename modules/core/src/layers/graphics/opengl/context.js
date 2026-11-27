@@ -434,11 +434,13 @@ export function createGlContext(options = {}){
             // caller that hands over a scratch it reuses on its next call
             // (the fixed-count vector readers do, for a program parameter or
             // a matrix) must not have this call's copy overwritten by that
-            // one before the list is ever played back.
+            // one before the list is ever played back, nor bytes read where
+            // the program writes again (an unpack buffer's, guest memory's).
             compiling.commands.push({
                 call: name,
                 args: args.map(/** @param {any} arg */ arg=>(
-                    arg instanceof Float32Array || arg instanceof Float64Array)
+                    arg instanceof Float32Array || arg instanceof Float64Array
+                    || arg instanceof Uint8Array)
                     ? arg.slice() : arg),
             });
             return compileMode === GL.COMPILE_AND_EXECUTE;
