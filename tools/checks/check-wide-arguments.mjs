@@ -90,8 +90,6 @@ export const KNOWN_CUTS = new Map([
     ['modules/core/src/layers/win32/advapi32/security.js :: BuildTrusteeWithObjectsAndSid',
         'OBJECTS_AND_SID and TRUSTEE are laid out 32-bit, the pointers in them dwords:'
             + ' their 64-bit layout is the fix, not the argument'],
-    ['modules/core/src/layers/win32/msvcrt/heap.js :: _set_new_handler',
-        'msvcrt is another stream\'s while it is reworked: wholeAddress(handler) there'],
 ]);
 
 /**

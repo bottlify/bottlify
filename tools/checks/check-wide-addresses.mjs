@@ -247,8 +247,6 @@ export async function layerAt(base){
  * @type {Map<string, string>}
  */
 export const KNOWN_CUTS = new Map([
-    ['msvcrt.dll!?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z',
-        'msvcrt is another stream\'s while it is reworked: wholeAddress(handler) there'],
     ['ADVAPI32.dll!BuildTrusteeWithObjectsAndSidA',
         'OBJECTS_AND_SID is laid out 32-bit, its SID pointer a dword: the 64-bit layout'
             + ' is the fix'],
