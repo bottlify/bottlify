@@ -1463,10 +1463,8 @@ export function createMsvcrtFunctions(host){
         __RTDynamicCast: guestEntry(inGuestRtti.__RTDynamicCast, RTTI_CODE.__RTDynamicCast, host),
         ...createProcessFunctions({
             errno,
-            readCString: ansi.read,
-            readU32: at=>guest.u32(wholeAddress(at)),
+            guest,
             allocate,
-            writeMemory: host.writeMemory,
             ...host.launch ? { launch: host.launch } : {},
             ...host.closeHandle ? { closeHandle: host.closeHandle } : {},
             callGuest: host.callGuest,
