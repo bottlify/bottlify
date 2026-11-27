@@ -710,6 +710,7 @@ export function createCxxExceptions(host){
     /** @param {number} offset */
     const slotOfThread = offset=>({
         convention: 'cdecl',
+        returns: 'pointer',
         argBytes: 0,
         handler: ()=>threadData(host.currentThread()) + offset,
     });

@@ -533,7 +533,8 @@ export function createEnvironmentFunctions(host){
          */
         GetEnvironmentStrings: { returns: 'pointer', argBytes: 0,
             handler: ()=>environmentBlock(false) },
-        GetEnvironmentStringsA: { argBytes: 0, handler: ()=>environmentBlock(false) },
+        GetEnvironmentStringsA: { returns: 'pointer', argBytes: 0,
+            handler: ()=>environmentBlock(false) },
 
         /** LPWCH GetEnvironmentStringsW(VOID) */
         GetEnvironmentStringsW: { returns: 'pointer', argBytes: 0,

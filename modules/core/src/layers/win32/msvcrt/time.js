@@ -1091,6 +1091,7 @@ export function createTimeFunctions(host){
      */
     const accessor = name=>({
         convention: 'cdecl',
+        returns: 'pointer',
         argBytes: 0,
         handler: ()=>{
             startZone();

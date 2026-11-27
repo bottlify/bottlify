@@ -787,12 +787,12 @@ export function createModuleFunctions(host){
         GetDllDirectoryA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([size, buffer])=>getDllDirectory(size >>> 0, buffer >>> 0, false),
+            handler: ([size, buffer])=>getDllDirectory(size >>> 0, wholeAddress(buffer), false),
         },
         GetDllDirectoryW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([size, buffer])=>getDllDirectory(size >>> 0, buffer >>> 0, true),
+            handler: ([size, buffer])=>getDllDirectory(size >>> 0, wholeAddress(buffer), true),
         },
 
         /** BOOL FreeLibrary(HMODULE hLibModule) */

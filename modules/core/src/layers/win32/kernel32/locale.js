@@ -1156,7 +1156,7 @@ export function createLocaleFunctions(host){
     const enumerateFormats = (proc, formats, wide, after = [])=>{
         const call = host.call;
         const allocate = host.allocate;
-        if (!call || !allocate || (proc >>> 0) === 0)
+        if (!call || !allocate || wholeAddress(proc) === 0)
         {
             return 0;
         }
@@ -1181,7 +1181,7 @@ export function createLocaleFunctions(host){
                     const { bytes } = encodeSingleByte(text, ANSI_CODE_PAGE);
                     host.writeMemory(block, bytes);
                 }
-                answer = (await call(proc >>> 0, [block, ...after], thread)) | 0;
+                answer = (await call(wholeAddress(proc), [block, ...after], thread)) | 0;
                 if (answer === 0)
                 {
                     break;
@@ -1737,7 +1737,7 @@ export function createLocaleFunctions(host){
         /** @param {number[]} args */
         handler: args=>{
             const [proc, flags] = args;
-            if ((proc >>> 0) === 0)
+            if (wholeAddress(proc) === 0)
             {
                 return refuse(ERROR_INVALID_PARAMETER);
             }
@@ -2729,12 +2729,12 @@ export function createLocaleFunctions(host){
         GetCPInfoExA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([page, , info])=>pageInfo(page, info >>> 0, false),
+            handler: ([page, , info])=>pageInfo(page, wholeAddress(info), false),
         },
         GetCPInfoExW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([page, , info])=>pageInfo(page, info >>> 0, true),
+            handler: ([page, , info])=>pageInfo(page, wholeAddress(info), true),
         },
 
         /**
@@ -3092,7 +3092,7 @@ export function createLocaleFunctions(host){
      * @param {number} proc @param {number} flags @param {number} parameter
      */
     const enumerateLocaleNames = (proc, flags, parameter)=>{
-        if (!host.call || !host.allocate || (proc >>> 0) === 0)
+        if (!host.call || !host.allocate || wholeAddress(proc) === 0)
         {
             return refuse(ERROR_INVALID_PARAMETER);
         }
@@ -3115,7 +3115,7 @@ export function createLocaleFunctions(host){
                 writeWide(block, `${locale.name}\0`);
                 const kind = LOCALE_WINDOWS
                     | (locale.neutral ? LOCALE_NEUTRALDATA : LOCALE_SPECIFICDATA);
-                if (((await call(proc >>> 0, [block, kind, parameter], thread)) | 0) === 0)
+                if (((await call(wholeAddress(proc), [block, kind, parameter], thread)) | 0) === 0)
                 {
                     break;
                 }

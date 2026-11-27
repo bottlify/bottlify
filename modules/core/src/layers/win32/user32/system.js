@@ -5523,7 +5523,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 0;
                 }
-                return writeWideString(name >>> 0, text, count | 0);
+                return writeWideString(wholeAddress(name), text, count | 0);
             },
         },
 

@@ -82,6 +82,11 @@ test('an MSVC name says which of its arguments are addresses', ()=>{
     assert.deepEqual(mangledPointers('??3@YAXPAX@Z'), [0], 'operator delete(void *)');
     assert.deepEqual(mangledPointers('??3@YAXPEAX@Z'), [0]);
     assert.equal(mangledPointers('?f@@YAXVclass@@@Z'), null, 'a class is not read');
-    assert.equal(mangledPointers('??0exception@@QAE@XZ'), null, 'a member is not read');
+    assert.equal(mangledPointers('??0exception@@QAE@XZ'), null, 'a constructor is not read');
+    // A member's `this` is its first argument; a count after it is none.
+    assert.deepEqual(mangledPointers('?allocate@?$allocator@D@std@@QEAAPEAD_K@Z'), [0],
+        'std::allocator<char>::allocate(unsigned __int64)');
+    assert.deepEqual(mangledPointers('?deallocate@?$allocator@D@std@@QEAAXPEAD_K@Z'), [0, 1]);
+    assert.deepEqual(mangledPointers('?max_size@?$allocator@D@std@@QBEIXZ'), [0], 'const, 32-bit');
     assert.equal(mangledPointers('GetProcessHeap'), null);
 });

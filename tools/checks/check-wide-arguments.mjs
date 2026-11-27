@@ -90,6 +90,51 @@ export const KNOWN = new Map([
  */
 
 /**
+ * A parameter list's parameters, each type written for both forms of a
+ * function (`LPCSTR/LPCWSTR`, `LOCALE_ENUMPROCA/W`) taken as its first: the
+ * two spellings are the same size and kind.
+ *
+ * @param {string} list
+ */
+const paramsOf = list=>list.split(',')
+    .map(each=>each.trim().replace(/(\w)(?:\/\w+)+/g, '$1')).filter(Boolean);
+
+/**
+ * The functions a signature names, where one comment is written for several
+ * (`EnumSystemLocalesA/W`, `GetTextExtentExPointA/W/I`, `Get/SetConsoleCursorInfo`,
+ * `Read/WriteConsoleOutputA/W`, `Module32First/Module32FirstW`): each by its
+ * own name, the one comment theirs alike. A trailing single letter is another
+ * form's last letter; a leading single word another verb of the name after it.
+ *
+ * @param {string} written
+ * @returns {string[]}
+ */
+export function namesOf(written){
+    const pieces = written.split('/');
+    let last = pieces.length;
+    while (last > 1 && /^[A-Z]$/.test(pieces[last - 1]))
+    {
+        last--;
+    }
+    const letters = pieces.slice(last);
+    /** @type {string[]} */
+    const names = [];
+    /** @type {string[]} */
+    let verbs = [];
+    pieces.slice(0, last).forEach((piece, index)=>{
+        const lead = /^[A-Z][a-z]+/.exec(piece)?.[0] ?? '';
+        if (lead === piece && index < last - 1)
+        {
+            verbs.push(piece);
+            return;
+        }
+        names.push(...verbs.map(verb=>`${verb}${piece.slice(lead.length)}`), piece);
+        verbs = [];
+    });
+    return names.flatMap(name=>[name, ...letters.map(letter=>`${name.slice(0, -1)}${letter}`)]);
+}
+
+/**
  * A signature's parameters as the 32-bit layout has them.
  *
  * @param {string} list  The text between the parentheses.
@@ -98,7 +143,7 @@ export const KNOWN = new Map([
 export function layoutOf(list){
     /** @type {Layout} */
     const layout = { quad: [], floats: {}, slots: {}, structs: {} };
-    const params = list.split(',').map(each=>each.trim()).filter(Boolean);
+    const params = paramsOf(list);
     if (params.length === 1 && /^void$/i.test(params[0]))
     {
         return layout;
@@ -292,7 +337,7 @@ function helperBody(text, name){
  */
 export function checkText(text){
     const found = [];
-    const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*(?:[A-Za-z_]\w*\s+)+?\**\s*(\w+)\s*\(/g;
+    const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*(?:[A-Za-z_]\w*\s+)+?\**\s*(\w+(?:\/\w+)*)\s*\(/g;
     for (const match of text.matchAll(comment))
     {
         const open = (match.index ?? 0) + match[0].length - 1;
@@ -514,7 +559,7 @@ const SIZES = new Set(['size_t', 'SIZE_T', 'ULONG_PTR', 'UINT_PTR', 'DWORD_PTR',
     'WPARAM']);
 
 export function pointersOf(list, { addresses = false, sizes = false } = {}){
-    const params = list.split(',').map(each=>each.trim()).filter(Boolean);
+    const params = paramsOf(list);
     if (params.length === 1 && /^void$/i.test(params[0]))
     {
         return [];
@@ -571,11 +616,11 @@ export function pointersOf(list, { addresses = false, sizes = false } = {}){
  */
 export function checkReturns(text, { exported = false } = {}){
     const found = [];
-    const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*((?:[A-Za-z_]\w*\s*\**\s+)+?\**)\s*(\w+)\s*\(/g;
+    const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*((?:[A-Za-z_]\w*\s*\**\s+)+?\**)\s*(\w+(?:\/\w+)*)\s*\(/g;
     // A signature on a later line of its comment, after the prose that says why:
     // taken only where the spec under the comment has its name.
     const block = /\/\*\*((?:(?!\*\/)[^])*)\*\/\s*['"]?([\w$]+)['"]?\s*:/g;
-    const sigLine = /^\s*\*\s*((?:[A-Za-z_]\w*\s*\**\s+)+?\**)\s*(\w+)\s*\(/;
+    const sigLine = /^\s*\*\s*((?:[A-Za-z_]\w*\s*\**\s+)+?\**)\s*(\w+(?:\/\w+)*)\s*\(/;
     /** @type {Map<number | undefined, RegExpMatchArray>} */
     const blocks = new Map([...text.matchAll(block)].map(b=>[b.index, b]));
     /** @param {RegExpMatchArray} b */
@@ -583,7 +628,7 @@ export function checkReturns(text, { exported = false } = {}){
         for (const one of b[1].split('\n').slice(1))
         {
             const sig = sigLine.exec(one);
-            if (sig && sig[2] === b[2])
+            if (sig && namesOf(sig[2]).includes(b[2]))
             {
                 return Object.assign([sig[0], sig[1], sig[2]], { index: b.index, later: true });
             }
@@ -599,7 +644,7 @@ export function checkReturns(text, { exported = false } = {}){
         const b = blocks.get(m.index);
         // The first line read as a signature where it is prose: the spec's own
         // name on a later line wins.
-        matches.push((b && b[2] !== m[2] && signed(b)) || m);
+        matches.push((b && !namesOf(m[2]).includes(b[2]) && signed(b)) || m);
     }
     for (const [index, b] of blocks)
     {
@@ -638,41 +683,125 @@ export function checkReturns(text, { exported = false } = {}){
         }
         const own = /\breturns\s*:\s*['"](\w+)['"]/.exec(object)?.[1];
         const line = text.slice(0, match.index).split('\n').length;
-        const { pointer, problem } = resultProblem(match[1], match[2], own);
         // The key the spec is exported by, where it is not the C name (`'#71'`
         // for Alloc, a C++ name, `CreateFileA` under `CreateFile`'s comment):
         // the gate meets a handler by its key.
         const keyed = /^\s*(?:['"]([^'"\n]+)['"]|([A-Za-z_$][\w$]*))\s*:/.exec(spec);
         const key = keyed?.[1] ?? keyed?.[2];
-        found.push({ name: match[2], key: key !== match[2] ? key : undefined, line, pointer,
-            problem, params: paramsAfter(text, match) });
-        // The comment's other signatures, one per spec written after it
-        // (`GetSidSubAuthority` under GetSidIdentifierAuthority's): each read
-        // in its own object, found by its name before the next signature comment.
         const own0 = text.slice(match.index ?? 0, end);
-        const nextSigned = text.slice(end).search(/\/\*\*\s*(?:\r?\n\s*\*)?\s*[A-Za-z_]\w*[\s*]+\w+\s*\(/);
+        const nextSigned = text.slice(end).search(/\/\*\*\s*(?:\r?\n\s*\*)?\s*[A-Za-z_]\w*[\s*]+\w+(?:\/\w+)*\s*\(/);
         const reach = text.slice(end, nextSigned < 0 ? text.length : end + nextSigned);
+        /**
+         * A function the comment names whose spec is not the one right under
+         * it, read in its own object, found by its name before the next
+         * signature comment. With `exported`, a spec a helper makes counts
+         * (`UpdateResourceA: update(false),`), and so does one further on
+         * that has no comment of its own (`GetDllDirectoryA` after
+         * SetDefaultDllDirectories's): the comment that names it is its only one.
+         *
+         * @param {string[]} sig  the signature's return type and name in 1 and 2
+         * @param {string} name
+         */
+        const after = (sig, name)=>{
+            const keyAt = new RegExp(String.raw`\n\s*['"]?${name}['"]?\s*:\s*`, 'g');
+            const rest = text.slice(end);
+            const at = [...reach.matchAll(keyAt)][0] ?? (exported
+                ? [...rest.matchAll(keyAt)].find(one=>!/\*\/\s*$/.test(rest.slice(0, one.index)))
+                : undefined);
+            const start = at ? (at.index ?? 0) + at[0].length : -1;
+            const body = rest[start] === '{' ? balanced(rest, start) ?? '' : '';
+            if (!at || (!exported && !/\b(argBytes|invoke|handler)\s*:/.test(body)))
+            {
+                return;
+            }
+            const params = paramsAfter(text,
+                Object.assign([own0, sig[1], sig[2]], { index: match.index }));
+            // `BOOL ModifyMenuW(...)` under ModifyMenuA's: the same, not said again.
+            if (exported && params === '...')
+            {
+                return;
+            }
+            const declared = /\breturns\s*:\s*['"](\w+)['"]/.exec(body)?.[1];
+            found.push({ name, line: line0(text, match.index) + 1, params,
+                ...resultProblem(sig[1], name, declared) });
+        };
+        // A comment written for several functions (`EnumSystemLocalesA/W`) is
+        // each one's: the spec under it is the one its key names, or the first.
+        const forms = namesOf(match[2]);
+        const under = key !== undefined && forms.includes(key) ? key : forms[0];
+        for (const name of forms)
+        {
+            if (name !== under)
+            {
+                after(match, name);
+                continue;
+            }
+            found.push({ name, key: key !== name ? key : undefined, line,
+                ...resultProblem(match[1], name, own), params: paramsAfter(text, match) });
+        }
+        // The comment's other signatures, one per spec written after it
+        // (`GetSidSubAuthority` under GetSidIdentifierAuthority's).
         for (const one of own0.split('\n').slice(1))
         {
             const sig = sigLine.exec(one);
-            if (!sig || sig[2] === match[2])
+            if (sig && sig[2] !== match[2])
             {
-                continue;
+                for (const name of namesOf(sig[2]))
+                {
+                    after(sig, name);
+                }
             }
-            const at = new RegExp(String.raw`\n\s*['"]?${sig[2]}['"]?\s*:\s*(?=\{)`).exec(reach);
-            const body = at ? balanced(reach, (at.index ?? 0) + at[0].length) ?? '' : '';
-            if (!/\b(argBytes|invoke|handler)\s*:/.test(body))
-            {
-                continue;
-            }
-            const declared = /\breturns\s*:\s*['"](\w+)['"]/.exec(body)?.[1];
-            found.push({ name: sig[2], line: line0(text, match.index) + 1,
-                params: paramsAfter(text,
-                    Object.assign([own0, sig[1], sig[2]], { index: match.index })),
-                ...resultProblem(sig[1], sig[2], declared) });
         }
     }
+    if (exported)
+    {
+        found.push(...helperSignatures(text, found, sigLine));
+    }
     return found;
+}
+
+/**
+ * The signatures a helper's comment gives on a later line, after the prose
+ * (`whenFormat`'s `int GetDateFormatA/W(...)`, `calendarInfo`'s
+ * `BOOL EnumCalendarInfo(...)`): each the signature of the specs of the file
+ * the helper makes under that name, at either width (`GetDateFormatA:
+ * whenFormat(false, true)`), where no comment of their own said one.
+ *
+ * @param {string} text @param {{ name: string }[]} found  what was read already
+ * @param {RegExp} sigLine
+ */
+function helperSignatures(text, found, sigLine){
+    const named = new Set(found.map(one=>one.name));
+    const out = [];
+    for (const h of text.matchAll(/\/\*\*((?:(?!\*\/)[^])*)\*\/\s*(?:export\s+)?(?:const|function)\s+(\w+)/g))
+    {
+        for (const one of h[1].split('\n').slice(1))
+        {
+            const sig = sigLine.exec(one);
+            if (!sig)
+            {
+                continue;
+            }
+            for (const name of namesOf(sig[2]))
+            {
+                const made = new RegExp(
+                    String.raw`\n\s*['"]?(${name}[AW]?)['"]?\s*:\s*${h[2]}\(`, 'g');
+                for (const [, key] of text.matchAll(made))
+                {
+                    if (named.has(key))
+                    {
+                        continue;
+                    }
+                    named.add(key);
+                    out.push({ name: key, line: line0(text, h.index) + 1,
+                        params: paramsAfter(text, Object.assign([h[0], sig[1], sig[2]],
+                            { index: h.index })),
+                        ...resultProblem(sig[1], key, undefined) });
+                }
+            }
+        }
+    }
+    return out;
 }
 
 /**
@@ -687,7 +816,7 @@ export function checkReturns(text, { exported = false } = {}){
  */
 export function checkAddresses(text){
     const found = [];
-    const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*(?:[A-Za-z_]\w*\s+)+?\**\s*(\w+)\s*\(/g;
+    const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*(?:[A-Za-z_]\w*\s+)+?\**\s*(\w+(?:\/\w+)*)\s*\(/g;
     for (const match of text.matchAll(comment))
     {
         const end = text.indexOf('*/', match.index);
