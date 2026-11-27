@@ -2795,9 +2795,7 @@ export function createWin32Module(){
             {
                 const dispatcher = seh64;
                 cxx64 = createCxxExceptions64({
-                    readMemory,
-                    writeMemory,
-                    readCString,
+                    guest,
                     isMapped,
                     imageBaseOf: address=>modules.imageOf?.(address)?.base ?? 0,
                     raise: what=>dispatcher.raise(what),
@@ -4761,8 +4759,7 @@ export function createWin32Module(){
 
                 'msvcrt.dll': ()=>({
                     ...createCrtSeh({
-                        readMemory,
-                        writeMemory,
+                        guest,
                         isMapped,
                         registers: ()=>Object.fromEntries(
                             registerNames.map(name=>[name, cpuRegisters.read(name)])),
@@ -4898,9 +4895,7 @@ export function createWin32Module(){
                     // After the runtime's own table: `terminate` is answered here,
                     // where the handler `set_terminate` installed is known.
                     ...createCxxExceptions({
-                        readMemory,
-                        writeMemory,
-                        readCString,
+                        guest,
                         isMapped,
                         registers: ()=>Object.fromEntries(
                             registerNames.map(name=>[name, cpuRegisters.read(name)])),

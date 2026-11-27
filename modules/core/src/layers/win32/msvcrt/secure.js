@@ -24,6 +24,7 @@ import { LOWER, UPPER } from './inguest.js';
 import { guestEntry } from './guest-code.js';
 import { COMPILED } from './inguest.x86.js';
 import { unitsAt } from './widetext.js';
+import { writeMade, writeZeros } from '../common/guest.js';
 
 /**
  * @typedef {Object} SecureHost
@@ -471,13 +472,13 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
                 }
                 if ((source >>> 0) === 0 || length > room)
                 {
-                    if (room !== 0)
-                    {
-                        host.writeMemory(destination, new Uint8Array(room));
-                    }
+                    // The room is the program's: zeroed a chunk at a time, no
+                    // buffer of it made on the host.
+                    writeZeros(host.writeMemory, destination, room);
                     return fail((source >>> 0) === 0 ? EINVAL : ERANGE);
                 }
-                host.writeMemory(destination, host.readMemory(source, length));
+                writeMade(host.writeMemory, destination, length,
+                    (chunk, offset)=>chunk.set(host.readMemory(source + offset, chunk.length)));
                 return 0;
             },
         }),

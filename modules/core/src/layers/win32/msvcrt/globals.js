@@ -36,8 +36,7 @@ export const EILSEQ = 42;
 /**
  * @typedef {Object} GlobalsHost
  * @property {(bytes: number) => number} allocate
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(name: string) => number} [placed]  Where the runtime's data already holds
  *     the variable, or 0: one the DLL exports by name (`_fmode`, `_commode`) is that cell.
  */
@@ -47,7 +46,7 @@ export const EILSEQ = 42;
  * @property {(name: string, initial?: number) => number} address
  *           Where the variable lives, placed on first ask holding what it has
  *           been set to, or `initial` when nothing has set it.
- * @property {(name: string) => number} get
+ * @property {(name: string) => number} get  An int's value, as a program reads one.
  * @property {(name: string, value: number) => void} set
  */
 
@@ -56,16 +55,30 @@ export const EILSEQ = 42;
  * @returns {Globals}
  */
 export function createGlobals(host){
+    const { guest } = host;
     /** @type {Map<string, number>} */
     const addresses = new Map();
+    /** Each variable's own cell, eight bytes, as against an export's. @type {Set<number>} */
+    const own = new Set();
     /** @type {Map<string, number>} */
     const values = new Map();
 
-    /** @param {number} address @param {number} value */
+    /**
+     * A value into its cell. A cell of the runtime's own is room for a
+     * pointer of either width - `argv`, the environment's `char **` - and
+     * holds the value whole, an int sign-extended; an exported one is an int.
+     *
+     * @param {number} address @param {number} value
+     */
     const store = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setInt32(0, value | 0, true);
-        host.writeMemory(address, bytes);
+        if (own.has(address))
+        {
+            guest.set64(address, value);
+        }
+        else
+        {
+            guest.set32(address, value);
+        }
     };
 
     return {
@@ -75,13 +88,11 @@ export function createGlobals(host){
             {
                 return held;
             }
-            // Room for a pointer of either width, the high half zero: the
-            // environment's cells (`environ.js`) hold a `char **` here.
             const exported = host.placed?.(name) ?? 0;
             const address = exported || host.allocate(8);
             if (address !== 0 && exported === 0)
             {
-                host.writeMemory(address + 4, new Uint8Array(4));
+                own.add(address);
             }
             if (address !== 0)
             {
@@ -93,16 +104,11 @@ export function createGlobals(host){
 
         get(name){
             const address = addresses.get(name) ?? 0;
-            if (address === 0)
-            {
-                return values.get(name) ?? 0;
-            }
-            const bytes = host.readMemory(address, 4);
-            return new DataView(bytes.buffer, bytes.byteOffset, 4).getInt32(0, true);
+            return address === 0 ? (values.get(name) ?? 0) | 0 : guest.i32(address);
         },
 
         set(name, value){
-            values.set(name, value | 0);
+            values.set(name, value);
             const address = addresses.get(name) ?? 0;
             if (address !== 0)
             {

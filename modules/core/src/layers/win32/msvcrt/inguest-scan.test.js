@@ -19,6 +19,7 @@ import { COMPILED } from './inguest-scan.x86.js';
 import { COMPILED as LONG } from './inguest-scan.x64.js';
 import * as sources from './inguest-scan.js';
 import { createScanFunctions, listScanHandler } from './scan.js';
+import { guestThrough } from './guest-window.fixture.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
 import { caseOf, pick } from './scan-cases.fixture.js';
 
@@ -102,34 +103,30 @@ function helpersOf(bytes, slotBytes){
 
 /** The host's side over a case's memory, as msvcrt's table has it. @param {Uint8Array} bytes @param {number} slotBytes */
 function hostOf(bytes, slotBytes){
-    const host = {
-        readCString: (/** @type {number} */ address, /** @type {number} */ max)=>{
-            let text = '';
-            for (let a = address - DATA; bytes[a] !== 0 && text.length < max; a++)
-            {
-                text += String.fromCharCode(bytes[a]);
-            }
-            return text;
-        },
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+    // The handlers' view of the case's memory, at the slots' width. A store
+    // through a null place, or one a place over the list made of a later
+    // slot, is the host's alone, and lands nowhere here.
+    const host = { guest: guestThrough(
+        (/** @type {number} */ address, /** @type {number} */ length)=>
             bytes.slice(address - DATA, address - DATA + length),
-        // A store through a null place, or one a place over the list made of
-        // a later slot, is the host's alone, and lands nowhere here.
-        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ written)=>{
+        (/** @type {number} */ address, /** @type {Uint8Array} */ written)=>{
             if (address >= DATA && address + written.length <= DATA + SIZE)
             {
                 bytes.set(written, address - DATA);
             }
-        },
-        pointerSize: slotBytes,
-    };
+        }, /** @type {4 | 8} */ (slotBytes)) };
     return { sscanf: createScanFunctions(host).sscanf.handler, listed: listScanHandler(host) };
 }
 
-/** The places sscanf's own handler is given: the list's slots, as the bridge reads them. */
+/**
+ * The places sscanf's own handler is given: the list's slots, each whole as a
+ * 64-bit caller's slot holds it - a slot whose high half is set names a place
+ * past 4 GiB, which the list's handler stores through too, not 4 GiB lower.
+ */
 const placesOf = (/** @type {Uint8Array} */ bytes, /** @type {number} */ slotBytes)=>{
     const view = new DataView(bytes.buffer);
-    return Array.from({ length: 32 }, (_, i)=>view.getUint32(LIST - DATA + slotBytes * i, true));
+    return Array.from({ length: 32 }, (_, i)=>view.getUint32(LIST - DATA + slotBytes * i, true)
+        + (slotBytes === 8 ? view.getUint32(LIST - DATA + slotBytes * i + 4, true) * 2 ** 32 : 0));
 };
 
 test('sscanf in the guest answers and stores what the host\'s scanner does, or hands the call'

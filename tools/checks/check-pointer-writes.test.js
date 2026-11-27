@@ -39,9 +39,24 @@ test('a reader or writer handing its work to the memory layer or pointerIo passe
         '    const readPointer = address=>{\n        const bytes = host.readMemory(address, 8);\n'
             + '        return width.get(new DataView(bytes.buffer), 0);\n    };',
         '    writePointer: (address, value, bytes)=>memory.writePointer(address, value, bytes),',
+        '    const readPointer = guest.ptr;',
+        '    const writePointer = (at, value)=>host.guest.setPtr(at, value);',
+        '    const { ptr: readPointer, setPtr: writePointer } = host.guest;',
+        '    const { ptr: readPointer } = guest;',
     ])
     {
         assert.deepEqual(pointerWriteIssues('layers/x/seam.js', text), [], text);
+    }
+});
+
+test('a name of the guest view that is not its pointer is no delegation', ()=>{
+    for (const text of [
+        '    const readPointer = guest.u32;',
+        '    const { u32: readPointer } = guest;',
+        '    const readPointer = notguest.ptr;',
+    ])
+    {
+        assert.equal(pointerWriteIssues('layers/x/seam.js', text).length, 1, text);
     }
 });
 

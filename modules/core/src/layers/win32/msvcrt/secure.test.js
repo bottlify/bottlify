@@ -178,3 +178,33 @@ test('the _*toa_s family writes a sign and the digits from the last', ()=>{
     assert.equal(table._i64toa_s.handler([0xffffffff, 0xffffffff, buffer, 40, 10]), 0);
     assert.equal(memory.text(buffer), '-1');
 });
+
+test('memcpy_s makes no buffer of the program\'s length: a large room is zeroed, a large copy'
+    + ' moved, a chunk at a time', ()=>{
+    const size = 32 << 20;
+    const memory = fakeMemory(0x10000, 2 * size + 0x20000);
+    let largest = 0;
+    const errno = /** @type {number[]} */ ([]);
+    const table = /** @type {Record<string, any>} */ (createSecureFunctions({
+        ...memory,
+        writeMemory: (address, bytes)=>{
+            largest = Math.max(largest, bytes.length);
+            memory.writeMemory(address, bytes);
+        },
+        errno: code=>errno.push(code),
+    }));
+    const dest = 0x10000;
+    const source = dest + size;
+    memory.bytes.fill(0x58, dest, dest + size);
+    memory.bytes.fill(0x41, source, source + size);
+    const before = process.memoryUsage().arrayBuffers;
+    assert.equal(table.memcpy_s.handler([dest, size, source, size + 1]), ERANGE);
+    const grown = process.memoryUsage().arrayBuffers - before;
+    assert.deepEqual(errno, [ERANGE]);
+    assert.ok(memory.bytes.subarray(dest, dest + size).every(byte=>byte === 0), 'zeroed whole');
+    assert.ok(largest <= 0x10000, `written ${largest} bytes at once`);
+    assert.ok(grown < 4 << 20, `the host grew by ${grown} bytes`);
+    assert.equal(table.memcpy_s.handler([dest, size, source, size]), 0);
+    assert.ok(memory.bytes.subarray(dest, dest + size).every(byte=>byte === 0x41), 'copied whole');
+    assert.ok(largest <= 0x10000, `written ${largest} bytes at once`);
+});

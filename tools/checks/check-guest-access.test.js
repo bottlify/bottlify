@@ -44,6 +44,40 @@ test('a value, a call, a property or a comment of the same name is not a definit
     assert.deepEqual(occurrences(code), {});
 });
 
+test('guest code and what takes no address are not counted', ()=>{
+    const code = [
+        '/**',
+        ' * char &operator[](size_type index)',
+        ' *',
+        ' * @guestCode thiscall',
+        ' * @param {Guest} guest',
+        ' */',
+        'export function stringAt({ u32 }, self, index){ return u32(self) + index; }',
+        '/**',
+        ' * What a `@guestCode` function is handed.',
+        ' *',
+        ' * @typedef {Object} Guest',
+        ' * @property {(address: number) => number} u8',
+        ' * @property {(address: number, value: number) => void} setU8',
+        ' */',
+        'const u8 = address=>host.readMemory(address, 1)[0];',
+        'function setU8(address, value){ host.writeMemory(address, [value]); }',
+        'const word = ()=>varargs[taken++] | 0;',
+        'function dword( ){ return view.getUint32((at += 4) - 4, true); }',
+    ].join('\n');
+    assert.deepEqual(occurrences(code), {});
+    // A doc that only mentions guest code, and a typedef that is not guest code's view.
+    assert.deepEqual(occurrences([
+        '/** Beside the `@guestCode` routines. */',
+        'const readU32 = at=>host.readMemory(at, 4)[0];',
+        '/**',
+        ' * @typedef {Object} View',
+        ' * @property {(address: number) => number} u8',
+        ' */',
+        'const u8 = at=>host.readMemory(at, 1)[0];',
+    ].join('\n')), { 'accessor readU32': 1, 'accessor u8': 1 });
+});
+
 test('a read copied again is counted across lines; one read alone is not', ()=>{
     const code = [
         'const a = host.readMemory(at, 4).slice();',

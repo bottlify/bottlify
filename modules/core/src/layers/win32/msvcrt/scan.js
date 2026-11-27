@@ -23,11 +23,8 @@
 
 import { scanInteger, scanFloat, scanStandardDecimal } from './convert.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { wideStringAt } from './widetext.js';
 import { wholeAddress } from '../common/pointers.js';
-
-/** A string's terminator, where a stored string ends: never itself written. */
-const NUL = new Uint8Array(1);
+import { utf16, utf16z } from '../common/utf16.js';
 
 /**
  * How many stack slots a variadic function reads past its fixed arguments.
@@ -93,8 +90,12 @@ function integerWidth(modifier, standard = false, pointerBytes = 4){
  */
 function scanStandardFloat(field){
     let at = /^[+-]/.test(field) ? 1 : 0;
-    /** @param {string} spelt */
-    const word = spelt=>{
+    /**
+     * Whether the field goes on with the word, read past it as far as it does.
+     *
+     * @param {string} spelt
+     */
+    const spelledOut = spelt=>{
         let read = 0;
         while (read < spelt.length && field[at + read]?.toLowerCase() === spelt[read])
         {
@@ -108,15 +109,15 @@ function scanStandardFloat(field){
     const first = field[at]?.toLowerCase();
     if (first === 'i')
     {
-        if (!word('inf'))
+        if (!spelledOut('inf'))
         {
             return failed();
         }
-        return field[at]?.toLowerCase() === 'i' && !word('inity') ? failed() : value();
+        return field[at]?.toLowerCase() === 'i' && !spelledOut('inity') ? failed() : value();
     }
     if (first === 'n')
     {
-        if (!word('nan'))
+        if (!spelledOut('nan'))
         {
             return failed();
         }
@@ -575,65 +576,53 @@ export function runScan(input, format, nextPointer, store, options = {}){
  * The stores a scan makes, into guest memory: an integer of its width, a
  * float or a double, and text in the ANSI page or UTF-16.
  *
- * @param {{ writeMemory: (address: number, bytes: Uint8Array) => void }} host
+ * @param {{ guest: import('../common/guest.js').Guest }} host
  * @returns {ScanStore}
  */
-export function createScanStore(host){
+export function createScanStore({ guest }){
     return {
         integer(pointer, value, bytes){
-            const buffer = new Uint8Array(bytes);
-            const view = new DataView(buffer.buffer);
             const truncated = BigInt.asUintN(bytes * 8, value);
             if (bytes === 8)
             {
-                view.setBigUint64(0, truncated, true);
+                guest.set64(pointer, truncated);
             }
             else if (bytes === 4)
             {
-                view.setUint32(0, Number(truncated), true);
+                guest.set32(pointer, Number(truncated));
             }
             else if (bytes === 2)
             {
-                view.setUint16(0, Number(truncated), true);
+                guest.set16(pointer, Number(truncated));
             }
             else
             {
-                view.setUint8(0, Number(truncated));
+                guest.set8(pointer, Number(truncated));
             }
-            host.writeMemory(pointer, buffer);
         },
 
         real(pointer, value, bytes){
-            const buffer = new Uint8Array(bytes);
-            const view = new DataView(buffer.buffer);
             if (bytes === 8)
             {
-                view.setFloat64(0, value, true);
+                guest.setF64(pointer, value);
             }
             else
             {
-                view.setFloat32(0, value, true);
+                guest.setF32(pointer, value);
             }
-            host.writeMemory(pointer, buffer);
         },
 
         text(pointer, value, terminate, wide){
             if (wide)
             {
-                const buffer = new Uint8Array((value.length + (terminate ? 1 : 0)) * 2);
-                const view = new DataView(buffer.buffer);
-                for (let at = 0; at < value.length; at++)
-                {
-                    view.setUint16(at * 2, value.charCodeAt(at), true);
-                }
-                host.writeMemory(pointer, buffer);
+                guest.setBytes(pointer, terminate ? utf16z(value) : utf16(value));
                 return;
             }
             // A byte a character in the ANSI page, then the terminator.
-            host.writeMemory(pointer, encodeAnsi(value));
+            guest.setBytes(pointer, encodeAnsi(value));
             if (terminate)
             {
-                host.writeMemory(pointer + value.length, NUL);
+                guest.set8(pointer + value.length, 0);
             }
         },
     };
@@ -641,12 +630,8 @@ export function createScanStore(host){
 
 /**
  * @typedef {Object} ScanHost
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- *           For the wide input and format of swscanf. Absent, it stays unexported.
- * @property {number} [pointerSize]  8 in a 64-bit process, the width of a %p
- *           and an I; absent, 4.
+ * @property {import('../common/guest.js').Guest} guest  The process's memory: in a
+ *           64-bit one a `va_list`'s slots, a %p and an I are eight bytes.
  */
 
 /** The key the universal runtime's scans are carried under in the runtime's table. */
@@ -664,23 +649,21 @@ export const KERNEL_SCAN = Symbol('kernel scan');
  * the conversions come to them and no more of them than sscanf's own handler
  * reads.
  *
- * @param {ScanHost & { readMemory: (address: number, length: number) => Uint8Array }} host
+ * @param {ScanHost} host
  * @returns {(args: number[]) => number}
  */
 export function listScanHandler(host){
+    const { guest } = host;
     const store = createScanStore(host);
-    const slotBytes = host.pointerSize ?? 4;
+    const slotBytes = guest.pointerSize;
     return ([input, format, list])=>{
         let taken = 0;
-        return runScan(host.readCString(input, MAX_STRING), host.readCString(format, MAX_STRING),
-            ()=>{
-                if (taken >= VARIADIC_SLOTS)
-                {
-                    return 0;
-                }
-                const slot = host.readMemory(wholeAddress(list) + slotBytes * taken++, 4);
-                return new DataView(slot.buffer, slot.byteOffset, 4).getUint32(0, true);
-            }, store, { pointerBytes: slotBytes });
+        return runScan(guest.cstr(input, MAX_STRING), guest.cstr(format, MAX_STRING),
+            // Each slot a pointer of the process's width, whole: a place past
+            // 4 GiB is stored through there.
+            ()=>(taken >= VARIADIC_SLOTS ? 0
+                : guest.ptr(wholeAddress(list) + slotBytes * taken++)),
+            store, { pointerBytes: slotBytes });
     };
 }
 
@@ -688,8 +671,11 @@ export function listScanHandler(host){
  * @param {ScanHost} host
  */
 export function createScanFunctions(host){
+    const { guest } = host;
     /** @param {number} pointer */
-    const readString = pointer=>host.readCString(pointer, MAX_STRING);
+    const narrowAt = pointer=>guest.cstr(pointer, MAX_STRING);
+    /** @param {number} pointer */
+    const unitsAt = pointer=>guest.wstr(pointer, MAX_STRING);
 
     const store = createScanStore(host);
 
@@ -702,7 +688,7 @@ export function createScanFunctions(host){
      * @param {boolean} [standard]
      * @param {boolean} [floats]
      */
-    const scanf = (fixed, inputOf, formatOf = readString, wide = false, secure = false,
+    const scanf = (fixed, inputOf, formatOf = narrowAt, wide = false, secure = false,
         standard = false, floats = true)=>({
         convention: 'cdecl',
         // The pointers to store through are the variadic tail, and only as
@@ -714,21 +700,17 @@ export function createScanFunctions(host){
             let taken = fixed;
             const assigned = runScan(inputOf(args), formatOf(args[fixed - 1]),
                 ()=>args[taken++] ?? 0, store,
-                { wide, secure, standard, floats, pointerBytes: host.pointerSize ?? 4 });
+                { wide, secure, standard, floats, pointerBytes: guest.pointerSize });
             // msvcrt's wide scan answers no input with nothing assigned, not
             // with EOF, as the later runtimes do.
             return wide && !standard && assigned === SCAN_EOF ? 0 : assigned;
         },
     });
 
-    const { readMemory } = host;
-    /** @param {number} pointer */
-    const readWide = pointer=>wideStringAt(/** @type {(address: number, length: number)
-        => Uint8Array} */ (readMemory), pointer);
 
     return {
         /** int sscanf(const char *buffer, const char *format, ...) */
-        sscanf: scanf(2, args=>readString(args[0])),
+        sscanf: scanf(2, args=>narrowAt(args[0])),
 
         /**
          * int _snscanf(const char *buffer, size_t count, const char *format, ...)
@@ -736,35 +718,33 @@ export function createScanFunctions(host){
          * The count bounds the input rather than the output, so a buffer that
          * is not terminated at all is still safe to read from.
          */
-        _snscanf: scanf(3, args=>readString(args[0]).slice(0, args[1] >>> 0)),
+        _snscanf: scanf(3, args=>narrowAt(args[0]).slice(0, args[1] >>> 0)),
 
         /** int sscanf_s(const char *buffer, const char *format, ...) */
-        sscanf_s: scanf(2, args=>readString(args[0]), readString, false, true),
+        sscanf_s: scanf(2, args=>narrowAt(args[0]), narrowAt, false, true),
 
-        [KERNEL_SCAN]: scanf(2, args=>readString(args[0]), readString, false, false, false,
+        [KERNEL_SCAN]: scanf(2, args=>narrowAt(args[0]), narrowAt, false, false, false,
             false),
 
         // The universal runtime's string scans (`runScan`'s `standard`), the
         // count bounding the input or not, secure or not.
         [STANDARD_SCAN]: {
-            sscanf: scanf(2, args=>readString(args[0]), readString, false, false, true),
-            sscanf_s: scanf(2, args=>readString(args[0]), readString, false, true, true),
-            _snscanf: scanf(3, args=>readString(args[0]).slice(0, args[1] >>> 0), readString,
+            sscanf: scanf(2, args=>narrowAt(args[0]), narrowAt, false, false, true),
+            sscanf_s: scanf(2, args=>narrowAt(args[0]), narrowAt, false, true, true),
+            _snscanf: scanf(3, args=>narrowAt(args[0]).slice(0, args[1] >>> 0), narrowAt,
                 false, false, true),
-            _snscanf_s: scanf(3, args=>readString(args[0]).slice(0, args[1] >>> 0), readString,
+            _snscanf_s: scanf(3, args=>narrowAt(args[0]).slice(0, args[1] >>> 0), narrowAt,
                 false, true, true),
         },
 
-        ...readMemory ? {
-            /**
-             * int swscanf(const wchar_t *buffer, const wchar_t *format, ...)
-             *
-             * %s and %c store wide text here, %S, %C and an h narrow.
-             */
-            swscanf: scanf(2, args=>readWide(args[0]), readWide, true),
+        /**
+         * int swscanf(const wchar_t *buffer, const wchar_t *format, ...)
+         *
+         * %s and %c store wide text here, %S, %C and an h narrow.
+         */
+        swscanf: scanf(2, args=>unitsAt(args[0]), unitsAt, true),
 
-            /** int swscanf_s(const wchar_t *buffer, const wchar_t *format, ...) */
-            swscanf_s: scanf(2, args=>readWide(args[0]), readWide, true, true),
-        } : {},
+        /** int swscanf_s(const wchar_t *buffer, const wchar_t *format, ...) */
+        swscanf_s: scanf(2, args=>unitsAt(args[0]), unitsAt, true, true),
     };
 }

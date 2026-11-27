@@ -10,6 +10,7 @@ import { createNtdllCrt } from './crt.js';
 import { createConversionFunctions } from '../msvcrt/convert.js';
 import { createScanFunctions } from '../msvcrt/scan.js';
 import { createSortFunctions } from '../msvcrt/sort.js';
+import { guestWindow } from '../msvcrt/guest-window.fixture.js';
 
 const machine = ()=>{
     const memory = new Uint8Array(0x1000);
@@ -110,8 +111,7 @@ const memoryIo = ()=>{
 test('the wide readings skip the Latin-1 blanks alone, msvcrt\'s reading otherwise', ()=>{
     const { memory, view, io } = memoryIo();
     const msvcrt = /** @type {Record<string, any>} */ (createConversionFunctions(
-        /** @type {any} */ ({ ...io, pointerSize: 4,
-            readCString: ()=>'' })));
+        /** @type {any} */ ({ ...io, pointerSize: 4, guest: guestWindow(memory) })));
     const ntdll = /** @type {Record<string, any>} */ (createNtdllCrt({ ...io, crt: msvcrt }));
     /** @param {string} text */
     const put = text=>{
@@ -134,11 +134,11 @@ test('the wide readings skip the Latin-1 blanks alone, msvcrt\'s reading otherwi
 });
 
 test('sscanf reads no floating-point field, and stops at one', ()=>{
-    const { view, io } = memoryIo();
+    const { memory, view, io } = memoryIo();
     const strings = new Map([[0x10, '10'], [0x20, '%d'], [0x30, '%f'], [0x40, '%d %f %d'],
         [0x50, '1 2.5 3']]);
-    const msvcrt = createScanFunctions(/** @type {any} */ ({ ...io, pointerSize: 4,
-        readCString: (/** @type {number} */ at)=>strings.get(at) ?? '' }));
+    const msvcrt = createScanFunctions(/** @type {any} */ ({ guest: { ...guestWindow(memory),
+        cstr: (/** @type {number} */ at)=>strings.get(at) ?? '' } }));
     const ntdll = /** @type {Record<string, any>} */ (createNtdllCrt({ ...io, crt: msvcrt }));
     assert.equal(ntdll.sscanf.handler([0x10, 0x20, 0x200]), 1);
     assert.equal(view.getInt32(0x200, true), 10);
@@ -151,11 +151,11 @@ test('sscanf reads no floating-point field, and stops at one', ()=>{
 });
 
 test('qsort puts equal elements where msvcrt.dll\'s own sort puts them', async()=>{
-    const { view, io } = memoryIo();
+    const { memory, view, io } = memoryIo();
     const words = ['Hello', 'Wine', 'World', '!', 'wine', 'Sorted', 'WINE'];
     const COMPARE = 0x9000;
     const msvcrt = createSortFunctions({
-        ...io,
+        guest: guestWindow(memory),
         // The comparator: the words the two elements index, folded to lower case.
         callGuest: async(entry, [left, right])=>{
             assert.equal(entry, COMPARE);

@@ -219,9 +219,6 @@
   "d3dx10/loaders.js": {
    "accessor writeU32": 1
   },
-  "d3dx9/constants-setters.js": {
-   "accessor SetFloat": 1
-  },
   "d3dx9/constants.js": {
    "accessor dword": 1,
    "accessor f32": 1,
@@ -238,10 +235,6 @@
   },
   "d3dx9/effect-binary.js": {
    "accessor u32": 1
-  },
-  "d3dx9/effect-setters.js": {
-   "accessor SetFloat": 1,
-   "accessor SetInt": 1
   },
   "d3dx9/effect.js": {
    "accessor putU32": 1,
@@ -688,94 +681,19 @@
    "accessor i32": 1,
    "accessor u32": 1
   },
-  "msvcrt/convert.js": {
-   "accessor writeInt": 1,
-   "string readString": 1,
-   "string writeString": 1,
-   "string writeWideString": 1
-  },
-  "msvcrt/eh.js": {
-   "accessor readI32": 1,
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
-  "msvcrt/eh64.js": {
-   "accessor u32": 1
-  },
-  "msvcrt/environ.js": {
-   "accessor writePointer": 1,
-   "accessor writeU32": 1,
-   "string readWide": 1
-  },
-  "msvcrt/float.js": {
-   "accessor readDouble": 1
-  },
-  "msvcrt/format.js": {
-   "accessor word": 1
-  },
   "msvcrt/functions.js": {
    "string readString": 1,
    "string readWide": 1,
    "string writeString": 1
   },
-  "msvcrt/guest-code.js": {
-   "accessor setU8": 1,
-   "accessor u8": 1
-  },
-  "msvcrt/inguest-string.js": {
-   "string stringAt": 1
-  },
   "msvcrt/io.js": {
    "string wide": 1
-  },
-  "msvcrt/locale.js": {
-   "accessor dword": 1
-  },
-  "msvcrt/mbcs.js": {
-   "accessor setU8": 1,
-   "accessor u8": 1
-  },
-  "msvcrt/mbstring.js": {
-   "string readWide": 1,
-   "string writeWide": 1
   },
   "msvcrt/paths.js": {
    "string readString": 1,
    "string readWide": 1,
    "string writeString": 1,
    "string writeWide": 1
-  },
-  "msvcrt/scan.js": {
-   "accessor word": 1,
-   "string readString": 1,
-   "string readWide": 1
-  },
-  "msvcrt/seh.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
-  "msvcrt/sort.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
-  "msvcrt/startup.js": {
-   "accessor dword": 1,
-   "accessor readPointer": 1,
-   "accessor writePointer": 1,
-   "accessor writeU32": 1
-  },
-  "msvcrt/stdio.js": {
-   "accessor putByte": 1,
-   "accessor writeU32": 1,
-   "string readString": 1,
-   "string readWide": 1
-  },
-  "msvcrt/strings.js": {
-   "string readString": 1,
-   "string writeString": 1
-  },
-  "msvcrt/threads.js": {
-   "accessor writeU32": 1
   },
   "msvcrt/time.js": {
    "accessor dword": 1,
@@ -791,9 +709,6 @@
    "accessor getU32": 1,
    "accessor setU32": 1,
    "copy readMemory().slice()": 4
-  },
-  "msvfw32/video1.js": {
-   "accessor word": 1
   },
   "msxml/dom.js": {
    "accessor readU32": 1,
@@ -936,7 +851,7 @@
    "string readWide": 1
   },
   "ole32/ole2.js": {
-   "accessor word": 2,
+   "accessor word": 1,
    "copy readMemory().slice()": 1,
    "string ansi": 1,
    "string string": 1,

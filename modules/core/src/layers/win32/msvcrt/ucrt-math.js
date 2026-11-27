@@ -24,7 +24,7 @@ import * as inGuestFloat from './inguest-float.js';
 import * as inGuestMath from './inguest-math.js';
 import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
-import { readDouble, readSingle, returningDouble, returningSingle } from './float.js';
+import { doubleArg, readSingle, returningDouble, returningSingle } from './float.js';
 import { EDOM, ERANGE } from './globals.js';
 import { wholeAddress } from '../common/pointers.js';
 
@@ -216,7 +216,7 @@ export function createUcrtMathFunctions(host){
     for (const [name, compute] of Object.entries(UNARY))
     {
         table[name] = returningDouble(fpu, 8, args=>{
-            const x = readDouble(args, 0);
+            const x = doubleArg(args, 0);
             return answer([x], compute(x));
         }, ONE_DOUBLE);
         table[`${name}f`] = returningSingle(fpu, 4, args=>{
@@ -227,7 +227,7 @@ export function createUcrtMathFunctions(host){
     for (const [name, compute] of Object.entries(BINARY))
     {
         table[name] = returningDouble(fpu, 16, args=>
-            compute(readDouble(args, 0), readDouble(args, 2)), TWO_DOUBLES);
+            compute(doubleArg(args, 0), doubleArg(args, 2)), TWO_DOUBLES);
         table[`${name}f`] = returningSingle(fpu, 8, args=>
             compute(readSingle(args, 0), readSingle(args, 1)), TWO_FLOATS);
     }
@@ -257,7 +257,7 @@ export function createUcrtMathFunctions(host){
         return rounded | 0;
     };
     table.lround = { convention: 'cdecl', argBytes: 8, floats: ONE_DOUBLE,
-        handler: (/** @type {number[]} */ args)=>roundToLong(readDouble(args, 0)) };
+        handler: (/** @type {number[]} */ args)=>roundToLong(doubleArg(args, 0)) };
     table.lroundf = { convention: 'cdecl', argBytes: 4, floats: ONE_FLOAT,
         handler: (/** @type {number[]} */ args)=>roundToLong(readSingle(args, 0)) };
 
@@ -265,14 +265,14 @@ export function createUcrtMathFunctions(host){
      * double fma(double x, double y, double z), float fmaf(float, float, float):
      * one rounding, of the float's precision for the float form.
      */
-    table.fma = returningDouble(fpu, 24, args=>fusedMultiplyAdd(readDouble(args, 0),
-        readDouble(args, 2), readDouble(args, 4), 53, -1074), THREE_DOUBLES);
+    table.fma = returningDouble(fpu, 24, args=>fusedMultiplyAdd(doubleArg(args, 0),
+        doubleArg(args, 2), doubleArg(args, 4), 53, -1074), THREE_DOUBLES);
     table.fmaf = returningSingle(fpu, 12, args=>fusedMultiplyAdd(readSingle(args, 0),
         readSingle(args, 1), readSingle(args, 2), 24, -149), THREE_FLOATS);
 
     /** int ilogb(double x), int ilogbf(float x) */
     table.ilogb = { convention: 'cdecl', argBytes: 8, floats: ONE_DOUBLE,
-        handler: (/** @type {number[]} */ args)=>exponentOf(readDouble(args, 0)) >>> 0 };
+        handler: (/** @type {number[]} */ args)=>exponentOf(doubleArg(args, 0)) >>> 0 };
     table.ilogbf = { convention: 'cdecl', argBytes: 4, floats: ONE_FLOAT,
         handler: (/** @type {number[]} */ args)=>exponentOf(readSingle(args, 0)) >>> 0 };
 
@@ -329,7 +329,7 @@ export function createUcrtMathFunctions(host){
      */
     table._except1 = returningDouble(fpu, 32, args=>{
         const fpe = args[0] >>> 0;
-        let result = readDouble(args, 4);
+        let result = doubleArg(args, 4);
         const word = args[6] >>> 0;
         const masks = host.pointerSize === 8 ? word >>> 7 & 0x3f : word;
         const first = EXCEPT1.find(({ bit })=>(fpe & bit) !== 0);
@@ -417,7 +417,7 @@ export function createUcrtMathFunctions(host){
         {
             const compute = SSE2_UNARY[name];
             const cdecl = returningDouble(fpu, 8, args=>{
-                const x = readDouble(args, 0);
+                const x = doubleArg(args, 0);
                 return answer([x], compute(x));
             }, ONE_DOUBLE);
             table[`__libm_sse2_${name}`] = xmmEntry(guestExport(MATH_CODE[name], cdecl),

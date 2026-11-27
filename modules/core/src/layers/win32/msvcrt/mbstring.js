@@ -25,30 +25,34 @@ import {
     CT_BLANK, CT_HEX, CT_LETTER, CT_ALPHA,
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
-import { wideStringAt } from './widetext.js';
 import { byteText } from './format.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
-import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 import {
     SHIFT_JIS, jisToShiftJis, shiftJisToJis, toHiragana, toKatakana, isKatakana, toFullWidth,
     toHalfWidth, jisLevel,
 } from './kana.js';
 
-/** A wide string's terminator, where a string ends: never itself written. */
-const WIDE_NUL = new Uint8Array(2);
-
 const MAX_STRING = 1 << 20;
+
+/** How far a wide string is read, in units, before it is taken as ended. */
+const MAX_WIDE = 1 << 16;
 
 /**
  * @typedef {Object} WideHost
+ * @property {import('../common/guest.js').Guest} guest  What the handlers read and
+ *           write: in a 64-bit process the string pointer `mbsrtowcs` and
+ *           `wcsrtombs` advance is a quadword.
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ *           With writeMemory, what the routines that run in the guest read and
+ *           write when they answer as handlers (`guestEntry`).
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
  * @property {(code: number) => void} [errno]  Where a failure says why.
  * @property {(bytes: number) => number} [allocate]  The heap a duplicate is
  *           made on; without it `_wcsdup` stays unexported.
- * @property {number} [pointerSize]  8 in a 64-bit process, where the string
- *           pointer `mbsrtowcs` and `wcsrtombs` advance is a quadword; absent, 4.
+ * @property {number} [pointerSize]  8 in a 64-bit process: what the routines in the
+ *           guest read a pointer as.
  */
 
 /** WEOF, and what no class is answered for. */
@@ -93,7 +97,7 @@ const WIDE_MASKS = Object.freeze({
  * @param {WideHost} host
  */
 export function createWideFunctions(host){
-    const width = pointerWidth(host.pointerSize);
+    const { guest } = host;
     /**
      * A narrow string as the C locale widens it, each byte to the unit of its
      * own value as mbtowc widens one: the memory layer reads the string in the
@@ -101,44 +105,29 @@ export function createWideFunctions(host){
      *
      * @param {number} pointer
      */
-    const readNarrowUnits = pointer=>byteText(encodeAnsi(host.readCString(pointer, MAX_STRING)));
+    const narrowUnits = pointer=>byteText(encodeAnsi(guest.cstr(pointer, MAX_STRING)));
 
     /**
-     * A wide string up to its terminator, sixty-four thousand units at most:
-     * read a line at a time, never past the terminator's line, so a string
-     * near the end of its region is not read beyond it.
+     * Units written where they go, terminated or not: an n-bounded call
+     * leaves a full buffer unterminated.
      *
-     * @param {number} pointer
+     * @param {number} pointer @param {string} text @param {boolean} terminate
      */
-    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
+    const putUnits = (pointer, text, terminate)=>
+        guest.setBytes(pointer, terminate ? utf16z(text) : utf16(text));
 
     /**
-     * A wide string's first `count` units at most, read no further: an
-     * n-bounded call stops at its count whether or not a terminator came.
+     * The C locale's bytes of units to U+00FF, each its low byte.
      *
-     * @param {number} pointer @param {number} count
+     * @param {number} pointer @param {string} text @param {boolean} terminate
      */
-    const readWideUpTo = (pointer, count)=>wideStringAt(host.readMemory, pointer, count);
-
-    /** @param {number} pointer @param {string} text @param {boolean} terminate */
-    const writeWide = (pointer, text, terminate = true)=>{
-        const bytes = new Uint8Array((text.length + (terminate ? 1 : 0)) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
-        host.writeMemory(pointer, bytes);
-    };
-
-    /** @param {number} pointer @param {string} text @param {boolean} terminate */
-    const writeNarrow = (pointer, text, terminate)=>{
+    const putNarrowed = (pointer, text, terminate)=>{
         const bytes = new Uint8Array(text.length + (terminate ? 1 : 0));
         for (let at = 0; at < text.length; at++)
         {
             bytes[at] = text.charCodeAt(at) & 0xff;
         }
-        host.writeMemory(pointer, bytes);
+        guest.setBytes(pointer, bytes);
     };
 
     /**
@@ -165,13 +154,13 @@ export function createWideFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([string])=>{
-            if ((string >>> 0) === 0)
+            if (wholeAddress(string) === 0)
             {
                 host.errno?.(EINVAL);
                 return 0;
             }
-            const text = readWide(string);
-            writeWide(string, String.fromCharCode(
+            const text = guest.wstr(string, MAX_WIDE * 2);
+            putUnits(string, String.fromCharCode(
                 ...Array.from(text, unit=>folded(table, unit.charCodeAt(0)))), false);
             return string;
         },
@@ -193,10 +182,10 @@ export function createWideFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const length = count >>> 0;
-                const text = readWideUpTo(source, length);
+                const text = guest.wstr(source, Math.min(length, MAX_WIDE) * 2);
                 // Padded to the full count and unterminated when it truncates,
                 // exactly as the narrow strncpy does.
-                writeWide(destination, text.padEnd(length, '\0'), false);
+                putUnits(destination, text.padEnd(length, '\0'), false);
                 return destination;
             },
         },
@@ -221,10 +210,10 @@ export function createWideFunctions(host){
                     host.errno?.(EINVAL);
                     return 0x7fffffff;
                 }
-                const text = readWideUpTo(source, MAX_STRING);
+                const text = guest.wstr(source, MAX_WIDE * 2);
                 if (room !== 0)
                 {
-                    writeWide(destination, `${text}\0`.slice(0, room), false);
+                    putUnits(destination, `${text}\0`.slice(0, room), false);
                 }
                 return text.length;
             },
@@ -247,12 +236,12 @@ export function createWideFunctions(host){
                     {
                         return 0;
                     }
-                    const units = readWide(text);
+                    const units = guest.wstr(text, MAX_WIDE * 2);
                     const copy = /** @type {(bytes: number) => number} */ (host.allocate)(
                         (units.length + 1) * 2);
                     if (copy !== 0)
                     {
-                        writeWide(copy, units);
+                        putUnits(copy, units, true);
                     }
                     return copy;
                 },
@@ -296,7 +285,8 @@ export function createWideFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([string])=>{
-                writeWide(string, readWide(string).split('').reverse().join(''), false);
+                putUnits(string, guest.wstr(string, MAX_WIDE * 2).split('').reverse().join(''),
+                    false);
                 return string;
             },
         },
@@ -321,8 +311,8 @@ export function createWideFunctions(host){
                 {
                     return 0;
                 }
-                const separators = new Set(readWide(delimiters));
-                const rest = readWide(wideTokenAt);
+                const separators = new Set(guest.wstr(delimiters, MAX_WIDE * 2));
+                const rest = guest.wstr(wideTokenAt, MAX_WIDE * 2);
                 let start = 0;
                 while (start < rest.length && separators.has(rest[start]))
                 {
@@ -341,7 +331,7 @@ export function createWideFunctions(host){
                 const token = wideTokenAt + start * 2;
                 if (end < rest.length)
                 {
-                    host.writeMemory(wideTokenAt + end * 2, WIDE_NUL);
+                    guest.set16(wideTokenAt + end * 2, 0);
                     wideTokenAt += (end + 1) * 2;
                 }
                 else
@@ -382,7 +372,7 @@ export function createWideFunctions(host){
                     host.errno?.(EINVAL);
                     return -1;
                 }
-                const text = readNarrowUnits(source);
+                const text = narrowUnits(source);
                 if (wholeAddress(destination) === 0)
                 {
                     return text.length;
@@ -391,7 +381,7 @@ export function createWideFunctions(host){
                 // The terminator is written only when it fits within the count,
                 // which is the trap in this function: a full buffer comes back
                 // unterminated and the caller must terminate it itself.
-                writeWide(destination, written, written.length < (count >>> 0));
+                putUnits(destination, written, written.length < (count >>> 0));
                 return written.length;
             },
         },
@@ -410,7 +400,7 @@ export function createWideFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
-                const text = readWide(source);
+                const text = guest.wstr(source, MAX_WIDE * 2);
                 const converted = wholeAddress(destination) === 0 ? text : text.slice(0,
                     count >>> 0);
                 if (/[^\0-\xff]/.test(converted))
@@ -424,7 +414,7 @@ export function createWideFunctions(host){
                 }
                 // Terminated, as mbstowcs is, only when the text ends within
                 // the count: a buffer the text fills is left unterminated.
-                writeNarrow(destination, converted, converted.length < (count >>> 0));
+                putNarrowed(destination, converted, converted.length < (count >>> 0));
                 return converted.length;
             },
         },
@@ -450,7 +440,7 @@ export function createWideFunctions(host){
                     host.errno?.(EILSEQ);
                     return -1;
                 }
-                host.writeMemory(destination, new Uint8Array([unit & 0xff]));
+                guest.set8(destination, unit & 0xff);
                 return 1;
             },
         },
@@ -477,10 +467,10 @@ export function createWideFunctions(host){
                 {
                     return -2;
                 }
-                const byte = host.readMemory(source, 1)[0];
+                const byte = guest.u8(source);
                 if (wholeAddress(destination) !== 0)
                 {
-                    writeWide(destination, String.fromCharCode(byte), false);
+                    guest.set16(destination, byte);
                 }
                 return byte === 0 ? 0 : 1;
             },
@@ -501,7 +491,7 @@ export function createWideFunctions(host){
                 {
                     return -2;
                 }
-                return host.readMemory(source, 1)[0] === 0 ? 0 : 1;
+                return guest.u8(source) === 0 ? 0 : 1;
             },
         },
 
@@ -526,7 +516,7 @@ export function createWideFunctions(host){
                     host.errno?.(EILSEQ);
                     return -1;
                 }
-                host.writeMemory(destination, new Uint8Array([unit & 0xff]));
+                guest.set8(destination, unit & 0xff);
                 return 1;
             },
         },
@@ -545,9 +535,8 @@ export function createWideFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
-                const source = width.get(new DataView(host.readMemory(wholeAddress(from),
-                    width.size).buffer), 0);
-                const text = readNarrowUnits(source);
+                const source = guest.ptr(from);
+                const text = narrowUnits(source);
                 if (wholeAddress(destination) === 0)
                 {
                     return text.length;
@@ -555,9 +544,8 @@ export function createWideFunctions(host){
                 const room = count >>> 0;
                 const converted = text.slice(0, room);
                 const ended = converted.length < room;
-                writeWide(destination, converted, ended);
-                host.writeMemory(wholeAddress(from),
-                    width.bytes(ended ? 0 : source + converted.length));
+                putUnits(destination, converted, ended);
+                guest.setPtr(from, ended ? 0 : source + converted.length);
                 return converted.length;
             },
         },
@@ -575,9 +563,8 @@ export function createWideFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
-                const source = width.get(new DataView(host.readMemory(wholeAddress(from),
-                    width.size).buffer), 0);
-                const text = readWide(source);
+                const source = guest.ptr(from);
+                const text = guest.wstr(source, MAX_WIDE * 2);
                 const room = wholeAddress(destination) === 0 ? text.length + 1 : count >>> 0;
                 const converted = text.slice(0, room);
                 const refused = converted.search(/[^\0-\xff]/);
@@ -585,8 +572,8 @@ export function createWideFunctions(host){
                 {
                     if (wholeAddress(destination) !== 0)
                     {
-                        writeNarrow(destination, converted.slice(0, refused), false);
-                        host.writeMemory(wholeAddress(from), width.bytes(source + refused * 2));
+                        putNarrowed(destination, converted.slice(0, refused), false);
+                        guest.setPtr(from, source + refused * 2);
                     }
                     host.errno?.(EILSEQ);
                     return -1;
@@ -596,9 +583,8 @@ export function createWideFunctions(host){
                     return text.length;
                 }
                 const ended = converted.length < room;
-                writeNarrow(destination, converted, ended);
-                host.writeMemory(wholeAddress(from),
-                    width.bytes(ended ? 0 : source + converted.length * 2));
+                putNarrowed(destination, converted, ended);
+                guest.setPtr(from, ended ? 0 : source + converted.length * 2);
                 return converted.length;
             },
         },
@@ -614,10 +600,10 @@ export function createWideFunctions(host){
                 {
                     return 0;
                 }
-                const byte = host.readMemory(source, 1)[0];
+                const byte = guest.u8(source);
                 if (wholeAddress(destination) !== 0)
                 {
-                    writeWide(destination, String.fromCharCode(byte), false);
+                    guest.set16(destination, byte);
                 }
                 return byte === 0 ? 0 : 1;
             },
@@ -678,7 +664,10 @@ export function createWideClassificationFunctions(){
 
 /**
  * @typedef {Object} MultiByteFunctionsHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ *     With writeMemory, what the routines that run in the guest read and write
+ *     when they answer as handlers (`guestEntry`).
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
  * @property {(code: number) => void} [errno]
@@ -789,7 +778,7 @@ export function createMultiByteFunctions(narrow, host){
         const at = host.addressOf?.('_mbctype') ?? 0;
         if (at !== 0)
         {
-            host.writeMemory(at, page.table());
+            host.guest.setBytes(at, page.table());
         }
     };
 
@@ -870,7 +859,7 @@ export function createMultiByteFunctions(narrow, host){
                 {
                     return -1;
                 }
-                return host.readMemory(wholeAddress(text), 1)[0] === 0 ? 0 : 1;
+                return host.guest.u8(text) === 0 ? 0 : 1;
             },
         },
         ...narrow.strlen ? { _mbstrlen: narrow.strlen } : {},

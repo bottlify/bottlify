@@ -14,6 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStartupFunctions, splitCommandLine } from './startup.js';
+import { guestWindow } from './guest-window.fixture.js';
 import { windowsVersion } from '../kernel32/versions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
@@ -72,10 +73,7 @@ function fakeMachine(commandLine = '"C:\\App\\Game.exe"', { version, expand } = 
     };
 
     const fns = createStartupFunctions({
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestWindow(bytes),
         /** @param {number} size */
         allocate(size){
             const at = next;
@@ -285,8 +283,7 @@ test('_initterm_e stops at the first initialiser that fails', ()=>{
     /** @type {number[]} */
     const called = [];
     const fns = createStartupFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestWindow(bytes),
         allocate: ()=>HEAP_BASE,
         commandLine: ()=>'game.exe',
         callGuest: entry=>{
@@ -485,3 +482,49 @@ test('_pgmptr and _wpgmptr hold the program\'s path, and their getters hand out 
     const EINVAL = 22;
     assert.equal(table._get_pgmptr.handler([0]), EINVAL, 'nowhere to write is EINVAL');
 });
+
+test('at 64 bits past 4 GiB: argv, _pgmptr, _acmdln and the exit tables are whole pointers',
+    ()=>{
+        const base = 0x140000000;
+        const bytes = new Uint8Array(0x4000);
+        const view = new DataView(bytes.buffer);
+        let next = base + 0x1000;
+        const fns = /** @type {Record<string, any>} */ (createStartupFunctions({
+            guest: guestWindow(bytes, { base, pointerSize: 8 }),
+            allocate: size=>{
+                const at = next;
+                next += size + 15 & ~15;
+                return at;
+            },
+            commandLine: ()=>'game.exe -x',
+            imagePath: ()=>'C:\\App\\Game.exe',
+            callGuest: ()=>Promise.resolve(0),
+            exitProcess: ()=>'parked',
+        }));
+        /** @param {number} at */
+        const quad = at=>view.getUint32(at - base, true)
+            + view.getUint32(at - base + 4, true) * 2 ** 32;
+        /** @param {Uint8Array} data */
+        const pointerIn = data=>new DataView(data.buffer).getUint32(0, true)
+            + new DataView(data.buffer).getUint32(4, true) * 2 ** 32;
+        /** @param {number} at */
+        const text = at=>String.fromCharCode(...bytes.subarray(at - base,
+            bytes.indexOf(0, at - base)));
+
+        const argv = quad(fns.__p___argv.handler([]));
+        assert.ok(argv > base, 'the cell holds the vector whole');
+        assert.deepEqual([text(quad(argv)), text(quad(argv + 8))], ['game.exe', '-x']);
+        assert.equal(text(pointerIn(fns._pgmptr.data())), 'C:\\App\\Game.exe');
+        assert.equal(text(pointerIn(fns._acmdln.data())), 'game.exe -x');
+        const out = base + 0x100;
+        bytes.fill(0xcc, 0x100, 0x108);
+        assert.equal(fns._get_pgmptr.handler([out]), 0);
+        assert.equal(text(quad(out)), 'C:\\App\\Game.exe', '_get_pgmptr\'s char *');
+
+        const pbegin = base + 0x200;
+        const pend = base + 0x208;
+        const fn = 0x140001234;
+        assert.equal(fns.__dllonexit.handler([fn, pbegin, pend]), fn);
+        assert.equal(quad(pend) - quad(pbegin), 8, 'one entry');
+        assert.equal(quad(quad(pbegin)), fn, 'the function, whole');
+    });

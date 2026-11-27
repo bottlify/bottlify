@@ -322,7 +322,7 @@ export function createMsvcrtFunctions(host){
     const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
     /** Where %Z reads and %n writes. */
-    const memoryAccess = guestAccess(host.readMemory, host.writeMemory);
+    const memoryAccess = guestAccess(host.guest);
 
     /**
      * Text in the ANSI page the text was read in, a byte a character, so a
@@ -1114,7 +1114,7 @@ export function createMsvcrtFunctions(host){
     // One set of the runtime's variables for the whole table: errno is set by
     // whichever function fails and read through the address `_errno` hands out.
     const globals = createGlobals({
-        allocate, readMemory: host.readMemory, writeMemory: host.writeMemory,
+        allocate, guest: host.guest,
         // The two a start-up reads and writes by the name it imported.
         placed: name=>(name === 'fmode' || name === 'commode'
             ? host.addressOf?.(`_${name}`) ?? 0 : 0),
@@ -1161,10 +1161,7 @@ export function createMsvcrtFunctions(host){
     // starts: what getenv reads, _putenv changes and main is handed.
     const environment = host.allocate
         ? createEnvironment({
-            pointerSize: host.pointerSize,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            readCString: host.readCString,
+            guest: host.guest,
             allocate: host.allocate,
             errno,
             ...host.environment ? { environment: host.environment } : {},
@@ -1197,10 +1194,7 @@ export function createMsvcrtFunctions(host){
 
     const stdio = host.files && host.allocate && host.free
         ? createStdioFunctions({
-            pointerSize: host.pointerSize,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            readCString: host.readCString,
+            guest: host.guest,
             allocate: host.allocate,
             free: host.free,
             files,
@@ -1237,9 +1231,9 @@ export function createMsvcrtFunctions(host){
     const narrow = {
         ...table,
         ...createStringFunctions({
+            guest: host.guest,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
-            readCString: host.readCString,
             scanCString: host.scanCString,
             allocate,
             errno,
@@ -1251,10 +1245,10 @@ export function createMsvcrtFunctions(host){
     const secure = createSecureFunctions({ readMemory: host.readMemory,
         writeMemory: host.writeMemory, errno });
     const wideStrings = createWideFunctions({
+        guest: host.guest,
         pointerSize: host.pointerSize,
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
-        readCString: host.readCString,
         errno,
         ...host.allocate ? { allocate: host.allocate } : {},
     });
@@ -1296,6 +1290,7 @@ export function createMsvcrtFunctions(host){
         ...narrow,
         // Bound to the byte functions above, so the two families cannot drift.
         ...createMultiByteFunctions(narrow, {
+            guest: host.guest,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             fillMemory: host.fillMemory,
@@ -1453,9 +1448,8 @@ export function createMsvcrtFunctions(host){
          */
         __strncnt: secure.strnlen,
         ...createConversionFunctions({
+            guest: host.guest,
             pointerSize: host.pointerSize,
-            ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
-            readCString: host.readCString,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             allocate,
@@ -1472,8 +1466,7 @@ export function createMsvcrtFunctions(host){
          */
         sscanf: variadicEntry(2, scanList, scans.sscanf),
         ...createSortFunctions({
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
+            guest: host.guest,
             callGuest: host.callGuest,
             errno,
             ...host.currentThread ? { currentThread: host.currentThread } : {},
@@ -1496,10 +1489,7 @@ export function createMsvcrtFunctions(host){
             ...host.divergence ? { divergence: host.divergence } : {},
         }),
         ...createLocaleFunctions({
-            pointerSize: host.pointerSize,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            readCString: host.readCString,
+            guest: host.guest,
             allocate,
             ...host.currentThread ? { currentThread: host.currentThread } : {},
             ...host.divergence ? { divergence: host.divergence } : {},
@@ -1524,9 +1514,7 @@ export function createMsvcrtFunctions(host){
         // than a start-up that half runs.
         ...(host.allocate && host.commandLine && host.exitProcess
             ? createStartupFunctions({
-                pointerSize: host.pointerSize,
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
+                guest: host.guest,
                 allocate: host.allocate,
                 commandLine: host.commandLine,
                 ...host.imagePath ? { imagePath: host.imagePath } : {},
@@ -1731,11 +1719,9 @@ export function createMsvcrtFunctions(host){
                         allocate: host.allocate,
                         free: host.free,
                         allocateCode: host.allocateCode,
-                        readMemory: host.readMemory,
-                        writeMemory: host.writeMemory,
+                        guest: host.guest,
                         closeHandle: host.closeHandle,
                         currentThreadId: ()=>host.currentThread?.()?.id ?? 0,
-                        long: host.pointerSize === 8,
                     },
                 }
                 : {},

@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createWideFunctions, createMultiByteFunctions } from './mbstring.js';
 import { createMsvcrtFunctions } from './functions.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const build = ()=>{
     const memory = fakeMemory();
@@ -261,8 +262,9 @@ test('mbsrtowcs and wcsrtombs move the caller\'s pointer, a quadword in a 64-bit
     for (const pointerSize of [4, 8])
     {
         const memory = fakeMemory();
-        const table = /** @type {Record<string, any>} */ (
-            createWideFunctions({ ...memory, pointerSize }));
+        const table = /** @type {Record<string, any>} */ (createWideFunctions({ ...memory,
+            guest: guestWindow(memory.bytes, { pointerSize: /** @type {4 | 8} */ (pointerSize) }),
+            pointerSize }));
         const source = memory.put('abcd');
         const from = memory.allocate(8);
         const view = new DataView(memory.bytes.buffer);
@@ -819,4 +821,34 @@ test('wcsncat appends at most count characters and always terminates', ()=>{
     table.wcsncat.handler([destination, memory.putWide('x'), 9]);
     assert.equal(memory.wide(destination), 'abcdx');
     assert.equal(table.wcsncat.argBytes, 12);
+});
+
+test('at 64 bits past 4 GiB: the walks keep their addresses whole, *src a whole pointer', ()=>{
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    const io = {
+        guest: guestWindow(bytes, { base, pointerSize: 8 }),
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.slice(at - base, at - base + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+            bytes.set(data, at - base),
+        pointerSize: 8,
+    };
+    const multi = /** @type {Record<string, any>} */ (createMultiByteFunctions({}, io));
+    bytes.set([...'ab cd\0 \0'].map(c=>c.charCodeAt(0)), 0x100);
+    const space = base + 0x106;
+    assert.equal(multi._mbstok.handler([base + 0x100, space]), base + 0x100);
+    assert.equal(multi._mbstok.handler([0, space]), base + 0x103, 'carried on from where it was');
+    assert.equal(multi._mbstok.handler([0, space]), 0);
+    assert.equal(multi._mbsninc.handler([base + 0x100, 1]), base + 0x101);
+
+    const wide = /** @type {Record<string, any>} */ (createWideFunctions(io));
+    const from = base + 0x200;
+    view.setUint32(0x200, (base + 0x103) % 2 ** 32, true);
+    view.setUint32(0x204, Math.floor(base / 2 ** 32), true);
+    assert.equal(wide.mbsrtowcs.handler([base + 0x300, from, 1, 0]), 1);
+    assert.equal(view.getUint16(0x300, true), 0x63);
+    assert.equal(view.getUint32(0x200, true) + view.getUint32(0x204, true) * 2 ** 32,
+        base + 0x104, '*src moved past one, whole');
 });

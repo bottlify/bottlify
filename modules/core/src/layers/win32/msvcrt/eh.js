@@ -104,9 +104,7 @@ const WALK_LIMIT = 4096;
 
 /**
  * @typedef {Object} CxxEhHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number) => boolean} isMapped
  * @property {() => Record<string, number>} registers
  * @property {(options: { entry: number, args: number[], thread?: any,
@@ -167,16 +165,8 @@ const THREAD_DATA = Object.freeze({
  * @param {CxxEhHost} host
  */
 export function createCxxExceptions(host){
-    const readU32 = (/** @type {number} */ at)=>{
-        const bytes = host.readMemory(wholeAddress(at), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    const readI32 = (/** @type {number} */ at)=>readU32(at) | 0;
-    const writeU32 = (/** @type {number} */ at, /** @type {number} */ value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(at), bytes);
-    };
+    // The i386's frames, tables and thrown objects: every field a dword.
+    const { guest } = host;
 
     /**
      * The catches each thread is inside, innermost last.
@@ -212,7 +202,7 @@ export function createCxxExceptions(host){
             return known;
         }
         const at = host.allocate(THREAD_DATA.SIZE) >>> 0;
-        host.writeMemory(at, new Uint8Array(THREAD_DATA.SIZE));
+        guest.fill(at, 0, THREAD_DATA.SIZE);
         if (thread !== null && typeof thread === 'object')
         {
             blocks.set(thread, at);
@@ -224,24 +214,24 @@ export function createCxxExceptions(host){
         return at;
     };
     /** Exceptions thrown on the thread and not yet caught. @param {any} thread */
-    const inFlight = thread=>readU32(threadData(thread) + THREAD_DATA.PROCESSING_THROW);
+    const inFlight = thread=>guest.u32(threadData(thread) + THREAD_DATA.PROCESSING_THROW);
     /** @param {any} thread @param {number} count */
     const setInFlight = (thread, count)=>
-        writeU32(threadData(thread) + THREAD_DATA.PROCESSING_THROW, Math.max(0, count));
+        guest.set32(threadData(thread) + THREAD_DATA.PROCESSING_THROW, Math.max(0, count));
 
     let terminateHandler = 0;
     let unexpectedHandler = 0;
 
     /** @param {number} at */
     const funcInfo = at=>{
-        const magic = readU32(at + FUNC_INFO.MAGIC) & 0x1fffffff;
+        const magic = guest.u32(at + FUNC_INFO.MAGIC) & 0x1fffffff;
         return {
             magic,
-            maxState: readI32(at + FUNC_INFO.MAX_STATE),
-            unwindMap: readU32(at + FUNC_INFO.UNWIND_MAP),
-            tryBlocks: readU32(at + FUNC_INFO.TRY_BLOCKS),
-            tryMap: readU32(at + FUNC_INFO.TRY_MAP),
-            ehFlags: magic >= EH_MAGIC.V3 ? readU32(at + FUNC_INFO.EH_FLAGS) : 0,
+            maxState: guest.i32(at + FUNC_INFO.MAX_STATE),
+            unwindMap: guest.u32(at + FUNC_INFO.UNWIND_MAP),
+            tryBlocks: guest.u32(at + FUNC_INFO.TRY_BLOCKS),
+            tryMap: guest.u32(at + FUNC_INFO.TRY_MAP),
+            ehFlags: magic >= EH_MAGIC.V3 ? guest.u32(at + FUNC_INFO.EH_FLAGS) : 0,
         };
     };
 
@@ -251,7 +241,7 @@ export function createCxxExceptions(host){
     /** @param {number} descriptor */
     const typeName = descriptor=>(descriptor === 0
         ? ''
-        : host.readCString(descriptor + TYPE_NAME, 256));
+        : guest.cstr(descriptor + TYPE_NAME, 256));
 
     /**
      * Where a base lives inside an object: the member displacement, then,
@@ -261,14 +251,14 @@ export function createCxxExceptions(host){
      * @param {number} catchable
      */
     const adjust = (object, catchable)=>{
-        const mdisp = readI32(catchable + CATCHABLE.MDISP);
-        const pdisp = readI32(catchable + CATCHABLE.PDISP);
-        const vdisp = readI32(catchable + CATCHABLE.VDISP);
+        const mdisp = guest.i32(catchable + CATCHABLE.MDISP);
+        const pdisp = guest.i32(catchable + CATCHABLE.PDISP);
+        const vdisp = guest.i32(catchable + CATCHABLE.VDISP);
         let at = (object + mdisp) >>> 0;
         if (pdisp >= 0)
         {
-            const vbtable = readU32(object + pdisp);
-            at = (at + readI32(vbtable + vdisp) + pdisp) >>> 0;
+            const vbtable = guest.u32(object + pdisp);
+            at = (at + guest.i32(vbtable + vdisp) + pdisp) >>> 0;
         }
         return at;
     };
@@ -283,19 +273,19 @@ export function createCxxExceptions(host){
      * @param {number} throwInfo
      */
     const matches = (handler, catchable, throwInfo)=>{
-        const wanted = readU32(handler + HANDLER.TYPE);
+        const wanted = guest.u32(handler + HANDLER.TYPE);
         if (wanted === 0 || typeName(wanted) === '')
         {
             return true;
         }
-        const offered = readU32(catchable + CATCHABLE.TYPE);
+        const offered = guest.u32(catchable + CATCHABLE.TYPE);
         if (wanted !== offered && typeName(wanted) !== typeName(offered))
         {
             return false;
         }
-        const adjectives = readU32(handler + HANDLER.ADJECTIVES);
-        const properties = readU32(catchable + CATCHABLE.PROPERTIES);
-        const attributes = readU32(throwInfo + THROW_INFO.ATTRIBUTES);
+        const adjectives = guest.u32(handler + HANDLER.ADJECTIVES);
+        const properties = guest.u32(catchable + CATCHABLE.PROPERTIES);
+        const attributes = guest.u32(throwInfo + THROW_INFO.ATTRIBUTES);
         if ((properties & CT.BY_REFERENCE_ONLY) !== 0 && (adjectives & HT.REFERENCE) === 0)
         {
             return false;
@@ -314,12 +304,12 @@ export function createCxxExceptions(host){
 
     /** @param {number} handler */
     const isEllipsis = handler=>{
-        const wanted = readU32(handler + HANDLER.TYPE);
+        const wanted = guest.u32(handler + HANDLER.TYPE);
         return wanted === 0 || typeName(wanted) === '';
     };
 
     /** @param {number} frame */
-    const stateOf = frame=>readI32(frame + EH_FRAME.STATE);
+    const stateOf = frame=>guest.i32(frame + EH_FRAME.STATE);
 
     /**
      * Runs the destructors between the frame's state and `target`, each after
@@ -337,9 +327,9 @@ export function createCxxExceptions(host){
             && guard < WALK_LIMIT; guard++)
         {
             const entry = info.unwindMap + state * UNWIND_ENTRY;
-            const next = readI32(entry);
-            const action = readU32(entry + 4);
-            writeU32(frame + EH_FRAME.STATE, next);
+            const next = guest.i32(entry);
+            const action = guest.u32(entry + 4);
+            guest.set32(frame + EH_FRAME.STATE, next);
             if (action !== 0 && host.isMapped(action))
             {
                 await host.callGuest({
@@ -366,7 +356,7 @@ export function createCxxExceptions(host){
         {
             return;
         }
-        const destructor = readU32(throwInfo + THROW_INFO.UNWIND);
+        const destructor = guest.u32(throwInfo + THROW_INFO.UNWIND);
         if (destructor !== 0 && host.isMapped(destructor))
         {
             await host.callGuest({
@@ -388,35 +378,35 @@ export function createCxxExceptions(host){
      * @param {{ thread: any, stackAtRest: number }} how
      */
     const buildCatchObject = async(frame, handler, catchable, object, how)=>{
-        const displacement = readI32(handler + HANDLER.CATCH_OBJECT);
+        const displacement = guest.i32(handler + HANDLER.CATCH_OBJECT);
         if (catchable === 0 || displacement === 0 || isEllipsis(handler))
         {
             return;
         }
         const into = (frame + EH_FRAME.EBP + displacement) >>> 0;
-        const adjectives = readU32(handler + HANDLER.ADJECTIVES);
-        const properties = readU32(catchable + CATCHABLE.PROPERTIES);
-        const size = readU32(catchable + CATCHABLE.SIZE);
-        const copy = readU32(catchable + CATCHABLE.COPY);
+        const adjectives = guest.u32(handler + HANDLER.ADJECTIVES);
+        const properties = guest.u32(catchable + CATCHABLE.PROPERTIES);
+        const size = guest.u32(catchable + CATCHABLE.SIZE);
+        const copy = guest.u32(catchable + CATCHABLE.COPY);
         if ((adjectives & HT.REFERENCE) !== 0)
         {
-            writeU32(into, adjust(object, catchable));
+            guest.set32(into, adjust(object, catchable));
             return;
         }
         if ((properties & CT.SIMPLE) !== 0)
         {
-            host.writeMemory(into, host.readMemory(object, size));
+            guest.copy(into, object, size);
             // A pointer is caught as the base it is being caught as.
-            if (size === 4 && readU32(into) !== 0)
+            if (size === 4 && guest.u32(into) !== 0)
             {
-                writeU32(into, adjust(readU32(into), catchable));
+                guest.set32(into, adjust(guest.u32(into), catchable));
             }
             return;
         }
         const source = adjust(object, catchable);
         if (copy === 0 || !host.isMapped(copy))
         {
-            host.writeMemory(into, host.readMemory(source, size));
+            guest.copy(into, source, size);
             return;
         }
         await host.callGuest({
@@ -458,7 +448,7 @@ export function createCxxExceptions(host){
             // stack it stood on before that block ran.
             if (last.frame === frame)
             {
-                writeU32(frame + EH_FRAME.SAVED_ESP, last.savedEsp);
+                guest.set32(frame + EH_FRAME.SAVED_ESP, last.savedEsp);
             }
             if (!last.rethrown && last.object !== object)
             {
@@ -488,21 +478,21 @@ export function createCxxExceptions(host){
         throwInfo,
         entry, how })=>{
         const { thread } = how;
-        const tryLow = readI32(tryEntry + TRY_ENTRY.LOW);
-        const tryHigh = readI32(tryEntry + TRY_ENTRY.HIGH);
-        const catchHigh = readI32(tryEntry + TRY_ENTRY.CATCH_HIGH);
+        const tryLow = guest.i32(tryEntry + TRY_ENTRY.LOW);
+        const tryHigh = guest.i32(tryEntry + TRY_ENTRY.HIGH);
+        const catchHigh = guest.i32(tryEntry + TRY_ENTRY.CATCH_HIGH);
 
-        await host.unwind(frame, readU32(handler + HANDLER.ADDRESS), {
+        await host.unwind(frame, guest.u32(handler + HANDLER.ADDRESS), {
             record, registers: { ...entry, esp: how.stackAtRest }, thread,
         });
         // The record is the exception's, and it is still being handled: a
         // catch block that rethrows raises it again, not an unwinding copy.
-        writeU32(record + RECORD.FLAGS,
-            readU32(record + RECORD.FLAGS) & ~(EH_UNWINDING | EXCEPTION_EXIT_UNWIND));
+        guest.set32(record + RECORD.FLAGS,
+            guest.u32(record + RECORD.FLAGS) & ~(EH_UNWINDING | EXCEPTION_EXIT_UNWIND));
 
         await buildCatchObject(frame, handler, catchable, object, how);
         await unwindTo(frame, info, tryLow, how);
-        writeU32(frame + EH_FRAME.STATE, tryHigh + 1);
+        guest.set32(frame + EH_FRAME.STATE, tryHigh + 1);
 
         await abandon(thread, frame, tryLow, catchHigh, object, how);
         const list = caught(thread);
@@ -513,7 +503,7 @@ export function createCxxExceptions(host){
         // into the same slot when it began. A catch block writes its own
         // stack there too, for exactly that case, so the value is kept here
         // and put back before the function goes on.
-        const saved = readU32(frame + EH_FRAME.SAVED_ESP);
+        const saved = guest.u32(frame + EH_FRAME.SAVED_ESP);
         /** @type {Caught} */
         const mine = {
             object, throwInfo, frame, tryLow, catchHigh, rethrown: false, savedEsp: saved,
@@ -523,21 +513,21 @@ export function createCxxExceptions(host){
         // The exception the block handles is the thread's current one while it
         // runs, the one before it again once it is done.
         const block = threadData(thread);
-        const outer = [readU32(block + THREAD_DATA.CURRENT_EXCEPTION),
-            readU32(block + THREAD_DATA.CURRENT_CONTEXT)];
-        writeU32(block + THREAD_DATA.CURRENT_EXCEPTION, record);
-        writeU32(block + THREAD_DATA.CURRENT_CONTEXT, context);
+        const outer = [guest.u32(block + THREAD_DATA.CURRENT_EXCEPTION),
+            guest.u32(block + THREAD_DATA.CURRENT_CONTEXT)];
+        guest.set32(block + THREAD_DATA.CURRENT_EXCEPTION, record);
+        guest.set32(block + THREAD_DATA.CURRENT_CONTEXT, context);
 
         const continuation = await host.callGuest({
-            entry: readU32(handler + HANDLER.ADDRESS),
+            entry: guest.u32(handler + HANDLER.ADDRESS),
             args: [],
             thread,
             stackAtRest: how.stackAtRest,
             registers: { ebp: frame + EH_FRAME.EBP },
         }) >>> 0;
 
-        writeU32(block + THREAD_DATA.CURRENT_EXCEPTION, outer[0]);
-        writeU32(block + THREAD_DATA.CURRENT_CONTEXT, outer[1]);
+        guest.set32(block + THREAD_DATA.CURRENT_EXCEPTION, outer[0]);
+        guest.set32(block + THREAD_DATA.CURRENT_CONTEXT, outer[1]);
         // The block ended by returning, so it is still the innermost catch.
         const at = list.lastIndexOf(mine);
         if (at >= 0)
@@ -548,7 +538,7 @@ export function createCxxExceptions(host){
         {
             await destroy(object, throwInfo, how);
         }
-        writeU32(frame + EH_FRAME.SAVED_ESP, saved);
+        guest.set32(frame + EH_FRAME.SAVED_ESP, saved);
         return host.continueAt({
             eip: continuation, esp: saved, ebp: frame + EH_FRAME.EBP,
         }, { below: saved });
@@ -566,7 +556,7 @@ export function createCxxExceptions(host){
         const info = funcInfo(entry.ecx >>> 0);
         const how = { thread, stackAtRest: (entry.esp - 0x10 & ~0xf) >>> 0 };
         const at = wholeAddress(frame);
-        const flags = readU32(wholeAddress(record) + RECORD.FLAGS);
+        const flags = guest.u32(wholeAddress(record) + RECORD.FLAGS);
 
         if (!knownMagic(info.magic))
         {
@@ -589,42 +579,42 @@ export function createCxxExceptions(host){
             return Disposition.CONTINUE_SEARCH;
         }
 
-        const code = readU32(wholeAddress(record) + RECORD.CODE);
-        const parameters = readU32(wholeAddress(record) + RECORD.PARAMETER_COUNT);
+        const code = guest.u32(wholeAddress(record) + RECORD.CODE);
+        const parameters = guest.u32(wholeAddress(record) + RECORD.PARAMETER_COUNT);
         const isCxx = code === EH_EXCEPTION_NUMBER && parameters >= 3
-            && knownMagic(readU32(wholeAddress(record) + RECORD.INFORMATION));
+            && knownMagic(guest.u32(wholeAddress(record) + RECORD.INFORMATION));
         const state = stateOf(at);
 
-        const translator = readU32(threadData(thread) + THREAD_DATA.TRANSLATOR);
+        const translator = guest.u32(threadData(thread) + THREAD_DATA.TRANSLATOR);
         if (!isCxx && translator !== 0)
         {
             // The program's translator turns a structured exception into a C++
             // one by throwing it. If it returns instead, the exception goes on
             // as it was.
             const pointers = (how.stackAtRest - 8) >>> 0;
-            writeU32(pointers, record >>> 0);
-            writeU32(pointers + 4, context >>> 0);
+            guest.set32(pointers, record >>> 0);
+            guest.set32(pointers + 4, context >>> 0);
             await host.callGuest({
                 entry: translator, args: [code, pointers], thread,
                 stackAtRest: pointers,
             });
         }
 
-        const object = isCxx ? readU32(wholeAddress(record) + RECORD.INFORMATION + 4) : 0;
-        const throwInfo = isCxx ? readU32(wholeAddress(record) + RECORD.INFORMATION + 8) : 0;
-        const catchables = throwInfo === 0 ? 0 : readU32(throwInfo + THROW_INFO.CATCHABLE_TYPES);
-        const catchableCount = catchables === 0 ? 0 : Math.min(readU32(catchables), WALK_LIMIT);
+        const object = isCxx ? guest.u32(wholeAddress(record) + RECORD.INFORMATION + 4) : 0;
+        const throwInfo = isCxx ? guest.u32(wholeAddress(record) + RECORD.INFORMATION + 8) : 0;
+        const catchables = throwInfo === 0 ? 0 : guest.u32(throwInfo + THROW_INFO.CATCHABLE_TYPES);
+        const catchableCount = catchables === 0 ? 0 : Math.min(guest.u32(catchables), WALK_LIMIT);
 
         for (let block = 0; block < Math.min(info.tryBlocks, WALK_LIMIT); block++)
         {
             const tryEntry = info.tryMap + block * TRY_ENTRY.SIZE;
-            if (state < readI32(tryEntry + TRY_ENTRY.LOW)
-                || state > readI32(tryEntry + TRY_ENTRY.HIGH))
+            if (state < guest.i32(tryEntry + TRY_ENTRY.LOW)
+                || state > guest.i32(tryEntry + TRY_ENTRY.HIGH))
             {
                 continue;
             }
-            const handlers = readU32(tryEntry + TRY_ENTRY.HANDLERS);
-            const count = Math.min(readU32(tryEntry + TRY_ENTRY.CATCHES), WALK_LIMIT);
+            const handlers = guest.u32(tryEntry + TRY_ENTRY.HANDLERS);
+            const count = Math.min(guest.u32(tryEntry + TRY_ENTRY.CATCHES), WALK_LIMIT);
             for (let index = 0; index < count; index++)
             {
                 const handler = handlers + index * HANDLER.SIZE;
@@ -642,7 +632,7 @@ export function createCxxExceptions(host){
                 }
                 for (let type = 0; type < catchableCount; type++)
                 {
-                    const catchable = readU32(catchables + 4 + type * 4);
+                    const catchable = guest.u32(catchables + 4 + type * 4);
                     if (matches(handler, catchable, throwInfo))
                     {
                         return catchIt({ record: record >>> 0, context: context >>> 0,
@@ -695,9 +685,9 @@ export function createCxxExceptions(host){
         handler: ([buffer])=>{
             const at = wholeAddress(buffer);
             const entry = host.registers();
-            const frame = readU32(at + 24);
-            const info = funcInfo(readU32(at + 40));
-            return unwindTo(frame, info, readI32(at + 28), {
+            const frame = guest.u32(at + 24);
+            const info = funcInfo(guest.u32(at + 40));
+            return unwindTo(frame, info, guest.i32(at + 28), {
                 thread: host.currentThread(),
                 stackAtRest: (entry.esp - 0x10 & ~0xf) >>> 0,
             }).then(()=>0);
@@ -711,8 +701,8 @@ export function createCxxExceptions(host){
         /** @param {number[]} args */
         handler: ([handler])=>{
             const slot = threadData(host.currentThread()) + THREAD_DATA.TRANSLATOR;
-            const previous = readU32(slot);
-            writeU32(slot, handler >>> 0);
+            const previous = guest.u32(slot);
+            guest.set32(slot, handler >>> 0);
             return previous;
         },
     };
@@ -810,14 +800,14 @@ export function createCxxExceptions(host){
                 /** @param {number[]} args */
                 handler: ([record])=>{
                     const at = wholeAddress(record);
-                    if (at === 0 || readU32(at + RECORD.CODE) !== EH_EXCEPTION_NUMBER
-                        || readU32(at + RECORD.PARAMETER_COUNT) !== 3
-                        || !knownMagic(readU32(at + RECORD.INFORMATION)))
+                    if (at === 0 || guest.u32(at + RECORD.CODE) !== EH_EXCEPTION_NUMBER
+                        || guest.u32(at + RECORD.PARAMETER_COUNT) !== 3
+                        || !knownMagic(guest.u32(at + RECORD.INFORMATION)))
                     {
                         return 0;
                     }
-                    return destroy(readU32(at + RECORD.INFORMATION + 4),
-                        readU32(at + RECORD.INFORMATION + 8), { thread: host.currentThread() })
+                    return destroy(guest.u32(at + RECORD.INFORMATION + 4),
+                        guest.u32(at + RECORD.INFORMATION + 8), { thread: host.currentThread() })
                         .then(()=>0);
                 },
             },
@@ -887,9 +877,9 @@ export function createCxxExceptions(host){
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([message, file, line])=>{
-                    const text = host.readCString(wholeAddress(message), 1024);
+                    const text = guest.cstr(message, 1024);
                     host.abort(`Assertion failed: ${text}, file ${
-                        host.readCString(wholeAddress(file), 260)}, line ${line >>> 0}`);
+                        guest.cstr(file, 260)}, line ${line >>> 0}`);
                     return host.park();
                 },
             },

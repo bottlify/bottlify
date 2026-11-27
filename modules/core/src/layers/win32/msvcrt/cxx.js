@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 import { wholeAddress } from '../common/pointers.js';
+import { longName } from './classes.js';
 
 /**
  * Runtime type information, as the compiler laid it out: the object's vtable is
@@ -16,16 +17,23 @@ import { wholeAddress } from '../common/pointers.js';
  * the field offsets are as fixed as an instruction encoding.
  */
 
-/** Offsets in the complete object locator, 32-bit fields. */
-const LOCATOR = { OFFSET: 4, TYPE: 12 };
+/**
+ * Offsets in the complete object locator, 32-bit fields at either width: its
+ * signature, the subobject's offset in the complete object, the type
+ * descriptor, and - x64's alone - its own offset in the image (`pSelf`).
+ */
+const LOCATOR = { SIGNATURE: 0, OFFSET: 4, TYPE: 12, SELF: 20 };
 
-/** A type descriptor's decorated name begins here, after two reserved words. */
-const TYPE_NAME = 8;
+/**
+ * The signature of a locator whose fields name the type and the hierarchy by
+ * their offset in the image, as an x64 compiler lays it; 0 is the i386's,
+ * whose fields are addresses.
+ */
+const IMAGE_RELATIVE = 1;
 
 /**
  * @typedef {Object} CxxHost
  * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, maxLength: number) => string} readCString
  * @property {(message: string) => void} [abort]  How the runtime stops a
  *           program that has already lost: a pure virtual call has no
  *           continuation that means anything.
@@ -58,12 +66,29 @@ export const CHKESP_CODE = Uint8Array.of(0xc3);
  * @param {CxxHost} host
  */
 export function createCxxFunctions(host){
-    const { u32, i32 } = host.guest;
+    const { guest } = host;
+    const { u32, i32 } = guest;
+    // A type descriptor's decorated name begins after its vtable pointer and
+    // a spare one.
+    const typeName = 2 * guest.pointerSize;
 
-    /** The locator sits at vtable[-1], one slot below what the object points at. */
-    const locatorOf = (/** @type {number} */ object)=>u32(u32(object) - 4);
+    /** The locator sits at vtable[-1], one pointer below what the object points at. */
+    const locatorOf = (/** @type {number} */ object)=>guest.ptr(guest.ptr(object)
+        - guest.pointerSize);
 
-    return {
+    /**
+     * The type descriptor a locator names: an address in the i386's layout;
+     * in x64's an offset from the image's base, which lies as far below the
+     * locator as its own offset says.
+     *
+     * @param {number} locator
+     */
+    const typeOf = locator=>(u32(locator + LOCATOR.SIGNATURE) === IMAGE_RELATIVE
+        ? locator - u32(locator + LOCATOR.SELF) + u32(locator + LOCATOR.TYPE)
+        : u32(locator + LOCATOR.TYPE));
+
+    /** @type {Record<string, any>} */
+    const table = {
         /**
          * _EH_prolog: the frame setup a function with C++ unwinding calls
          * instead of writing it out, with its handler in EAX. It builds the
@@ -106,7 +131,7 @@ export function createCxxFunctions(host){
             /** @param {number[]} args */
             handler: ([object])=>(wholeAddress(object) === 0
                 ? 0
-                : u32(locatorOf(object) + LOCATOR.TYPE)),
+                : typeOf(locatorOf(object))),
         },
 
         /**
@@ -137,7 +162,13 @@ export function createCxxFunctions(host){
             convention: 'thiscall',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([self])=>(self >>> 0) + TYPE_NAME,
+            handler: ([self])=>wholeAddress(self) + typeName,
         },
     };
+    // raw_name again under the name a 64-bit program imports.
+    if (guest.pointerSize === 8)
+    {
+        table[longName('?raw_name@type_info@@QBEPBDXZ')] = table['?raw_name@type_info@@QBEPBDXZ'];
+    }
+    return table;
 }

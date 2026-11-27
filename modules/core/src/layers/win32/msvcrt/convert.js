@@ -19,25 +19,26 @@
  * documents. Handing back a fresh allocation each time would leak.
  */
 
-import { readDouble, returningDouble } from './float.js';
+import { doubleArg, returningDouble } from './float.js';
 import { EINVAL, ERANGE } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
-import { wideStringAt } from './widetext.js';
 import { cvtDigits } from './format.js';
-import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { wholeAddress } from '../common/pointers.js';
 import { decimalToExtended, extendedDigits } from './ldouble.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 import * as inGuest64 from './inguest-int64.js';
 import { COMPILED as INT64_CODE } from './inguest-int64.x86.js';
-import { utf16z } from '../common/utf16.js';
 
 /** A double as the first argument, which a 64-bit caller passes in XMM0. */
 const DOUBLE_FIRST = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
 
 const MAX_STRING = 1 << 20;
+
+/** A wide string is read no further than this many bytes: sixty-four thousand units. */
+const MAX_WIDE = 1 << 17;
 
 const LONG_MAX = 0x7fffffffn;
 const LONG_MIN = -0x80000000n;
@@ -310,6 +311,9 @@ for (const c of ' \t\n\v\f\r+-.0123456789eEdD')
 /** How many bytes of a number's text strtod and atof read before reading it whole. */
 const DECIMAL_WINDOW = 64;
 
+/** The window a number is read into: one, as a call reads it and is done. */
+const decimalWindow = new Uint8Array(DECIMAL_WINDOW);
+
 /**
  * The double strtod reads, where it stops, and whether it is out of range:
  * an infinity from finite digits, or a zero from digits that were not all
@@ -445,17 +449,20 @@ export function scanStandardDecimal(text){
 
 /**
  * @typedef {Object} ConversionHost
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  What the handlers read and
+ *           write: in a 64-bit process the end pointer a conversion writes
+ *           back is a quadword.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *           With it, strtol and strtoul are code in the guest, handing the
- *           host only what they leave to it; without it, handlers.
+ *           host only what they leave to it; without it, handlers. The two
+ *           are what the code in the guest reads and writes as a handler.
  * @property {(bytes: number) => number} allocate
  * @property {import('./float.js').FloatHost} [fpu]  Absent means the functions
  *           that return a double are not exported at all.
  * @property {(code: number) => void} [errno]  Where an out-of-range value says so.
- * @property {number} [pointerSize]  8 in a 64-bit process, where the end
- *           pointer a conversion writes back is a quadword; absent, 4.
+ * @property {number} [pointerSize]  8 in a 64-bit process: what the code in the
+ *           guest reads a pointer as.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Where an __int64 answer puts its high half, EDX.
  */
@@ -464,34 +471,18 @@ export function scanStandardDecimal(text){
  * @param {ConversionHost} host
  */
 export function createConversionFunctions(host){
-    const width = pointerWidth(host.pointerSize);
-    /** @param {number} pointer */
-    const readString = pointer=>host.readCString(pointer, MAX_STRING);
+    const { guest } = host;
 
-    /** @param {number} pointer @param {string} text */
-    const writeString = (pointer, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let at = 0; at < text.length; at++)
+    /**
+     * An int answered through the caller's pointer; nothing for a null one.
+     *
+     * @param {number} pointer @param {number} value
+     */
+    const intThrough = (pointer, value)=>{
+        if (wholeAddress(pointer) !== 0)
         {
-            bytes[at] = text.charCodeAt(at) & 0xff;
+            guest.set32(pointer, value);
         }
-        host.writeMemory(pointer, bytes);
-    };
-
-    /** @param {number} pointer @param {string} text */
-    const writeWideString = (pointer, text)=>{
-        host.writeMemory(pointer, utf16z(text));
-    };
-
-    /** @param {number} pointer @param {number} value */
-    const writeInt = (pointer, value)=>{
-        if ((pointer >>> 0) === 0)
-        {
-            return;
-        }
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setInt32(0, value | 0, true);
-        host.writeMemory(pointer, bytes);
     };
 
     /**
@@ -501,9 +492,9 @@ export function createConversionFunctions(host){
      * @param {number} pointer @param {number} value
      */
     const writeEnd = (pointer, value)=>{
-        if ((pointer >>> 0) !== 0)
+        if (wholeAddress(pointer) !== 0)
         {
-            host.writeMemory(wholeAddress(pointer), width.bytes(value));
+            guest.setPtr(pointer, value);
         }
     };
 
@@ -540,9 +531,8 @@ export function createConversionFunctions(host){
         /** @param {number[]} args */
         handler: ([string, end, base])=>{
             const scanned = wide
-                ? scanWideInteger(wideStringAt(/** @type {(address: number, length: number)
-                    => Uint8Array} */ (host.readMemory), string), base | 0, isSpace)
-                : scanInteger(readString(string), base | 0);
+                ? scanWideInteger(guest.wstr(string, MAX_WIDE), base | 0, isSpace)
+                : scanInteger(guest.cstr(string, MAX_STRING), base | 0);
             // Nothing converted: the end pointer goes back to the start, so a
             // caller comparing it against the input sees no progress.
             writeEnd(end, scanned ? string + scanned.end * (wide ? 2 : 1) : string);
@@ -630,7 +620,7 @@ export function createConversionFunctions(host){
             {
                 pattern = (pattern << 32n) | BigInt(args[slot] >>> 0);
             }
-            (wide ? writeWideString : writeString)(buffer, signed && radix === 10
+            (wide ? guest.writeWide : guest.writeAnsi)(buffer, signed && radix === 10
                 ? BigInt.asIntN(bits, pattern).toString(10)
                 : pattern.toString(radix));
             return buffer;
@@ -681,12 +671,12 @@ export function createConversionFunctions(host){
         /** @param {number[]} args */
         handler: args=>{
             const { digits, point, negative } = cvtDigits(
-                { value: readDouble(args, 0), low: args[0] >>> 0, high: args[1] >>> 0 },
+                { value: doubleArg(args, 0), low: args[0] >>> 0, high: args[1] >>> 0 },
                 args[2] | 0, fixed);
             const buffer = cvtBuffer();
-            writeInt(args[3], point);
-            writeInt(args[4], negative ? 1 : 0);
-            writeString(buffer, digits.slice(0, CVT_BUFFER - 1));
+            intThrough(args[3], point);
+            intThrough(args[4], negative ? 1 : 0);
+            guest.writeAnsi(buffer, digits.slice(0, CVT_BUFFER - 1));
             return buffer;
         },
     });
@@ -697,11 +687,10 @@ export function createConversionFunctions(host){
      * @param {number} value @param {number} text
      */
     const toDouble = (value, text)=>{
-        const scanned = (text >>> 0) === 0 ? null : scanDecimal(readString(text));
+        const scanned = wholeAddress(text) === 0 ? null
+            : scanDecimal(guest.cstr(text, MAX_STRING));
         const number = scanned ? scanned.value : 0;
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setFloat64(0, number, true);
-        host.writeMemory(wholeAddress(value), bytes);
+        guest.setF64(value, number);
         if (!scanned)
         {
             return 0;
@@ -722,7 +711,7 @@ export function createConversionFunctions(host){
      * @param {number[]} slots @param {number} digits
      */
     const gcvtText = (slots, digits)=>{
-        const value = readDouble(slots, 0);
+        const value = doubleArg(slots, 0);
         if (!Number.isFinite(value))
         {
             return String(value);
@@ -756,23 +745,23 @@ export function createConversionFunctions(host){
         floats: { 2: /** @type {'f64'} */ ('f64') },
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [buffer, size, low, high, count, point, sign])=>{
-            if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (point >>> 0) === 0
-                || (sign >>> 0) === 0)
+            if (wholeAddress(buffer) === 0 || (size >>> 0) === 0 || wholeAddress(point) === 0
+                || wholeAddress(sign) === 0)
             {
                 host.errno?.(EINVAL);
                 return EINVAL;
             }
-            const answer = cvtDigits({ value: readDouble([low, high], 0), low: low >>> 0,
+            const answer = cvtDigits({ value: doubleArg([low, high], 0), low: low >>> 0,
                 high: high >>> 0 }, count | 0, fixed);
-            writeInt(point, answer.point);
-            writeInt(sign, answer.negative ? 1 : 0);
+            intThrough(point, answer.point);
+            intThrough(sign, answer.negative ? 1 : 0);
             if (answer.digits.length + 1 > (size >>> 0))
             {
-                writeString(buffer, '');
+                guest.writeAnsi(buffer, '');
                 host.errno?.(ERANGE);
                 return ERANGE;
             }
-            writeString(buffer, answer.digits);
+            guest.writeAnsi(buffer, answer.digits);
             return 0;
         },
     });
@@ -812,7 +801,7 @@ export function createConversionFunctions(host){
                     bytes[4 + at] = answer.buffer.charCodeAt(at);
                 }
                 bytes[4 + answer.len] = 0;
-                host.writeMemory(wholeAddress(out), bytes.subarray(0, Math.max(4 + answer.len + 1,
+                guest.setBytes(out, bytes.subarray(0, Math.max(4 + answer.len + 1,
                     4 + answer.buffer.length)));
                 return answer.ok;
             },
@@ -832,14 +821,10 @@ export function createConversionFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([value, end, text])=>{
-                const { bytes, end: read, status } = decimalToExtended(readString(text));
-                host.writeMemory(value, bytes);
-                if (wholeAddress(end) !== 0)
-                {
-                    const pointer = new Uint8Array(4);
-                    new DataView(pointer.buffer).setUint32(0, text + read >>> 0, true);
-                    host.writeMemory(end, pointer);
-                }
+                const { bytes, end: read, status } = decimalToExtended(
+                    guest.cstr(text, MAX_STRING));
+                guest.setBytes(value, bytes);
+                writeEnd(end, wholeAddress(text) + read);
                 return status;
             },
         },
@@ -914,7 +899,7 @@ export function createConversionFunctions(host){
                 const int64 = strtoInteger(12, toInt64, int64Limit, true, true, isSpace);
                 const atoi = { convention: 'cdecl', argBytes: 4,
                     handler: (/** @type {number[]} */ [string])=>wideAtoi(
-                        wideStringAt(readMemory, string), isSpace) };
+                        guest.wstr(string, MAX_WIDE), isSpace) };
                 return {
                     _wtoi: atoi,
                     _wtol: atoi,
@@ -1042,12 +1027,12 @@ export function createConversionFunctions(host){
                     host.errno?.(ERANGE);
                     return 0;
                 }
-                if ((buffer >>> 0) === 0)
+                if (wholeAddress(buffer) === 0)
                 {
                     host.errno?.(EINVAL);
                     return 0;
                 }
-                writeString(buffer, gcvtText(args, args[2] | 0));
+                guest.writeAnsi(buffer, gcvtText(args, args[2] | 0));
                 return buffer;
             },
         },
@@ -1073,11 +1058,11 @@ export function createConversionFunctions(host){
                 const text = gcvtText([low, high], digits | 0);
                 if ((digits | 0) >= (size >>> 0) || text.length + 1 > (size >>> 0))
                 {
-                    writeString(buffer, '');
+                    guest.writeAnsi(buffer, '');
                     host.errno?.(ERANGE);
                     return ERANGE;
                 }
-                writeString(buffer, text);
+                guest.writeAnsi(buffer, text);
                 return 0;
             },
         },
@@ -1112,32 +1097,29 @@ export function createConversionFunctions(host){
      * @param {number} pointer
      */
     const decimalText = pointer=>{
-        if (readMemory)
+        let read = 0;
+        try
         {
-            /** @type {Uint8Array} */
-            let bytes = new Uint8Array(0);
-            try
+            guest.bytes(pointer, DECIMAL_WINDOW, decimalWindow);
+            read = DECIMAL_WINDOW;
+        }
+        catch {
+            // The window runs past the string's region: the walk below
+            // stops at the region's end.
+        }
+        for (let at = 0; at < read; at++)
+        {
+            if (SPELLS_DECIMAL[decimalWindow[at]] === 0)
             {
-                bytes = readMemory(pointer, DECIMAL_WINDOW);
-            }
-            catch {
-                // The window runs past the string's region: the walk below
-                // stops at the region's end.
-            }
-            for (let at = 0; at < bytes.length; at++)
-            {
-                if (SPELLS_DECIMAL[bytes[at]] === 0)
+                let text = '';
+                for (let i = 0; i < at; i++)
                 {
-                    let text = '';
-                    for (let i = 0; i < at; i++)
-                    {
-                        text += String.fromCharCode(bytes[i]);
-                    }
-                    return text;
+                    text += String.fromCharCode(decimalWindow[i]);
                 }
+                return text;
             }
         }
-        return readString(pointer);
+        return guest.cstr(pointer, MAX_STRING);
     };
 
     /**
@@ -1146,10 +1128,10 @@ export function createConversionFunctions(host){
      * @param {number[]} args
      */
     const strtod = args=>{
-        if ((args[0] >>> 0) === 0)
+        if (wholeAddress(args[0]) === 0)
         {
             host.errno?.(EINVAL);
-            writeInt(args[1], 0);
+            writeEnd(args[1], 0);
             return 0;
         }
         const scanned = scanDecimal(decimalText(args[0]));
@@ -1164,14 +1146,13 @@ export function createConversionFunctions(host){
      * @param {number[]} args
      */
     const wcstod = args=>{
-        if ((args[0] >>> 0) === 0)
+        if (wholeAddress(args[0]) === 0)
         {
             host.errno?.(EINVAL);
-            writeInt(args[1], 0);
+            writeEnd(args[1], 0);
             return 0;
         }
-        const text = wideStringAt(/** @type {(address: number, length: number)
-            => Uint8Array} */ (readMemory), args[0]);
+        const text = guest.wstr(args[0], MAX_WIDE);
         const scanned = scanDecimal(text);
         writeEnd(args[1], scanned ? args[0] + scanned.end * 2 : args[0]);
         return decimal(scanned);
@@ -1184,10 +1165,10 @@ export function createConversionFunctions(host){
      * @param {(pointer: number) => string} textAt @param {number} unit  bytes a character
      */
     const standardReading = (textAt, unit)=>(/** @type {number[]} */ args)=>{
-        if ((args[0] >>> 0) === 0)
+        if (wholeAddress(args[0]) === 0)
         {
             host.errno?.(EINVAL);
-            writeInt(args[1], 0);
+            writeEnd(args[1], 0);
             return 0;
         }
         const scanned = scanStandardDecimal(textAt(args[0]));
@@ -1195,10 +1176,10 @@ export function createConversionFunctions(host){
         return decimal(scanned);
     };
 
-    /** @param {any} guest */
-    const standardNumbers = guest=>{
+    /** @param {any} floatHost */
+    const standardNumbers = floatHost=>{
         const fpu = /** @type {import('./float.js').FloatHost} */ (host.fpu);
-        const narrow = standardReading(readString, 1);
+        const narrow = standardReading(pointer=>guest.cstr(pointer, MAX_STRING), 1);
         const entries = {
             strtod: returningDouble(fpu, 8, narrow),
             atof: returningDouble(fpu, 4, args=>narrow([args[0], 0])),
@@ -1209,15 +1190,15 @@ export function createConversionFunctions(host){
         {
             return entries;
         }
-        const read = readMemory;
-        const wide = standardReading(pointer=>wideStringAt(read, pointer), 2);
+        const wide = standardReading(pointer=>guest.wstr(pointer, MAX_WIDE), 2);
         return {
             ...entries,
-            strtod: guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, guest, entries.strtod),
-            atof: guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, guest, entries.atof),
-            wcstod: guestEntry(inGuestFloat.wcstod, FLOAT_CODE.wcstod, guest,
+            strtod: guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, floatHost,
+                entries.strtod),
+            atof: guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, floatHost, entries.atof),
+            wcstod: guestEntry(inGuestFloat.wcstod, FLOAT_CODE.wcstod, floatHost,
                 returningDouble(fpu, 8, wide)),
-            _wtof: guestEntry(inGuestFloat._wtof, FLOAT_CODE._wtof, guest,
+            _wtof: guestEntry(inGuestFloat._wtof, FLOAT_CODE._wtof, floatHost,
                 returningDouble(fpu, 4, args=>wide([args[0], 0]))),
             _wcstod_l: returningDouble(fpu, 12, wide),
             _wtof_l: returningDouble(fpu, 8, args=>wide([args[0], 0])),
@@ -1235,21 +1216,21 @@ export function createConversionFunctions(host){
     // Code in the guest (`inguest-float.js`), which reads the number and
     // computes the values Clinger's fast path makes exact; the handlers above
     // answer the rest, and set errno for an overflow or an underflow.
-    const guest = { readMemory, writeMemory, fpu: host.fpu, pointerSize: host.pointerSize };
+    const floatHost = { readMemory, writeMemory, fpu: host.fpu, pointerSize: host.pointerSize };
     return {
         ...table,
         ...readMemory ? {
-            wcstod: guestEntry(inGuestFloat.wcstod, FLOAT_CODE.wcstod, guest,
+            wcstod: guestEntry(inGuestFloat.wcstod, FLOAT_CODE.wcstod, floatHost,
                 returningDouble(host.fpu, 8, wcstod)),
             /** double _wtof(const wchar_t *str): `wcstod`, no end. */
-            _wtof: guestEntry(inGuestFloat._wtof, FLOAT_CODE._wtof, guest,
+            _wtof: guestEntry(inGuestFloat._wtof, FLOAT_CODE._wtof, floatHost,
                 returningDouble(host.fpu, 4, args=>wcstod([args[0], 0]))),
         } : {},
         atof: readMemory
-            ? guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, guest, handlers.atof)
+            ? guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, floatHost, handlers.atof)
             : handlers.atof,
         strtod: readMemory
-            ? guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, guest, handlers.strtod)
+            ? guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, floatHost, handlers.strtod)
             : handlers.strtod,
 
         // The `_l` forms' locale is the C one, the only one carried.
@@ -1261,6 +1242,6 @@ export function createConversionFunctions(host){
         // The universal runtime's, which read C99's infinities, NaNs and
         // hexadecimal numbers too; the code in the guest is the same, and
         // hands those to these.
-        [STANDARD_NUMBERS]: standardNumbers(guest),
+        [STANDARD_NUMBERS]: standardNumbers(floatHost),
     };
 }

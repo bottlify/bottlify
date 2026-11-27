@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { COMPILED } from './inguest.x86.js';
 import * as sources from './inguest.js';
 import { createConversionFunctions } from './convert.js';
+import { guestThrough } from './guest-window.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { DATA, DATA_END, doubleWords, equivalence, random } from
     '../../../../scripts/guest-code/equivalence.mjs';
@@ -32,14 +33,18 @@ function conversionHandlers(){
     const errno = [];
     const table = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
         createConversionFunctions({
-            readCString: (address, limit)=>{
+            // Over whichever case's memory is the current one; a string read
+            // as the engine's memory reads it, its terminator within reach.
+            guest: { ...guestThrough((address, length)=>memory.slice(address, address + length),
+                (address, bytes)=>memory.set(bytes, address)),
+            cstr: (address, limit = 0)=>{
                 const end = memory.indexOf(0, address);
                 if (end === -1 || end - address >= limit)
                 {
                     throw new Error(`No NUL within ${limit} bytes`);
                 }
                 return decodeAnsi(memory.subarray(address, end));
-            },
+            } },
             writeMemory: (address, bytes)=>memory.set(bytes, address),
             allocate: ()=>{
                 throw new Error('nothing here allocates');

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSortFunctions } from './sort.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const COMPARE = 0x7000;
 const BASE = 0x100;
@@ -16,10 +17,8 @@ const BASE = 0x100;
  * The table over a fake memory whose comparator is Wine's qsort_comp: the
  * values modulo 1000, each call's element indices recorded.
  */
-const build = (/** @type {(plain: (a: number, n: number) => Uint8Array) =>
-    ((a: number, n: number) => Uint8Array)} */ reader = plain=>plain)=>{
+const build = ()=>{
     const memory = fakeMemory();
-    memory.readMemory = /** @type {typeof memory.readMemory} */ (reader(memory.readMemory));
     /** @type {[number, number][]} */
     const calls = [];
     /** @type {number[]} */
@@ -108,24 +107,22 @@ test('qsort_s sorts a hundred values and refuses what it cannot sort', async()=>
     assert.deepEqual(errno, [22, 22]);
 });
 
-test('qsort_s copies no element twice: what memory reads is the caller\'s already', async()=>{
-    // The memory layer answers a copy (`MsvcrtHost.readMemory`); every
-    // further copy of it is counted, and a swap per comparison makes any
-    // second one show at once.
-    let copied = 0;
-    const { table, put, read } = build(plain=>(address, length)=>{
-        const bytes = plain(address, length);
-        bytes.slice = (...range)=>{
-            copied++;
-            return Uint8Array.prototype.slice.apply(bytes, range);
-        };
-        return bytes;
-    });
+test('qsort_s makes no buffer a swap: each element is read into the two it holds', async()=>{
+    const { memory, table, put, read } = build();
+    const { bytes } = memory.guest;
+    let made = 0;
+    let reads = 0;
+    memory.guest.bytes = (address, length, into)=>{
+        reads++;
+        made += into ? 0 : 1;
+        return bytes(address, length, into);
+    };
     const values = Array.from({ length: 100 }, (_, i)=>(i * 7919) % 1000);
     put(values);
     await table.qsort_s.handler([BASE, 100, 4, COMPARE, 0]);
     assert.deepEqual(read(100), values.slice().sort((a, b)=>a - b));
-    assert.equal(copied, 0);
+    assert.ok(reads > 0);
+    assert.equal(made, 0);
 });
 
 test('_lfind_s finds the first element its comparator calls equal, or null', async()=>{
@@ -148,4 +145,33 @@ test('_lfind_s finds the first element its comparator calls equal, or null', asy
     memory.setU32(key, 234);
     assert.equal(await table._lfind_s.handler([key, BASE, num, 4, COMPARE, 0x77]), 0);
     assert.deepEqual(errno, [22, 22, 22, 22], 'not found is no error');
+});
+
+test('at 64 bits past 4 GiB: the array, the key and the element handed back are whole', async()=>{
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    /** @type {number[][]} */
+    const asked = [];
+    const table = /** @type {Record<string, any>} */ (createSortFunctions({
+        guest: guestWindow(bytes, { base, pointerSize: 8 }),
+        callGuest: async(entry, args)=>{
+            asked.push(args);
+            const [left, right] = args.slice(-2);
+            return view.getInt32(left - base, true) - view.getInt32(right - base, true);
+        },
+    }));
+    [3, 1, 2].forEach((value, i)=>view.setInt32(0x100 + i * 4, value, true));
+    await table.qsort_s.handler([base + 0x100, 3, 4, COMPARE, 0]);
+    assert.deepEqual([0, 1, 2].map(i=>view.getInt32(0x100 + i * 4, true)), [1, 2, 3]);
+    assert.ok(asked.flat().slice(1).every(at=>at === 0 || at >= base), 'elements whole');
+    view.setInt32(0x200, 2, true);
+    view.setUint32(0x300, 3, true);
+    assert.equal(await table._lfind.handler([base + 0x200, base + 0x100, base + 0x300, 4,
+        COMPARE]), base + 0x104);
+    view.setInt32(0x200, 9, true);
+    assert.equal(await table._lsearch.handler([base + 0x200, base + 0x100, base + 0x300, 4,
+        COMPARE]), base + 0x10c, 'appended past the three');
+    assert.equal(view.getInt32(0x10c, true), 9);
+    assert.equal(view.getUint32(0x300, true), 4);
 });

@@ -30,7 +30,7 @@
  */
 
 import { guestException } from '../common/raise.js';
-import { readDouble, readSingle, returningDouble, returningSingle } from './float.js';
+import { doubleArg, readSingle, returningDouble, returningSingle } from './float.js';
 import { EDOM, ERANGE } from './globals.js';
 import { guestEntry, guestExport } from './guest-code.js';
 import * as inGuest from './inguest.js';
@@ -304,7 +304,7 @@ export function createMathFunctions(host){
     for (const [name, compute] of Object.entries(UNARY))
     {
         const respond = unary(name, compute);
-        handlers[name] = returningDouble(fpu, 8, args=>respond(readDouble(args, 0)), ONE_DOUBLE);
+        handlers[name] = returningDouble(fpu, 8, args=>respond(doubleArg(args, 0)), ONE_DOUBLE);
 
         // The FPU-stack form: one argument, consumed, replaced by the result.
         handlers[`_CI${name}`] = {
@@ -322,8 +322,8 @@ export function createMathFunctions(host){
     for (const [name, compute] of Object.entries(BINARY))
     {
         handlers[name] = returningDouble(fpu, 16, args=>{
-            const left = readDouble(args, 0);
-            const right = readDouble(args, 2);
+            const left = doubleArg(args, 0);
+            const right = doubleArg(args, 2);
             return answer([left, right], compute(left, right));
         }, TWO_DOUBLES);
 
@@ -346,7 +346,7 @@ export function createMathFunctions(host){
 
     /** double ldexp(double value, int exponent): only an overflow comes here. */
     handlers.ldexp = returningDouble(fpu, 12, args=>{
-        const value = readDouble(args, 0);
+        const value = doubleArg(args, 0);
         return answer([value], value * Math.pow(2, args[2] | 0));
     }, ONE_DOUBLE);
 
@@ -371,22 +371,22 @@ export function createMathFunctions(host){
 
     /** double _logb(double x): only a zero comes here, -infinity and ERANGE. */
     handlers._logb = returningDouble(fpu, 8, args=>{
-        const value = readDouble(args, 0);
+        const value = doubleArg(args, 0);
         return answer([value], value === 0 ? -Infinity : value);
     }, ONE_DOUBLE);
 
     /** double _nextafter(double x, double y): only a step to an infinity, ERANGE. */
     handlers._nextafter = returningDouble(fpu, 16, args=>{
-        const x = readDouble(args, 0);
-        const y = readDouble(args, 2);
+        const x = doubleArg(args, 0);
+        const y = doubleArg(args, 2);
         return answer([x, y], nextAfter(x, y));
     }, TWO_DOUBLES);
 
     /** double _j0(double x), double _j1(double x) */
-    handlers._j0 = returningDouble(fpu, 8, args=>besselJ(0, readDouble(args, 0)), ONE_DOUBLE);
-    handlers._j1 = returningDouble(fpu, 8, args=>besselJ(1, readDouble(args, 0)), ONE_DOUBLE);
+    handlers._j0 = returningDouble(fpu, 8, args=>besselJ(0, doubleArg(args, 0)), ONE_DOUBLE);
+    handlers._j1 = returningDouble(fpu, 8, args=>besselJ(1, doubleArg(args, 0)), ONE_DOUBLE);
     /** double _jn(int n, double x) */
-    handlers._jn = returningDouble(fpu, 12, args=>besselJ(args[0] | 0, readDouble(args, 1)),
+    handlers._jn = returningDouble(fpu, 12, args=>besselJ(args[0] | 0, doubleArg(args, 1)),
         { 1: 'f64' });
 
     // sqrtf and the rest: a 64-bit runtime's, computed as the double form

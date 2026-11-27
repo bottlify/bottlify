@@ -170,8 +170,7 @@ export const SETJMP_CODE = Object.freeze({
 
 /**
  * @typedef {Object} CrtSehHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number) => boolean} isMapped
  * @property {() => Record<string, number>} registers
  * @property {(values: Record<string, number>) => void} setRegisters
@@ -194,15 +193,8 @@ export const SETJMP_CODE = Object.freeze({
  * @param {CrtSehHost} host
  */
 export function createCrtSeh(host){
-    const readU32 = (/** @type {number} */ at)=>{
-        const bytes = host.readMemory(at, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    const writeU32 = (/** @type {number} */ at, /** @type {number} */ value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at, bytes);
-    };
+    // An i386 frame's and jmp_buf's fields: dwords, the only width they have.
+    const { guest } = host;
 
     /**
      * Takes the unwinding flags back off a record once its unwind is done.
@@ -216,7 +208,8 @@ export function createCrtSeh(host){
     const clearUnwinding = record=>{
         if (record !== 0 && host.isMapped(record))
         {
-            writeU32(record + 4, readU32(record + 4) & ~(EH_UNWINDING | EXCEPTION_EXIT_UNWIND));
+            guest.set32(record + 4,
+                guest.u32(record + 4) & ~(EH_UNWINDING | EXCEPTION_EXIT_UNWIND));
         }
     };
 
@@ -237,15 +230,15 @@ export function createCrtSeh(host){
     const entryAt = (table, level)=>{
         const at = table + level * SCOPE_ENTRY.SIZE;
         return {
-            enclosing: readU32(at + SCOPE_ENTRY.ENCLOSING),
-            filter: readU32(at + SCOPE_ENTRY.FILTER),
-            target: readU32(at + SCOPE_ENTRY.TARGET),
+            enclosing: guest.u32(at + SCOPE_ENTRY.ENCLOSING),
+            filter: guest.u32(at + SCOPE_ENTRY.FILTER),
+            target: guest.u32(at + SCOPE_ENTRY.TARGET),
         };
     };
 
     /** _except_handler3's table: at the frame's word, entries from its start. */
     /** @type {ScopeScheme} */
-    const EH3 = { table: frame=>readU32(frame + SCOPE_FRAME.TABLE), none: NO_TRY_LEVEL };
+    const EH3 = { table: frame=>guest.u32(frame + SCOPE_FRAME.TABLE), none: NO_TRY_LEVEL };
 
     /**
      * _except_handler4's, under the cookie the image's handler names.
@@ -253,7 +246,7 @@ export function createCrtSeh(host){
      * @param {number} cookie @returns {ScopeScheme}
      */
     const eh4 = cookie=>({
-        table: frame=>((readU32(frame + SCOPE_FRAME.TABLE) ^ cookie) + EH4_TABLE_HEADER) >>> 0,
+        table: frame=>((guest.u32(frame + SCOPE_FRAME.TABLE) ^ cookie) + EH4_TABLE_HEADER) >>> 0,
         none: EH4_NO_TRY_LEVEL,
     });
 
@@ -277,13 +270,13 @@ export function createCrtSeh(host){
         {
             return;
         }
-        let level = readU32(frame + SCOPE_FRAME.TRY_LEVEL);
+        let level = guest.u32(frame + SCOPE_FRAME.TRY_LEVEL);
         // A table is finite, and a level that encloses itself is a table the
         // program damaged; walking it would not end.
         for (let guard = 0; level !== scheme.none && level !== stop && guard < 4096; guard++)
         {
             const scope = entryAt(table, level);
-            writeU32(frame + SCOPE_FRAME.TRY_LEVEL, scope.enclosing);
+            guest.set32(frame + SCOPE_FRAME.TRY_LEVEL, scope.enclosing);
             // A filter of zero is a __finally: no question is asked, the
             // block simply runs as the frame goes away.
             if (scope.filter === 0 && host.isMapped(scope.target))
@@ -338,9 +331,9 @@ export function createCrtSeh(host){
         // the one that faulted.
         const asked = host.currentThread?.();
         const at = wholeAddress(frame);
-        const flags = readU32(wholeAddress(record) + 4);
+        const flags = guest.u32(wholeAddress(record) + 4);
         const table = scheme.table(at);
-        let level = readU32(at + SCOPE_FRAME.TRY_LEVEL);
+        let level = guest.u32(at + SCOPE_FRAME.TRY_LEVEL);
         // The exception pointers a filter reads through its frame, kept below
         // everything the handler was called with, and every block this handler
         // runs is built below them.
@@ -362,9 +355,9 @@ export function createCrtSeh(host){
             return Disposition.CONTINUE_SEARCH;
         }
 
-        writeU32(pointers, record >>> 0);
-        writeU32(pointers + 4, context >>> 0);
-        writeU32(at + SCOPE_FRAME.POINTERS, pointers);
+        guest.set32(pointers, record >>> 0);
+        guest.set32(pointers + 4, context >>> 0);
+        guest.set32(at + SCOPE_FRAME.POINTERS, pointers);
 
         for (let guard = 0; level !== scheme.none && guard < 4096; guard++)
         {
@@ -392,8 +385,8 @@ export function createCrtSeh(host){
                     });
                     clearUnwinding(record >>> 0);
                     await localUnwind(at, level, how, scheme);
-                    writeU32(at + SCOPE_FRAME.TRY_LEVEL, scope.enclosing);
-                    const esp = readU32(at + SCOPE_FRAME.SAVED_ESP);
+                    guest.set32(at + SCOPE_FRAME.TRY_LEVEL, scope.enclosing);
+                    const esp = guest.u32(at + SCOPE_FRAME.SAVED_ESP);
                     return host.continueAt({
                         eip: scope.target, esp, ebp: at + SCOPE_FRAME.EBP,
                     }, { below: esp });
@@ -439,23 +432,23 @@ export function createCrtSeh(host){
         const registers = host.registers();
         const at = wholeAddress(buffer);
         const esp = frame ? frame.callerStack + 4 >>> 0 : registers.esp ?? 0;
-        writeU32(at + JMP_BUF.EBP, registers.ebp ?? 0);
-        writeU32(at + JMP_BUF.EBX, registers.ebx ?? 0);
-        writeU32(at + JMP_BUF.EDI, registers.edi ?? 0);
-        writeU32(at + JMP_BUF.ESI, registers.esi ?? 0);
-        writeU32(at + JMP_BUF.ESP, esp);
-        writeU32(at + JMP_BUF.EIP, frame ? frame.hostReturn : registers.eip ?? 0);
+        guest.set32(at + JMP_BUF.EBP, registers.ebp ?? 0);
+        guest.set32(at + JMP_BUF.EBX, registers.ebx ?? 0);
+        guest.set32(at + JMP_BUF.EDI, registers.edi ?? 0);
+        guest.set32(at + JMP_BUF.ESI, registers.esi ?? 0);
+        guest.set32(at + JMP_BUF.ESP, esp);
+        guest.set32(at + JMP_BUF.EIP, frame ? frame.hostReturn : registers.eip ?? 0);
         standing.set(at, esp + argumentWords * 4 >>> 0);
         const teb = host.teb?.() ?? 0;
-        writeU32(at + JMP_BUF.REGISTRATION, teb === 0 ? 0 : readU32(teb));
+        guest.set32(at + JMP_BUF.REGISTRATION, teb === 0 ? 0 : guest.u32(teb));
         if (unwind)
         {
-            writeU32(at + JMP_BUF.COOKIE, JMP_COOKIE);
-            writeU32(at + JMP_BUF.UNWIND_FUNC, unwind[0] ?? 0);
-            writeU32(at + JMP_BUF.TRY_LEVEL, unwind.length > 1 ? unwind[1] : NO_TRY_LEVEL);
+            guest.set32(at + JMP_BUF.COOKIE, JMP_COOKIE);
+            guest.set32(at + JMP_BUF.UNWIND_FUNC, unwind[0] ?? 0);
+            guest.set32(at + JMP_BUF.TRY_LEVEL, unwind.length > 1 ? unwind[1] : NO_TRY_LEVEL);
             for (let index = 0; index < UNWIND_DATA_WORDS; index++)
             {
-                writeU32(at + JMP_BUF.UNWIND_DATA + index * 4, unwind[index + 2] ?? 0);
+                guest.set32(at + JMP_BUF.UNWIND_DATA + index * 4, unwind[index + 2] ?? 0);
             }
         }
         // Zero says "this is the call that set the mark", and it is how the
@@ -480,8 +473,8 @@ export function createCrtSeh(host){
         handler: ([buffer])=>{
             const at = wholeAddress(buffer);
             const asked = host.currentThread?.();
-            return localUnwind(readU32(at + JMP_BUF.REGISTRATION),
-                readU32(at + JMP_BUF.TRY_LEVEL), {
+            return localUnwind(guest.u32(at + JMP_BUF.REGISTRATION),
+                guest.u32(at + JMP_BUF.TRY_LEVEL), {
                     thread: asked,
                     stackAtRest: (host.registers().esp - 0x10 & ~0xf) >>> 0,
                 }).then(()=>0);
@@ -513,7 +506,7 @@ export function createCrtSeh(host){
                 argBytes: 24,
                 /** @param {number[]} args */
                 handler: ([cookie, , record, frame, context, dispatcher])=>exceptHandler3(
-                    [record, frame, context, dispatcher], eh4(readU32(wholeAddress(cookie)))),
+                    [record, frame, context, dispatcher], eh4(guest.u32(wholeAddress(cookie)))),
             },
 
             /**
@@ -601,7 +594,7 @@ export function createCrtSeh(host){
                     const unwind = [];
                     for (let index = 0; index < words; index++)
                     {
-                        unwind.push(readU32(/** @type {number} */ (from) + 12 + index * 4));
+                        unwind.push(guest.u32(/** @type {number} */ (from) + 12 + index * 4));
                     }
                     return setjmp(buffer, frame, 2 + (count >>> 0), unwind);
                 },
@@ -625,23 +618,23 @@ export function createCrtSeh(host){
                 handler: ([buffer, value])=>{
                     const at = wholeAddress(buffer);
                     const target = {
-                        ebp: readU32(at + JMP_BUF.EBP),
-                        ebx: readU32(at + JMP_BUF.EBX),
-                        edi: readU32(at + JMP_BUF.EDI),
-                        esi: readU32(at + JMP_BUF.ESI),
-                        esp: readU32(at + JMP_BUF.ESP),
-                        eip: readU32(at + JMP_BUF.EIP),
+                        ebp: guest.u32(at + JMP_BUF.EBP),
+                        ebx: guest.u32(at + JMP_BUF.EBX),
+                        edi: guest.u32(at + JMP_BUF.EDI),
+                        esi: guest.u32(at + JMP_BUF.ESI),
+                        esp: guest.u32(at + JMP_BUF.ESP),
+                        eip: guest.u32(at + JMP_BUF.EIP),
                         // What setjmp appears to return the second time. Never
                         // zero, or the program cannot tell the arrivals apart
                         // and takes the first branch for ever.
                         eax: ((value | 0) === 0 ? 1 : value | 0) >>> 0,
                     };
-                    const registration = readU32(at + JMP_BUF.REGISTRATION);
+                    const registration = guest.u32(at + JMP_BUF.REGISTRATION);
                     const teb = host.teb?.() ?? 0;
                     const across = teb !== 0 && registration !== 0
-                        && readU32(teb) !== registration;
-                    const own = readU32(at + JMP_BUF.COOKIE) === JMP_COOKIE
-                        ? readU32(at + JMP_BUF.UNWIND_FUNC) : 0;
+                        && guest.u32(teb) !== registration;
+                    const own = guest.u32(at + JMP_BUF.COOKIE) === JMP_COOKIE
+                        ? guest.u32(at + JMP_BUF.UNWIND_FUNC) : 0;
                     if (!across && own === 0)
                     {
                         host.setRegisters(target);

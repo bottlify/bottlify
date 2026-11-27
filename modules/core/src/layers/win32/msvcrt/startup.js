@@ -121,8 +121,8 @@ function splitCommandLineWords(line){
 
 /**
  * @typedef {Object} StartupHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest  The process's memory: its
+ *     vectors, `_pgmptr`, `_acmdln` and the exit tables at its pointer width.
  * @property {(bytes: number) => number} allocate
  * @property {() => string} commandLine
  * @property {() => string} [imagePath]
@@ -160,9 +160,6 @@ function splitCommandLineWords(line){
  * @property {{ narrow: () => number, wide: () => number }} [environment]
  *           The runtime's environment arrays (`environ.js`), which the main
  *           arguments hand on as they stand. Absent, an empty one.
- * @property {number} [pointerSize]
- *           8 in a 64-bit process, where argv, the initialiser tables and the
- *           exit tables hold 8-byte pointers. Absent, 4.
  */
 
 /**
@@ -171,7 +168,8 @@ function splitCommandLineWords(line){
  */
 export function createStartupFunctions(host){
     const version = host.version ?? windowsVersion();
-    const width = pointerWidth(host.pointerSize);
+    const { guest } = host;
+    const width = pointerWidth(guest.pointerSize);
 
     /**
      * A C string in guest memory that outlives this call, in the ANSI page
@@ -187,7 +185,7 @@ export function createStartupFunctions(host){
         {
             return 0;
         }
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
         return address;
     };
 
@@ -204,33 +202,32 @@ export function createStartupFunctions(host){
         {
             return 0;
         }
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
         return address;
     };
 
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        if ((address >>> 0) === 0)
+    /**
+     * An int answered through the caller's pointer; nothing for a null one.
+     *
+     * @param {number} address @param {number} value
+     */
+    const intThrough = (address, value)=>{
+        if (wholeAddress(address) !== 0)
         {
-            return;
-        }
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
-
-    /** @param {number} address @param {number} value */
-    const writePointer = (address, value)=>{
-        if ((address >>> 0) !== 0)
-        {
-            host.writeMemory(wholeAddress(address), width.bytes(value));
+            guest.set32(address, value);
         }
     };
 
-    /** @param {number} address */
-    const readPointer = address=>{
-        const bytes = host.readMemory(wholeAddress(address), width.size);
-        return width.get(new DataView(bytes.buffer, bytes.byteOffset, width.size), 0);
+    /**
+     * A pointer answered through the caller's, whole; nothing for a null one.
+     *
+     * @param {number} address @param {number} value
+     */
+    const pointerThrough = (address, value)=>{
+        if (wholeAddress(address) !== 0)
+        {
+            guest.setPtr(address, value);
+        }
     };
 
     /**
@@ -242,7 +239,7 @@ export function createStartupFunctions(host){
         const entries = [];
         for (let at = first; at + width.size <= last; at += width.size)
         {
-            const entry = readPointer(at);
+            const entry = guest.ptr(at);
             if (entry !== 0)
             {
                 entries.push(entry);
@@ -325,7 +322,7 @@ export function createStartupFunctions(host){
         const address = host.allocate(bytes.length);
         if (address !== 0)
         {
-            host.writeMemory(address, bytes);
+            guest.setBytes(address, bytes);
         }
         return address;
     };
@@ -349,18 +346,18 @@ export function createStartupFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     globals.set(host.errnoName?.() ?? 'errno', EINVAL);
                     return EINVAL;
                 }
-                host.writeMemory(wholeAddress(out), dword(pointer()));
+                guest.setPtr(out, pointer());
                 return 0;
             },
         });
         return {
-            _pgmptr: { data: ()=>dword(narrowPath()) },
-            _wpgmptr: { data: ()=>dword(widePath()) },
+            _pgmptr: { data: ()=>width.bytes(narrowPath()) },
+            _wpgmptr: { data: ()=>width.bytes(widePath()) },
             _get_pgmptr: getter(narrowPath),
             _get_wpgmptr: getter(widePath),
         };
@@ -378,8 +375,8 @@ export function createStartupFunctions(host){
         return wideMainArgs;
     };
 
-    /** @param {number} value @returns {Uint8Array} a dword, as a data export holds one */
-    const dword = value=>{
+    /** @param {number} value @returns {Uint8Array} an int, as a data export holds one */
+    const intBytes = value=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         return bytes;
@@ -433,9 +430,9 @@ export function createStartupFunctions(host){
             /** @param {number[]} args */
             handler: ([argc, argv, env, wildcards])=>{
                 const built = buildMainArgs(wildcards !== 0);
-                writeU32(argc, built.argc);
-                writePointer(argv, built.argv);
-                writePointer(env, host.environment?.narrow() ?? built.env);
+                intThrough(argc, built.argc);
+                pointerThrough(argv, built.argv);
+                pointerThrough(env, host.environment?.narrow() ?? built.env);
                 return 0;
             },
         },
@@ -453,9 +450,9 @@ export function createStartupFunctions(host){
             /** @param {number[]} args */
             handler: ([argc, argv, env, wildcards])=>{
                 const built = buildWideMainArgs(wildcards !== 0);
-                writeU32(argc, built.argc);
-                writePointer(argv, built.argv);
-                writePointer(env, host.environment?.wide() ?? buildMainArgs().env);
+                intThrough(argc, built.argc);
+                pointerThrough(argv, built.argv);
+                pointerThrough(env, host.environment?.wide() ?? buildMainArgs().env);
                 return 0;
             },
         },
@@ -642,11 +639,7 @@ export function createStartupFunctions(host){
          * a program is free to read either and compare.
          */
         _acmdln: {
-            data: ()=>{
-                const bytes = new Uint8Array(4);
-                new DataView(bytes.buffer).setUint32(0, publish(host.commandLine()), true);
-                return bytes;
-            },
+            data: ()=>width.bytes(publish(host.commandLine())),
         },
 
         ...host.imagePath ? programPath(/** @type {() => string} */ (host.imagePath)) : {},
@@ -678,11 +671,11 @@ export function createStartupFunctions(host){
          * for the Windows the process is told it runs on, since a program may
          * compare the two.
          */
-        _osplatform: { data: ()=>dword(version.platformId) },
-        _osver: { data: ()=>dword(version.build) },
-        _winver: { data: ()=>dword(version.major << 8 | version.minor) },
-        _winmajor: { data: ()=>dword(version.major) },
-        _winminor: { data: ()=>dword(version.minor) },
+        _osplatform: { data: ()=>intBytes(version.platformId) },
+        _osver: { data: ()=>intBytes(version.build) },
+        _winver: { data: ()=>intBytes(version.major << 8 | version.minor) },
+        _winmajor: { data: ()=>intBytes(version.major) },
+        _winminor: { data: ()=>intBytes(version.minor) },
 
         /**
          * double _HUGE
@@ -725,7 +718,7 @@ export function createStartupFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([fn])=>{
-                onExit.push(fn >>> 0);
+                onExit.push(wholeAddress(fn));
                 return wholeAddress(fn);
             },
         },
@@ -756,9 +749,9 @@ export function createStartupFunctions(host){
             /** @param {number[]} args */
             handler: ([fn, pbegin, pend])=>{
                 const size = width.size;
-                const begin = readPointer(pbegin);
-                const empty = begin === 0 || begin === 0xffffffff;
-                const count = empty ? 0 : Math.trunc(((readPointer(pend) - begin) >>> 0) / size);
+                const begin = guest.ptr(pbegin);
+                const empty = begin === 0 || begin === 2 ** (size * 8) - 1;
+                const count = empty ? 0 : Math.trunc(((guest.ptr(pend) - begin) >>> 0) / size);
                 // ponytail: a fresh array per entry, the old one left to the
                 // library's own free at detach; resize when a table gets long.
                 const grown = host.allocate((count + 1) * size);
@@ -768,11 +761,11 @@ export function createStartupFunctions(host){
                 }
                 if (count > 0)
                 {
-                    host.writeMemory(grown, host.readMemory(begin, count * size));
+                    guest.copy(grown, begin, count * size);
                 }
-                writePointer(grown + count * size, fn >>> 0);
-                writePointer(pbegin, grown);
-                writePointer(pend, grown + (count + 1) * size);
+                pointerThrough(grown + count * size, wholeAddress(fn));
+                pointerThrough(pbegin, grown);
+                pointerThrough(pend, grown + (count + 1) * size);
                 return wholeAddress(fn);
             },
         },

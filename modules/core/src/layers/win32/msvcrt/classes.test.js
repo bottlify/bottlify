@@ -56,7 +56,7 @@ function build(pointerSize){
             memory.setU32(start + at, /** @type {number} */ (addresses.get(to)));
         }
     }
-    const cxx = createCxxFunctions({ guest: memory.guest, readCString: memory.readCString });
+    const cxx = createCxxFunctions({ guest: memory.guest });
     /** @param {string} name @param {number[]} args */
     const call = (name, args)=>(table[name] ?? /** @type {any} */ (table)[UNIVERSAL_CXX][name])
         .handler(args);

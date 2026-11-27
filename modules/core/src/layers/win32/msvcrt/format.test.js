@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {
     formatToString, guestAccess, sequentialArguments, varargsSlots, wideSlots,
 } from './format.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /** Pointers the guest would hold; the engine never invents one of its own. */
 const HELLO = 0x100;
@@ -212,10 +213,6 @@ test('h makes an integer its low sixteen bits, and the modifiers run together', 
 test('%Z prints a counted string and %n writes the count, where the guest memory is given', ()=>{
     const memory = new Uint8Array(0x1000);
     const view = new DataView(memory.buffer);
-    const read = (/** @type {number} */ at, /** @type {number} */ length)=>
-        memory.slice(at, at + length);
-    const write = (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-        memory.set(bytes, at);
     memory.set([...'not wide'].map(c=>c.charCodeAt(0)), 0x100);
     view.setUint16(0x10, 2, true);
     view.setUint32(0x14, 0x100, true);
@@ -223,7 +220,7 @@ test('%Z prints a counted string and %n writes the count, where the guest memory
     view.setUint16(0x20, 4, true);
     view.setUint32(0x24, 0x200, true);
     view.setUint32(0x34, 0, true);
-    const options = { ...guestAccess(read, write) };
+    const options = { ...guestAccess(guestWindow(memory)) };
     assert.equal(formatToString('%Z|%wZ|%Z|%Z', [0x10, 0x20, 0, 0x30], readString, options),
         'no|wi|(null)|(null)');
     assert.equal(formatToString('asdf%n!', [0x40], readString, options), 'asdf!');

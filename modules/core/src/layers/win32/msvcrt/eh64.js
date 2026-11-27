@@ -57,7 +57,7 @@
 
 import { EXCEPTION_NONCONTINUABLE } from '../kernel32/seh.js';
 import { Disposition } from '../kernel32/seh64.js';
-import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The exception code every C++ throw raises: 0xE0 followed by "msc". */
 const EH_EXCEPTION_NUMBER = 0xe06d7363;
@@ -151,50 +151,50 @@ const WALK_LIMIT = 4096;
  */
 
 /**
+ * An address the tables name image-relative: the image's base, whole past
+ * 4 GiB where a 64-bit image lies at its own base, and the offset, a dword.
+ *
+ * @param {number} base @param {number} rva
+ */
+const imageAddress = (base, rva)=>wholeAddress(base) + (rva >>> 0);
+
+/**
  * A byte reader over guest memory: unsigned and signed words, and the
  * compressed numbers of the FH4 tables.
  *
- * @param {(address: number, length: number) => Uint8Array} readMemory
+ * @param {import('../common/guest.js').Guest} guest
  */
-export function createTableReader(readMemory){
-    /** @param {number} at */
-    const u32 = at=>{
-        const bytes = readMemory(wholeAddress(at), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
+export function createTableReader(guest){
+    const { u8 } = guest;
     return {
-        u32,
-        /** @param {number} at */
-        i32: at=>u32(at) | 0,
-        /** @param {number} at */
-        u8: at=>readMemory(wholeAddress(at), 1)[0],
+        u32: guest.u32,
+        i32: guest.i32,
+        u8,
         /**
-         * A compressed unsigned number at `at`: its value and its length.
+         * A compressed unsigned number at `at`: its value and its length, its
+         * bytes read as far as its first says it goes.
          *
          * @param {number} at
          */
         compressed(at){
-            const bytes = readMemory(wholeAddress(at), 5);
-            const first = bytes[0];
+            const first = u8(at);
             if ((first & 1) === 0)
             {
                 return { value: first >>> 1, length: 1 };
             }
             if ((first & 3) === 1)
             {
-                return { value: (first | bytes[1] << 8) >>> 2, length: 2 };
+                return { value: (first | u8(at + 1) << 8) >>> 2, length: 2 };
             }
             if ((first & 7) === 3)
             {
-                return { value: (first | bytes[1] << 8 | bytes[2] << 16) >>> 3, length: 3 };
+                return { value: (first | u8(at + 1) << 8 | u8(at + 2) << 16) >>> 3, length: 3 };
             }
             if ((first & 15) === 7)
             {
-                return { value: (first | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 4,
-                    length: 4 };
+                return { value: guest.u32(at) >>> 4, length: 4 };
             }
-            return { value: (bytes[1] | bytes[2] << 8 | bytes[3] << 16 | bytes[4] << 24) >>> 0,
-                length: 5 };
+            return { value: guest.u32(at + 1), length: 5 };
         },
     };
 }
@@ -213,7 +213,7 @@ export function readFuncInfo3(read, imageBase, info){
         return null;
     }
     /** @param {number} rva */
-    const at = rva=>imageBase + rva >>> 0;
+    const at = rva=>imageAddress(imageBase, rva);
     const maxState = Math.min(Math.max(read.i32(info + FUNC_INFO.MAX_STATE), 0), WALK_LIMIT);
     const unwindMap = read.u32(info + FUNC_INFO.UNWIND_MAP);
     const unwind = Array.from({ length: maxState }, (_unused, state)=>{
@@ -256,7 +256,7 @@ export function readFuncInfo3(read, imageBase, info){
         // call's return address is placed after it by the compiler, inside
         // the call's state.
         stateAt(pc){
-            const rva = pc - imageBase >>> 0;
+            const rva = wholeAddress(pc) - wholeAddress(imageBase) >>> 0;
             let low = 0;
             let high = ipCount - 1;
             let state = -1;
@@ -316,7 +316,7 @@ export function readFuncInfo4(read, imageBase, info, begin){
     const unwind = [];
     if (unwindRva !== 0)
     {
-        cursor = imageBase + unwindRva >>> 0;
+        cursor = imageAddress(imageBase, unwindRva);
         const count = Math.min(unsigned(), WALK_LIMIT);
         const start = cursor;
         /** @type {Map<number, number>} the state each entry's offset is */
@@ -334,7 +334,7 @@ export function readFuncInfo4(read, imageBase, info, begin){
             let object = 0;
             if (kind !== UNWIND_KIND.NONE)
             {
-                action = imageBase + int() >>> 0;
+                action = imageAddress(imageBase, int());
             }
             if (kind === UNWIND_KIND.OBJECT || kind === UNWIND_KIND.POINTER_TO_OBJECT)
             {
@@ -355,7 +355,7 @@ export function readFuncInfo4(read, imageBase, info, begin){
     const tries = [];
     if (tryRva !== 0)
     {
-        cursor = imageBase + tryRva >>> 0;
+        cursor = imageAddress(imageBase, tryRva);
         const count = Math.min(unsigned(), WALK_LIMIT);
         /** @type {number[]} */
         const lists = [];
@@ -369,7 +369,7 @@ export function readFuncInfo4(read, imageBase, info, begin){
             {
                 return;
             }
-            cursor = imageBase + lists[index] >>> 0;
+            cursor = imageAddress(imageBase, lists[index]);
             const handlers = Math.min(unsigned(), WALK_LIMIT);
             for (let which = 0; which < handlers; which++)
             {
@@ -377,18 +377,18 @@ export function readFuncInfo4(read, imageBase, info, begin){
                 const adjectives = (flags & HANDLER4.ADJECTIVES) !== 0 ? unsigned() : 0;
                 const type = (flags & HANDLER4.TYPE) !== 0 ? int() : 0;
                 const catchObject = (flags & HANDLER4.CATCH_OBJECT) !== 0 ? unsigned() : 0;
-                const handler = imageBase + int() >>> 0;
+                const handler = imageAddress(imageBase, int());
                 const continuationCount = flags >>> 4 & 3;
                 /** @type {number[]} */
                 const continuations = [];
                 for (let next = 0; next < Math.min(continuationCount, 2); next++)
                 {
                     continuations.push((flags & HANDLER4.CONTINUATION_RVA) !== 0
-                        ? imageBase + int() >>> 0
-                        : begin + unsigned() >>> 0);
+                        ? imageAddress(imageBase, int())
+                        : wholeAddress(begin) + unsigned());
                 }
                 block.handlers.push({
-                    adjectives, type: type === 0 ? 0 : imageBase + type >>> 0, catchObject,
+                    adjectives, type: type === 0 ? 0 : imageAddress(imageBase, type), catchObject,
                     handler, frame: 0, continuations,
                 });
             }
@@ -397,7 +397,7 @@ export function readFuncInfo4(read, imageBase, info, begin){
 
     // The IP-to-state map of this function or funclet: separated code keeps
     // one per segment, found by the segment's start.
-    let ipMap = imageBase + ipRva >>> 0;
+    let ipMap = imageAddress(imageBase, ipRva);
     if ((header & FH4.IS_SEPARATED) !== 0)
     {
         cursor = ipMap;
@@ -407,9 +407,9 @@ export function readFuncInfo4(read, imageBase, info, begin){
         {
             const segment = int();
             const map = int();
-            if ((imageBase + segment >>> 0) === (begin >>> 0))
+            if (imageAddress(imageBase, segment) === wholeAddress(begin))
             {
-                ipMap = imageBase + map >>> 0;
+                ipMap = imageAddress(imageBase, map);
             }
         }
     }
@@ -422,7 +422,7 @@ export function readFuncInfo4(read, imageBase, info, begin){
         let ip = wholeAddress(begin);
         for (let index = 0; index < count; index++)
         {
-            ip = ip + unsigned() >>> 0;
+            ip += unsigned();
             ips.push({ ip, state: unsigned() - 1 });
         }
     }
@@ -434,7 +434,7 @@ export function readFuncInfo4(read, imageBase, info, begin){
             let state = -1;
             for (const entry of ips)
             {
-                if ((pc >>> 0) < entry.ip)
+                if (wholeAddress(pc) < entry.ip)
                 {
                     break;
                 }
@@ -450,9 +450,8 @@ export function readFuncInfo4(read, imageBase, info, begin){
 
 /**
  * @typedef {Object} CxxEh64Host
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  A 64-bit process's: its
+ *     pointers eight bytes, read and written whole.
  * @property {(address: number) => boolean} isMapped
  * @property {(address: number) => number} imageBaseOf  The base of the image an
  *     address lies in; zero outside every image.
@@ -484,9 +483,8 @@ export function readFuncInfo4(read, imageBase, info, begin){
  * @param {CxxEh64Host} host
  */
 export function createCxxExceptions64(host){
-    const read = createTableReader(host.readMemory);
-    /** A pointer read and written whole: eight bytes, the process being a 64-bit one. */
-    const { read: readPointer, write: writePointer } = pointerIo(host, 8);
+    const { guest } = host;
+    const read = createTableReader(guest);
 
     /** @type {WeakMap<object, Caught[]>} */
     const caughtBy = new WeakMap();
@@ -509,7 +507,7 @@ export function createCxxExceptions64(host){
 
     /** @param {number} descriptor */
     const typeName = descriptor=>(descriptor === 0
-        ? '' : host.readCString(descriptor + TYPE_NAME >>> 0, 256));
+        ? '' : guest.cstr(wholeAddress(descriptor) + TYPE_NAME, 256));
 
     /**
      * Where a base lives inside an object: the member displacement, then, for
@@ -521,11 +519,11 @@ export function createCxxExceptions64(host){
         const mdisp = read.i32(catchable + CATCHABLE.MDISP);
         const pdisp = read.i32(catchable + CATCHABLE.PDISP);
         const vdisp = read.i32(catchable + CATCHABLE.VDISP);
-        let at = object + mdisp >>> 0;
+        let at = wholeAddress(object) + mdisp;
         if (pdisp >= 0)
         {
-            const vbtable = readPointer(object + pdisp);
-            at = at + read.i32(vbtable + vdisp) + pdisp >>> 0;
+            const vbtable = guest.ptr(wholeAddress(object) + pdisp);
+            at += read.i32(vbtable + vdisp) + pdisp;
         }
         return at;
     };
@@ -546,7 +544,7 @@ export function createCxxExceptions64(host){
         {
             return true;
         }
-        const offered = throwBase + read.u32(catchable + CATCHABLE.TYPE) >>> 0;
+        const offered = imageAddress(throwBase, read.u32(catchable + CATCHABLE.TYPE));
         if (handler.type !== offered && typeName(handler.type) !== typeName(offered))
         {
             return false;
@@ -577,7 +575,7 @@ export function createCxxExceptions64(host){
      * @returns {CxxFunction | null}
      */
     const tablesOf = (visit, format)=>{
-        const info = visit.fn.imageBase + read.u32(visit.handlerData) >>> 0;
+        const info = imageAddress(visit.fn.imageBase, read.u32(visit.handlerData));
         return format === 3
             ? readFuncInfo3(read, visit.fn.imageBase, info)
             : readFuncInfo4(read, visit.fn.imageBase, info, visit.fn.begin);
@@ -603,31 +601,33 @@ export function createCxxExceptions64(host){
             {
                 continue;
             }
-            const handler = block.handlers.find(entry=>entry.handler === visit.fn.begin >>> 0);
+            const begin = wholeAddress(visit.fn.begin);
+            const handler = block.handlers.find(entry=>entry.handler === begin);
             if (handler)
             {
                 inCatch = block;
-                parent = readPointer(visit.establisher
+                parent = guest.ptr(wholeAddress(visit.establisher)
                     + (fn.format === 3 ? handler.frame : fn.catchFrame));
             }
         }
         if (parent < 0 && fn.isCatch)
         {
-            parent = readPointer(visit.establisher + fn.catchFrame);
+            parent = guest.ptr(wholeAddress(visit.establisher) + fn.catchFrame);
         }
         if (parent >= 0)
         {
-            visit.memo.set(`cxx:${parent >>> 0}`, state);
-            return { frame: parent >>> 0, state, inCatch, funclet: true };
+            visit.memo.set(`cxx:${parent}`, state);
+            return { frame: parent, state, inCatch, funclet: true };
         }
-        const key = `cxx:${visit.establisher >>> 0}`;
+        const establisher = wholeAddress(visit.establisher);
+        const key = `cxx:${establisher}`;
         const left = visit.memo.get(key);
         if (left !== undefined)
         {
             visit.memo.delete(key);
-            return { frame: visit.establisher >>> 0, state: left, inCatch, funclet: false };
+            return { frame: establisher, state: left, inCatch, funclet: false };
         }
-        return { frame: visit.establisher >>> 0, state, inCatch, funclet: false };
+        return { frame: establisher, state, inCatch, funclet: false };
     };
 
     /**
@@ -653,11 +653,11 @@ export function createCxxExceptions64(host){
             let object = 0;
             if (entry.kind === UNWIND_KIND.OBJECT)
             {
-                object = frame + entry.object >>> 0;
+                object = frame + entry.object;
             }
             else if (entry.kind === UNWIND_KIND.POINTER_TO_OBJECT)
             {
-                object = readPointer(frame + entry.object);
+                object = guest.ptr(frame + entry.object);
             }
             await pass.call(entry.action, { rcx: object, rdx: frame });
         }
@@ -675,11 +675,12 @@ export function createCxxExceptions64(host){
         {
             return null;
         }
-        const throwInfo = parameters[2] >>> 0;
+        const throwInfo = wholeAddress(parameters[2]);
         return {
-            object: parameters[1] >>> 0,
+            object: wholeAddress(parameters[1]),
             throwInfo,
-            throwBase: parameters.length >= 4 ? parameters[3] >>> 0 : host.imageBaseOf(throwInfo),
+            throwBase: parameters.length >= 4 ? wholeAddress(parameters[3])
+                : host.imageBaseOf(throwInfo),
         };
     };
 
@@ -694,7 +695,7 @@ export function createCxxExceptions64(host){
             return;
         }
         const rva = read.u32(what.throwInfo + THROW_INFO.UNWIND);
-        const destructor = what.throwBase + rva >>> 0;
+        const destructor = imageAddress(what.throwBase, rva);
         if (rva !== 0 && host.isMapped(destructor))
         {
             await pass.call(destructor, { rcx: what.object });
@@ -714,30 +715,30 @@ export function createCxxExceptions64(host){
         {
             return;
         }
-        const into = frame + handler.catchObject >>> 0;
+        const into = frame + handler.catchObject;
         const properties = read.u32(catchable + CATCHABLE.PROPERTIES);
         const size = read.u32(catchable + CATCHABLE.SIZE);
         const copyRva = read.u32(catchable + CATCHABLE.COPY);
-        const copy = thrown.throwBase + copyRva >>> 0;
+        const copy = imageAddress(thrown.throwBase, copyRva);
         if ((handler.adjectives & HT.REFERENCE) !== 0)
         {
-            writePointer(into, adjust(thrown.object, catchable));
+            guest.setPtr(into, adjust(thrown.object, catchable));
             return;
         }
         if ((properties & CT.SIMPLE) !== 0)
         {
-            host.writeMemory(into, host.readMemory(thrown.object, size));
+            guest.copy(into, thrown.object, size);
             // A pointer is caught as the base it is being caught as.
-            if (size === 8 && readPointer(into) !== 0)
+            if (size === 8 && guest.ptr(into) !== 0)
             {
-                writePointer(into, adjust(readPointer(into), catchable));
+                guest.setPtr(into, adjust(guest.ptr(into), catchable));
             }
             return;
         }
         const source = adjust(thrown.object, catchable);
         if (copyRva === 0 || !host.isMapped(copy))
         {
-            host.writeMemory(into, host.readMemory(source, size));
+            guest.copy(into, source, size);
             return;
         }
         await pass.call(copy, { rcx: into, rdx: source,
@@ -825,7 +826,8 @@ export function createCxxExceptions64(host){
                 + ' frame of a 64-bit process with a translator installed; it is not called');
         }
         const catchables = thrown
-            ? thrown.throwBase + read.u32(thrown.throwInfo + THROW_INFO.CATCHABLE_TYPES) >>> 0 : 0;
+            ? imageAddress(thrown.throwBase,
+                read.u32(thrown.throwInfo + THROW_INFO.CATCHABLE_TYPES)) : 0;
         const catchableCount = thrown ? Math.min(read.u32(catchables), WALK_LIMIT) : 0;
         for (const block of fn.tries)
         {
@@ -852,7 +854,8 @@ export function createCxxExceptions64(host){
                 }
                 for (let type = 0; type < catchableCount; type++)
                 {
-                    const catchable = thrown.throwBase + read.u32(catchables + 4 + type * 4) >>> 0;
+                    const catchable = imageAddress(thrown.throwBase,
+                        read.u32(catchables + 4 + type * 4));
                     if (matches(handler, catchable, thrown.throwInfo, thrown.throwBase))
                     {
                         return catchIt({ visit, pass, frame, block, handler, catchable, thrown });
@@ -903,7 +906,7 @@ export function createCxxExceptions64(host){
         lastError: false,
         /** @param {number[]} args */
         handler: ([, , , dispatcher])=>{
-            const found = host.dispatcherContextAt(dispatcher >>> 0);
+            const found = host.dispatcherContextAt(wholeAddress(dispatcher));
             if (!found)
             {
                 host.divergence?.(name, 'called with a dispatcher context no walk of this'
@@ -1007,7 +1010,7 @@ export function createCxxExceptions64(host){
                 /** @param {number[]} args */
                 handler: ([handler])=>{
                     const previous = terminateHandler;
-                    terminateHandler = handler >>> 0;
+                    terminateHandler = wholeAddress(handler);
                     return BigInt(previous);
                 },
             },
@@ -1019,7 +1022,7 @@ export function createCxxExceptions64(host){
                 /** @param {number[]} args */
                 handler: ([handler])=>{
                     const previous = unexpectedHandler;
-                    unexpectedHandler = handler >>> 0;
+                    unexpectedHandler = wholeAddress(handler);
                     return BigInt(previous);
                 },
             },
@@ -1035,7 +1038,7 @@ export function createCxxExceptions64(host){
                 /** @param {number[]} args */
                 handler: ([handler])=>{
                     const previous = translator;
-                    translator = handler >>> 0;
+                    translator = wholeAddress(handler);
                     return BigInt(previous);
                 },
             },

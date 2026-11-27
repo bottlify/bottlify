@@ -16,6 +16,7 @@ import { COMPILED } from './inguest-int64.x86.js';
 import { COMPILED as LONG } from './inguest-int64.x64.js';
 import * as sources from './inguest-int64.js';
 import { createConversionFunctions } from './convert.js';
+import { guestThrough } from './guest-window.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { DATA, DATA_END, equivalence, random } from
     '../../../../scripts/guest-code/equivalence.mjs';
@@ -34,14 +35,18 @@ function handlers(){
     const errno = [];
     const table = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
         createConversionFunctions({
-            readCString: (address, limit)=>{
+            // Over whichever case's memory is the current one; a string read
+            // as the engine's memory reads it, its terminator within reach.
+            guest: { ...guestThrough((address, length)=>memory.slice(address, address + length),
+                (address, bytes)=>memory.set(bytes, address)),
+            cstr: (address, limit = 0)=>{
                 const end = memory.indexOf(0, address);
                 if (end === -1 || end - address >= limit)
                 {
                     throw new Error(`No NUL within ${limit} bytes`);
                 }
                 return decodeAnsi(memory.subarray(address, end));
-            },
+            } },
             readMemory: (address, length)=>memory.slice(address, address + length),
             writeMemory: (address, bytes)=>memory.set(bytes, address),
             allocate: ()=>{

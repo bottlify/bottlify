@@ -45,6 +45,10 @@ import { COMPILED as SCAN } from './inguest-scan.x86.js';
 import { COMPILED as SCAN_LONG } from './inguest-scan.x64.js';
 import { setSingle } from './float.js';
 import { wholeAddress } from '../common/pointers.js';
+import { writeMade } from '../common/guest.js';
+
+/** How much of a long copy is read before it is written. */
+const MOVE_CHUNK = 0x10000;
 
 /**
  * Each function's x86-64 code by its i386, the two compiled from one source:
@@ -313,6 +317,23 @@ export function guestMemory(host){
         fill(scratchView);
         host.writeMemory(at(address), pieces[length]);
     };
+    /**
+     * A run of the program's length moved a chunk at a time, no buffer of it
+     * made on the host: each chunk read whole before it is written, from the
+     * end down where the destination is above the source, so an overlap
+     * moves as the byte loop it stands for does.
+     *
+     * @param {number} destination @param {number} source @param {number} length
+     * @param {boolean} down
+     */
+    const moveChunks = (destination, source, length, down)=>{
+        for (let done = 0; done < length; done += MOVE_CHUNK)
+        {
+            const size = Math.min(MOVE_CHUNK, length - done);
+            const offset = down ? length - done - size : done;
+            host.writeMemory(at(destination + offset), host.readMemory(at(source + offset), size));
+        }
+    };
     /** @param {number} address */
     const u8 = address=>host.readMemory(at(address), 1)[0];
     /** @param {number} address @param {number} value */
@@ -350,7 +371,7 @@ export function guestMemory(host){
             // same bytes the ascending one does.
             if ((destination - source >>> 0) >= length)
             {
-                host.writeMemory(at(destination), host.readMemory(at(source), length));
+                moveChunks(destination, source, length, false);
                 return;
             }
             for (let i = 0; i < length; i++)
@@ -362,7 +383,7 @@ export function guestMemory(host){
             const length = count >>> 0;
             if ((source - destination >>> 0) >= length)
             {
-                host.writeMemory(at(destination), host.readMemory(at(source), length));
+                moveChunks(destination, source, length, true);
                 return;
             }
             for (let i = length - 1; i >= 0; i--)
@@ -376,7 +397,10 @@ export function guestMemory(host){
                 host.fillMemory(at(destination), value & 0xff, count >>> 0);
                 return;
             }
-            host.writeMemory(at(destination), new Uint8Array(count >>> 0).fill(value & 0xff));
+            // A chunk at a time: the count is the program's, and no buffer
+            // of it is made on the host.
+            writeMade(host.writeMemory, at(destination), count >>> 0,
+                chunk=>void chunk.fill(value & 0xff));
         },
         // One thread's reference: the host answers it with nothing else running.
         compareExchange: (address, expected, value)=>{

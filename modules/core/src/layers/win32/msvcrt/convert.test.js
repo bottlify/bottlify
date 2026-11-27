@@ -10,6 +10,7 @@ import {
     createConversionFunctions, scanInteger, scanFloat, scanStandardDecimal,
 } from './convert.js';
 import { fakeMemory, doubleSlots, fakeFpu } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const build = (/** @type {any} */ fpu = undefined)=>{
     const memory = fakeMemory();
@@ -296,6 +297,7 @@ test('strtod and atof hand over a long number, which the handler reads through a
     // A string that ends 40 bytes before the end of what is mapped: a
     // window of 64 from it would run past, as the memory layer refuses.
     const mapped = 0x20000;
+    const fenced = guestWindow(memory.bytes.subarray(0, mapped));
     const table = /** @type {Record<string, any>} */ (createConversionFunctions({
         ...memory, fpu,
         /** @param {number} address @param {number} length */
@@ -306,11 +308,11 @@ test('strtod and atof hand over a long number, which the handler reads through a
             }
             return memory.readMemory(address, length);
         },
-        /** @param {number} address @param {number} max */
-        readCString: (address, max)=>{
+        // The guest view fenced where the mapping ends, its whole reads counted.
+        guest: { ...fenced, cstr: (address, max)=>{
             whole++;
-            return memory.readCString(address, max);
-        },
+            return fenced.cstr(address, max);
+        } },
     }));
     const seventeen = '0.12345678901234567';
     /** @type {[string, number, number, number][]} text, value, end, reads of the whole */
@@ -385,7 +387,8 @@ test('a 64-bit caller\'s end pointer is written whole, its high half zero', ()=>
     // of whatever the variable held, and the caller's next read faults.
     const memory = fakeMemory();
     const table = /** @type {Record<string, any>} */ (
-        createConversionFunctions({ ...memory, pointerSize: 8 }));
+        createConversionFunctions({ ...memory, pointerSize: 8,
+            guest: guestWindow(memory.bytes, { pointerSize: 8 }) }));
     const end = memory.allocate(8);
     const view = new DataView(memory.bytes.buffer);
     view.setBigUint64(end, 0xccccccccccccccccn, true);
@@ -615,4 +618,47 @@ test('the universal runtime reads C99\'s infinities, NaNs and hexadecimal number
     assert.equal(scanStandardDecimal('nan(ind)')?.end, 8, 'the parenthesised part is read');
     assert.equal(scanStandardDecimal('input'), null);
     assert.equal(scanStandardDecimal('-input'), null);
+});
+
+test('at 64 bits past 4 GiB: every end pointer is written whole, the null text\'s too', ()=>{
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    const fpu = fakeFpu();
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({
+        guest: guestWindow(bytes, { base, pointerSize: 8 }),
+        writeMemory: (at, data)=>bytes.set(data, at - base),
+        allocate: ()=>0,
+        fpu,
+        pointerSize: 8,
+    }));
+    /** @param {number} at */
+    const quad = at=>view.getUint32(at - base, true)
+        + view.getUint32(at - base + 4, true) * 2 ** 32;
+    const text = base + 0x100;
+    bytes.set([...'42x\0'].map(c=>c.charCodeAt(0)), 0x100);
+    const end = base + 0x200;
+    bytes.fill(0xcc, 0x200, 0x208);
+    assert.equal(table.strtol.handler([text, end, 10]), 42);
+    assert.equal(quad(end), text + 2, 'strtol\'s end');
+    bytes.fill(0xcc, 0x200, 0x208);
+    table.__STRINGTOLD.handler([base + 0x300, end, text, 0]);
+    assert.equal(quad(end), text + 2, '__STRINGTOLD\'s end');
+    bytes.fill(0xcc, 0x200, 0x208);
+    table.strtod.handler([0, end]);
+    assert.equal(quad(end), 0, 'no text: the end null, every bit of it');
+    bytes.fill(0xcc, 0x200, 0x208);
+    table.strtod.handler([text, end]);
+    assert.equal(quad(end), text + 2, 'strtod\'s end');
+});
+
+test('the _*toa and _*tow handlers write their text, narrow and wide, terminated', ()=>{
+    const { memory, table } = build();
+    const buffer = memory.allocate(40);
+    assert.equal(table.ltoa.handler([-1, buffer, 10]), buffer);
+    assert.equal(memory.text(buffer), '-1');
+    assert.equal(table.ltoa.handler([-1, buffer, 16]), buffer);
+    assert.equal(memory.text(buffer), 'ffffffff', 'every other radix the bit pattern');
+    assert.equal(table._itow.handler([255, buffer, 2]), buffer);
+    assert.equal(memory.wide(buffer), '11111111');
 });

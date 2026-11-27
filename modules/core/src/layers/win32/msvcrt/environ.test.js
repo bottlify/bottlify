@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createEnvironment } from './environ.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /**
  * The environment over a fake memory, started with two variables, its
@@ -169,4 +170,41 @@ test('the accessors hand out the exports\' own addresses, or cells holding the s
     bare.call('_putenv', bare.memory.put('x=1'));
     assert.equal(bare.u32(cell), bare.environment.narrow(), 'the cell follows the array');
     assert.equal(bare.environment.value('X'), '1');
+});
+
+test('at 64 bits past 4 GiB: getenv_s\'s size_t and the arrays\' pointers are whole', ()=>{
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x2000);
+    const view = new DataView(bytes.buffer);
+    let next = base + 0x1000;
+    /** @param {number} size */
+    const allocate = size=>{
+        const at = next;
+        next += size + 15 & ~15;
+        return at;
+    };
+    const cells = ['_environ', '_wenviron', '__initenv', '__winitenv'];
+    const environment = createEnvironment({
+        guest: guestWindow(bytes, { base, pointerSize: 8 }),
+        allocate,
+        errno: ()=>{},
+        environment: ()=>({ Path: 'C:\\WINDOWS' }),
+        cell: name=>base + 0x800 + cells.indexOf(name) * 8,
+    });
+    const table = /** @type {Record<string, any>} */ (environment.functions);
+    /** @param {number} at */
+    const quad = at=>view.getUint32(at - base, true)
+        + view.getUint32(at - base + 4, true) * 2 ** 32;
+    bytes.set([...'PATH\0'].map(c=>c.charCodeAt(0)), 0x100);
+    const length = base + 0x200;
+    bytes.fill(0xcc, 0x200, 0x208);
+    assert.equal(table.getenv_s.handler([length, base + 0x300, 0x40, base + 0x100]), 0);
+    assert.equal(quad(length), 'C:\\WINDOWS'.length + 1, 'a size_t, every bit of it');
+    assert.equal(String.fromCharCode(...bytes.subarray(0x300, 0x30a)), 'C:\\WINDOWS');
+    const cell = table.__p__environ.handler([]);
+    assert.equal(cell, base + 0x800);
+    const list = quad(cell);
+    assert.ok(list > base, 'the array, whole');
+    assert.equal(quad(list), table.getenv.handler([base + 0x100]) - 'Path='.length);
+    assert.equal(quad(list + 8), 0);
 });

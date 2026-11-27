@@ -862,23 +862,20 @@ const slotWordsOf = values=>(/** @type {{ slotWords?: number }} */ (values).slot
 
 /**
  * What a printer over guest memory hands the engine: %Z's counted string read
- * from it, and %n's count written to it.
+ * from it, and %n's count, an int, written to it.
  *
- * @param {(address: number, length: number) => Uint8Array} readMemory
- * @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @param {import('../common/guest.js').Guest} guest
  */
-export function guestAccess(readMemory, writeMemory){
+export function guestAccess(guest){
     return {
-        readMemory,
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>guest.bytes(address, length),
         /** @param {number} pointer @param {number} value */
         writeCount: (pointer, value)=>{
-            if (pointer === 0)
+            if (pointer !== 0)
             {
-                return;
+                guest.set32(pointer, value);
             }
-            const bytes = new Uint8Array(4);
-            new DataView(bytes.buffer).setInt32(0, value, true);
-            writeMemory(pointer, bytes);
         },
     };
 }
