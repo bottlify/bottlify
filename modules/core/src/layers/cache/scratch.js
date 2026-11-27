@@ -78,7 +78,7 @@ export const roomFor = length=>{
 export function createScratches(hold){
     const counts = { scratches: 0, held: 0, heldBytes: 0, plain: 0, plainBytes: 0, grows: 0,
         plainGrows: 0 };
-    /** The scratches holding a room now, for `releaseAll`. @type {Set<() => void>} */
+    /** The scratches holding a room of the cache now, for `releaseAll`. @type {Set<() => void>} */
     const holding = new Set();
     return {
         /**
@@ -133,6 +133,10 @@ export function createScratches(hold){
                             inCache = true;
                             counts.held++;
                             counts.heldBytes += size;
+                            // Only the cache's room needs letting go: plain
+                            // memory goes with whoever stops referring to it,
+                            // and a set of it here would keep it for ever.
+                            holding.add(release);
                         }
                         else
                         {
@@ -142,7 +146,6 @@ export function createScratches(hold){
                             counts.plainGrows++;
                         }
                         view = room;
-                        holding.add(release);
                     }
                     if (view.length !== length)
                     {

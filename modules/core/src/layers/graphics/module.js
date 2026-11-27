@@ -415,6 +415,26 @@ const offered = ask=>{
     }
 };
 
+/**
+ * Host memory a machine's graphics keep between calls - a blit's rooms, a
+ * level decoded on its way up, a staging mirror - held in the run's cache
+ * (`cache/scratch.js`); plain memory under the same contract where the cache
+ * layer is switched off, whose stub refuses the call. Made out here, so that
+ * what it is handed to (a presenter whose reactions the run's GPU device
+ * holds) holds the cache and nothing else of the machine.
+ *
+ * @param {any} cache @returns {(name: string) => import('../cache/scratch.js').Scratch}
+ */
+const scratchesOf = cache=>name=>{
+    try
+    {
+        return cache.scratch(name);
+    }
+    catch {
+        return plainScratches.scratch(name);
+    }
+};
+
 /** The graphics layer's module for one graph; see `defaultModules`. */
 /**
  * The drawable OpenGL sees for a device context: a window's is its client
@@ -498,24 +518,7 @@ export function createGraphicsModule(){
             // draw needs them: the run's cache, which lets idle bodies go to the
             // disk, rather than the worker's own heap.
             const cache = /** @type {any} */ (host.requireApi('cache'));
-            /**
-             * Host memory this machine's graphics keep between calls - a
-             * blit's rooms, a level decoded on its way up, a staging mirror -
-             * held in the run's cache (`cache/scratch.js`); plain memory under
-             * the same contract where the cache layer is switched off, whose
-             * stub refuses the call.
-             *
-             * @param {string} name @returns {import('../cache/scratch.js').Scratch}
-             */
-            const scratches = name=>{
-                try
-                {
-                    return cache.scratch(name);
-                }
-                catch {
-                    return plainScratches.scratch(name);
-                }
-            };
+            const scratches = scratchesOf(cache);
             /**
              * Everything this instance owns, and whether it is still open.
              *

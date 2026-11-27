@@ -187,10 +187,15 @@ test('a full-screen blit reused frame after frame grows its rooms once and makes
     const frame = ()=>blt({ memory, dest: primary, src: back, flags: 0, rooms });
     assert.equal(frame(), 0);
     const grows = scratches.figures().grows;
-    // A call's own few objects (its rectangles, its job), no pixels: the
-    // screen is 1.2 MB, and a room made a frame would be all of it.
-    assert.ok(await bytesPerCall(frame, { calls: 200 }) < 4096, 'no room made a frame');
+    // The heap's sampler sees a call's own few objects (its rectangles, its
+    // job) and an array's header, never the bytes behind it: a room made a
+    // frame would add a header to what it counts, the counter of grows the
+    // room itself. Every room a blit works in is taken through its scratch.
+    const frames = 200;
+    assert.ok(await bytesPerCall(frame, { calls: frames }) < 4096, 'a call\'s own objects');
     assert.equal(scratches.figures().grows, grows, 'the counter of grows stays put');
+    assert.equal(rooms.snapshot.bytes(width * height * 4), rooms.snapshot.bytes(width * height * 4),
+        'the same view frame after frame');
     assert.equal(scratches.figures().heldBytes, 2 * 1024 * 1024 + 4096,
         'the snapshot (1.2 MB in a 2 MiB block) and a row, in the run\'s budget');
     assert.equal(cache.keeper.under('scratch/').hotBytes, scratches.figures().heldBytes);
