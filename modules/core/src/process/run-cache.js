@@ -11,9 +11,15 @@
  * A process on this thread reads through the reader made here, its calls to
  * the keeper plain calls. A process in a worker of its own is handed the
  * index and the segments as they are (`join`) and makes a reader there; its
- * calls come across its link (`handlers`), and the segments made and let go
+ * calls come across its link (`across`), and the segments made and let go
  * after reach it as messages. Every thread reads a body where the keeper put
  * it: nothing is copied from one thread to another.
+ *
+ * Every owner of names - a graphics root, a process's scratches, the run's
+ * own - is numbered here, wherever it runs: on this thread (`own`), in a
+ * worker of this thread's (`serve`, a channel), in a process's worker or a
+ * worker of that process's (`across`). Its going lets go of all it held; one
+ * that goes without saying so goes with its process, or with the run.
  *
  * Its disk is a folder in the run's own (`run-folder.js`), for the bodies that
  * are the only copy for this run (texels the GPU was given, `disk: 'run'`): a
@@ -22,7 +28,8 @@
  */
 
 import { createChannel, createReader, openKeeper, openServer } from '@bottlify/cellar';
-import { serveKeeper } from '../layers/cache/module.js';
+import { ownedSpace, releaseOwner, serveKeeper } from '../layers/cache/module.js';
+import { createScratches } from '../layers/cache/scratch.js';
 import { opfsDisk } from '../layers/filesystem/internal/opfs-disk.js';
 
 const MIB = 1024 * 1024;
@@ -136,6 +143,19 @@ export async function openRunCache(opened = {}){
     const served = new Set();
     /** Owners given names of their own, a number each, over every channel. */
     let owners = 0;
+    /**
+     * The owners whose names are out and whose release is not a channel's:
+     * one on this thread (`own`), one in a process's worker, one whose
+     * channel has not come yet. Each is let go of by its own release, else
+     * with its process, else with the run.
+     *
+     * @type {Set<string>}
+     */
+    const ownersOut = new Set();
+    /** Whether the run is going: an owner let go of with it leaves no tail. */
+    let closing = false;
+    /** @param {string} name */
+    const numbered = name=>`${name}/${++owners}/`;
     /** What owners that went left behind them, summed. */
     const tails = { owners: 0, bodies: 0, bytes: 0 };
     /** The keeper as a channel's owners call it. */
@@ -153,6 +173,46 @@ export async function openRunCache(opened = {}){
         tails.bodies += tail.bodies;
         tails.bytes += tail.bytes;
         onTail(tail);
+    };
+    /**
+     * An owner out goes: its names let go of, past the `held` it said, a
+     * tail; null once it went before (a second release, its process gone).
+     *
+     * @param {string} prefix @param {number | null} held  null where it never said
+     */
+    const releaseOut = (prefix, held)=>(ownersOut.delete(prefix)
+        ? releaseOwner(channelKeeper, prefix, held, { onTail: tailed, quiet: closing }) : null);
+    /**
+     * Serves the channel of an owner numbered already, as `serve` does.
+     *
+     * @param {SharedArrayBuffer} channel @param {string} prefix
+     */
+    const serveOn = (channel, prefix)=>{
+        const one = serveKeeper(openServer(channel), channelKeeper,
+            { owner: prefix, onTail: tailed });
+        served.add(one);
+        // A channel whose owner closed it is not held to the run's end.
+        one.ended.then(()=>served.delete(one));
+    };
+    /**
+     * The run's own scratches (its presenter's), under names of its own,
+     * made when first asked for and let go of with the run.
+     *
+     * @type {{ rooms: ReturnType<typeof createScratches>,
+     *     owner: ReturnType<typeof ownedSpace> } | null}
+     */
+    let runRooms = null;
+    /**
+     * Names of the run's cache an owner on this thread holds alone, `name/<n>/`,
+     * the number the run's over every owner (`ownedSpace`): let go of by its
+     * release, its keeper calls this thread's.
+     *
+     * @param {string} name @returns {import('../layers/cache/module.js').Owned}
+     */
+    const own = name=>{
+        const prefix = numbered(name);
+        ownersOut.add(prefix);
+        return { prefix, release: held=>releaseOut(prefix, held) };
     };
     const weighSpaces = ()=>Object.fromEntries([...spaces].sort()
         .map(space=>[space, keeper.under(`${space}/`)]));
@@ -181,15 +241,83 @@ export async function openRunCache(opened = {}){
     return {
         reader,
 
-        /** The link handlers a process in a worker of its own calls the keeper through. */
-        handlers: {
-            cache: {
-                reserve,
-                /** @param {string} name @param {{ known?: number }} [options] */
-                raise: (name, options)=>keeper.raise(name, options ?? {}),
-                /** @param {string} name */
-                drop: name=>keeper.drop(name),
-            },
+        /**
+         * A process in a worker of its own, as the keeper serves it: the link
+         * handlers it calls the keeper through (`handlers`), the names its
+         * owners there are given (`cache.own`, numbered here as every owner of
+         * the run is) and let go of (`cache.release`), and the channel of one
+         * of them that a graphics worker writes through, which comes as a
+         * message, since the link carries no shared memory (`served`). `end`:
+         * the process went, and every owner of it still out is let go of -
+         * past what it said it held, a tail - but one whose channel is served,
+         * which goes when its graphics root does.
+         */
+        across(){
+            /** Its owners out, by prefix. @type {Set<string>} */
+            const mine = new Set();
+            return {
+                handlers: {
+                    cache: {
+                        reserve,
+                        /** @param {string} name @param {{ known?: number }} [options] */
+                        raise: (name, options)=>keeper.raise(name, options ?? {}),
+                        /** @param {string} name */
+                        drop: name=>keeper.drop(name),
+                        /** @param {string} name */
+                        own: name=>{
+                            const { prefix } = own(name);
+                            mine.add(prefix);
+                            return prefix;
+                        },
+                        /** @param {string} prefix @param {number} held */
+                        release: (prefix, held)=>(mine.delete(prefix)
+                            ? releaseOut(prefix, Number(held) || 0) : null),
+                    },
+                },
+                /**
+                 * The channel of an owner of its own: served from now on. One
+                 * that is not its, or comes after it went, is closed unserved,
+                 * so nothing waits on it.
+                 *
+                 * @param {string} prefix @param {SharedArrayBuffer} channel
+                 */
+                served(prefix, channel){
+                    if (!(channel instanceof SharedArrayBuffer) || !mine.delete(prefix)
+                        || !ownersOut.delete(prefix))
+                    {
+                        if (channel instanceof SharedArrayBuffer)
+                        {
+                            openServer(channel).close();
+                        }
+                        return;
+                    }
+                    serveOn(channel, prefix);
+                },
+                end(){
+                    for (const prefix of mine)
+                    {
+                        releaseOut(prefix, null);
+                    }
+                    mine.clear();
+                },
+            };
+        },
+
+        own,
+
+        /**
+         * A scratch of the run's own (its presenter's), held under names of
+         * the run's, made when first asked for and let go of with the run.
+         *
+         * @param {string} name @returns {import('../layers/cache/scratch.js').Scratch}
+         */
+        scratch(name){
+            if (runRooms === null)
+            {
+                const owner = ownedSpace(reader, own('scratch'));
+                runRooms = { owner, rooms: createScratches(owner.space.hold ?? null) };
+            }
+            return runRooms.rooms.scratch(name);
         },
 
         /**
@@ -220,12 +348,8 @@ export async function openRunCache(opened = {}){
          */
         serve(name){
             const channel = createChannel();
-            const prefix = `${name}/${++owners}/`;
-            const one = serveKeeper(openServer(channel), channelKeeper,
-                { owner: prefix, onTail: tailed });
-            served.add(one);
-            // A channel whose owner closed it is not held to the run's end.
-            one.ended.then(()=>served.delete(one));
+            const prefix = numbered(name);
+            serveOn(channel, prefix);
             return { channel, prefix };
         },
 
@@ -243,9 +367,21 @@ export async function openRunCache(opened = {}){
          * memory and the blocks they take; and as the cache stood when it had
          * the most placed (`peakSpaces`, `peakRoundingBytes`).
          */
-        figures: ()=>({ ...look(), spaces: weighSpaces() }),
+        figures: ()=>({ ...look(), spaces: weighSpaces(),
+            // What each owner whose names are out but not a channel's holds:
+            // a process's in a worker of its own, by its prefix.
+            ownersOut: Object.fromEntries([...ownersOut].sort()
+                .map(prefix=>[prefix, keeper.under(prefix)])) }),
 
         close(){
+            closing = true;
+            runRooms?.rooms.releaseAll();
+            runRooms?.owner.close();
+            runRooms = null;
+            for (const prefix of [...ownersOut])
+            {
+                releaseOut(prefix, null);
+            }
             for (const one of served)
             {
                 one.close();
@@ -284,4 +420,41 @@ export function remoteCacheReader(joined, link){
             },
         },
     });
+}
+
+/**
+ * Names of the run's cache for the owners of a process in a worker of its
+ * own, numbered by the keeper across its link (`RunCache.across`), as an
+ * owner on the keeper's thread is numbered there: `own` for one that reads
+ * and writes through the process's reader (`ownedSpace`: an in-thread root,
+ * the process's scratches), let go of by a call it waits on, so its going is
+ * counted before its process is; `serve` for one in a worker of the
+ * process's (a graphics root, `channelSpace`), whose channel is made here and
+ * sent to the keeper's thread as a message (`post`), since the link carries
+ * no shared memory. The owner may call through it at once: what it asks
+ * waits in the channel until the keeper's thread serves it.
+ *
+ * @param {{ ask: (method: string, args: any[]) => any }} link  `ask` blocks for the answer
+ * @param {((message: { type: 'cache-serve', prefix: string,
+ *     channel: SharedArrayBuffer }) => void) | null} post  to the keeper's thread
+ */
+export function remoteCacheOwners(link, post){
+    return {
+        /** @type {import('../layers/cache/module.js').Own} */
+        own: name=>{
+            const prefix = String(link.ask('own', [name]));
+            return { prefix, release: held=>link.ask('release', [prefix, held]) };
+        },
+        /** @type {import('../layers/cache/module.js').Serve} */
+        serve: name=>{
+            if (post === null)
+            {
+                return null;
+            }
+            const channel = createChannel();
+            const prefix = String(link.ask('own', [name]));
+            post({ type: 'cache-serve', prefix, channel });
+            return { channel, prefix };
+        },
+    };
 }

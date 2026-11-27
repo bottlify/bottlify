@@ -125,7 +125,7 @@ async function run(seed, where, { mutate = false } = {}){
     }
     else if (runCache)
     {
-        texels = ownedSpace(runCache.reader, runCache.serve('texels'));
+        texels = ownedSpace(runCache.reader, runCache.own('texels'));
     }
     if (texels && mutate)
     {

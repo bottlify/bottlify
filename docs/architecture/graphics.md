@@ -61,9 +61,12 @@ flowchart TB
   its room, asked for without waiting; idle there, it goes to the disk. A root drawn in the
   graphics worker is given its names there; one drawn on the process's own thread takes them from
   the cache layer (`owner('texels')`, numbered by the run's keeper, its room taken through that
-  thread's reader as a body is put), let go of with the graphics layer. A body under 4 KiB (the
-  cache's unit of room), one refused room, and every body of a device the run serves no names
-  (a process in a worker of its own) stay in plain memory under the same contract. A body the
+  thread's reader as a body is put), let go of with the graphics layer. A process in a worker
+  of its own is served names the same way, numbered by the keeper across its link, its roots in
+  the graphics worker by a channel it sends the keeper's thread (`process/run-cache.js`
+  `remoteCacheOwners`). A body under 4 KiB (the cache's unit of room), one refused room, and
+  every body of a device the run serves no names (a layer built alone, with no cache) stay in
+  plain memory under the same contract. A body the
   cache cannot give back is a `loss` and reads as zeros. An OpenGL level's texels are the
   device's once a draw uploads them. Until then the graphics thread hands them, and the blocks of
   a level kept as S3TC, about once a second to the store (`opengl/gpu.js` `spill`); nothing on
@@ -92,8 +95,8 @@ flowchart TB
   the ring and zeroed when the ring is made, and the picture the presenter converts a surface
   in guest memory into on its way up (`webgpu/internal/presenter.js`) are scratches the same
   way, where the graphics layer made them; the run's presenter, which the run makes outside
-  the layer, and a backend in the graphics worker keep theirs in plain memory, kept the same
-  way. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
+  the layer, holds them under names of the run's own (`RunCache.scratch`), and a backend in
+  the graphics worker keeps them in plain memory, kept the same way. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
   it while the level is unchanged. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of
@@ -124,8 +127,8 @@ flowchart TB
   address, and an unmap reads the pages written since (`d3d10/render.js`, `GuestStorage`).
   The host's copy of every resource's bytes, which a copy, an update and a read-back work in,
   is held in the run's cache for the resource's life (`backingOf`, `cache/scratch.js` `hold`):
-  zero when made, in a block of a power of two from 4 KiB, under the process's `scratch/`
-  names on the program's thread and under the root's `resources/<n>/` names in the graphics
+  zero when made, in a block of a power of two from 4 KiB, under the process's `scratch/<n>/`
+  names on the program's thread (in a worker of its own too) and under the root's `resources/<n>/` names in the graphics
   worker; plain memory of its own length where the cache has no room (a resource past a
   segment of 16 MiB) or there is no cache. It is let go of when the backing is collected - a
   view, a share's other device or a read-back in flight outlives the program's last

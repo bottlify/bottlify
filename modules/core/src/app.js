@@ -3979,6 +3979,28 @@ export async function createApp(options){
     // a swap does not wait for another instantiation.
     /** @type {{ value: any }} */
     const mediaInstance = { value: null };
+
+    // The run's cache, its keeper on this thread beside the stores: a process
+    // here reads it through the reader made with it, one in a worker of its own
+    // through a reader there (`processesBeside`). A process joined to a run
+    // across a link is handed the run's reader (`options.cache`).
+    // Both keep what they let go of from memory in the run's own folder.
+    const runFolder = options.system ? null : await openRunFolderOf(options);
+    const runCache = options.system ? null : await openRunCache({ ...options.cache, runFolder,
+        // An owner that went (a graphics root) leaving bodies under its names
+        // past what it held: let go of now, said as what it is.
+        onTail: tail=>events.emit('loss', { api: 'cache', detail: `${tail.prefix}: ${tail.bodies} `
+            + `bodies (${tail.bytes} bytes under it) ${tail.why === 'unreleased'
+                ? 'held by an owner that went without letting go of them'
+                : `past the ${tail.held} its owner said it held`}` }) });
+
+    // The pieces of the run's writable layers are the run's, as its volume is:
+    // a process in a worker of its own writes through the run's.
+    if (runCache)
+    {
+        system.volume.pageFile = openRunPageFile(events, runCache.reader);
+    }
+
     // The presenter is a service of the run too, and for the same reason: a
     // machine is a process, but the canvas it draws into is not. Made once
     // here -- from the GPU the worker opened and the canvas the device carries
@@ -4005,6 +4027,9 @@ export async function createApp(options){
             onPresented: options.device.onPresented,
             onPresentFailed: options.device.onPresentFailed,
             frameClock: options.device.frameClock,
+            // What it keeps between frames (a surface converted on its way
+            // up), held in the run's cache under names of the run's own.
+            ...runCache ? { scratches: (/** @type {string} */ name)=>runCache.scratch(name) } : {},
             // The run's windows, by which the screen is composed of every
             // process's picture while more than one has a window showing.
             windows: ()=>{
@@ -4040,27 +4065,6 @@ export async function createApp(options){
     const heldModuleBytes = options.cork?.config?.sharedModuleBytes ?? SHARED_MODULE_BYTES;
     const translationStore = openedStore && !options.system && (options.concurrency ?? 1) > 1
         && heldModuleBytes > 0 ? withHeldModules(openedStore, heldModuleBytes) : openedStore;
-
-    // The run's cache, its keeper on this thread beside the stores: a process
-    // here reads it through the reader made with it, one in a worker of its own
-    // through a reader there (`processesBeside`). A process joined to a run
-    // across a link is handed the run's reader (`options.cache`).
-    // Both keep what they let go of from memory in the run's own folder.
-    const runFolder = options.system ? null : await openRunFolderOf(options);
-    const runCache = options.system ? null : await openRunCache({ ...options.cache, runFolder,
-        // An owner that went (a graphics root) leaving bodies under its names
-        // past what it held: let go of now, said as what it is.
-        onTail: tail=>events.emit('loss', { api: 'cache', detail: `${tail.prefix}: ${tail.bodies} `
-            + `bodies (${tail.bytes} bytes under it) ${tail.why === 'unreleased'
-                ? 'held by an owner that went without letting go of them'
-                : `past the ${tail.held} its owner said it held`}` }) });
-
-    // The pieces of the run's writable layers are the run's, as its volume is:
-    // a process in a worker of its own writes through the run's.
-    if (runCache)
-    {
-        system.volume.pageFile = openRunPageFile(events, runCache.reader);
-    }
 
     const translationPool = await openTranslationPool(options);
     /** What a machine's translator is told where the run lends it its translators. */
@@ -4122,7 +4126,7 @@ export async function createApp(options){
         machine: runMachine,
         ...runCache === null ? {}
             : { cache: { reader: runCache.reader, figures: runCache.figures,
-                join: runCache.join, serve: runCache.serve } },
+                join: runCache.join, serve: runCache.serve, own: runCache.own } },
         cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
             ...lentConfig } },
         events,

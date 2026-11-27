@@ -238,6 +238,28 @@ const parsed = bytes=>(bytes.length === 0 ? undefined : JSON.parse(decoder.decod
  */
 
 /**
+ * Lets go of every name of one owner's in the keeper (Cellar's `release`,
+ * which takes back the memory it held as well): past the `held` it said it
+ * had, a tail (`onTail`); `held` null where it went without saying, a tail
+ * unless `quiet` - the run going, every owner with it.
+ *
+ * @param {{ release: (prefix: string)
+ *     => { bodies: number, bytes: number, waiting: number } }} keeper
+ * @param {string} prefix @param {number | null} held
+ * @param {{ onTail?: (tail: OwnerTail) => void, quiet?: boolean }} [options]
+ */
+export function releaseOwner(keeper, prefix, held, { onTail = ()=>{}, quiet = false } = {}){
+    const left = keeper.release(prefix);
+    const owed = held ?? 0;
+    if (left.bodies > owed && !(held === null && quiet))
+    {
+        onTail({ prefix, bodies: left.bodies - owed, bytes: left.bytes, held: owed,
+            why: held === null ? 'unreleased' : 'unknown' });
+    }
+    return left;
+}
+
+/**
  * Serves a channel's keeper calls (`channelSpace`) on this thread's event
  * loop, one wait at a time, until it is closed. The channel is one owner's,
  * whose names begin with `owner`: let go of when it goes (`release`) or,
@@ -258,22 +280,14 @@ export function serveKeeper(server, keeper, { owner, onTail = ()=>{} }){
     /** Whether this side closes the channel: the run going, every owner with it. */
     let closing = false;
     /**
-     * Lets go of an owner's names: past the `held` it said it had, a tail;
-     * `held` null where it never said, and went (a tail only where this side
-     * did not close the channel).
+     * `held` null where the owner never said, and went: a tail only where
+     * this side did not close the channel.
      *
      * @param {string} prefix @param {number | null} held
      */
     const release = (prefix, held)=>{
         out = false;
-        const left = keeper.release(prefix);
-        const owed = held ?? 0;
-        if (left.bodies > owed && !(held === null && closing))
-        {
-            onTail({ prefix, bodies: left.bodies - owed, bytes: left.bytes, held: owed,
-                why: held === null ? 'unreleased' : 'unknown' });
-        }
-        return left;
+        return releaseOwner(keeper, prefix, held, { onTail, quiet: closing });
     };
     /** @param {Uint8Array} request */
     const handle = request=>{
@@ -458,24 +472,39 @@ export function channelSpace(joined, { channel, prefix }){
 }
 
 /**
- * Names of the run's cache one owner on this thread holds alone (an
- * in-thread graphics root's texels), as `channelSpace`'s are a worker's: the
- * same prefix, numbered by the keeper (`serve`), so no two owners of the run
- * share a name, and the same release when it goes. Its bodies are read and
- * written through this thread's own reader, which reaches the keeper itself:
- * room is taken when a body is put, so nothing is asked ahead (`ask` grants at
- * once, `forgo` has nothing to let go of), and only the release crosses the
- * channel. Memory it holds (`space.hold`) is held through that reader too,
- * under the same contract as a worker's.
+ * Names of the run's cache an owner was given (`Own`): the prefix the keeper
+ * numbered, and how it lets go of them when it goes, saying how many bodies
+ * and holds it held (what the keeper finds past them is a tail); what the
+ * keeper found, or null where it could not be asked.
  *
- * @param {Reader} reader
- * @param {{ channel: SharedArrayBuffer, prefix: string }} served  the owner's channel and
- *     the prefix of its names (`RunCache.serve`)
+ * @typedef {{ prefix: string,
+ *     release: (held: number) => { bodies: number, bytes: number, waiting: number } | null }} Owned
  */
-export function ownedSpace(reader, { channel, prefix }){
-    const client = openClient(channel);
-    /** @param {any} call */
-    const askLater = call=>client.call(encoder.encode(JSON.stringify(call)), { read: parsed });
+
+/**
+ * Names of the run's cache for one owner on this thread, numbered by the
+ * keeper (`RunCache.own`, or across a process's link), or null where the run
+ * serves none.
+ *
+ * @typedef {(name: string) => Owned | null} Own
+ */
+
+/**
+ * Names of the run's cache one owner on this thread holds alone (an
+ * in-thread graphics root's texels, a process's scratches), as
+ * `channelSpace`'s are a worker's: the same prefix, numbered by the keeper,
+ * so no two owners of the run share a name, and the same release when it
+ * goes. Its bodies are read and written through this thread's own reader,
+ * which reaches the keeper itself, plainly on the keeper's thread or across
+ * a process's link: room is taken when a body is put, so nothing is asked
+ * ahead (`ask` grants at once, `forgo` has nothing to let go of), and only
+ * the release is the owner's own call (`Owned.release`). Memory it holds
+ * (`space.hold`) is held through that reader too, under the same contract as
+ * a worker's.
+ *
+ * @param {Reader} reader @param {Owned} owned
+ */
+export function ownedSpace(reader, { prefix, release }){
     let closed = false;
     const { space, held, holds } = ownerNames(reader, prefix, ()=>!closed);
     return {
@@ -500,7 +529,7 @@ export function ownedSpace(reader, { channel, prefix }){
                 return null;
             }
             closed = true;
-            return released(askLater, client, held.size + holds.size);
+            return release(held.size + holds.size);
         },
     };
 }
@@ -610,11 +639,14 @@ export function createCacheModule(){
     let made = false;
     /**
      * The scratches of this process's layers (`scratch.js`): held in the run's
-     * cache under `scratch/...`, or plain memory where there is none.
+     * cache under names of the process's own (`scratch/<n>/...`), or plain
+     * memory where there is none.
      *
      * @type {ReturnType<typeof createScratches> | null}
      */
     let scratches = null;
+    /** The names they are held under, let go of with the process. @type {ReturnType<typeof ownedSpace> | null} */
+    let scratchOwner = null;
 
     return {
         name: 'cache',
@@ -623,11 +655,13 @@ export function createCacheModule(){
 
         /**
          * @param {{ reader?: Reader | null, join?: Join | null,
-         *     serve?: Serve | null } | null} config
+         *     serve?: Serve | null, own?: Own | null } | null} config
          *     `join`: how another thread of this process (an executor) is joined to
          *     the run's cache, to read it in place too; `serve`: a channel a worker
-         *     that writes the cache calls the keeper through (`channelSpace`), and
-         *     an owner on this thread is numbered by (`owner`)
+         *     that writes the cache calls the keeper through (`channelSpace`);
+         *     `own`: names an owner on this thread holds alone (`owner`, and the
+         *     process's scratches), numbered by the keeper. A reader with no `own`
+         *     (a test of one layer) holds its scratches under `scratch/...` itself
          * @returns {Promise<{ space: (name: string, options?: { onlyCopy?: boolean,
          *     disk?: 'kept' | 'run' | 'never', idle?: 'go' | 'stay' }) => CacheSpace,
          *     join: Join,
@@ -643,12 +677,20 @@ export function createCacheModule(){
             reader = config?.reader ?? null;
             made = true;
             const given = reader;
-            const own = createScratches(given ? cacheSpace(given, 'scratch').hold ?? null : null);
-            scratches = own;
+            const own = given ? config?.own ?? null : null;
             /** @param {string} name */
-            const scratch = name=>own.scratch(name);
+            const owner = name=>{
+                const owned = own?.(name) ?? null;
+                return given && owned ? ownedSpace(given, owned) : null;
+            };
+            scratchOwner = owner('scratch');
+            const rooms = createScratches(scratchOwner?.space.hold
+                ?? (given ? cacheSpace(given, 'scratch').hold ?? null : null));
+            scratches = rooms;
+            /** @param {string} name */
+            const scratch = name=>rooms.scratch(name);
             /** @param {string} name @param {number} length */
-            const hold = (name, length)=>own.hold(name, length);
+            const hold = (name, length)=>rooms.hold(name, length);
             if (given === null)
             {
                 return { ...noCache, scratch, hold };
@@ -661,10 +703,7 @@ export function createCacheModule(){
                 space: (name, options)=>cacheSpace(given, name, options),
                 join: post=>join?.(post) ?? null,
                 serve: name=>serve?.(name) ?? null,
-                owner: name=>{
-                    const served = serve?.(name) ?? null;
-                    return served ? ownedSpace(given, served) : null;
-                },
+                owner,
                 scratch,
                 hold,
             };
@@ -693,6 +732,8 @@ export function createCacheModule(){
             // A scratch its layer did not let go of is the process's: it goes
             // with it, its room the cache's again.
             scratches?.releaseAll();
+            await scratchOwner?.close();
+            scratchOwner = null;
             reader = null;
         },
     };

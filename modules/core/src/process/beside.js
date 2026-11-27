@@ -252,6 +252,8 @@ export function processesBeside(deps){
         const lentBeside = new Set();
         /** The processes whose windows it answers for, by id: detached as it goes. @type {Set<number>} */
         const windowsAcross = new Set();
+        // Its owners of the run's cache, numbered here and let go of with it.
+        const cacheAcross = runCache?.across() ?? null;
         const link = openLink(memory.a, {
             ...systemHandlers(/** @type {any} */ (system),
                 (target, method, args)=>link.callWaiting(target, method, args), windowsAcross),
@@ -261,7 +263,7 @@ export function processesBeside(deps){
             // The run's translation store, which only this thread can hold open.
             ...translationStore ? storeHandlers(translationStore) : {},
             // The run's cache, whose keeper only this thread runs.
-            ...runCache ? runCache.handlers : {},
+            ...cacheAcross ? cacheAcross.handlers : {},
             process: {
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>
                     events.emit('output', { handle, text }),
@@ -423,6 +425,11 @@ export function processesBeside(deps){
                         reject(Object.assign(new Error(data.message),
                             { diagnostics: data.diagnostics }));
                     }
+                    else if (data?.type === 'cache-serve')
+                    {
+                        // The channel of an owner of its own, which a link cannot carry.
+                        cacheAcross?.served(data.prefix, data.channel);
+                    }
                     else if (data?.type === 'module')
                     {
                         translationStore?.hold?.(data.key, data.module, data.bytes);
@@ -551,6 +558,9 @@ export function processesBeside(deps){
                     link.close();
                     await answering;
                 },
+                // Once its link answers no more: an owner it did not let go of
+                // goes with it, said as a tail.
+                ()=>cacheAcross?.end(),
                 ()=>held.sound?.giveBack(),
                 ()=>held.shown?.dispose(),
                 ()=>held.display?.port1.close(),
