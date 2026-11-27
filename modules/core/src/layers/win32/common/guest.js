@@ -24,6 +24,7 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
 
 /**
  * What the view is made over: the memory layer's api, or its accessors.
@@ -65,6 +66,9 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
  * @property {(address: number, value: number) => void} setF32
  * @property {(address: number, value: number) => void} setF64
  * @property {(address: number, value: number) => void} setPtr
+ * @property {(address: number, values: ArrayLike<number>) => number} set32s
+ *     Consecutive dwords; answers the address after the last, where a
+ *     marshaler writes on.
  * @property {(address: number, limit?: number) => string} cstr
  *     An ANSI string, at most `limit` bytes of it.
  * @property {(address: number, limit?: number) => string} wstr
@@ -74,6 +78,9 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
  *     answers the bytes written before the NUL. Nothing is written for no room.
  * @property {(address: number, text: string, room?: number) => number} writeWide
  *     The same in UTF-16, `room` in units, as a W function's cch counts them.
+ * @property {(address: number) => string} guid  the GUID there, in its canonical form
+ * @property {(address: number, guid: string) => boolean} setGuid
+ *     The GUID's sixteen bytes; nothing is written for a string that is no GUID.
  * @property {(address: number, length: number, into?: Uint8Array) => Uint8Array} bytes
  *     The bytes copied: into `into` from its start where it is given, which is
  *     answered, or into one new buffer.
@@ -156,6 +163,13 @@ export function createGuest(memory, pointerSize = 4){
                 set64(address, whole % 2 ** 32, Math.floor(whole / 2 ** 32));
             }
             : writeU32,
+        set32s: (address, values)=>{
+            for (let at = 0; at < values.length; at++)
+            {
+                writeU32(address + at * 4, values[at]);
+            }
+            return address + values.length * 4;
+        },
         cstr: (address, limit)=>{
             try
             {
@@ -220,6 +234,16 @@ export function createGuest(memory, pointerSize = 4){
             units[length * 2 + 1] = 0;
             writeBytes(address, units.subarray(0, (length + 1) * 2));
             return length;
+        },
+        // Formatted where it lies: nothing runs between the read and the text.
+        guid: address=>formatGuid(memory.window(address, GUID_SIZE)),
+        setGuid: (address, guid)=>{
+            const bytes = parseGuid(guid);
+            if (bytes !== null)
+            {
+                writeBytes(address, bytes);
+            }
+            return bytes !== null;
         },
         bytes: (address, length, into)=>{
             if (!into)

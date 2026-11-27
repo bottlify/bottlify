@@ -6,9 +6,11 @@
 
 /**
  * A library's `guest` over a test's own bytes: the memory layer's accessors,
- * the same that a run's view goes through, over one readable and writable
- * region at address 0 the length of the buffer - what a handler is handed,
- * with no machine around it.
+ * the same that a run's view goes through, over readable and writable
+ * regions from address 0 to the buffer's end - what a handler is handed,
+ * with no machine around it. `ends` parts them where an allocation ends and
+ * nothing may be read across it, as memory refuses a read across a region's
+ * end.
  */
 
 import { createAccessors } from '../../memory/internal/accessors.js';
@@ -18,12 +20,15 @@ import { createGuest } from './guest.js';
 /**
  * @param {Uint8Array} bytes  the guest's memory, byte 0 at address 0
  * @param {4 | 8} [pointerSize]
+ * @param {number[]} [ends]  where one region ends and the next begins
  */
-export function guestOver(bytes, pointerSize = 4){
+export function guestOver(bytes, pointerSize = 4, ends = []){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const regions = createRegionMap();
-    regions.register({ name: 'test', base: 0, size: bytes.length, kind: RegionKind.STACK,
-        access: Access.READ_WRITE });
+    const starts = [0, ...ends.filter(end=>end > 0 && end < bytes.length).sort((a, b)=>a - b)];
+    starts.forEach((base, index)=>regions.register({ name: `test ${index}`, base,
+        size: (starts[index + 1] ?? bytes.length) - base, kind: RegionKind.STACK,
+        access: Access.READ_WRITE }));
     const accessors = createAccessors({ regions, raw: {
         readPhysical: (address, length)=>bytes.subarray(address, address + length),
         writePhysical: (address, data)=>bytes.set(data, address),

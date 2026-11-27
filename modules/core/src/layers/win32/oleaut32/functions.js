@@ -27,7 +27,6 @@
  */
 
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
-import { GUID_SIZE, formatGuid, guidBytes } from '../../../system/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
 import { IID_IPICTURE, IID_IPICTUREDISP, createPictureObjects } from './picture.js';
@@ -316,9 +315,6 @@ export function createAutomationFunctions(host){
         }
         return type === VT_VARIANT ? VARIANT_ELEMENT : ELEMENT_BYTES[type] ?? 0;
     };
-    const guidScratch = new Uint8Array(GUID_SIZE);
-    /** The GUID at an address, read into one buffer made once. @param {number} address */
-    const guidAt = address=>formatGuid(guest.bytes(address, GUID_SIZE, guidScratch));
     /**
      * The IRecordInfo a record array keeps in front of its descriptor.
      *
@@ -1859,8 +1855,8 @@ export function createAutomationFunctions(host){
         if (type === VT_UNKNOWN || type === VT_DISPATCH)
         {
             features = FADF_HAVEIID;
-            guest.setBytes(psa - DESCRIPTOR_PREFIX,
-                guidBytes(type === VT_UNKNOWN ? IID_IUNKNOWN : IID_IDISPATCH));
+            guest.setGuid(psa - DESCRIPTOR_PREFIX,
+                type === VT_UNKNOWN ? IID_IUNKNOWN : IID_IDISPATCH);
         }
         else if (type === VT_RECORD)
         {
@@ -4597,7 +4593,7 @@ export function createAutomationFunctions(host){
                 }
                 guest.set32(wholeAddress(out), 0);
                 const key = registrationKey(
-                    guidAt(guid >>> 0), major & 0xffff, minor & 0xffff, false);
+                    guest.guid(guid >>> 0), major & 0xffff, minor & 0xffff, false);
                 const win32 = key && host.hive ? host.hive.open(key, '0\\win32') : null;
                 const value = win32 && host.hive ? host.hive.getValue(win32, '') : null;
                 if (!value)
@@ -4647,7 +4643,7 @@ export function createAutomationFunctions(host){
                 {
                     return TYPE_E_REGISTRYACCESS;
                 }
-                const id = guidAt(guid >>> 0);
+                const id = guest.guid(guid >>> 0);
                 const version = `TypeLib\\${id}\\${versionKey(major & 0xffff, minor & 0xffff)}`;
                 if (!hive.open(root, version))
                 {
@@ -5242,7 +5238,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_POINTER;
                 }
-                return pictures.create(wholeAddress(desc), guidAt(riid >>> 0),
+                return pictures.create(wholeAddress(desc), guest.guid(riid >>> 0),
                     (own >>> 0) !== 0,
                     wholeAddress(out));
             },
@@ -5268,7 +5264,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_POINTER;
                 }
-                return pictures.load(wholeAddress(stream), size | 0, guidAt(riid >>> 0),
+                return pictures.load(wholeAddress(stream), size | 0, guest.guid(riid >>> 0),
                     wholeAddress(out));
             },
         },
@@ -5293,7 +5289,7 @@ export function createAutomationFunctions(host){
                 }
                 guest.fill(wholeAddress(out), 0, 4);
                 return pictureAtPath(guest.wstr(wholeAddress(path), WHOLE),
-                    (riid >>> 0) === 0 ? IID_IPICTURE : guidAt(riid >>> 0), wholeAddress(out));
+                    (riid >>> 0) === 0 ? IID_IPICTURE : guest.guid(riid >>> 0), wholeAddress(out));
             },
         },
 

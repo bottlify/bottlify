@@ -193,7 +193,7 @@ test('a string stops at its terminator or at its limit, and is written cut to it
     assert.equal(guest.wstr(0x300, 8192), long.slice(0, 2047));
 });
 
-test('bytes are one copy, or none into a buffer given; a copy within moves as memmove', ()=>{
+test('bytes are one copy, or none into a buffer given; a copy moves as memmove', ()=>{
     const ram = new Uint8Array(0x100);
     ram.set([1, 2, 3, 4, 5, 6, 7, 8], 0x10);
     const guest = guestOver(ram);
@@ -205,6 +205,14 @@ test('bytes are one copy, or none into a buffer given; a copy within moves as me
     assert.deepEqual([...into], [2, 3, 4, 0, 0, 0]);
     guest.copy(0x12, 0x10, 6);
     assert.deepEqual([...ram.subarray(0x10, 0x18)], [9, 2, 9, 2, 3, 4, 5, 6]);
+    assert.equal(guest.set32s(0x20, [1, -1]), 0x28, 'where the next would go');
+    assert.deepEqual([guest.u32(0x20), guest.u32(0x24)], [1, 0xffffffff]);
+    const guid = '{6B29FC40-CA47-1067-B31D-00DD010662DA}';
+    assert.equal(guest.setGuid(0x30, guid), true);
+    assert.equal(ram[0x30], 0x40, 'its first field little-endian');
+    assert.equal(guest.guid(0x30), guid);
+    assert.equal(guest.setGuid(0x30, 'no guid'), false);
+    assert.equal(guest.guid(0x30), guid, 'nothing written for it');
     guest.fill(0x10, 0xaa, 2);
     guest.setBytes(0x12, Uint8Array.of(7));
     assert.deepEqual([...ram.subarray(0x10, 0x13)], [0xaa, 0xaa, 7]);

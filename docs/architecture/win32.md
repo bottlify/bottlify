@@ -107,13 +107,14 @@ A handler reads and writes guest memory through one view, `host.guest`
 ([`common/guest.js`](../../modules/core/src/layers/win32/common/guest.js)), which the win32 layer
 builds once per process over the memory layer's accessors and hands to each library, and to the
 sound and input layers through its api: `u8`, `u16`, `u32`, `i32`, `u64`, `f32`, `f64` and `ptr`
-read a value where it lies, `set8` to `setPtr` write one, `cstr` and `wstr` read a string to its
-terminator or to a limit in bytes (cut there, a fault only where memory ends), `writeAnsi` and
-`writeWide` write one cut to its room, and `bytes` is the one read that copies, into a buffer it
-is given or into one it makes. `ptr` and `setPtr` are as wide as the process's pointers. A
-library makes no accessor of its own and copies no read again:
-`tools/checks/check-guest-access.mjs` (`npm run check:boundaries`) fails a new one, and lists in
-its baseline the ones the layer still has, which only shrinks.
+read a value where it lies, `set8` to `setPtr` and `set32s` write one, `cstr` and `wstr` read a
+string to its terminator or to a limit in bytes (cut there, a fault only where memory ends),
+`writeAnsi` and `writeWide` write one cut to its room, `guid` and `setGuid` a GUID in its
+canonical form, and `bytes` is the one read that copies, into a buffer it is given or into one it
+makes. `ptr` and `setPtr` are as wide as the process's pointers. A library makes no accessor of
+its own and copies no read again: `tools/checks/check-guest-access.mjs` (`npm run
+check:boundaries`) fails a new one, and lists in its baseline the ones the layer still has, which
+only shrinks.
 
 ## One call, from the program to JS and back
 
