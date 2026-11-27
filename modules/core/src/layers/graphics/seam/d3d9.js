@@ -51,8 +51,8 @@ import {
     IID_IDirect3DVertexBuffer9, IID_IDirect3DVertexDeclaration9, IID_IDirect3DVertexShader9,
 } from '../d3d9/interfaces.js';
 import {
-    D3DADAPTER_IDENTIFIER9, D3DCAPS9, D3DCAPS9_FLOATS, D3DCLIPSTATUS9, D3DDECL_END_STREAM,
-    D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER,
+    D3DADAPTER_IDENTIFIER9, D3DADAPTER_IDENTIFIER9_FIELDS, D3DCAPS9, D3DCAPS9_FLOATS,
+    D3DCLIPSTATUS9, D3DDECL_END_STREAM, D3DDISPLAYMODEEX, D3DDISPLAYMODEFILTER,
     D3DINDEXBUFFER_DESC9, D3DSURFACE_DESC9, D3DVERTEXBUFFER_DESC9, D3DVERTEXELEMENT9,
     D3DVIEWPORT9, D3DVOLUME_DESC9,
 } from '../d3d9/structs.js';
@@ -1925,8 +1925,7 @@ export function createDirect3D9Seam(
             const hr = device.GetCreationParameters(held);
             if (hr === D3D_OK && held.parameters)
             {
-                fields.writeStruct(out >>> 0, CREATION_PARAMETERS,
-                    long ? { ...held.parameters, hFocusWindowHigh: 0 } : held.parameters);
+                fields.writeStruct(out >>> 0, CREATION_PARAMETERS, held.parameters);
             }
             return hr;
         },
@@ -3503,7 +3502,7 @@ export function createDirect3D9Seam(
      */
     const writeAdapterIdentifier = (address, flags)=>{
         const { vendorId, deviceId, description } = describeAdapter(identity?.() ?? null);
-        const block = new Uint8Array(D3DADAPTER_IDENTIFIER9.FIELDS);
+        const block = new Uint8Array(D3DADAPTER_IDENTIFIER9_FIELDS);
         /** @param {string} text @param {number} at @param {number} room */
         const ascii = (text, at, room)=>{
             for (let index = 0; index < Math.min(text.length, room - 1); index++)

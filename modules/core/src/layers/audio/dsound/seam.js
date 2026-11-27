@@ -39,6 +39,7 @@ import {
     SOUND_ADAPTER_NAME, SOUND_DEVICE_GUID, SOUND_DEVICE_INTERFACE,
 } from '../../win32/devices.js';
 import { parseGuid } from '../../../system/guid.js';
+import { GUID, struct } from '../../../system/layout.js';
 import {
     FORMAT_WaveFormatEx, IID_IMediaObject, IID_IMediaObjectInPlace, MEDIASUBTYPE_IEEE_FLOAT,
     MEDIASUBTYPE_PCM, MEDIATYPE_Audio,
@@ -112,6 +113,9 @@ const DSBCAPS_CTRLFX = 0x00000200;
 const DSBCAPS_LOCDEFER = 0x00040000;
 const DSBSTATUS_LOCSOFTWARE = 0x00000010;
 
+/** @param {readonly string[]} names @returns {[string, 'u32'][]} a run of DWORDs */
+const dwords = names=>names.map(name=>[name, 'u32']);
+
 /** Interface identifiers. Facts about somebody else's ABI; there is no partial credit. */
 export const IID_IDirectSound = '{279AFA83-4981-11CE-A521-0020AF0BE560}';
 export const IID_IDirectSound8 = '{C50A7E93-F395-4834-9EF6-7FA99DE50966}';
@@ -126,64 +130,50 @@ const COUNTED_ON_THEIR_OWN = new Set([IID_IDirectSoundNotify, IID_IKsPropertySet
 /** IDirectSound and IDirectSound8 share the device's count; its IUnknown has one of its own. */
 const DEVICE_COUNTED_ON_ITS_OWN = new Set([IID_IUNKNOWN]);
 
-/** WAVEFORMATEX. The two-byte fields are why this is not a table of dwords. */
-export const WAVEFORMATEX = Object.freeze({
-    wFormatTag: 0x00,
-    nChannels: 0x02,
-    nSamplesPerSec: 0x04,
-    nAvgBytesPerSec: 0x08,
-    nBlockAlign: 0x0c,
-    wBitsPerSample: 0x0e,
-    cbSize: 0x10,
-    SIZE: 0x12,
-});
+/**
+ * WAVEFORMATEX, under mmsystem.h's #pragma pack(1): eighteen bytes, and the
+ * two-byte fields are why it is not a table of dwords.
+ */
+const WAVE_FORMAT = struct([['wFormatTag', 'u16'], ['nChannels', 'u16'],
+    ['nSamplesPerSec', 'u32'], ['nAvgBytesPerSec', 'u32'], ['nBlockAlign', 'u16'],
+    ['wBitsPerSample', 'u16'], ['cbSize', 'u16']], { pack: 1 });
+export const WAVEFORMATEX = WAVE_FORMAT.at(4);
 /** WAVE_FORMAT_EXTENSIBLE, and where its extension's fields sit after WAVEFORMATEX. */
 const WAVE_FORMAT_EXTENSIBLE = 0xfffe;
 /** WAVE_FORMAT_IEEE_FLOAT; also the first dword of KSDATAFORMAT_SUBTYPE_IEEE_FLOAT. */
 const WAVE_FORMAT_IEEE_FLOAT = 3;
-const EXTENSIBLE = Object.freeze({ wValidBitsPerSample: 18, SubFormat: 24, EXTRA: 22 });
+/**
+ * WAVEFORMATEXTENSIBLE (mmreg.h, packed as its WAVEFORMATEX is): the
+ * Samples union is one WORD, whichever of its names is meant.
+ */
+const EXTENSIBLE = struct([['Format', WAVE_FORMAT], ['wValidBitsPerSample', 'u16'],
+    ['dwChannelMask', 'u32'], ['SubFormat', GUID]], { pack: 1 }).at(4);
+/** The cbSize a whole WAVEFORMATEXTENSIBLE names: what follows its WAVEFORMATEX. */
+const EXTENSIBLE_EXTRA = EXTENSIBLE.SIZE - WAVEFORMATEX.SIZE;
 
 /**
- * DSBUFFERDESC.
+ * DSBUFFERDESC, dsound.h's.
  *
- * DirectX 8 appends a 3D algorithm GUID, so the structure is either twenty
- * bytes or thirty-six and the caller says which in its first field. Nothing
- * before that moves, so both are read the same way and only the trailing field
- * is conditional.
+ * DirectX 7 appended a 3D algorithm GUID, so the structure is either the
+ * older DSBUFFERDESC1 or this one, and the caller says which in its first
+ * field. Nothing before that moves, so both are read the same way and only
+ * the trailing field is conditional. In a 64-bit process lpwfxFormat is
+ * eight bytes and stays at 0x10, already aligned for it, so only the sizes
+ * and the GUID behind it move: a 64-bit caller declares 24 or 40, and a
+ * check against the 32-bit sizes refuses every buffer it asks for.
  */
-export const DSBUFFERDESC = Object.freeze({
-    dwSize: 0x00,
-    dwFlags: 0x04,
-    dwBufferBytes: 0x08,
-    dwReserved: 0x0c,
-    lpwfxFormat: 0x10,
-    guid3DAlgorithm: 0x14,
-    SIZE: 0x14,
-    SIZE_DX8: 0x24,
-});
-
-/**
- * DSBUFFERDESC in a 64-bit process: lpwfxFormat is eight bytes and stays at
- * 0x10, which is already aligned for it, so only the sizes and the GUID
- * behind it move. A 64-bit caller declares 24 or 40, and a check against the
- * 32-bit sizes refuses every buffer it asks for.
- */
-export const DSBUFFERDESC_64 = Object.freeze({
-    ...DSBUFFERDESC,
-    guid3DAlgorithm: 0x18,
-    SIZE: 0x18,
-    SIZE_DX8: 0x28,
-});
+const BUFFERDESC1_FIELDS = /** @type {const} */ ([['dwSize', 'u32'], ['dwFlags', 'u32'],
+    ['dwBufferBytes', 'u32'], ['dwReserved', 'u32'], ['lpwfxFormat', 'ptr']]);
+const BUFFERDESC = struct([...BUFFERDESC1_FIELDS, ['guid3DAlgorithm', GUID]]);
+const BUFFERDESC1 = struct(BUFFERDESC1_FIELDS);
+export const DSBUFFERDESC = BUFFERDESC.at(4);
+export const DSBUFFERDESC_64 = BUFFERDESC.at(8);
+export const DSBUFFERDESC1 = BUFFERDESC1.at(4);
+export const DSBUFFERDESC1_64 = BUFFERDESC1.at(8);
 
 /** DSBCAPS, which a program reads back to learn what it actually got. */
-export const DSBCAPS = Object.freeze({
-    dwSize: 0x00,
-    dwFlags: 0x04,
-    dwBufferBytes: 0x08,
-    dwUnlockTransferRate: 0x0c,
-    dwPlayCpuOverhead: 0x10,
-    SIZE: 0x14,
-});
+export const DSBCAPS = struct(dwords(['dwSize', 'dwFlags', 'dwBufferBytes',
+    'dwUnlockTransferRate', 'dwPlayCpuOverhead'])).at(4);
 
 /**
  * DSCAPS. Only the first few fields are filled; the rest exist to place them.
@@ -193,33 +183,14 @@ export const DSBCAPS = Object.freeze({
  * this: too large a figure here refuses every correctly-filled structure, which
  * is what a sound library reads as "there is no DirectSound on this machine".
  */
-export const DSCAPS = Object.freeze({
-    dwSize: 0x00,
-    dwFlags: 0x04,
-    dwMinSecondarySampleRate: 0x08,
-    dwMaxSecondarySampleRate: 0x0c,
-    dwPrimaryBuffers: 0x10,
-    dwMaxHwMixingAllBuffers: 0x14,
-    dwMaxHwMixingStaticBuffers: 0x18,
-    dwMaxHwMixingStreamingBuffers: 0x1c,
-    dwFreeHwMixingAllBuffers: 0x20,
-    dwFreeHwMixingStaticBuffers: 0x24,
-    dwFreeHwMixingStreamingBuffers: 0x28,
-    dwMaxHw3DAllBuffers: 0x2c,
-    dwMaxHw3DStaticBuffers: 0x30,
-    dwMaxHw3DStreamingBuffers: 0x34,
-    dwFreeHw3DAllBuffers: 0x38,
-    dwFreeHw3DStaticBuffers: 0x3c,
-    dwFreeHw3DStreamingBuffers: 0x40,
-    dwTotalHwMemBytes: 0x44,
-    dwFreeHwMemBytes: 0x48,
-    dwMaxContigFreeHwMemBytes: 0x4c,
-    dwUnlockTransferRateHwBuffers: 0x50,
-    dwPlayCpuOverheadSwBuffers: 0x54,
-    dwReserved1: 0x58,
-    dwReserved2: 0x5c,
-    SIZE: 0x60,
-});
+export const DSCAPS = struct(dwords(['dwSize', 'dwFlags', 'dwMinSecondarySampleRate',
+    'dwMaxSecondarySampleRate', 'dwPrimaryBuffers', 'dwMaxHwMixingAllBuffers',
+    'dwMaxHwMixingStaticBuffers', 'dwMaxHwMixingStreamingBuffers', 'dwFreeHwMixingAllBuffers',
+    'dwFreeHwMixingStaticBuffers', 'dwFreeHwMixingStreamingBuffers', 'dwMaxHw3DAllBuffers',
+    'dwMaxHw3DStaticBuffers', 'dwMaxHw3DStreamingBuffers', 'dwFreeHw3DAllBuffers',
+    'dwFreeHw3DStaticBuffers', 'dwFreeHw3DStreamingBuffers', 'dwTotalHwMemBytes',
+    'dwFreeHwMemBytes', 'dwMaxContigFreeHwMemBytes', 'dwUnlockTransferRateHwBuffers',
+    'dwPlayCpuOverheadSwBuffers', 'dwReserved1', 'dwReserved2'])).at(4);
 
 /**
  * DSCAPS.dwFlags -- what the device says it can play.
@@ -303,18 +274,13 @@ const defaultDeviceId = which=>Object.freeze([
 const DEFAULT_PLAYBACK_IDS = Object.freeze([0, 2].map(defaultDeviceId));
 const DEFAULT_CAPTURE_IDS = Object.freeze([1, 3].map(defaultDeviceId));
 
-/** DSBPOSITIONNOTIFY, one per position a program wants to be told about. */
-export const DSBPOSITIONNOTIFY = Object.freeze({
-    dwOffset: 0x00,
-    hEventNotify: 0x04,
-    SIZE: 0x08,
-});
-/** DSBPOSITIONNOTIFY in a 64-bit process: the HANDLE is eight bytes, aligned to eight. */
-export const DSBPOSITIONNOTIFY_64 = Object.freeze({
-    dwOffset: 0x00,
-    hEventNotify: 0x08,
-    SIZE: 0x10,
-});
+/**
+ * DSBPOSITIONNOTIFY, one per position a program wants to be told about. In a
+ * 64-bit process the HANDLE is eight bytes, aligned to eight.
+ */
+const POSITIONNOTIFY = struct([['dwOffset', 'u32'], ['hEventNotify', 'handle']]);
+export const DSBPOSITIONNOTIFY = POSITIONNOTIFY.at(4);
+export const DSBPOSITIONNOTIFY_64 = POSITIONNOTIFY.at(8);
 
 /** IDirectSound, after IUnknown's three. */
 export const IDIRECTSOUND_SLOTS = /** @type {[string, number][]} */ ([
@@ -423,30 +389,29 @@ const DATAFLOW_RENDER = 0;
 const DATAFLOW_CAPTURE = 1;
 /** DIRECTSOUNDDEVICE_TYPE_WDM: Windows NT has no VxD, so every device it lists is WDM. */
 const DEVICE_TYPE_WDM = 2;
-/** ..._WAVEDEVICEMAPPING_A/W_DATA: the wave device's name and flow in, its GUID out. */
-const WAVEDEVICEMAPPING = Object.freeze({
-    DeviceName: 0, DataFlow: 4, DeviceId: 8, SIZE: 24,
-});
-const WAVEDEVICEMAPPING_64 = Object.freeze({
-    DeviceName: 0, DataFlow: 8, DeviceId: 12, SIZE: 32,
-});
+/**
+ * dsconf.h's ..._WAVEDEVICEMAPPING_A/W_DATA: the wave device's name and flow
+ * in, its GUID out.
+ */
+const WAVEDEVICEMAPPING_LAYOUT = struct([['DeviceName', 'ptr'], ['DataFlow', 'u32'],
+    ['DeviceId', GUID]]);
+const WAVEDEVICEMAPPING = WAVEDEVICEMAPPING_LAYOUT.at(4);
+const WAVEDEVICEMAPPING_64 = WAVEDEVICEMAPPING_LAYOUT.at(8);
+/** MAX_PATH, the length of the module name fields. */
+const MAX_PATH = 260;
 /** ..._DESCRIPTION_1_DATA: no pointer in it, one layout in either width. */
-const DESCRIPTION_1 = Object.freeze({
-    DeviceId: 0, DescriptionA: 16, DescriptionW: 272, ModuleA: 784, ModuleW: 1044,
-    Type: 1564, DataFlow: 1568, WaveDeviceId: 1572, Devnode: 1576, SIZE: 1580,
-});
+const DESCRIPTION_1 = struct([['DeviceId', GUID], ['DescriptionA', 'u8', 0x100],
+    ['DescriptionW', 'u16', 0x100], ['ModuleA', 'u8', MAX_PATH], ['ModuleW', 'u16', MAX_PATH],
+    ...dwords(['Type', 'DataFlow', 'WaveDeviceId', 'Devnode'])]).at(4);
 /** ..._DESCRIPTION_A/W_DATA: the strings are pointers to text the library keeps. */
-const DESCRIPTION = Object.freeze({
-    Type: 0, DataFlow: 4, DeviceId: 8, Description: 24, Module: 28, Interface: 32,
-    WaveDeviceId: 36, SIZE: 40,
-});
-const DESCRIPTION_64 = Object.freeze({
-    Type: 0, DataFlow: 4, DeviceId: 8, Description: 24, Module: 32, Interface: 40,
-    WaveDeviceId: 48, SIZE: 56,
-});
+const DESCRIPTION_LAYOUT = struct([['Type', 'u32'], ['DataFlow', 'u32'], ['DeviceId', GUID],
+    ['Description', 'ptr'], ['Module', 'ptr'], ['Interface', 'ptr'], ['WaveDeviceId', 'u32']]);
+const DESCRIPTION = DESCRIPTION_LAYOUT.at(4);
+const DESCRIPTION_64 = DESCRIPTION_LAYOUT.at(8);
 /** ..._ENUMERATE_1/A/W_DATA: the program's callback and its context. */
-const ENUMERATE = Object.freeze({ Callback: 0, Context: 4, SIZE: 8 });
-const ENUMERATE_64 = Object.freeze({ Callback: 0, Context: 8, SIZE: 16 });
+const ENUMERATE_LAYOUT = struct([['Callback', 'ptr'], ['Context', 'ptr']]);
+const ENUMERATE = ENUMERATE_LAYOUT.at(4);
+const ENUMERATE_64 = ENUMERATE_LAYOUT.at(8);
 
 /** IDirectSoundNotify, after IUnknown's three. */
 const IDIRECTSOUNDNOTIFY_SLOTS = /** @type {[string, number][]} */ ([
@@ -610,6 +575,7 @@ export function createDirectSound({
     const publisher = createPublisher({ publishInterface });
     const long = pointerSize === 8;
     const descriptorLayout = long ? DSBUFFERDESC_64 : DSBUFFERDESC;
+    const descriptorLayout1 = long ? DSBUFFERDESC1_64 : DSBUFFERDESC1;
     const notifyLayout = long ? DSBPOSITIONNOTIFY_64 : DSBPOSITIONNOTIFY;
 
     /** @param {number} address */
@@ -724,7 +690,7 @@ export function createDirectSound({
         if (readU16(address + WAVEFORMATEX.wFormatTag) === WAVE_FORMAT_EXTENSIBLE)
         {
             const subFormat = memory.readMemory((address >>> 0) + EXTENSIBLE.SubFormat, 16);
-            if (readU16(address + WAVEFORMATEX.cbSize) < EXTENSIBLE.EXTRA
+            if (readU16(address + WAVEFORMATEX.cbSize) < EXTENSIBLE_EXTRA
                 || subFormat.every((/** @type {number} */ byte)=>byte === 0)
                 || readU16(address + EXTENSIBLE.wValidBitsPerSample)
                     > readU16(address + WAVEFORMATEX.wBitsPerSample))
@@ -769,8 +735,8 @@ export function createDirectSound({
         const extra = readU16(address + WAVEFORMATEX.cbSize);
         const tag = readU16(address + WAVEFORMATEX.wFormatTag);
         const length = tag === WAVE_FORMAT_PCM ? WAVEFORMATEX.SIZE - 2
-            : WAVEFORMATEX.SIZE + Math.min(extra, EXTENSIBLE.EXTRA);
-        const bytes = new Uint8Array(WAVEFORMATEX.SIZE + EXTENSIBLE.EXTRA);
+            : WAVEFORMATEX.SIZE + Math.min(extra, EXTENSIBLE_EXTRA);
+        const bytes = new Uint8Array(WAVEFORMATEX.SIZE + EXTENSIBLE_EXTRA);
         bytes.set(memory.readMemory(address >>> 0, length));
         return bytes.subarray(0, Math.max(length, WAVEFORMATEX.SIZE));
     };
@@ -1510,7 +1476,7 @@ export function createDirectSound({
             // One of the two layouts, or a caller that disagrees with us about
             // where every later field is.
             const size = readU32(descriptor + descriptorLayout.dwSize);
-            if (size !== descriptorLayout.SIZE && size !== descriptorLayout.SIZE_DX8)
+            if (size !== descriptorLayout1.SIZE && size !== descriptorLayout.SIZE)
             {
                 writePointer(out, 0);
                 return DSERR_INVALIDPARAM;

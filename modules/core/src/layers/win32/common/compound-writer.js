@@ -31,7 +31,10 @@ import { GUID, bytesView, fieldOf, struct, write } from '../../../system/layout.
  * The header as [MS-CFB] 2.2 lays it out: the signature and a class, the
  * versions, the byte order and the two sector sizes, then where the
  * directory, the mini FAT and the DIFAT start and how long each is, and the
- * first 109 FAT sector numbers.
+ * first 109 FAT sector numbers. It and the directory entry are declared here,
+ * where every user of the format already takes its name rules from, and
+ * both readers (ole32's whole-file one and msi's over a byte source) find a
+ * file's tables by them.
  */
 export const CFB_HEADER = struct([['signature', 'u8', 8], ['clsid', GUID],
     ['minorVersion', 'u16'], ['majorVersion', 'u16'], ['byteOrder', 'u16'],

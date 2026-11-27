@@ -28,22 +28,24 @@
  */
 
 import {
-    MAX_NAME_LENGTH, compareNames, compoundBytesSync, memorySource, nameKey,
+    CFB_ENTRY, CFB_HEADER, MAX_NAME_LENGTH, compareNames, compoundBytesSync, memorySource, nameKey,
 } from '../common/compound-writer.js';
-import { GUID_NULL, formatGuid } from '../../../system/guid.js';
+import { GUID_NULL, GUID_SIZE, formatGuid } from '../../../system/guid.js';
+import { fieldOf } from '../../../system/layout.js';
 
 export { MAX_NAME_LENGTH, compareNames, nameKey };
 
 /** The eight bytes every compound file begins with. */
 const SIGNATURE = Object.freeze([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
 
-const HEADER_SIZE = 512;
-const DIRECTORY_ENTRY_SIZE = 128;
+const HEADER_SIZE = CFB_HEADER.SIZE;
+const DIRECTORY_ENTRY_SIZE = CFB_ENTRY.SIZE;
 const MINI_SECTOR_SIZE = 64;
 /** A stream shorter than this lives in the mini stream. */
 const MINI_STREAM_CUTOFF = 4096;
 /** How many FAT sector numbers the header itself holds before DIFAT sectors are needed. */
-const HEADER_DIFAT_ENTRIES = 109;
+const HEADER_DIFAT_ENTRIES = /** @type {import('../../../system/layout.js').Field} */ (
+    fieldOf(CFB_HEADER, 'difat')).count;
 
 /** Sector numbers with a meaning of their own. */
 const MAXREGSECT = 0xfffffffa;
@@ -119,8 +121,8 @@ export function parseCompoundFile(given){
         return null;
     }
     const header = new DataView(given.buffer, given.byteOffset, HEADER_SIZE);
-    const sectorShift = header.getUint16(0x1e, true);
-    const miniShift = header.getUint16(0x20, true);
+    const sectorShift = header.getUint16(CFB_HEADER.sectorShift, true);
+    const miniShift = header.getUint16(CFB_HEADER.miniSectorShift, true);
     if ((sectorShift !== 9 && sectorShift !== 12) || miniShift !== 6)
     {
         return null;
@@ -158,15 +160,15 @@ export function parseCompoundFile(given){
 
     // The DIFAT: which sectors hold the FAT. The header's own 109 entries
     // come first, then a chain of DIFAT sectors whose last word is the next.
-    const fatSectorCount = view.getUint32(0x2c, true);
+    const fatSectorCount = view.getUint32(CFB_HEADER.fatSectors, true);
     /** @type {number[]} */
     const fatSectors = [];
     for (let index = 0; index < HEADER_DIFAT_ENTRIES && fatSectors.length < fatSectorCount; index++)
     {
-        fatSectors.push(view.getUint32(0x4c + index * 4, true));
+        fatSectors.push(view.getUint32(CFB_HEADER.difat + index * 4, true));
     }
-    let difatSector = view.getUint32(0x44, true);
-    const difatCount = view.getUint32(0x48, true);
+    let difatSector = view.getUint32(CFB_HEADER.difatStart, true);
+    const difatCount = view.getUint32(CFB_HEADER.difatSectors, true);
     for (let seen = 0; seen < difatCount && difatSector <= MAXREGSECT; seen++)
     {
         const words = sectorWords(difatSector);
@@ -245,7 +247,8 @@ export function parseCompoundFile(given){
     };
 
     // The directory, as a flat list of entries; the tree is walked afterwards.
-    const directoryChain = chainOf(fat, view.getUint32(0x30, true), sectorCount);
+    const directoryChain = chainOf(fat, view.getUint32(CFB_HEADER.directoryStart, true),
+        sectorCount);
     if (!directoryChain)
     {
         return null;
@@ -262,7 +265,7 @@ export function parseCompoundFile(given){
         for (let slot = 0; slot < entriesPerDirectorySector; slot++)
         {
             const at = sectorOffset(sector) + slot * DIRECTORY_ENTRY_SIZE;
-            const nameBytes = view.getUint16(at + 0x40, true);
+            const nameBytes = view.getUint16(at + CFB_ENTRY.nameLength, true);
             let name = '';
             // The length counts the terminator; a length of zero is an
             // unallocated entry and an odd one is damage, both read as empty.
@@ -271,7 +274,7 @@ export function parseCompoundFile(given){
                 : 0;
             for (let index = 0; index < units; index++)
             {
-                const unit = view.getUint16(at + index * 2, true);
+                const unit = view.getUint16(at + CFB_ENTRY.name + index * 2, true);
                 if (unit === 0)
                 {
                     break;
@@ -280,19 +283,20 @@ export function parseCompoundFile(given){
             }
             // Version 3 files carry a 32-bit size and leave the high word to
             // chance, so only the low word is trusted there.
-            const sizeLow = view.getUint32(at + 0x78, true);
-            const sizeHigh = sectorShift === 9 ? 0 : view.getUint32(at + 0x7c, true);
+            const sizeLow = view.getUint32(at + CFB_ENTRY.size, true);
+            const sizeHigh = sectorShift === 9 ? 0 : view.getUint32(at + CFB_ENTRY.sizeHigh, true);
             raw.push({
                 name,
-                type: view.getUint8(at + 0x42),
-                left: view.getUint32(at + 0x44, true),
-                right: view.getUint32(at + 0x48, true),
-                child: view.getUint32(at + 0x4c, true),
-                clsid: formatGuid(bytes.subarray(at + 0x50, at + 0x60)),
-                stateBits: view.getUint32(at + 0x60, true),
-                created: view.getBigUint64(at + 0x64, true),
-                modified: view.getBigUint64(at + 0x6c, true),
-                start: view.getUint32(at + 0x74, true),
+                type: view.getUint8(at + CFB_ENTRY.type),
+                left: view.getUint32(at + CFB_ENTRY.left, true),
+                right: view.getUint32(at + CFB_ENTRY.right, true),
+                child: view.getUint32(at + CFB_ENTRY.child, true),
+                clsid: formatGuid(bytes.subarray(at + CFB_ENTRY.clsid,
+                    at + CFB_ENTRY.clsid + GUID_SIZE)),
+                stateBits: view.getUint32(at + CFB_ENTRY.stateBits, true),
+                created: view.getBigUint64(at + CFB_ENTRY.created, true),
+                modified: view.getBigUint64(at + CFB_ENTRY.modified, true),
+                start: view.getUint32(at + CFB_ENTRY.start, true),
                 size: sizeHigh === 0 ? sizeLow : Number.MAX_SAFE_INTEGER,
             });
         }
@@ -305,7 +309,7 @@ export function parseCompoundFile(given){
     // The mini stream is the root entry's own stream, and the mini FAT is
     // chained through the regular FAT like anything else.
     const miniStream = readChain(raw[0].start, raw[0].size);
-    const miniFatChain = chainOf(fat, view.getUint32(0x3c, true), sectorCount);
+    const miniFatChain = chainOf(fat, view.getUint32(CFB_HEADER.miniFatStart, true), sectorCount);
     if (!miniStream || !miniFatChain)
     {
         return null;

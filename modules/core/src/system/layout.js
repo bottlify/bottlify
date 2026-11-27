@@ -64,7 +64,8 @@ const alignOfKind = (kind, width)=>(typeof kind === 'string'
 /**
  * Each table a layout made, to what it holds at its width.
  *
- * @type {WeakMap<object, { fields: Field[], byName: Map<string, Field>, width: 4 | 8 }>}
+ * @type {WeakMap<object, { fields: Field[], byName: Map<string, Field>, width: 4 | 8,
+ *     layout: Layout }>}
  */
 const made = new WeakMap();
 
@@ -132,7 +133,8 @@ function define(declared, { union = false, pack = 8 }){
         table.SIZE = Math.ceil(end / align) * align;
         fields.sort((a, b)=>a.offset - b.offset);
         const entry = { table: /** @type {Table} */ (Object.freeze(table)), fields, align };
-        made.set(entry.table, { fields, byName: new Map(fields.map(f=>[f.name, f])), width });
+        made.set(entry.table, { fields, byName: new Map(fields.map(f=>[f.name, f])), width,
+            layout });
         widths.set(width, entry);
         return entry;
     };
@@ -206,6 +208,14 @@ export const fieldOf = (table, name)=>made.get(table)?.byName.get(name);
 
 /** The width a table was laid out at. @param {Table} table @returns {4 | 8} */
 export const widthOf = table=>madeOf(table).width;
+
+/**
+ * The layout a table was laid out from: a module that exports its
+ * structures at the width its callers use hands the other width out too.
+ *
+ * @param {Table} table @returns {Layout}
+ */
+export const layoutOf = table=>madeOf(table).layout;
 
 /** @param {Table} table @param {string} name */
 const scalar = (table, name)=>{

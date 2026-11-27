@@ -12,7 +12,8 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import { parseGuid, readGuid, writeGuid } from '../../../system/guid.js';
 import {
     createDirectSound, createPublisher, describe,
-    DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBUFFERDESC_64, DSBCAPS, DSCAPS, DSCAPS_FLAGS,
+    DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBUFFERDESC_64, DSBUFFERDESC1, DSBUFFERDESC1_64, DSBCAPS,
+    DSCAPS, DSCAPS_FLAGS,
     DSBPOSITIONNOTIFY, DSBPOSITIONNOTIFY_64,
     IID_IDirectSound, IID_IDirectSound8, IID_IDirectSoundBuffer,
     IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer, IID_IKsPropertySet,
@@ -587,8 +588,8 @@ test('CreateSoundBuffer reads a description of either size and refuses any other
     const f = createRoot();
     const out = 0x1800;
     const descriptor = describeBuffer(f.memory, { bytes: 4096 });
-    for (const size of [0, DSBUFFERDESC.SIZE - 1, DSBUFFERDESC.SIZE_DX8 - 1,
-        DSBUFFERDESC.SIZE_DX8 + 1])
+    for (const size of [0, DSBUFFERDESC1.SIZE - 1, DSBUFFERDESC.SIZE - 1,
+        DSBUFFERDESC.SIZE + 1])
     {
         f.memory.setU32(out, 0xdeadbeef);
         f.memory.setU32(descriptor + DSBUFFERDESC.dwSize, size);
@@ -597,7 +598,7 @@ test('CreateSoundBuffer reads a description of either size and refuses any other
         assert.equal(f.memory.u32(out), 0, `dwSize ${size} writes a null back`);
     }
     assert.equal(f.dsound.buffers().length, 0);
-    for (const size of [DSBUFFERDESC.SIZE, DSBUFFERDESC.SIZE_DX8])
+    for (const size of [DSBUFFERDESC1.SIZE, DSBUFFERDESC.SIZE])
     {
         f.memory.setU32(descriptor + DSBUFFERDESC.dwSize, size);
         assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]), DS_OK,
@@ -1892,13 +1893,13 @@ test('a 64-bit process describes its buffers in 24 or 40 bytes and is handed who
     const f = createRoot(fixture({ pointerSize: 8 }));
     const out = 0x1800;
     const descriptor = describeBuffer(f.memory, { bytes: 4096 });
-    for (const size of [DSBUFFERDESC.SIZE, DSBUFFERDESC.SIZE_DX8, DSBUFFERDESC_64.SIZE_DX8 + 8])
+    for (const size of [DSBUFFERDESC1.SIZE, DSBUFFERDESC.SIZE, DSBUFFERDESC_64.SIZE + 8])
     {
         f.memory.setU32(descriptor + DSBUFFERDESC_64.dwSize, size);
         assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
             DSERR_INVALIDPARAM, `dwSize ${size} is a 32-bit layout or none`);
     }
-    for (const size of [DSBUFFERDESC_64.SIZE, DSBUFFERDESC_64.SIZE_DX8])
+    for (const size of [DSBUFFERDESC1_64.SIZE, DSBUFFERDESC_64.SIZE])
     {
         f.memory.setU32(out, 0xdeadbeef);
         f.memory.setU32(out + 4, 0xdeadbeef);
@@ -1927,7 +1928,7 @@ test('a 64-bit process\'s notification positions are sixteen bytes, the handle a
     const f = createRoot(fixture({ pointerSize: 8 }));
     const descriptor = describeBuffer(f.memory,
         { bytes: 88200, flags: DSBCAPS_CTRLPOSITIONNOTIFY });
-    f.memory.setU32(descriptor + DSBUFFERDESC_64.dwSize, DSBUFFERDESC_64.SIZE_DX8);
+    f.memory.setU32(descriptor + DSBUFFERDESC_64.dwSize, DSBUFFERDESC_64.SIZE);
     assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, 0x1800, 0]), DS_OK);
     const array = 0x1d00;
     f.memory.setU32(array + DSBPOSITIONNOTIFY_64.dwOffset, 44100);
@@ -2419,3 +2420,20 @@ test('SetFX makes each effect through COM, gives it the buffer\'s format and run
         assert.equal(record.effectedWindow(0, 4), null, 'the program\'s samples are heard again');
         assert.deepEqual(asked.slice(-2), [OWN, '{00000000-0000-0000-0000-000000000000}']);
     });
+
+test('the structures have their headers\' sizes and offsets at either width', ()=>{
+    // sizeof and offsetof under mmsystem.h (WAVEFORMATEX, #pragma pack(1)) and
+    // dsound.h by the x86 compiler's rule, and under _WIN64 for the two whose
+    // pointer or HANDLE moves what follows it.
+    assert.deepEqual([WAVEFORMATEX.nSamplesPerSec, WAVEFORMATEX.nBlockAlign,
+        WAVEFORMATEX.cbSize, WAVEFORMATEX.SIZE], [4, 12, 16, 18]);
+    assert.deepEqual([DSBUFFERDESC.lpwfxFormat, DSBUFFERDESC.guid3DAlgorithm,
+        DSBUFFERDESC1.SIZE, DSBUFFERDESC.SIZE], [0x10, 0x14, 0x14, 0x24]);
+    assert.deepEqual([DSBUFFERDESC_64.lpwfxFormat, DSBUFFERDESC_64.guid3DAlgorithm,
+        DSBUFFERDESC1_64.SIZE, DSBUFFERDESC_64.SIZE], [0x10, 0x18, 0x18, 0x28]);
+    assert.deepEqual([DSBCAPS.dwPlayCpuOverhead, DSBCAPS.SIZE], [0x10, 0x14]);
+    assert.deepEqual([DSCAPS.dwFreeHw3DStreamingBuffers, DSCAPS.dwReserved2, DSCAPS.SIZE],
+        [0x40, 0x5c, 0x60]);
+    assert.deepEqual([DSBPOSITIONNOTIFY.hEventNotify, DSBPOSITIONNOTIFY.SIZE], [4, 8]);
+    assert.deepEqual([DSBPOSITIONNOTIFY_64.hEventNotify, DSBPOSITIONNOTIFY_64.SIZE], [8, 16]);
+});

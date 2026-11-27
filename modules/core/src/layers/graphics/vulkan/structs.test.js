@@ -5,16 +5,19 @@
  */
 
 /**
- * Every layout in `structs.js` is spelled out by hand. This derives each one a
- * second time from its registry field list under the 32-bit rules -- four-byte
- * pointers, eight-byte eight-aligned 64-bit fields -- and holds the two to each
- * other, so a slip in either the arithmetic or the rules shows up as a named
- * field at the wrong offset rather than as a picture that is merely wrong.
+ * Every layout in `structs.js` is declared once and laid out by
+ * `system/layout.js`. This derives each one a second time, by its own
+ * arithmetic, from its registry field list under the 32-bit rules - four-byte
+ * pointers, eight-byte eight-aligned 64-bit fields - and holds the two to
+ * each other, so a slip in either the declaration or the rule shows up as a
+ * named field at the wrong offset rather than as a picture that is merely
+ * wrong. The 64-bit build's documented sizes hold the same declarations at 8.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as S from './structs.js';
+import { layoutOf } from '../../../system/layout.js';
 
 /** @typedef {{ size: number, align: number }} Shape */
 
@@ -189,9 +192,9 @@ test('the physical device properties: the limits move after each VkDeviceSize', 
 test('the features are fifty-five booleans and the memory properties two fixed arrays', ()=>{
     assert.equal(S.PHYSICAL_DEVICE_FEATURES.length, 55);
     assert.equal(S.VkPhysicalDeviceFeatures.SIZE, 220);
-    assert.equal(S.VkPhysicalDeviceFeatures.offsetOf('robustBufferAccess'), 0);
-    assert.equal(S.VkPhysicalDeviceFeatures.offsetOf('geometryShader'), 16);
-    assert.equal(S.VkPhysicalDeviceFeatures.offsetOf('inheritedQueries'), 216);
+    assert.equal(S.VkPhysicalDeviceFeatures.robustBufferAccess, 0);
+    assert.equal(S.VkPhysicalDeviceFeatures.geometryShader, 16);
+    assert.equal(S.VkPhysicalDeviceFeatures.inheritedQueries, 216);
 
     same('VkFormatProperties', S.VkFormatProperties, layout([['linearTilingFeatures', T.flags],
         ['optimalTilingFeatures', T.flags], ['bufferFeatures', T.flags]]));
@@ -387,6 +390,34 @@ test('the graphics pipeline and everything it points to', ()=>{
         ['basePipelineHandle', T.handle], ['basePipelineIndex', T.i32]]));
     assert.equal(S.VkGraphicsPipelineCreateInfo.layout, 56);
     assert.equal(S.VkGraphicsPipelineCreateInfo.SIZE, 96);
+});
+
+test('the same declarations in a 64-bit process: pointers and size_t are eight bytes', ()=>{
+    // sizeof under vulkan_core.h on x64, where a pointer, a size_t and a
+    // non-dispatchable handle (a pointer there) are all eight-aligned.
+    /** @param {Readonly<Record<string, number>>} table */
+    const wide = table=>layoutOf(/** @type {any} */ (table)).at(8);
+    assert.deepEqual([wide(S.VkPhysicalDeviceLimits).SIZE,
+        wide(S.VkPhysicalDeviceLimits).minMemoryMapAlignment,
+        wide(S.VkPhysicalDeviceLimits).minTexelBufferOffsetAlignment,
+        wide(S.VkPhysicalDeviceProperties).SIZE, wide(S.VkPhysicalDeviceProperties).limits],
+    [504, 0x130, 0x138, 824, 0x128]);
+    assert.deepEqual([wide(S.VkApplicationInfo).pApplicationName, wide(S.VkApplicationInfo).SIZE,
+        wide(S.VkInstanceCreateInfo).SIZE, wide(S.VkDeviceCreateInfo).SIZE],
+    [16, 48, 64, 72]);
+    assert.deepEqual([wide(S.VkSwapchainCreateInfoKHR).surface,
+        wide(S.VkSwapchainCreateInfoKHR).pQueueFamilyIndices,
+        wide(S.VkSwapchainCreateInfoKHR).oldSwapchain, wide(S.VkSwapchainCreateInfoKHR).SIZE],
+    [24, 72, 96, 104]);
+    assert.deepEqual([wide(S.VkWin32SurfaceCreateInfoKHR).hwnd,
+        wide(S.VkWin32SurfaceCreateInfoKHR).SIZE], [32, 40]);
+    assert.deepEqual([wide(S.VkGraphicsPipelineCreateInfo).layout,
+        wide(S.VkGraphicsPipelineCreateInfo).SIZE], [104, 144]);
+    assert.deepEqual([wide(S.VkSubmitInfo).SIZE, wide(S.VkPresentInfoKHR).SIZE,
+        wide(S.VkRenderPassBeginInfo).SIZE, wide(S.VkShaderModuleCreateInfo).SIZE],
+    [72, 64, 64, 40]);
+    // No pointer in it: the same at either width.
+    assert.deepEqual({ ...wide(S.VkMemoryHeap) }, { ...S.VkMemoryHeap });
 });
 
 // --- the readers and writers ---

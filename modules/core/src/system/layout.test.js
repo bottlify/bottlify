@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    GUID, POINT, RECT, bytesView, fieldOf, fieldsOf, highOf, read, struct, union, widthOf, write,
+    GUID, POINT, RECT, bytesView, fieldOf, fieldsOf, highOf, layoutOf, read, struct, union, widthOf,
+    write,
 } from './layout.js';
 
 test('a field sits on its natural alignment and the end is padded to the most aligned', ()=>{
@@ -42,6 +43,7 @@ test('an embedded structure, an array and a union take their room; a nameless on
     assert.deepEqual(fieldsOf(outer.at(4)).map(f=>f.name),
         ['tag', 'where', 'bounds', 'whole', 'low', 'high', 'last']);
     assert.equal(widthOf(outer.at(8)), 8);
+    assert.equal(layoutOf(outer.at(4)), outer, 'a table leads back to its layout');
 });
 
 test('a name given twice, or SIZE, is refused when the layout is laid out', ()=>{

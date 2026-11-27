@@ -183,7 +183,7 @@ test('the features are honest: what WebGPU has is true and the rest is false', (
     const at = f.alloc(VkPhysicalDeviceFeatures.SIZE);
     f.call('vkGetPhysicalDeviceFeatures', physicalDevice, at);
     /** @param {string} name */
-    const feature = name=>f.u32(at + VkPhysicalDeviceFeatures.offsetOf(name));
+    const feature = name=>f.u32(at + VkPhysicalDeviceFeatures[name]);
     assert.equal(feature('robustBufferAccess'), VK_TRUE);
     assert.equal(feature('geometryShader'), VK_FALSE);
     assert.equal(feature('tessellationShader'), VK_FALSE);
@@ -195,7 +195,7 @@ test('the features are honest: what WebGPU has is true and the rest is false', (
     const other = createInstance(without);
     const at2 = without.alloc(VkPhysicalDeviceFeatures.SIZE);
     without.call('vkGetPhysicalDeviceFeatures', other.physicalDevice, at2);
-    assert.equal(without.u32(at2 + VkPhysicalDeviceFeatures.offsetOf('textureCompressionBC')),
+    assert.equal(without.u32(at2 + VkPhysicalDeviceFeatures.textureCompressionBC),
         VK_FALSE);
     assert.equal(PHYSICAL_DEVICE_FEATURES.length * 4, VkPhysicalDeviceFeatures.SIZE);
 });
@@ -263,7 +263,7 @@ function createDevice(f, physicalDevice, options = {}){
         features = f.alloc(VkPhysicalDeviceFeatures.SIZE);
         for (const name of options.features)
         {
-            f.memory.writeMemory(features + VkPhysicalDeviceFeatures.offsetOf(name),
+            f.memory.writeMemory(features + VkPhysicalDeviceFeatures[name],
                 new Uint8Array([1, 0, 0, 0]));
         }
     }

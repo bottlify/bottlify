@@ -262,7 +262,13 @@ test('the header and a directory entry are laid out as [MS-CFB] 2.2 and 2.6 give
     assert.deepEqual([CFB_HEADER.minorVersion, CFB_HEADER.sectorShift, CFB_HEADER.directorySectors,
         CFB_HEADER.miniStreamCutoff, CFB_HEADER.difatSectors, CFB_HEADER.difat, CFB_HEADER.SIZE],
     [0x18, 0x1e, 0x28, 0x38, 0x48, 0x4c, 512]);
+    // What the two readers (ole32's and msi's) find the file's tables by.
+    assert.deepEqual([CFB_HEADER.miniSectorShift, CFB_HEADER.fatSectors,
+        CFB_HEADER.directoryStart, CFB_HEADER.miniFatStart, CFB_HEADER.difatStart],
+    [0x20, 0x2c, 0x30, 0x3c, 0x44]);
     assert.deepEqual([CFB_ENTRY.nameLength, CFB_ENTRY.type, CFB_ENTRY.color, CFB_ENTRY.left,
         CFB_ENTRY.clsid, CFB_ENTRY.created, CFB_ENTRY.modified, CFB_ENTRY.start, CFB_ENTRY.size,
         CFB_ENTRY.SIZE], [0x40, 0x42, 0x43, 0x44, 0x50, 0x64, 0x6c, 0x74, 0x78, 128]);
+    assert.deepEqual([CFB_ENTRY.name, CFB_ENTRY.right, CFB_ENTRY.child, CFB_ENTRY.stateBits,
+        CFB_ENTRY.sizeHigh], [0, 0x48, 0x4c, 0x60, 0x7c]);
 });

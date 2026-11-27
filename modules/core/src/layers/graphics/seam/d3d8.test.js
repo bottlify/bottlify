@@ -43,7 +43,8 @@ import {
     D3DSURFACE_DESC8, D3DVIEWPORT8, D3DVOLUME_DESC8, POINT, RECT, createFields,
 } from './structs.js';
 import {
-    D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP,
+    D3DADAPTER_IDENTIFIER8, D3DADAPTER_IDENTIFIER8_FIELDS, D3DCLIPSTATUS8,
+    D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP,
     D3DRASTER_STATUS, GAMMA_RAMP_ENTRIES,
 } from '../d3d8/structs.js';
 import { createDirect3D8 } from '../d3d8/device.js';
@@ -448,7 +449,7 @@ test('the adapter says who made it, in the shape a card database reads', ()=>{
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.DriverVersion + 4), 0x00010000);
     // The fields are written and the padding after them is not: a program
     // built with the structure packed keeps its stack cookie there.
-    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.FIELDS), 0xcdcdcdcd);
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8_FIELDS), 0xcdcdcdcd);
 
     // The flag that skips the certification lookup answers zero for it.
     assert.equal(ask('GetAdapterIdentifier', [0, 2, out]), D3D_OK);

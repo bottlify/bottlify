@@ -5,15 +5,14 @@
  */
 
 /**
- * The gdi32 structures, laid out the way the guest compiled them.
+ * The gdi32 structures, each declared once as wingdi.h declares it and laid
+ * out by `system/layout.js` at the width the guest was compiled for.
  *
  * Unlike the user32 ones, these are not uniform runs of DWORDs: a LOGFONTA ends
  * in eight bytes and a fixed character array, a BITMAPINFOHEADER has two WORDs
  * in the middle, and a TEXTMETRIC is eleven LONGs followed by nine bytes and
- * three bytes of tail padding. So the offsets below are the real ones, not a
- * field index times four, and they are written out because an offset is part of
- * the ABI: a field read from the wrong place is a plausible-looking value rather
- * than an error.
+ * three bytes of tail padding. An offset is part of the ABI: a field read from
+ * the wrong place is a plausible-looking value rather than an error.
  *
  * Reading and writing them lives here too, so that the offsets and the code that
  * uses them cannot drift apart.
@@ -21,123 +20,80 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { POINT as POINT_LAYOUT, struct } from '../../../system/layout.js';
+
+/** @typedef {import('../../../system/layout.js').Declared} Declared */
+
+/** @param {readonly string[]} names @param {'u32' | 'i32'} kind @returns {Declared[]} */
+const all = (names, kind)=>names.map(name=>[name, kind]);
 
 /** LOGPEN. Its width is a POINT, of which only the x is ever meaningful. */
-export const LOGPEN = Object.freeze({
-    lopnStyle: 0,
-    lopnWidthX: 4,
-    lopnWidthY: 8,
-    lopnColor: 12,
-    SIZE: 16,
-});
-
-/** LOGBRUSH. lbHatch is a hatch index for BS_HATCHED and a bitmap for BS_PATTERN. */
-export const LOGBRUSH = Object.freeze({
-    lbStyle: 0,
-    lbColor: 4,
-    lbHatch: 8,
-    SIZE: 12,
-});
-
-/** The face name field of a LOGFONT is this many bytes, terminator included. */
-export const LF_FACESIZE = 32;
+export const LOGPEN = struct([['lopnStyle', 'u32'], ['lopnWidth', POINT_LAYOUT],
+    ['lopnColor', 'u32']]).at(4);
 
 /**
- * LOGFONTA. The five LONGs are followed by eight single bytes -- no padding
- * between them, since a byte needs none -- and then the face name.
+ * LOGBRUSH. lbHatch is a hatch index for BS_HATCHED and a bitmap for
+ * BS_PATTERN: a ULONG_PTR, eight bytes in a 64-bit process.
  */
-export const LOGFONTA = Object.freeze({
-    lfHeight: 0,
-    lfWidth: 4,
-    lfEscapement: 8,
-    lfOrientation: 12,
-    lfWeight: 16,
-    lfItalic: 20,
-    lfUnderline: 21,
-    lfStrikeOut: 22,
-    lfCharSet: 23,
-    lfOutPrecision: 24,
-    lfClipPrecision: 25,
-    lfQuality: 26,
-    lfPitchAndFamily: 27,
-    lfFaceName: 28,
-    SIZE: 60,
-});
+const LOGBRUSH_LAYOUT = struct([['lbStyle', 'u32'], ['lbColor', 'u32'], ['lbHatch', 'ptr']]);
+export const LOGBRUSH = LOGBRUSH_LAYOUT.at(4);
+export const LOGBRUSH64 = LOGBRUSH_LAYOUT.at(8);
+
+/** The face name field of a LOGFONT is this many characters, terminator included. */
+export const LF_FACESIZE = 32;
+
+/** LOGFONT's fields before the face name: five LONGs, then eight bytes, unpadded. */
+const LOGFONT_HEAD = /** @type {Declared[]} */ ([
+    ...all(['lfHeight', 'lfWidth', 'lfEscapement', 'lfOrientation', 'lfWeight'], 'i32'),
+    ...['lfItalic', 'lfUnderline', 'lfStrikeOut', 'lfCharSet', 'lfOutPrecision',
+        'lfClipPrecision', 'lfQuality', 'lfPitchAndFamily'].map(name=>[name, 'u8']),
+]);
+
+/** LOGFONTA: the face name in bytes. */
+export const LOGFONTA = struct([...LOGFONT_HEAD, ['lfFaceName', 'u8', LF_FACESIZE]]).at(4);
+
+/** LOGFONTW: LOGFONTA with the face name as 32 WCHARs. */
+export const LOGFONTW_SIZE = struct([...LOGFONT_HEAD, ['lfFaceName', 'u16', LF_FACESIZE]])
+    .sizeOf(4);
 
 /** BITMAPINFOHEADER. biPlanes and biBitCount are WORDs; everything else is 32 bits. */
-export const BITMAPINFOHEADER = Object.freeze({
-    biSize: 0,
-    biWidth: 4,
-    biHeight: 8,
-    biPlanes: 12,
-    biBitCount: 14,
-    biCompression: 16,
-    biSizeImage: 20,
-    biXPelsPerMeter: 24,
-    biYPelsPerMeter: 28,
-    biClrUsed: 32,
-    biClrImportant: 36,
-    SIZE: 40,
-});
+const BITMAPINFOHEADER_LAYOUT = struct([['biSize', 'u32'], ['biWidth', 'i32'],
+    ['biHeight', 'i32'], ['biPlanes', 'u16'], ['biBitCount', 'u16'], ['biCompression', 'u32'],
+    ['biSizeImage', 'u32'], ['biXPelsPerMeter', 'i32'], ['biYPelsPerMeter', 'i32'],
+    ['biClrUsed', 'u32'], ['biClrImportant', 'u32']]);
+export const BITMAPINFOHEADER = BITMAPINFOHEADER_LAYOUT.at(4);
 
 /** BITMAPCOREHEADER, the OS/2 header: bcSize, then four WORDs. */
-export const BITMAPCOREHEADER = Object.freeze({
-    bcSize: 0,
-    bcWidth: 4,
-    bcHeight: 6,
-    bcPlanes: 8,
-    bcBitCount: 10,
-    SIZE: 12,
-});
+export const BITMAPCOREHEADER = struct([['bcSize', 'u32'], ['bcWidth', 'u16'],
+    ['bcHeight', 'u16'], ['bcPlanes', 'u16'], ['bcBitCount', 'u16']]).at(4);
 
 /**
  * BITMAP, as GetObject writes it. bmPlanes and bmBitsPixel are WORDs; bmBits
  * is the DIB section's pointer and NULL for a device-dependent bitmap, whose
- * bits the program has no address for.
+ * bits the program has no address for. In a 64-bit process the pointer is
+ * eight bytes on an eight-byte boundary and the whole padded to eight.
  */
-export const BITMAP = Object.freeze({
-    bmType: 0,
-    bmWidth: 4,
-    bmHeight: 8,
-    bmWidthBytes: 12,
-    bmPlanes: 16,
-    bmBitsPixel: 18,
-    bmBits: 20,
-    SIZE: 24,
-});
-
-/** DIBSECTION: a BITMAP, the header the section was made from, then its masks. */
-export const DIBSECTION = Object.freeze({
-    dsBm: 0,
-    dsBmih: 24,
-    dsBitfields: 64,
-    dshSection: 76,
-    dsOffset: 80,
-    SIZE: 84,
-});
+const BITMAP_LAYOUT = struct([['bmType', 'i32'], ['bmWidth', 'i32'], ['bmHeight', 'i32'],
+    ['bmWidthBytes', 'i32'], ['bmPlanes', 'u16'], ['bmBitsPixel', 'u16'], ['bmBits', 'ptr']]);
+export const BITMAP = BITMAP_LAYOUT.at(4);
+export const BITMAP64 = BITMAP_LAYOUT.at(8);
 
 /**
- * The same structures in a 64-bit process, where bmBits, a LOGBRUSH's and an
- * EXTLOGPEN's hatch (ULONG_PTR) and dshSection are eight bytes on an
- * eight-byte boundary, and every structure holding one is padded to eight
- * (wingdi.h under _WIN64).
+ * DIBSECTION: a BITMAP, the header the section was made from, its masks,
+ * then the section's HANDLE and the offset into it.
  */
-export const BITMAP64 = Object.freeze({
-    bmType: 0, bmWidth: 4, bmHeight: 8, bmWidthBytes: 12, bmPlanes: 16, bmBitsPixel: 18,
-    bmBits: 24, SIZE: 32,
-});
-export const DIBSECTION64 = Object.freeze({
-    dsBm: 0, dsBmih: 32, dsBitfields: 72, dshSection: 88, dsOffset: 96, SIZE: 104,
-});
-export const LOGBRUSH64 = Object.freeze({ lbStyle: 0, lbColor: 4, lbHatch: 8, SIZE: 16 });
+const DIBSECTION_LAYOUT = struct([['dsBm', BITMAP_LAYOUT], ['dsBmih', BITMAPINFOHEADER_LAYOUT],
+    ['dsBitfields', 'u32', 3], ['dshSection', 'handle'], ['dsOffset', 'u32']]);
+export const DIBSECTION = DIBSECTION_LAYOUT.at(4);
+export const DIBSECTION64 = DIBSECTION_LAYOUT.at(8);
+
 /**
- * EXTLOGPEN at 64 bits: the hatch a quadword, the dash table after the
- * count; GetObject writes it up to the last dash.
+ * EXTLOGPEN at 64 bits: the hatch (ULONG_PTR) a quadword, the dash table
+ * after the count; GetObject writes it up to the last dash.
  */
-export const EXTLOGPEN64 = Object.freeze({
-    elpPenStyle: 0, elpWidth: 4, elpBrushStyle: 8, elpColor: 12, elpHatch: 16,
-    elpNumEntries: 24, elpStyleEntry: 28, SIZE: 32,
-});
+export const EXTLOGPEN64 = struct([['elpPenStyle', 'u32'], ['elpWidth', 'u32'],
+    ['elpBrushStyle', 'u32'], ['elpColor', 'u32'], ['elpHatch', 'ptr'], ['elpNumEntries', 'u32'],
+    ['elpStyleEntry', 'u32', 1]]).at(8);
 
 /**
  * Bytes per row of a device-dependent bitmap, which pads to a WORD -- the
@@ -154,69 +110,45 @@ export const ddbStride = (width, bitCount)=>(((width * bitCount + 15) >>> 4) * 2
  */
 export const dibStride = (width, bitCount)=>(((width * bitCount + 31) >>> 5) * 4);
 
+/** TEXTMETRIC's eleven LONGs, the same in both character sets. */
+const TEXTMETRIC_LONGS = all(['tmHeight', 'tmAscent', 'tmDescent', 'tmInternalLeading',
+    'tmExternalLeading', 'tmAveCharWidth', 'tmMaxCharWidth', 'tmWeight', 'tmOverhang',
+    'tmDigitizedAspectX', 'tmDigitizedAspectY'], 'i32');
+/** Its five BYTEs after the four characters. */
+const TEXTMETRIC_BYTES = /** @type {Declared[]} */ (['tmItalic', 'tmUnderlined', 'tmStruckOut',
+    'tmPitchAndFamily', 'tmCharSet'].map(name=>[name, 'u8']));
+/** @param {'u8' | 'u16'} character @returns {Declared[]} */
+const textMetricCharacters = character=>['tmFirstChar', 'tmLastChar', 'tmDefaultChar',
+    'tmBreakChar'].map(name=>[name, character]);
+
 /**
  * TEXTMETRICA. Nine bytes sit past the eleven LONGs, and the structure is
  * padded from 53 to 56 so that an array of them stays LONG-aligned.
  */
-export const TEXTMETRICA = Object.freeze({
-    tmHeight: 0,
-    tmAscent: 4,
-    tmDescent: 8,
-    tmInternalLeading: 12,
-    tmExternalLeading: 16,
-    tmAveCharWidth: 20,
-    tmMaxCharWidth: 24,
-    tmWeight: 28,
-    tmOverhang: 32,
-    tmDigitizedAspectX: 36,
-    tmDigitizedAspectY: 40,
-    tmFirstChar: 44,
-    tmLastChar: 45,
-    tmDefaultChar: 46,
-    tmBreakChar: 47,
-    tmItalic: 48,
-    tmUnderlined: 49,
-    tmStruckOut: 50,
-    tmPitchAndFamily: 51,
-    tmCharSet: 52,
-    SIZE: 56,
-});
+export const TEXTMETRICA = struct([...TEXTMETRIC_LONGS, ...textMetricCharacters('u8'),
+    ...TEXTMETRIC_BYTES]).at(4);
 
 /**
  * TEXTMETRICW: TEXTMETRICA's LONGs, then the four characters as WCHARs, so
  * everything after them sits four bytes further on and the whole is 60.
  */
-const TEXTMETRICW = Object.freeze({
-    tmFirstChar: 44,
-    tmLastChar: 46,
-    tmDefaultChar: 48,
-    tmBreakChar: 50,
-    tmItalic: 52,
-    tmUnderlined: 53,
-    tmStruckOut: 54,
-    tmPitchAndFamily: 55,
-    tmCharSet: 56,
-    SIZE: 60,
-});
-
-/** LOGFONTW: LOGFONTA with the face name as 32 WCHARs. */
-export const LOGFONTW_SIZE = 92;
+const TEXTMETRICW = struct([...TEXTMETRIC_LONGS, ...textMetricCharacters('u16'),
+    ...TEXTMETRIC_BYTES]).at(4);
 
 /** POINT, which every *Ex function hands the previous value back through. */
-export const POINT = Object.freeze({ x: 0, y: 4, SIZE: 8 });
+export const POINT = POINT_LAYOUT.at(4);
 
 /** SIZE, the same shape under different field names. */
-export const SIZE = Object.freeze({ cx: 0, cy: 4, SIZE: 8 });
-
-/** LOGPALETTE. Two WORDs, then as many PALETTEENTRYs as the second one says. */
-export const LOGPALETTE = Object.freeze({
-    palVersion: 0,
-    palNumEntries: 2,
-    palPalEntry: 4,
-});
+export const SIZE = struct(all(['cx', 'cy'], 'i32')).at(4);
 
 /** PALETTEENTRY: red, green, blue and a flags byte. */
-export const PALETTEENTRY_SIZE = 4;
+const PALETTEENTRY = struct(/** @type {Declared[]} */ (['peRed', 'peGreen', 'peBlue',
+    'peFlags'].map(name=>[name, 'u8'])));
+export const PALETTEENTRY_SIZE = PALETTEENTRY.sizeOf(4);
+
+/** LOGPALETTE. Two WORDs, then as many PALETTEENTRYs as the second one says. */
+export const LOGPALETTE = struct([['palVersion', 'u16'], ['palNumEntries', 'u16'],
+    ['palPalEntry', PALETTEENTRY, 1]]).at(4);
 
 /**
  * A PALETTEENTRY read as a little-endian DWORD, as the drawing layer indexes it.
@@ -302,7 +234,7 @@ export function writeU32s(memory, address, values){
 export function readLogPen(memory, address){
     return {
         style: readU32(memory, address + LOGPEN.lopnStyle),
-        width: readI32(memory, address + LOGPEN.lopnWidthX),
+        width: readI32(memory, address + LOGPEN.lopnWidth),
         color: readU32(memory, address + LOGPEN.lopnColor),
     };
 }
