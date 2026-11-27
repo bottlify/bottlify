@@ -9,21 +9,37 @@ import assert from 'node:assert/strict';
 import { createLoaderFunctions } from './loader.js';
 import { STATUS } from './status.js';
 import { DLL_SEARCH_PATH } from '../kernel32/modules.js';
+import { guestWindow } from '../msvcrt/guest-window.fixture.js';
 
 const NAME = 0x100;
 const TEXT = 0x200;
 const OUT = 0x300;
 
-/** Guest memory, a bump heap, and a kernel32 loader knowing one module. */
+/** Past 4 GiB, where a 64-bit process's memory can be and a dword names another place. */
+const HIGH = 0x123400000;
+/** A 64-bit module there, and an export of it. */
+const HIGH_MODULE = 0x180000000;
+const HIGH_EXPORT = 0x180002000;
+
 /**
+ * Guest memory, a bump heap, and a kernel32 loader knowing one module: at
+ * address 0 in a 32-bit process, or at `base` in a 64-bit one, the module and
+ * its export past 4 GiB.
+ *
  * @param {Record<string, any>} [also]  kernel32 calls beside the ones here, or
  *     in place of them
+ * @param {{ base?: number, pointerSize?: 4 | 8 }} [process]
  */
-function machine(also = {}){
+function machine(also = {}, { base = 0, pointerSize = 4 } = {}){
     const bytes = new Uint8Array(0x30000);
     const view = new DataView(bytes.buffer);
+    const guest = guestWindow(bytes, { base, pointerSize });
+    const wide = pointerSize === 8;
+    const module = wide ? HIGH_MODULE : 0x10000000;
     // Above 64 KiB: GetProcAddress takes a pointer below it for an ordinal.
-    let next = 0x20000;
+    let next = base + 0x20000;
+    /** The heap blocks not given back. @type {Set<number>} */
+    const live = new Set();
     let lastError = 0;
     /** @type {{ flags: number, name: string }[]} */
     const asked = [];
@@ -33,42 +49,28 @@ function machine(also = {}){
     const registered = new Map();
     let cookies = 0;
     /** @param {number} at */
-    const wideAt = at=>{
-        let text = '';
-        for (let code; (code = view.getUint16(at, true)) !== 0; at += 2)
-        {
-            text += String.fromCharCode(code);
-        }
-        return text;
-    };
+    const wideAt = at=>guest.wstr(at);
     /** @param {number} at */
-    const ansiAt = at=>{
-        let text = '';
-        for (let code; (code = bytes[at]) !== 0; at++)
-        {
-            text += String.fromCharCode(code);
-        }
-        return text;
-    };
+    const ansiAt = at=>guest.cstr(at);
     const kernel32 = {
         GetModuleHandleExW: { handler: (/** @type {number[]} */ [flags, name, out])=>{
             const text = (flags & 4) !== 0 ? `@${name.toString(16)}` : wideAt(name);
             asked.push({ flags, name: text });
-            const found = text.toLowerCase() === 'game.dll' || text === '@10000000';
-            view.setUint32(out, found ? 0x10000000 : 0, true);
+            const found = text.toLowerCase() === 'game.dll' || text === `@${module.toString(16)}`;
+            guest.setPtr(out, found ? module : 0);
             return found ? 1 : 0;
         } },
         LoadLibraryW: { handler: (/** @type {number[]} */ [name])=>{
             loads.push(wideAt(name));
             return Promise.resolve(['late.dll', 'D:\\Two\\x.dll'].includes(wideAt(name))
-                ? 0x20000000 : 0);
+                ? module + 0x10000000 : 0);
         } },
         LoadLibraryExW: { handler: (/** @type {number[]} */ [name, , flags])=>{
             loads.push([wideAt(name), flags]);
             return 0;
         } },
-        [DLL_SEARCH_PATH]: (/** @type {string} */ module, /** @type {number} */ flags)=>
-            [`for ${module}`, flags.toString(16)],
+        [DLL_SEARCH_PATH]: (/** @type {string} */ named, /** @type {number} */ flags)=>
+            [`for ${named}`, flags.toString(16)],
         GetProcAddress: { handler: (/** @type {number[]} */ [, name])=>{
             if (name < 0x10000)
             {
@@ -76,7 +78,7 @@ function machine(also = {}){
                 return name === 7 ? 0x10001000 : 0;
             }
             lastError = 127;
-            return ansiAt(name) === 'Run' ? 0x10002000 : 0;
+            return ansiAt(name) === 'Run' ? module + 0x2000 : 0;
         } },
         GetLastError: { handler: ()=>lastError },
         SetDllDirectoryW: { handler: ()=>1 },
@@ -84,15 +86,15 @@ function machine(also = {}){
         ...also,
     };
     const table = createLoaderFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest,
         kernel32,
         allocate: size=>{
             const at = next;
             next += size + 8;
+            live.add(at);
             return at;
         },
-        free: ()=>true,
+        free: at=>live.delete(at),
         notifications: {
             register: (callback, context)=>{
                 registered.set(++cookies, { callback, context });
@@ -101,22 +103,32 @@ function machine(also = {}){
             unregister: cookie=>registered.delete(cookie),
         },
     });
-    /** A counted string at NAME over TEXT. @param {string} text @param {number} unit */
-    const counted = (text, unit = 2)=>{
+    /**
+     * A counted string at `at` over `buffer`, its Buffer a pointer wide after
+     * Length, MaximumLength and, in a 64-bit process, four bytes of padding
+     * that are not zero.
+     *
+     * @param {string} text @param {number} unit
+     */
+    const counted = (text, unit = 2, at = base + NAME, buffer = base + TEXT)=>{
         for (let i = 0; i < text.length; i++)
         {
             if (unit === 2)
             {
-                view.setUint16(TEXT + i * 2, text.charCodeAt(i), true);
+                guest.set16(buffer + i * 2, text.charCodeAt(i));
             }
             else
             {
-                bytes[TEXT + i] = text.charCodeAt(i);
+                guest.set8(buffer + i, text.charCodeAt(i));
             }
         }
-        view.setUint16(NAME, text.length * unit, true);
-        view.setUint16(NAME + 2, text.length * unit, true);
-        view.setUint32(NAME + 4, TEXT, true);
+        guest.set16(at, text.length * unit);
+        guest.set16(at + 2, text.length * unit);
+        if (wide)
+        {
+            guest.set32(at + 4, 0xdeadbeef);
+        }
+        guest.setPtr(at + pointerSize, buffer);
     };
     /** @param {string} name @param {number[]} args */
     const call = (name, ...args)=>table[name].handler(args);
@@ -124,7 +136,7 @@ function machine(also = {}){
     const failWith = code=>{
         lastError = code;
     };
-    return { view, call, counted, asked, loads, wideAt, registered, failWith };
+    return { view, guest, call, counted, asked, loads, wideAt, registered, failWith, live };
 }
 
 test('a loaded module by its name, its count left alone; one not loaded is not found', ()=>{
@@ -361,10 +373,9 @@ test('LdrShutdownProcess begins the shutdown RtlDllShutdownInProgress answers', 
     // the process goes on, and from then on it is.
     let begun = false;
     let told = 0;
-    /** @param {number} address @param {number} length */
-    const readMemory = (address, length)=>new Uint8Array(length);
+    const guest = guestWindow(new Uint8Array(0x2000));
     const table = createLoaderFunctions({
-        readMemory, writeMemory: ()=>{}, kernel32: {}, allocate: ()=>0x1000, free: ()=>true,
+        guest, kernel32: {}, allocate: ()=>0x1000, free: ()=>true,
         shutdown: {
             inProgress: ()=>begun,
             begin: ()=>{
@@ -380,8 +391,77 @@ test('LdrShutdownProcess begins the shutdown RtlDllShutdownInProgress answers', 
     assert.equal(told, 1, 'the images told');
     assert.equal(table.RtlDllShutdownInProgress.handler([]), 1);
 
-    const none = createLoaderFunctions({
-        readMemory, writeMemory: ()=>{}, kernel32: {}, allocate: ()=>0, free: ()=>true });
+    const none = createLoaderFunctions({ guest, kernel32: {}, allocate: ()=>0, free: ()=>true });
     assert.equal(none.LdrShutdownProcess, undefined, 'not exported with no shutdown to begin');
     assert.equal(none.RtlDllShutdownInProgress.handler([]), 0);
+});
+
+test('a 64-bit process: counted strings\' Buffers, handles and addresses a pointer wide', async()=>{
+    // A UNICODE_STRING's and an ANSI_STRING's Buffer is at offset 8 there,
+    // after four bytes of padding; a module handle, an export's address and a
+    // cookie are eight bytes, and all of them may lie past 4 GiB.
+    const { guest, call, counted, asked, registered, live } = machine({}, { base: HIGH,
+        pointerSize: 8 });
+    const name = HIGH + NAME;
+    const out = HIGH + OUT;
+    counted('GAME.DLL');
+    guest.set64(out, -1n);
+    assert.equal(call('LdrGetDllHandle', 0, 0, name, out), STATUS.SUCCESS);
+    assert.deepEqual(asked.at(-1), { flags: 2, name: 'GAME.DLL' }, 'the Buffer after the padding');
+    assert.equal(guest.ptr(out), HIGH_MODULE, 'the whole handle, all eight bytes written');
+    guest.set64(out, -1n);
+    assert.equal(call('LdrGetDllHandleEx', 0, 0, 0, name, out), STATUS.SUCCESS);
+    assert.equal(guest.ptr(out), HIGH_MODULE);
+    counted('other.dll');
+    guest.set64(out, -1n);
+    assert.equal(call('LdrGetDllHandle', 0, 0, name, out), STATUS.DLL_NOT_FOUND);
+    assert.equal(guest.ptr(out), 0, 'all eight bytes cleared');
+    guest.set64(out, -1n);
+    assert.equal(call('LdrAddRefDll', 0, HIGH_MODULE), STATUS.SUCCESS, 'by an address past 4 GiB');
+    assert.equal(asked.at(-1)?.name, `@${HIGH_MODULE.toString(16)}`);
+
+    counted('late.dll');
+    assert.equal(await call('LdrLoadDll', 0, 0, name, out), STATUS.SUCCESS);
+    assert.equal(guest.ptr(out), HIGH_MODULE + 0x10000000);
+
+    counted('Run', 1);
+    guest.set64(out, -1n);
+    assert.equal(call('LdrGetProcedureAddress', HIGH_MODULE, name, 0, out), STATUS.SUCCESS);
+    assert.equal(guest.ptr(out), HIGH_EXPORT);
+    counted('Walk', 1);
+    assert.equal(call('LdrGetProcedureAddress', HIGH_MODULE, name, 0, out), 0xc000007a);
+    assert.equal(guest.ptr(out), 0);
+
+    guest.set64(out, -1n);
+    assert.equal(call('LdrLockLoaderLock', 0, out + 8, out), STATUS.SUCCESS);
+    assert.equal(guest.ptr(out), 1, 'a ULONG_PTR cookie');
+    assert.equal(call('LdrRegisterDllNotification', 0, HIGH_MODULE, HIGH, out), STATUS.SUCCESS);
+    assert.deepEqual(registered.get(guest.ptr(out)), { callback: HIGH_MODULE, context: HIGH });
+
+    assert.deepEqual([...live], [], 'every block given back');
+
+    const STRING = HIGH + 0x400;
+    const BUFFER = HIGH + 0x500;
+    const small = machine({ GetDllDirectoryW: { handler: ()=>40 } }, { base: HIGH,
+        pointerSize: 8 });
+    small.guest.set16(STRING + 2, 4);
+    small.guest.set32(STRING + 4, 0xdeadbeef);
+    small.guest.setPtr(STRING + 8, BUFFER);
+    small.guest.set16(BUFFER, 0xcccc);
+    assert.equal(small.call('LdrGetDllDirectory', STRING), STATUS.BUFFER_TOO_SMALL);
+    assert.equal(small.guest.u16(STRING), 80);
+    assert.equal(small.guest.u16(BUFFER), 0, 'the empty string where the Buffer points');
+});
+
+test('a counted string that is not there faults with no block left behind', ()=>{
+    for (const pointerSize of /** @type {const} */ ([4, 8]))
+    {
+        const base = pointerSize === 8 ? HIGH : 0;
+        const { guest, call, counted, live } = machine({}, { base, pointerSize });
+        counted('GAME.DLL');
+        guest.setPtr(base + NAME + pointerSize, base + 0x40000);
+        assert.throws(()=>call('LdrGetDllHandle', 0, 0, base + NAME, base + OUT),
+            (/** @type {any} */ e)=>e.code === 'GUEST_ACCESS', `${pointerSize * 8}-bit: a fault`);
+        assert.deepEqual([...live], [], `${pointerSize * 8}-bit: no block left`);
+    }
 });

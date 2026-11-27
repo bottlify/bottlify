@@ -88,22 +88,19 @@ const MAX_NAME = 64;
  * @typedef {Object} BcryptHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest
  */
 
 /**
- * As many bytes from the host's cryptographic generator, which caps a single
- * call at 64 KiB.
+ * The guest's buffer filled from the host's cryptographic generator, a chunk
+ * at a time as it is drawn: a count the buffer does not have faults at its
+ * first chunk, as Windows' fill faults at the first byte not there, before
+ * gigabytes are drawn for nowhere.
  *
- * @param {number} count
+ * @param {BcryptHost} host @param {number} buffer @param {number} count
  */
-const randomBytes = count=>{
-    const out = new Uint8Array(count);
-    for (let at = 0; at < count; at += 65536)
-    {
-        crypto.getRandomValues(out.subarray(at, Math.min(at + 65536, count)));
-    }
-    return out;
-};
+const fillRandom = (host, buffer, count)=>host.guest.setMade(wholeAddress(buffer), count,
+    chunk=>void crypto.getRandomValues(chunk));
 
 /** @param {BcryptHost} host */
 export function createBcryptFunctions(host){
@@ -752,7 +749,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_SUCCESS;
                 }
-                host.writeMemory(wholeAddress(buffer), randomBytes(count >>> 0));
+                fillRandom(host, buffer, count >>> 0);
                 return STATUS_SUCCESS;
             },
         },
@@ -774,10 +771,7 @@ export function createBcryptPrimitivesFunctions(host){
             sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, count])=>{
-                if ((count >>> 0) > 0)
-                {
-                    host.writeMemory(wholeAddress(buffer), randomBytes(count >>> 0));
-                }
+                fillRandom(host, buffer, count >>> 0);
                 return 1;
             },
         },

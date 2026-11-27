@@ -50,12 +50,13 @@ function matches(e, n){
     const finalDot = n.lastIndexOf('.');
     const width = n.length + 1;
     // Whether the expression from i matches the name from j, filled from the
-    // expression's end back: every step looks only further into the
-    // expression, so a row is complete before a row before it reads it. No
-    // recursion: a long expression or name costs a table, not the stack.
-    const at = new Uint8Array((e.length + 1) * width);
-    /** @param {number} i @param {number} j */
-    const from = (i, j)=>at[i * width + j] === 1;
+    // expression's end back. Every step reads only the row after its own, so
+    // two rows a name long are the whole table: a long expression against a
+    // long name costs neither the stack nor the expression's length in rows.
+    let after = new Uint8Array(width);
+    let row = new Uint8Array(width);
+    /** @param {number} j */
+    const next = j=>after[j] === 1;
 
     /** @param {number} i @param {number} j @returns {boolean} */
     const step = (i, j)=>{
@@ -64,59 +65,57 @@ function matches(e, n){
             case '*':
                 for (let k = j; k <= n.length; k++)
                 {
-                    if (from(i + 1, k))
+                    if (next(k))
                     {
                         return true;
                     }
                 }
                 return false;
             case '?':
-                return j < n.length && from(i + 1, j + 1);
+                return j < n.length && next(j + 1);
             case DOS_STAR: {
                 // Past the final dot, or with none before it, any run; else a
                 // run that stops at the final dot or takes it and no more.
                 const last = finalDot < j ? n.length : finalDot + 1;
                 for (let k = j; k <= last; k++)
                 {
-                    if (from(i + 1, k))
+                    if (next(k))
                     {
                         return true;
                     }
                 }
                 return false;
             }
-            case DOS_QM: {
+            case DOS_QM:
+                // At a dot or the end a run of them matches nothing, and the
+                // expression goes on past the run: the next row says so, as
+                // it is another DOS_QM at the same place or what follows.
                 if (j === n.length || n[j] === '.')
                 {
-                    let past = i;
-                    while (e[past] === DOS_QM)
-                    {
-                        past++;
-                    }
-                    return from(past, j);
+                    return next(j);
                 }
-                return from(i + 1, j + 1);
-            }
+                return next(j + 1);
             case DOS_DOT:
                 if (j === n.length)
                 {
-                    return from(i + 1, j);
+                    return next(j);
                 }
-                return n[j] === '.' && from(i + 1, j + 1);
+                return n[j] === '.' && next(j + 1);
             default:
-                return j < n.length && n[j] === e[i] && from(i + 1, j + 1);
+                return j < n.length && n[j] === e[i] && next(j + 1);
         }
     };
 
-    at[e.length * width + n.length] = 1;
+    after[n.length] = 1;
     for (let i = e.length - 1; i >= 0; i--)
     {
         for (let j = n.length; j >= 0; j--)
         {
-            at[i * width + j] = step(i, j) ? 1 : 0;
+            row[j] = step(i, j) ? 1 : 0;
         }
+        [after, row] = [row, after];
     }
-    return from(0, 0);
+    return next(0);
 }
 
 /**

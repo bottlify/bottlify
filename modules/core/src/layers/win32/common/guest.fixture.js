@@ -37,3 +37,28 @@ export function guestOver(bytes, pointerSize = 4, ends = []){
     } });
     return createGuest(accessors, pointerSize);
 }
+
+/**
+ * How much the host's external memory (array buffers and the like) grew
+ * across a call, and what it threw: a handler that makes a buffer of a
+ * guest's length before the guest's memory says it is there shows as
+ * gigabytes here, where Windows faulted at the destination's first byte.
+ *
+ * @param {() => unknown} call
+ * @returns {{ grown: number, error: any }}
+ */
+export function externalGrowth(call){
+    const before = process.memoryUsage().external;
+    let error = null;
+    try
+    {
+        call();
+    }
+    catch (e){
+        error = e;
+    }
+    return { grown: process.memoryUsage().external - before, error };
+}
+
+/** The most a call that writes into the guest in place may grow external memory by. */
+export const IN_PLACE = 4 * 2 ** 20;

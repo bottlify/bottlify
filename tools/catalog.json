@@ -590,7 +590,7 @@
    "category": "checks",
    "kind": "check",
    "browser": false,
-   "question": "A handler faults on a bad guest pointer only as Windows does",
+   "question": "A handler faults on a bad guest pointer only as Windows does, and makes no host buffer of a wrong length first",
    "command": "npm run check:boundaries",
    "tests": [
     "tools/checks/check-guest-pointers.test.js"

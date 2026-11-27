@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBcryptFunctions, createBcryptPrimitivesFunctions } from './functions.js';
+import { IN_PLACE, externalGrowth, guestOver } from '../common/guest.fixture.js';
 
 const STATUS_INVALID_HANDLE = 0xc0000008 | 0;
 const STATUS_INVALID_PARAMETER = 0xc000000d | 0;
@@ -18,6 +19,7 @@ function machine(){
     const fns = createBcryptFunctions({
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         readMemory: (address, length)=>memory.subarray(address, address + length),
+        guest: guestOver(memory),
     });
     /** @param {number} at @param {string} text */
     const putWide = (at, text)=>memory.set(
@@ -66,11 +68,35 @@ test('ProcessPrng fills the buffer and cannot fail', ()=>{
     const fns = createBcryptPrimitivesFunctions({
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         readMemory: (address, length)=>memory.subarray(address, address + length),
+        guest: guestOver(memory),
     });
     assert.equal(fns.ProcessPrng.handler([0x100, 32]), 1);
     assert.ok(memory.subarray(0x100, 0x120).some(byte=>byte !== 0));
     assert.equal(memory[0x120], 0, 'nothing past the count');
     assert.equal(fns.ProcessPrng.handler([0, 0]), 1, 'no bytes is TRUE too');
+});
+
+test('a count past the buffer faults where the memory ends, nothing drawn for it on the host', ()=>{
+    // Windows' generator writes as it draws, and faults at the first byte
+    // that is not there; a host buffer of the count first is gigabytes for a
+    // wrong length.
+    const memory = new Uint8Array(0x1000);
+    const guest = guestOver(memory);
+    const io = { writeMemory: guest.setBytes, readMemory: guest.bytes, guest };
+    const prng = createBcryptPrimitivesFunctions(io).ProcessPrng;
+    const generate = createBcryptFunctions(io).BCryptGenRandom;
+    for (const [name, call] of /** @type {[string, () => unknown][]} */ ([
+        ['ProcessPrng', ()=>prng.handler([0xff0, 0xdeadbeef])],
+        ['BCryptGenRandom', ()=>generate.handler([0, 0xff0, 0xdeadbeef,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG])],
+        ['BCryptGenRandom unmapped', ()=>generate.handler([0, 0x10000, 0x80000000,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG])],
+    ]))
+    {
+        const { grown, error } = externalGrowth(call);
+        assert.equal(error?.code, 'GUEST_ACCESS', `${name}: a fault`);
+        assert.ok(grown < IN_PLACE, `${name}: ${grown} bytes grown`);
+    }
 });
 
 /** @param {Uint8Array} bytes */

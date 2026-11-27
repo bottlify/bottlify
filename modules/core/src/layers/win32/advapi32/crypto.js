@@ -29,6 +29,7 @@ import { createRc4 } from '../crypto/rc4.js';
 import { createProviderRegistry } from './providers.js';
 import { bigIntToBe, bigIntToLe, beToBigInt, leToBigInt, modPow } from '../crypto/rsa.js';
 import { wholeAddress } from '../common/pointers.js';
+import { writeMade } from '../common/guest.js';
 
 /** @typedef {import('../crypto/digest.js').Digest} Digest */
 /** @typedef {import('../crypto/rc4.js').StreamCipher} StreamCipher */
@@ -1562,7 +1563,10 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                host.writeMemory(wholeAddress(buffer), randomBytes(len));
+                // Drawn as it is written: a length the buffer does not have
+                // faults where it ends, nothing drawn for the rest.
+                writeMade(host.writeMemory, wholeAddress(buffer), len,
+                    chunk=>void crypto.getRandomValues(chunk));
                 return 1;
             },
         },

@@ -22,6 +22,7 @@ import {
     REG_MULTI_SZ,
     REG_SZ,
 } from './registry.js';
+import { IN_PLACE, externalGrowth } from '../common/guest.fixture.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -1228,6 +1229,21 @@ test('RegGetValue holds the value to the types it is asked for', ()=>{
     assert.equal(fns.RegGetValueA.handler(
         [key, 0, NAME + 0x20, RRF_RT_QWORD, OUT_TYPE, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
     assert.equal(fns.RegGetValueA.argBytes, 28);
+
+    // RRF_ZEROONFAILURE clears the buffer to the size the caller says it has:
+    // cleared where it lies, a size the buffer does not have refused where
+    // the memory ends, never a host buffer of that size first.
+    const RRF_ZEROONFAILURE = 0x20000000;
+    memory.putDword(OUT_SIZE, 0x40);
+    memory.putDword(OUT_DATA, 0xffffffff);
+    assert.equal(fns.RegGetValueA.handler([key, 0, NAME, RRF_RT_REG_BINARY | RRF_ZEROONFAILURE,
+        OUT_TYPE, OUT_DATA, OUT_SIZE]), 1630);
+    assert.equal(memory.dword(OUT_DATA), 0, 'cleared');
+    memory.putDword(OUT_SIZE, 0xdeadbeef);
+    const { grown, error } = externalGrowth(()=>fns.RegGetValueA.handler([key, 0, NAME,
+        RRF_RT_REG_BINARY | RRF_ZEROONFAILURE, OUT_TYPE, OUT_DATA, OUT_SIZE]));
+    assert.ok(error !== null, 'past the memory, the write refused');
+    assert.ok(grown < IN_PLACE, `${grown} bytes grown`);
 });
 
 test('RegGetValue answers a REG_EXPAND_SZ as REG_SZ expanded, unless told not to', ()=>{

@@ -12,6 +12,7 @@ import { HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
 import { decodeAnsi } from './locale.js';
 import { systemProgramAt, systemProgramImage } from '../programs/table.js';
 import { readIntoBy } from './vfs.js';
+import { IN_PLACE, externalGrowth } from '../common/guest.fixture.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -2927,6 +2928,12 @@ test('NtQueryEaFile: a file has none, said without the block; another object is 
     assert.equal(query.handler([0xffffffff, 0x300, 0x400, 8, 1, 0, 0, 0, 0]) >>> 0, 0xc0000024,
         'the process\'s pseudo-handle');
     assert.equal(query.handler([0xdead, 0x300, 0x400, 8, 1, 0, 0, 0, 0]) >>> 0, 0xc0000008);
+    // A length the buffer does not have: cleared where it lies until it ends,
+    // never a host buffer of that length first.
+    const { grown, error } = externalGrowth(()=>query.handler([handle, 0x300, 0x400, 0xdeadbeef,
+        1, 0, 0, 0, 0]));
+    assert.ok(error !== null, 'past the memory, the write refused');
+    assert.ok(grown < IN_PLACE, `${grown} bytes grown`);
 });
 
 test('an open file asks its volume for its number once, and only a class that answers it', ()=>{

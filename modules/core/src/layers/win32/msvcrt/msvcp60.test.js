@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcp60Functions } from './msvcp60.js';
 import { guestWindow } from './guest-window.fixture.js';
+import { IN_PLACE, externalGrowth } from '../common/guest.fixture.js';
 
 const STRING = '?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@';
 const WSTRING = '?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@';
@@ -233,4 +234,85 @@ test('set searches, iterator edits and reverse iterators', ()=>{
     assert.equal(call(`?rend@${STRING}QBE?AV?$reverse_iterator@PBDDABDPBDH@2@XZ`, 0x100, 0x180),
         0x180);
     assert.equal(new DataView(memory.buffer).getUint32(0x180, true), fields(0x100).ptr);
+});
+
+/** Where length_error's throw information is, as `setup` places it. @param {string[]} names */
+const lengthError = names=>names.indexOf('_TI??_R0?AVlength_error@std@@@8') + 0x600;
+
+test('a wide fill writes both bytes of its element, the same or not', ()=>{
+    const { call, memory, fields } = setup();
+    call(`?assign@${WSTRING}QAEAAV12@IG@Z`, 0x100, 3, 0x416);
+    call(`?append@${WSTRING}QAEAAV12@IG@Z`, 0x100, 2, 0x4141);
+    const { ptr, len } = fields(0x100);
+    assert.equal(len, 5);
+    assert.deepEqual([...new Uint16Array(memory.slice(ptr, ptr + 12).buffer)],
+        [0x416, 0x416, 0x416, 0x4141, 0x4141, 0]);
+});
+
+test('a count no string holds is length_error or the allocation\'s fault, none made first', ()=>{
+    // Every member that takes a count and an element, at both widths: a
+    // count past max_size() is length_error before anything is made; one
+    // under it the allocator cannot back faults where the text is written,
+    // as a null or short block does on Windows. The elements are never made
+    // on the host first.
+    const huge = 0xdeadbeef;
+    for (const [unit, S, E, P] of /** @type {const} */ ([[1, STRING, 'D', 'PAD'],
+        [2, WSTRING, 'G', 'PAG']]))
+    {
+        /** @type {[string, (text: number) => number[]][]} */
+        const members = [
+            [`??0${S}QAE@I${E}ABV?$allocator@${E}@1@@Z`, ()=>[0x200, huge, 0x41, 0]],
+            [`?assign@${S}QAEAAV12@I${E}@Z`, ()=>[0x100, huge, 0x41]],
+            [`?append@${S}QAEAAV12@I${E}@Z`, ()=>[0x100, huge, 0x41]],
+            [`?insert@${S}QAEAAV12@II${E}@Z`, ()=>[0x100, 1, huge, 0x41]],
+            [`?insert@${S}QAEX${P}I${E}@Z`, text=>[0x100, text + unit, huge, 0x41]],
+            [`?replace@${S}QAEAAV12@III${E}@Z`, ()=>[0x100, 0, 1, huge, 0x41]],
+            [`?replace@${S}QAEAAV12@${P}0I${E}@Z`, text=>[0x100, text, text + unit, huge, 0x41]],
+            [`?resize@${S}QAEXI${E}@Z`, ()=>[0x100, huge, 0x41]],
+        ];
+        for (const [name, args] of members)
+        {
+            const { call, fns, memory, fields, thrown, names } = setup();
+            memory.set(unit === 1 ? Uint8Array.of(0x61, 0x62, 0)
+                : Uint8Array.of(0x61, 0, 0x62, 0, 0, 0), 0x4000);
+            call(`??0${S}QAE@PB${E}ABV?$allocator@${E}@1@@Z`, 0x100, 0x4000, 0);
+            assert.ok(fns[name], name);
+            const { grown, error } = externalGrowth(()=>fns[name].handler(args(fields(0x100).ptr)));
+            assert.ok(grown < IN_PLACE, `${name}: ${grown} bytes grown`);
+            if (unit === 2)
+            {
+                assert.equal(error, null, `${name}: ${error?.message}`);
+                assert.equal(thrown[0]?.[1], lengthError(names),
+                    `${name}: past max_size(), length_error`);
+            }
+            else
+            {
+                assert.equal(error?.code, 'GUEST_ACCESS', `${name}: a fault where the text goes`);
+            }
+        }
+    }
+});
+
+test('a pointer and a count past max_size() is length_error before the elements are read', ()=>{
+    const unmapped = 0xdeadbeef;
+    for (const [S, E, count] of /** @type {const} */ ([[STRING, 'D', 0xfffffffe],
+        [WSTRING, 'G', 0xdeadbeef]]))
+    {
+        for (const [name, args] of /** @type {[string, number[]][]} */ ([
+            [`??0${S}QAE@PB${E}IABV?$allocator@${E}@1@@Z`, [0x200, unmapped, count, 0]],
+            [`?assign@${S}QAEAAV12@PB${E}I@Z`, [0x100, unmapped, count]],
+            [`?append@${S}QAEAAV12@PB${E}I@Z`, [0x100, unmapped, count]],
+            [`?insert@${S}QAEAAV12@IPB${E}I@Z`, [0x100, 0, unmapped, count]],
+            [`?replace@${S}QAEAAV12@IIPB${E}I@Z`, [0x100, 0, 0, unmapped, count]],
+        ]))
+        {
+            const { call, fns, thrown, names } = setup();
+            call(`??0${S}QAE@ABV?$allocator@${E}@1@@Z`, 0x100, 0);
+            assert.ok(fns[name], name);
+            const { grown, error } = externalGrowth(()=>fns[name].handler(args));
+            assert.equal(error, null, `${name}: ${error?.message}`);
+            assert.equal(thrown[0]?.[1], lengthError(names), `${name}: length_error`);
+            assert.ok(grown < IN_PLACE, `${name}: ${grown} bytes grown`);
+        }
+    }
 });

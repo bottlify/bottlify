@@ -36,6 +36,12 @@
  * fails, and so does a known one that no longer throws, so the list only
  * shrinks.
  *
+ * A call also fails when it grows the host's external memory by more than
+ * GROWTH: a buffer sized by the guest's length (every length is 0xdeadbeef in
+ * the unmapped set) and made before the guest's memory says it is there.
+ * Windows faults at the destination's first byte; a host buffer of gigabytes
+ * kills the tab for memory first. There is no list of known ones.
+ *
  *     node tools/checks/check-guest-pointers.mjs [--list]
  *
  * `--list` prints every call that threw, known or not.
@@ -43,6 +49,8 @@
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { isMain } from '../lib/common.mjs';
 import { noCache } from '../../modules/core/src/layers/cache/module.js';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
@@ -56,6 +64,13 @@ const GUEST_ACCESS = 'GUEST_ACCESS';
 const GUEST_EXCEPTION = 'GUEST_EXCEPTION';
 /** What a stand-in throws for a member it does not have. */
 export const STAND_IN = 'STAND_IN';
+
+/**
+ * The most one call may grow the host's external memory (array buffers and
+ * the like) by: well above any structure or string a handler makes, far
+ * below a buffer of a guest's length.
+ */
+export const GROWTH = 64 * 2 ** 20;
 
 /** Calls whose answer is the end of the process or thread, not a return. */
 const ENDS = /^(ExitProcess|ExitThread|FatalAppExit[AW]|FatalExit|FreeLibraryAndExitThread|RtlExitUserThread|RtlExitUserProcess|(Nt|Zw)Terminate(Process|Thread)|Terminate(Process|Thread|JobObject)|_?_?c?exit|_Exit|_amsg_exit|quick_exit|abort)$/;
@@ -110,6 +125,24 @@ export function classify(error){
  */
 
 /**
+ * @typedef {Object} Growth
+ * @property {string} key  `library!function`
+ * @property {string} label  Which arguments.
+ * @property {number} bytes  How much the call grew external memory by.
+ */
+
+/**
+ * The collector, for a sweep that has to start a call with no garbage of
+ * the last one's still counted: what a call grew is read as the difference.
+ *
+ * @returns {() => void}
+ */
+function collector(){
+    setFlagsFromString('--expose-gc');
+    return runInNewContext('gc');
+}
+
+/**
  * Calls every handler of every library once per argument set and keeps what
  * threw other than a fault.
  *
@@ -119,12 +152,25 @@ export function classify(error){
  *
  * @param {Record<string, Record<string, any>>} libraries
  * @param {[string, number][]} sets  A label and the value every argument takes.
+ * A call that grows external memory by more than `growth` is kept apart: the
+ * growth is read across the call, after a collection whenever the last one
+ * left more than that behind, so garbage collected during a call does not
+ * hide what it made.
+ *
  * @param {() => void} [prepare]  Puts the memory the values point at back as
  *     it was, before each call: a handler writes through what it is handed.
+ * @param {number} [growth]
  * @returns {Promise<{ handlers: number, calls: number, offences: Offence[],
- *     unmeasured: Set<string> }>}
+ *     growths: Growth[], unmeasured: Set<string> }>}
  */
-export async function sweep(libraries, sets, prepare = ()=>{}){
+export async function sweep(libraries, sets, prepare = ()=>{}, growth = GROWTH){
+    const collect = collector();
+    collect();
+    // What survives a collection is what the libraries keep: the floor rises
+    // with it, so a kept cache does not collect before every call.
+    let floor = process.memoryUsage().external;
+    /** @type {Growth[]} */
+    const growths = [];
     /** @type {Set<Function>} */
     const seen = new Set();
     /** @type {Offence[]} */
@@ -152,7 +198,18 @@ export async function sweep(libraries, sets, prepare = ()=>{}){
             {
                 calls++;
                 prepare();
+                if (process.memoryUsage().external > floor + growth)
+                {
+                    collect();
+                    floor = process.memoryUsage().external;
+                }
+                const before = process.memoryUsage().external;
                 const error = await outcome(handler, new Array(count).fill(value));
+                const grown = process.memoryUsage().external - before;
+                if (grown > growth)
+                {
+                    growths.push({ key, label, bytes: grown });
+                }
                 const kind = error === null ? 'fault' : classify(error);
                 if (kind === 'unmeasured')
                 {
@@ -171,7 +228,7 @@ export async function sweep(libraries, sets, prepare = ()=>{}){
             }
         }
     }
-    return { handlers, calls, offences, unmeasured };
+    return { handlers, calls, offences, growths, unmeasured };
 }
 
 /**
@@ -359,7 +416,8 @@ async function build(){
 
 async function main(){
     const { libraries, sets, prepare, dispose } = await build();
-    const { handlers, calls, offences, unmeasured } = await sweep(libraries, sets, prepare);
+    const { handlers, calls, offences, growths, unmeasured } = await sweep(libraries, sets,
+        prepare);
     await dispose();
     if (process.argv.includes('--list'))
     {
@@ -376,6 +434,12 @@ async function main(){
         console.error(`${offence.key} with every argument ${offence.label}: ${offence.message}`
             + `\n    ${offence.at}`);
     }
+    for (const { key, label, bytes } of growths)
+    {
+        console.error(`${key} with every argument ${label}: grew external memory by `
+            + `${(bytes / 2 ** 20).toFixed(0)} MiB, past ${GROWTH / 2 ** 20} MiB: a host buffer`
+            + ' sized by the guest\'s length before its memory said it was there');
+    }
     for (const key of stale)
     {
         console.error(`${key} no longer throws: take it off KNOWN`
@@ -383,8 +447,9 @@ async function main(){
     }
     console.log(`guest pointers: ${handlers} handlers, ${calls} calls, `
         + `${fresh.length} new host throws, ${threw.size - new Set(fresh.map(f=>f.key)).size}`
-        + ` known, ${unmeasured.size} not measured`);
-    process.exitCode = fresh.length > 0 || stale.length > 0 ? 1 : 0;
+        + ` known, ${growths.length} grew memory past ${GROWTH / 2 ** 20} MiB,`
+        + ` ${unmeasured.size} not measured`);
+    process.exitCode = fresh.length > 0 || stale.length > 0 || growths.length > 0 ? 1 : 0;
 }
 
 if (isMain(import.meta.url))

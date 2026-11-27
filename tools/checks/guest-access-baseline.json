@@ -839,12 +839,6 @@
    "accessor dword": 1,
    "accessor putDword": 1
   },
-  "ntdll/loader.js": {
-   "accessor setU32": 1,
-   "accessor u16": 1,
-   "accessor u32": 1,
-   "string wideAt": 1
-  },
   "ntdll/lznt1.js": {
    "accessor putDword": 1
   },
