@@ -7,9 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runTables } from '../common/run-tables.js';
+import { roomy } from '../../cache/testing.fixture.js';
 import { bestFit, codePages } from './codepages.js';
 
-const codePage = codePages(runTables(null));
+const codePage = codePages(runTables(roomy.api.space('tables', { idle: 'stay' })));
 
 /** @param {number} id */
 const page = id=>{

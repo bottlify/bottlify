@@ -113,17 +113,12 @@ function decodeCompile(body, key){
         result: { ok: header.ok, messages: header.messages, tokens, constantTable } };
 }
 
-/** Where a layer built without the run's cache keeps its compiles: nowhere. @type {CacheSpace} */
-const KEEP_NOTHING = Object.freeze({
-    look: ()=>null, with: ()=>undefined, put: ()=>false, drop: ()=>{},
-});
-
 /**
  * The compiles kept in `space`: `find` the one under `key`, `keep` one done.
  *
- * @param {CacheSpace} [space]  none: nothing is kept, and each compile is done again
+ * @param {CacheSpace} space
  */
-export function createCompileCache(space = KEEP_NOTHING){
+export function createCompileCache(space){
     return {
         /** @param {string} key */
         find: key=>space.with(compileName(key), body=>decodeCompile(body, key)) ?? null,

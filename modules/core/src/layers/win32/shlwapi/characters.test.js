@@ -6,6 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { runTables } from '../common/run-tables.js';
+import { roomy } from '../../cache/testing.fixture.js';
 import { shlwapiMachine } from './memory.fixture.js';
 import { createLocaleFunctions } from '../kernel32/locale.js';
 
@@ -15,7 +17,7 @@ function machine(){
     let kernel32 = null;
     const m = shlwapiMachine({ library: (/** @type {string} */ name)=>
         (name === 'KERNEL32.dll' ? kernel32 : undefined) });
-    kernel32 = createLocaleFunctions(/** @type {any} */ ({
+    kernel32 = createLocaleFunctions(/** @type {any} */ ({ tables: runTables(roomy.api.space('tables', { idle: 'stay' })),
         ...m.base,
         /** @param {number} address @param {number} unit */
         stringLength: (address, unit)=>{

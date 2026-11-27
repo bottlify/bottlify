@@ -7,10 +7,11 @@
 /**
  * The gate of the run's tables (`common/run-tables.js`) under the locale
  * functions: the same seeded calls - GetStringType, the conversions both
- * ways, the lead bytes, CPINFO - through tables this realm made alone, through
- * tables read in place from the run's cache, and through a cache too small to
- * keep most of them, each answer, last error and every byte of memory
- * compared after each call. And a second realm of the run (a worker) reading
+ * ways, the lead bytes, CPINFO - through tables made afresh for every read (a
+ * space that keeps nothing), through tables read in place from the run's
+ * cache, and through a cache too small to keep most of them, each answer, last
+ * error and every byte of memory compared after each call. And a second realm of the run (a worker)
+ * reading
  * the tables a first one made, without making them again.
  */
 
@@ -18,6 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { testCache } from '../../cache/testing.fixture.js';
+import { noCache } from '../../cache/module.js';
 import { runTables } from '../common/run-tables.js';
 import { codePages } from './codepages.js';
 import { createLocaleFunctions } from './locale.js';
@@ -44,7 +46,7 @@ const seeded = seed=>{
     };
 };
 
-/** @param {import('../common/run-tables.js').RunTables | undefined} tables */
+/** @param {import('../common/run-tables.js').RunTables} tables */
 const machine = tables=>{
     const bytes = new Uint8Array(MEMORY);
     /** @type {number[]} */
@@ -118,48 +120,49 @@ const call = next=>{
     }
 };
 
-test('the locale functions answer the same with the run\'s tables and with their own', async()=>{
-    const roomy = await testCache();
-    // Room for the single-byte pages and not the 128 KiB tables: those stay
-    // the realm's own.
-    const cramped = await testCache({ budget: 64 << 10, segmentBytes: 64 << 10 });
-    const own = machine(undefined);
-    const roomyTables = runTables(roomy.space('tables', { idle: 'stay' }));
-    const crampedTables = runTables(cramped.space('tables', { idle: 'stay' }));
-    const arms = { kept: machine(roomyTables), cramped: machine(crampedTables) };
-    const next = seeded(0x5eed);
-    /** @type {Set<string>} */
-    const named = new Set();
-    for (let n = 0; n < 1500; n++)
-    {
-        const { plant, name, args } = call(next);
-        named.add(name);
-        const answers = [own, ...Object.values(arms)].map(arm=>{
-            for (const [at, bytes] of plant)
-            {
-                arm.bytes.set(bytes, at);
-            }
-            const answer = arm.fns[name].handler(args);
-            return { answer, errors: arm.errors.length, error: arm.errors.at(-1) ?? null };
-        });
-        for (const [index, [label, arm]] of Object.entries(arms).entries())
+test('the locale functions answer the same with the run\'s tables and with tables made afresh',
+    async()=>{
+        const roomy = await testCache();
+        // Room for the single-byte pages and not the 128 KiB tables: those are
+        // made again at each read.
+        const cramped = await testCache({ budget: 64 << 10, segmentBytes: 64 << 10 });
+        const own = machine(runTables(noCache.space('tables')));
+        const roomyTables = runTables(roomy.space('tables', { idle: 'stay' }));
+        const crampedTables = runTables(cramped.space('tables', { idle: 'stay' }));
+        const arms = { kept: machine(roomyTables), cramped: machine(crampedTables) };
+        const next = seeded(0x5eed);
+        /** @type {Set<string>} */
+        const named = new Set();
+        for (let n = 0; n < 1500; n++)
         {
-            const what = `${label}: call ${n} ${name}(${args})`;
-            assert.deepEqual(answers[index + 1], answers[0], what);
-            assert.ok(Buffer.from(arm.bytes).equals(Buffer.from(own.bytes)),
-                `memory after ${what}`);
+            const { plant, name, args } = call(next);
+            named.add(name);
+            const answers = [own, ...Object.values(arms)].map(arm=>{
+                for (const [at, bytes] of plant)
+                {
+                    arm.bytes.set(bytes, at);
+                }
+                const answer = arm.fns[name].handler(args);
+                return { answer, errors: arm.errors.length, error: arm.errors.at(-1) ?? null };
+            });
+            for (const [index, [label, arm]] of Object.entries(arms).entries())
+            {
+                const what = `${label}: call ${n} ${name}(${args})`;
+                assert.deepEqual(answers[index + 1], answers[0], what);
+                assert.ok(Buffer.from(arm.bytes).equals(Buffer.from(own.bytes)),
+                    `memory after ${what}`);
+            }
         }
-    }
-    assert.equal(named.size, 7, 'every call drawn');
-    // Each arm took the path it stands for: the roomy one read tables in place,
-    // the cramped one kept some of its own.
-    const kept = roomyTables.figures();
-    assert.ok(kept.read > 0 && kept.local === 0, `kept: ${JSON.stringify(kept)}`);
-    const cramp = crampedTables.figures();
-    assert.ok(cramp.local > 0 && cramp.read > 0, `cramped: ${JSON.stringify(cramp)}`);
-    await roomy.keeper.close?.();
-    await cramped.keeper.close?.();
-});
+        assert.equal(named.size, 7, 'every call drawn');
+        // Each arm took the path it stands for: the roomy one read tables in place,
+        // the cramped one was refused room for some and made them again.
+        const kept = roomyTables.figures();
+        assert.ok(kept.read > 0 && kept.refused === 0, `kept: ${JSON.stringify(kept)}`);
+        const cramp = crampedTables.figures();
+        assert.ok(cramp.refused > 1 && cramp.read > 0, `cramped: ${JSON.stringify(cramp)}`);
+        await roomy.keeper.close?.();
+        await cramped.keeper.close?.();
+    });
 
 test('a worker of the run reads the tables a first process made, and makes none', async()=>{
     const cache = await testCache();
@@ -167,7 +170,7 @@ test('a worker of the run reads the tables a first process made, and makes none'
     const sjis = [0x93, 0xfa, 0x96, 0x7b, 0x41];
     const here = { words: Array.from(/** @type {Uint16Array} */ (stringTypes(first)(1, 'Aa1 '))),
         text: codePages(first)(932)?.decode(Uint8Array.from(sjis), false) };
-    assert.deepEqual(first.figures(), { made: 2, read: 0, local: 0 });
+    assert.deepEqual(first.figures(), { made: 2, read: 0, refused: 0 });
     const joined = /** @type {NonNullable<ReturnType<typeof cache.join>>} */ (cache.join(()=>{}));
     const url = (/** @type {string} */ path)=>JSON.stringify(new URL(path, import.meta.url).href);
     const worker = new Worker(`
@@ -191,5 +194,6 @@ test('a worker of the run reads the tables a first process made, and makes none'
     await worker.terminate();
     joined.leave();
     assert.deepEqual({ words: answer.words, text: answer.text }, here);
-    assert.deepEqual(answer.figures, { made: 0, read: 2, local: 0 }, 'read in place, made nowhere');
+    assert.deepEqual(answer.figures, { made: 0, read: 2, refused: 0 },
+        'read in place, made nowhere');
 });

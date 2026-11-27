@@ -186,12 +186,12 @@ withLongCode(QUATERNION, QUATERNION_LONG);
  *           Told of each compile, for a tool that compares the source with what came out.
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  *           A file's bytes, for D3DXCreateEffectFromFile and its kin.
- * @property {import('../../cache/module.js').CacheSpace} [compiles]
+ * @property {import('../../cache/module.js').CacheSpace} compiles
  *           Where shader compiles done are kept: the run's cache, for every process of
- *           the run. None: a compile asked again is done again.
- * @property {import('../../cache/module.js').CacheSpace} [images]
+ *           the run.
+ * @property {import('../../cache/module.js').CacheSpace} images
  *           Where the texture loaders keep the images they decoded: the run's cache,
- *           for every process of the run. None: a file is decoded at every create.
+ *           for every process of the run.
  * @property {(path: string, bytes: Uint8Array) => Promise<boolean> | boolean} [writeFile]
  *           A file written whole, for D3DXSaveTextureToFile: false when it could not be.
  * @property {(module: number, name: string | number, type: number) =>

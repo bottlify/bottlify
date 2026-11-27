@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { freshSpace } from '../../cache/testing.fixture.js';
 import { createD3dxFunctions } from './functions.js';
 import { parseShader } from '../../graphics/d3d9/shader.js';
 import { translateShader } from '../../graphics/d3d9/wgsl.js';
@@ -24,9 +25,9 @@ const CLOSE = 0x2222;
  *
  * @param {Record<string, string>} [files]
  * @param {Record<string, string>} [disk]  By path, and resources by `module:name`.
- * @param {import('../../cache/module.js').CacheSpace} [compiles]  Where compiles are kept.
+ * @param {import('../../cache/module.js').CacheSpace} [compiles]  Where compiles are kept: a space of its own if absent.
  */
-function guest(files = {}, disk = {}, compiles = undefined){
+function guest(files = {}, disk = {}, compiles = freshSpace('d3dx-compiles')){
     const memory = new Uint8Array(0x100000);
     const view = new DataView(memory.buffer);
     let free = 0x20000;
@@ -38,7 +39,7 @@ function guest(files = {}, disk = {}, compiles = undefined){
     view.setUint32(0x414, CLOSE, true);
     /** @type {string[]} */
     const opened = [];
-    const fns = /** @type {any} */ (createD3dxFunctions({
+    const fns = /** @type {any} */ (createD3dxFunctions({ images: freshSpace('d3dx-images'),
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         compiles,

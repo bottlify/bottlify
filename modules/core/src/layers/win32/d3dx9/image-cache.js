@@ -88,19 +88,14 @@ export function decodedFrom(plain, file){
     return plain.faces.some(levels=>levels.some(level=>level.buffer !== file.buffer));
 }
 
-/** Where a layer built without the run's cache keeps its decodes: nowhere. @type {CacheSpace} */
-const KEEP_NOTHING = Object.freeze({
-    look: ()=>null, with: ()=>undefined, put: ()=>false, drop: ()=>{},
-});
-
 /**
  * The decodes kept in `space`: `find` the one of a file asked a way, `keep`
  * one made. What is asked is the caller's string: every argument the decode
  * depends on.
  *
- * @param {CacheSpace} [space]  none: nothing is kept, and each create decodes again
+ * @param {CacheSpace} space
  */
-export function createImageCache(space = KEEP_NOTHING){
+export function createImageCache(space){
     /**
      * A decode as the body the cache keeps.
      *

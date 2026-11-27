@@ -18,9 +18,8 @@
  * `idle: 'stay'`, so a table leaves only when its room is wanted, and is made
  * again by whoever asks for it after.
  *
- * Without a cache - a test, a machine built alone - or with no room in it,
- * the realm keeps the table it made and reads that, as each realm did before
- * the tables were the run's: this is the one place that does so.
+ * A table the cache has no room for is read for the call that made it and
+ * made again by the next, as one it let go of is: no realm keeps one.
  */
 
 /** @typedef {import('../../cache/module.js').CacheSpace} CacheSpace */
@@ -45,22 +44,20 @@
 
 /**
  * What the tables of this realm did: tables `made` here, `read` in place from
- * the run's cache, `local` ones kept here (no cache, or no room in it).
+ * the run's cache, and made ones it had no room for (`refused`).
  *
- * @typedef {{ made: number, read: number, local: number }} RunTableFigures
+ * @typedef {{ made: number, read: number, refused: number }} RunTableFigures
  */
 
 /**
  * The run's constant tables, as bodies of `space` (the cache layer's, asked
- * for with `idle: 'stay'`); null for none.
+ * for with `idle: 'stay'`).
  *
- * @param {CacheSpace | null} space
+ * @param {CacheSpace} space
  */
 export function runTables(space){
-    /** Tables this realm keeps: made here with nowhere in the run to keep them. @type {Map<string, Table>} */
-    const local = new Map();
     /** @type {RunTableFigures} */
-    const counts = { made: 0, read: 0, local: 0 };
+    const counts = { made: 0, read: 0, refused: 0 };
     return {
         /**
          * The table named `key`, of `Type`, which `make` makes: called once
@@ -73,32 +70,23 @@ export function runTables(space){
         table(key, Type, make){
             return {
                 read(reader){
-                    const own = /** @type {A | undefined} */ (local.get(key));
-                    if (own !== undefined)
+                    let found = false;
+                    const answer = space.with(key, body=>{
+                        found = true;
+                        return reader(new Type(body.buffer, body.byteOffset,
+                            body.byteLength / Type.BYTES_PER_ELEMENT));
+                    });
+                    if (found)
                     {
-                        return reader(own);
-                    }
-                    if (space !== null)
-                    {
-                        let found = false;
-                        const answer = space.with(key, body=>{
-                            found = true;
-                            return reader(new Type(body.buffer, body.byteOffset,
-                                body.byteLength / Type.BYTES_PER_ELEMENT));
-                        });
-                        if (found)
-                        {
-                            counts.read++;
-                            return /** @type {any} */ (answer);
-                        }
+                        counts.read++;
+                        return /** @type {any} */ (answer);
                     }
                     const made = make();
                     counts.made++;
-                    const bytes = new Uint8Array(made.buffer, made.byteOffset, made.byteLength);
-                    if (space === null || !space.put(key, bytes))
+                    if (!space.put(key, new Uint8Array(made.buffer, made.byteOffset,
+                        made.byteLength)))
                     {
-                        local.set(key, made);
-                        counts.local++;
+                        counts.refused++;
                     }
                     return reader(made);
                 },

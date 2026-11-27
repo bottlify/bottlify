@@ -6,6 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { runTables } from '../common/run-tables.js';
+import { roomy } from '../../cache/testing.fixture.js';
 import { shlwapiMachine } from './memory.fixture.js';
 import { createLocaleFunctions } from '../kernel32/locale.js';
 import { byteSize, kbSize, timeInterval } from './strings.js';
@@ -20,19 +22,20 @@ function compared(){
     /** @type {any} */
     let kernel32 = null;
     const m = shlwapiMachine({ library: name=>(name === 'KERNEL32.dll' ? kernel32 : undefined) });
-    kernel32 = createLocaleFunctions({
-        readMemory: m.base.readMemory,
-        writeMemory: m.base.writeMemory,
-        setLastError: ()=>{},
-        stringLength: (address, unit)=>{
-            let length = 0;
-            while ((unit === 1 ? m.memory[address + length]
-                : m.view.getUint16(address + length * 2, true)) !== 0)
-            {
-                length++;
-            }
-            return length;
-        },
+    kernel32 = createLocaleFunctions({ tables: runTables(roomy.api.space('tables',
+        { idle: 'stay' })),
+    readMemory: m.base.readMemory,
+    writeMemory: m.base.writeMemory,
+    setLastError: ()=>{},
+    stringLength: (address, unit)=>{
+        let length = 0;
+        while ((unit === 1 ? m.memory[address + length]
+            : m.view.getUint16(address + length * 2, true)) !== 0)
+        {
+            length++;
+        }
+        return length;
+    },
     });
     return m;
 }

@@ -69,7 +69,7 @@ const SETTLED_MS = 2000;
 
 /** A volume with no cache to keep reads in. @type {import('../../cache/module.js').CacheSpace} */
 const KEEP_NOTHING = Object.freeze({
-    look: ()=>null, with: ()=>undefined, put: ()=>false, drop: ()=>{},
+    look: ()=>null, with: ()=>undefined, put: ()=>false, drop: ()=>{}, hold: ()=>null,
 });
 
 const CHANGE_FILE_NAME = 0x001;
