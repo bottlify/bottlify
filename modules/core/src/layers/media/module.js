@@ -24,7 +24,7 @@ import { createIjlLibrary } from './internal/ijl.js';
  * the clips this machine opened, leaving the instance for the next one.
  *
  * Beside it, internal/ holds the still-image and texture codecs (JPEG, GIF,
- * TIFF, S3TC) as plain functions: the layers that require
+ * TIFF, PNG and the inflate under it, S3TC) as plain functions: the layers that require
  * media - win32's imaging and D3DX, the drawing APIs - import them, so each
  * format is read and written in one place.
  */

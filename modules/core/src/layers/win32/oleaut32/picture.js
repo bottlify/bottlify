@@ -21,7 +21,7 @@
 
 import { after } from '../user32/controls.js';
 import { decodeJpeg } from '../../media/internal/jpeg.js';
-import { isPng, readPng } from '../d3dx9/png.js';
+import { isPng, readPng } from '../../media/internal/png.js';
 import { decodeGifFrames, isGif } from '../../media/internal/gif.js';
 import { wholeAddress } from '../common/pointers.js';
 

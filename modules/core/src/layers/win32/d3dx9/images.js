@@ -5,7 +5,7 @@
  */
 
 import { FMT, decodeTexels, isSupported, keptAsIs, layoutOf } from './pixels.js';
-import { PngError, isPng, readPng } from './png.js';
+import { PngError, isPng, readPng } from '../../media/internal/png.js';
 import { decodeJpeg } from '../../media/internal/jpeg.js';
 
 /**
