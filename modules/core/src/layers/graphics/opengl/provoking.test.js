@@ -19,7 +19,7 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @param {Uint32Array | null} order @param {number} size */
 const primitives = (order, size)=>{
@@ -72,7 +72,7 @@ test('glProvokingVertex sets the convention, the last by default', ()=>{
 test('a draw is turned round only where it has a flat value and the last vertex provokes',
     async()=>{
         const gpu = createFakeDevice();
-        const backend = createBackend({ scratches: roomy.api.scratch,
+        const backend = createBackend({ scratches: testScratch,
             device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{} });
         const renderer = createGpuRenderer({ backend,

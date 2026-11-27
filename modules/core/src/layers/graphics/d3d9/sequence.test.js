@@ -20,7 +20,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import {
     D3DBLEND, D3DCLEAR, D3DCULL, D3DFMT_INDEX, D3DLIGHTTYPE, D3DPT, D3DRS, D3DTS,
@@ -164,7 +164,7 @@ function worldOf(index){
 
 function scene(){
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const ram = new Uint8Array(4 << 20);

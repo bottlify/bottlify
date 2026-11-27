@@ -17,7 +17,7 @@ import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { GL_EXTENSIONS } from './extensions.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** A context drawing through the fake device, and that device. */
 function rig(){
@@ -27,7 +27,7 @@ function rig(){
     const samplers = [];
     const gpu = createFakeDevice();
     const renderer = createGpuRenderer({
-        backend: createBackend({ scratches: roomy.api.scratch,
+        backend: createBackend({ scratches: testScratch,
             device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
         createSampler: (/** @type {any} */ descriptor)=>{
             samplers.push(descriptor);

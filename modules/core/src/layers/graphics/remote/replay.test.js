@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { loopbackDirect3D } from './loopback.js';
 import { SWEEP_SLICE, createMirror, createPlayer, withMirrored } from './replay.js';
 import { OP, SECTION, WAIT, createWriter } from './wire.js';
@@ -859,7 +859,7 @@ function plain(value, depth = 0){
  */
 async function framesThrough(make, late = false){
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const ram = new Uint8Array(4 << 20);
@@ -1437,7 +1437,7 @@ test('a surface a read-back is still filling keeps its memory until the pixels h
         const gpu = createFakeDevice();
         const services = {
             // A renderer that reads back, so the pixels come from the played side.
-            backend: createBackend({ scratches: roomy.api.scratch,
+            backend: createBackend({ scratches: testScratch,
                 device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
                 now: ()=>0 }),
             createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',

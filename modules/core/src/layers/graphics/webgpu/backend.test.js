@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBackend } from './backend.js';
 import { createFakeDevice } from './internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { testScratch } from '../../cache/testing.fixture.js';
 
 /** @param {any} [options] */
 function harness(options = {}){
@@ -17,7 +17,7 @@ function harness(options = {}){
     const presented = [];
     let clock = 0;
     const backend = createBackend({
-        scratches: roomy.api.scratch,
+        scratches: testScratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: frame=>presented.push(frame),

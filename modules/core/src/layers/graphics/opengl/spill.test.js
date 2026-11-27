@@ -23,7 +23,7 @@ import { openRunCache } from '../../../process/run-cache.js';
 import { channelSpace } from '../../cache/module.js';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -54,7 +54,7 @@ const S3TC = [null,
 async function run(seed, cached){
     const next = random(seed);
     const fake = createFakeDevice({});
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const runCache = cached ? await openRunCache({ budget: 64 << 20 }) : null;
     /** @type {ReturnType<typeof channelSpace> | null} */
@@ -184,7 +184,7 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
     setFlagsFromString('--expose-gc');
     const gc = runInNewContext('gc');
     const fake = createFakeDevice({});
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const runCache = await openRunCache({ budget: 64 << 20 });
     /** @type {ReturnType<typeof channelSpace> | null} */
@@ -243,7 +243,7 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
 
 test('a level of the cache\'s unit of room moves, one below it stays', async()=>{
     const fake = createFakeDevice({});
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const runCache = await openRunCache({ budget: 64 << 20 });
     /** @type {ReturnType<typeof channelSpace> | null} */
@@ -289,7 +289,7 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
 test('a texture the program deleted gives back what of it waited in the run\'s cache at the next '
     + 'look, and the root that goes gives back the rest', async()=>{
     const fake = createFakeDevice({});
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const runCache = await openRunCache({ budget: 64 << 20 });
     /** @type {ReturnType<typeof channelSpace> | null} */

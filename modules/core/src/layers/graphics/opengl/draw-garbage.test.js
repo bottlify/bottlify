@@ -12,7 +12,7 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /**
  * A fixed-function frame as an old title draws it - a mipmapped texture on a
@@ -22,7 +22,7 @@ import { roomy } from '../../cache/testing.fixture.js';
  */
 function scene(){
     const fake = createFakeDevice({ quiet: true });
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const renderer = createGpuRenderer({ backend,
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });

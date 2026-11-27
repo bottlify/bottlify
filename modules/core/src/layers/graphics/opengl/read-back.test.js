@@ -23,14 +23,14 @@ import { createGpuRenderer } from './gpu.js';
 import { createOpengl } from './exports.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** A 4x4 level whose texels are all different. */
 const LEVEL = Uint8Array.from({ length: 64 }, (_, at)=>(at * 7 + 3) & 0xff);
 
 function rig(){
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const divergences = [];
@@ -169,7 +169,7 @@ test('a read before the level is drawn answers at once from this side', ()=>{
 test('the exports write the device\'s answer into the program\'s memory once it is here',
     async()=>{
         const gpu = createFakeDevice();
-        const backend = createBackend({ scratches: roomy.api.scratch,
+        const backend = createBackend({ scratches: testScratch,
             device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{} });
         const bytes = new Uint8Array(0x10000);

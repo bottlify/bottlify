@@ -14,7 +14,7 @@ import { COPY_UNIFORM_FLOATS, UNIFORM } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { dxt1ToAstc } from '../webgpu/internal/astc.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /**
  * A context on a renderer on a backend on a recording device: what the
@@ -45,7 +45,7 @@ function rig(services = {}){
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
-        scratches: roomy.api.scratch,
+        scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: frame=>presented.push(frame),
     });
     /** @type {string[]} */

@@ -17,7 +17,7 @@ import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { GL_EXTENSIONS } from './extensions.js';
 import { instanceElements, planLayout } from './gpu-layout.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @returns {{ gl: any, floats: (at: number, values: number[]) => void }} */
 function fixture(){
@@ -292,7 +292,7 @@ test('on the device a zero stride is an instance-stepped buffer of the one eleme
     const { createFakeDevice } = await import('../webgpu/internal/fake-device.js');
     const gpu = createFakeDevice();
     const renderer = createGpuRenderer({
-        backend: createBackend({ scratches: roomy.api.scratch,
+        backend: createBackend({ scratches: testScratch,
             device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
     });

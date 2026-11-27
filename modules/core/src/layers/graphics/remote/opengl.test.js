@@ -14,7 +14,7 @@ import { createReceiver, createSender } from './channel.js';
 import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { playedAtOnce } from './direct3d.js';
 import { playedOpengl, recordedOpengl } from './opengl.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { testScratch } from '../../cache/testing.fixture.js';
 
 /** The dword a guest pushes for a GLfloat. @param {number} value */
 function floatBits(value){
@@ -82,7 +82,7 @@ function plain(value, depth = 0){
  */
 async function framesThrough(remote){
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const bytes = new Uint8Array(0x40000);
@@ -268,7 +268,7 @@ test('a recorded context answers the program as a context on a device does', asy
  */
 async function readThrough(remote){
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const bytes = new Uint8Array(0x10000);
@@ -324,7 +324,7 @@ async function readThrough(remote){
  */
 async function queryThrough(remote){
     const gpu = createFakeDevice({ occlusionSamples: ()=>7 });
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const bytes = new Uint8Array(0x10000);
@@ -407,7 +407,7 @@ test('glReadPixels on a device writes what was drawn, wherever the device is', a
  */
 async function texelsThrough(remote){
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const bytes = new Uint8Array(0x10000);

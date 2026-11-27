@@ -20,12 +20,12 @@ import {
 } from './constants.js';
 import * as blit from './blit.js';
 import { readPixel, writePixel } from './blit.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { testScratch } from '../../cache/testing.fixture.js';
 
 const BASE = 0x100;
 
-/** The rooms a blit works in, held in the roomy cache, as a DirectDraw seam hands them. */
-const rooms = blit.blitRooms(roomy.api.scratch);
+/** The rooms a blit works in, held in a test's cache, as a DirectDraw seam hands them. */
+const rooms = blit.blitRooms(testScratch);
 /** @param {Parameters<typeof blit.blt>[0]} request */
 const blt = request=>blit.blt({ rooms, ...request });
 /** @param {Parameters<typeof blit.bltFast>[0]} request */

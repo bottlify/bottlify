@@ -119,13 +119,13 @@ export function drawPageRunner(){
         const { D3D11CreateDevice } = await import('/src/layers/graphics/d3d10/device.js');
         const { createBackend } = await import('/src/layers/graphics/webgpu/backend.js');
         // The backend's rooms, held in a real cache as a run's are.
-        const { roomy } = await import('/src/layers/cache/testing.fixture.js');
+        const { testScratch } = await import('/src/layers/cache/testing.fixture.js');
         /** @type {string[]} */
         const said = [];
         /** @type {any[]} */
         const textures = [];
         device.pushErrorScope('validation');
-        const backend = createBackend({ scratches: roomy.api.scratch,
+        const backend = createBackend({ scratches: testScratch,
             device, queue: device.queue, presentTo: ()=>{} });
         /** @type {any} */
         const out = { wantDevice: true, wantContext: true };

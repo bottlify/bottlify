@@ -452,5 +452,11 @@ export function createUniformPool(options){
         stats(){
             return { created, reused, writes, shared, written, laid };
         },
+
+        /** The ring's copy let go of, with its backend: a later block makes the ring anew. */
+        release(){
+            room.release();
+            ring = null;
+        },
     };
 }

@@ -8,10 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBindingCache, createUniformPool, dynamicOffsetsOf, resourceId } from './bindings.js';
 import { createFakeDevice } from './fake-device.js';
-import { roomy } from '../../../cache/testing.fixture.js';
+import { freshSpace, testScratch } from '../../../cache/testing.fixture.js';
+import { createScratches } from '../../../cache/scratch.js';
 
 /** A staging room of the roomy cache's, one a pool. */
-const staging = ()=>roomy.api.scratch('webgpu/uniforms');
+const staging = ()=>testScratch('webgpu/uniforms');
 
 test('resource identity is stable per object and distinct between objects', ()=>{
     const a = {};
@@ -61,6 +62,22 @@ test('a layout is mandatory, so nothing can fall back to an automatic one', ()=>
     assert.throws(()=>cache.get(null, [{ binding: 0, resource: {} }]), /explicit/);
     assert.throws(()=>cache.get('auto', [{ binding: 0, resource: {} }]), /explicit/);
 });
+
+test('a uniform pool let go of gives its copy\'s room back, and a later block makes the ring anew',
+    ()=>{
+        const gpu = createFakeDevice();
+        const rooms = createScratches(freshSpace('scratch').hold);
+        const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 512,
+            staging: rooms.scratch('webgpu/uniforms') });
+        const first = pool.allocate(new Uint8Array(64).fill(1));
+        assert.equal(rooms.figures().held, 1, 'the copy held in the cache');
+        pool.release();
+        assert.equal(rooms.figures().held, 0, 'and given back');
+        const again = pool.allocate(new Uint8Array(64).fill(2));
+        assert.notEqual(again.buffer, first.buffer, 'a ring made anew');
+        assert.equal(rooms.figures().held, 1);
+        assert.equal(pool.stats().created, 2);
+    });
 
 test('a uniform pool lays each block at its own offset of one ring, as bytes', ()=>{
     // Unit. One buffer rewritten per draw would show every draw in a pass the

@@ -1753,6 +1753,7 @@ export function createBackend(options){
 
         dispose(){
             disposed = true;
+            uniforms.release();
             dynamicBuffers.clear();
             touchedBuffers.clear();
             // Staged between frames but never encoded: their buffers are not on

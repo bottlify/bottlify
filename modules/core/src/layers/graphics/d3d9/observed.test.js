@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import { D3DLOCK, D3DPT } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
@@ -33,7 +33,7 @@ const STRIDE = 20;
 function harness(){
     const gpu = createFakeDevice();
     const backend = createBackend({
-        scratches: roomy.api.scratch,
+        scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{}, now: ()=>0,
     });
     const ram = new Uint8Array(RAM_SIZE);

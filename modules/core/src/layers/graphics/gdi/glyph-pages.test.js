@@ -26,7 +26,7 @@ import { extTextOut, textExtent } from './text.js';
 import { OPAQUE, TRANSPARENT } from './brush.js';
 import { createPainter } from './shapes.js';
 import { clearSurface, createSurface } from './surface.js';
-import { roomy, testCache } from '../../cache/testing.fixture.js';
+import { testCache, testScratch } from '../../cache/testing.fixture.js';
 import { noCache } from '../../cache/module.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
@@ -184,7 +184,7 @@ async function run(seed, where, { mutate = false } = {}){
             return read(wrong);
         }, options) };
     }
-    const engine = createFontEngine({ scratch: roomy.api.scratch('gdi/glyph-page'),
+    const engine = createFontEngine({ scratch: testScratch('gdi/glyph-page'),
         canvas: fakeCanvas(), space });
     /** @type {string[]} */
     const seen = [];

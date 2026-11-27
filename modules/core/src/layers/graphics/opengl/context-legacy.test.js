@@ -19,7 +19,7 @@ import { LEGACY } from './legacy-state.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @returns {{ gl: any, bytes: Uint8Array, view: DataView }} */
 function fixture(){
@@ -158,7 +158,7 @@ test('the stipple through pixel buffers: an offset into each, a range past one r
 
 test('a stippled draw on the device discards by the pattern its key carries', async()=>{
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     const renderer = createGpuRenderer({ backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }) });

@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
-import { freshSpace, roomy } from '../../cache/testing.fixture.js';
+import { freshSpace, testScratch } from '../../cache/testing.fixture.js';
 import { NONANTIALIASED_QUALITY, createFontEngine, familyOf } from './fonts.js';
 import { extTextOut, textExtent } from './text.js';
 import { createGdiDrawing } from './context.js';
@@ -119,7 +119,7 @@ const copied = (engine, code, request)=>engine.glyph(code, request, glyph=>({
 
 /** Where an engine keeps its pages: names of its own in a real cache, and its scratch. */
 const glyphRooms = ()=>({ space: freshSpace('glyphs'),
-    scratch: roomy.api.scratch('gdi/glyph-page') });
+    scratch: testScratch('gdi/glyph-page') });
 
 /** @param {Partial<import('./fonts.js').FontRequest>} fields */
 const font = fields=>({

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { createDirect3D7 } from '../d3d7/device.js';
 import { D3D7_COMMANDS } from '../d3d7/commands.js';
 import { D3DRENDERSTATE, D3D_OK, DEVICE_IDS } from '../d3d7/constants.js';
@@ -107,7 +107,7 @@ function corners(/** @type {number[][]} */ points, /** @type {boolean} */ textur
  */
 async function framesThrough(make, ring = false, queued = null){
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const ram = new Uint8Array(1 << 20);
@@ -394,7 +394,7 @@ async function lateDraws(make){
     /** @type {Map<number, () => unknown>} */
     const claims = new Map();
     const d3d = make(root, { ...deviceRooms(),
-        backend: createBackend({ scratches: roomy.api.scratch,
+        backend: createBackend({ scratches: testScratch,
             device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
             now: ()=>0 }),
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>

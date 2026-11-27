@@ -71,7 +71,7 @@ import {
 import { D3DPT } from '../d3d8/constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { testScratch } from '../../cache/testing.fixture.js';
 
 const HWND = 0x00010044;
 const SCREEN = { width: 16, height: 16, bitsPerPixel: 32 };
@@ -210,7 +210,7 @@ function seamed(observe = ()=>null, assembly = {}){
     const callbacks = [];
     const publisher = createPublisher({ publishInterface: box.publishInterface });
     const libraries = createGraphicsLibraries({
-        scratches: roomy.api.scratch,
+        scratches: testScratch,
         graphics: {
             /** @param {string} name @param {any} options */
             create: (name, options)=>{

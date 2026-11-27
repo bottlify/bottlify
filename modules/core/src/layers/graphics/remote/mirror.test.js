@@ -16,7 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { playedDirect3D7, recordedDirect3D7 } from './d3d7.js';
 import { playedDirect3D10, recordedDirect3D10 } from './d3d10.js';
@@ -60,7 +60,7 @@ const createSampler = descriptor=>({ kind: 'sampler', id: `sampler-${JSON.string
 
 const gpuServices = ()=>{
     const gpu = createFakeDevice();
-    return { gpu, backend: createBackend({ scratches: roomy.api.scratch,
+    return { gpu, backend: createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue,
         presentTo: ()=>{}, now: ()=>0 }) };
 };

@@ -24,7 +24,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import {
     D3D10_BIND, D3D10_BLEND, D3D10_BLEND_OP, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_CULL_MODE,
     D3D10_DRIVER_TYPE, D3D10_FILL_MODE, D3D10_FILTER, D3D10_MAP,
@@ -109,7 +109,7 @@ function harness(options = {}){
     /** @type {string[]} */
     const divergences = [];
     const backend = createBackend({
-        scratches: roomy.api.scratch,
+        scratches: testScratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: frame=>presented.push(frame),
@@ -2180,7 +2180,7 @@ test('a depth buffer bound through a read-only view is tested and read in one pa
     const gpu = createFakeDevice();
     /** @type {string[]} */
     const said = [];
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue,
         presentTo: ()=>{}, now: ()=>0 });
     /** @type {any} */
@@ -2992,7 +2992,7 @@ function quadPatches(){
     const gpu = createFakeDevice();
     /** @type {string[]} */
     const divergences = [];
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue,
         presentTo: ()=>{}, now: ()=>0 });
     /** @type {any} */

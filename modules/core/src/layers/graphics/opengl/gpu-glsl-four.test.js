@@ -20,7 +20,7 @@ import { createGpuRenderer } from './gpu.js';
 import { VERTEX_PROGRAM_BINDING, samplerBinding, samplerIndex } from './arb-wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 const VS = `#version 460
 in vec4 position; out vec4 colour;
@@ -34,7 +34,7 @@ function rig(vertex){
     const gpu = createFakeDevice();
     /** @type {string[]} */
     const divergences = [];
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     const renderer = createGpuRenderer({ backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
@@ -116,7 +116,7 @@ void main() { colour = position; gl_CullDistance[0] = -1.0; gl_Position = positi
 test('sixteen texture units: a program\'s ninth sampler on is bound past the other bindings, '
     + 'each reading its own unit', async()=>{
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     const renderer = createGpuRenderer({ backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }), divergence: ()=>{} });
@@ -193,7 +193,7 @@ ${samplers} out vec4 c; void main() { c = ${sum}; }`]])
 test('a texture wrapped GL_CLAMP_TO_BORDER is sampled clamped to its edge, and that is said',
     async()=>{
         const gpu = createFakeDevice();
-        const backend = createBackend({ scratches: roomy.api.scratch,
+        const backend = createBackend({ scratches: testScratch,
             device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{} });
         /** @type {string[]} */

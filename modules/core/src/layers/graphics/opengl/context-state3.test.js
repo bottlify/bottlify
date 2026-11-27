@@ -16,7 +16,7 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 test('glClampColor keeps what it is given, and says when that is not what is done', ()=>{
     /** @type {string[]} */
@@ -66,7 +66,7 @@ test('GL_DEPTH_CLAMP leaves depth unclipped where the device can, and says so wh
             const said = [];
             const gpu = createFakeDevice({ features });
             const renderer = createGpuRenderer({
-                backend: createBackend({ scratches: roomy.api.scratch,
+                backend: createBackend({ scratches: testScratch,
                     device: gpu.device, queue: gpu.queue,
                     presentTo: ()=>{} }),
                 createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),

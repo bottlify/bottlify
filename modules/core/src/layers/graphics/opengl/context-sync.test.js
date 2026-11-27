@@ -12,13 +12,13 @@ import { createGpuRenderer } from './gpu.js';
 import { SYNC, TIMEOUT_IGNORED } from './context-sync.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { testScratch } from '../../cache/testing.fixture.js';
 
 /** @param {boolean} device @returns {{ gl: any, renderer: any }} */
 function fixture(device){
     const gpu = createFakeDevice();
     const renderer = device ? createGpuRenderer({
-        backend: createBackend({ scratches: roomy.api.scratch,
+        backend: createBackend({ scratches: testScratch,
             device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
     }) : null;

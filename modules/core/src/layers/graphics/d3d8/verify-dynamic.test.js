@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createDynamicVerify } from './verify-dynamic.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { testScratch } from '../../cache/testing.fixture.js';
 
 /** D3DUSAGE_DYNAMIC. */
 const DYNAMIC = 0x200;
@@ -164,7 +164,7 @@ test('a frame reads back no more than its budget, and a device with no read back
 test('through a backend: what a frame binds is copied out after its draws and read back once it'
     + ' is submitted, and a copy rewritten before the frame\'s end is found', async()=>{
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const memory = new Uint8Array(0x3000);

@@ -35,7 +35,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 import { createHash } from 'node:crypto';
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
@@ -170,7 +170,7 @@ const everyPage = (address, length)=>({
 });
 
 /** @param {any} gpu */
-const backendOf = gpu=>createBackend({ scratches: roomy.api.scratch,
+const backendOf = gpu=>createBackend({ scratches: testScratch,
     device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
     now: ()=>0 });
 

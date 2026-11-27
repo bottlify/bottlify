@@ -20,7 +20,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { createVulkan } from './runtime.js';
 import { readU32, readU64, writeF32, writeU32, writeU64 } from './structs.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { testScratch } from '../../cache/testing.fixture.js';
 
 /** Where the fixture's memory starts: a program never hands out address zero. */
 const RAM_BASE = 0x00100000;
@@ -62,7 +62,7 @@ export function createFixture(options = {}){
         ...memory,
         backend: ()=>{
             backend ??= createBackend({
-                scratches: roomy.api.scratch,
+                scratches: testScratch,
                 device: gpu.device,
                 queue: gpu.queue,
                 presentTo: frame=>presented.push(frame),

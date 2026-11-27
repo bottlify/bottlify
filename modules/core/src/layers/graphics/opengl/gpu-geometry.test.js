@@ -24,11 +24,11 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { GLSL_GEOMETRY_PASS_BINDING } from './glsl-wgsl.js';
 import { UNIFORM } from './wgsl.js';
 import { TEX } from './formats.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 function rig(){
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const divergences = [];

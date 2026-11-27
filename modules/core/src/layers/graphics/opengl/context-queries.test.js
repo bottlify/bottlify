@@ -12,7 +12,7 @@ import { createGpuRenderer } from './gpu.js';
 import { QUERY } from './context-queries.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /**
  * @param {((slot: number) => number) | null} samples  what each occlusion slot counts, or
@@ -22,7 +22,7 @@ import { roomy } from '../../cache/testing.fixture.js';
 function fixture(samples){
     const gpu = createFakeDevice(samples ? { occlusionSamples: samples } : {});
     const renderer = samples ? createGpuRenderer({
-        backend: createBackend({ scratches: roomy.api.scratch,
+        backend: createBackend({ scratches: testScratch,
             device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
     }) : null;

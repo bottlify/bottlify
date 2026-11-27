@@ -30,7 +30,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { openRunCache } from '../../../process/run-cache.js';
 import { channelSpace, ownedSpace } from '../../cache/module.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -113,7 +113,7 @@ const KINDS = [
 async function run(seed, where, { mutate = false } = {}){
     const next = random(seed);
     const fake = createFakeDevice({});
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const runCache = await openRunCache({ budget: 64 << 20 });
     /** @type {ReturnType<typeof channelSpace> | ReturnType<typeof ownedSpace>} */

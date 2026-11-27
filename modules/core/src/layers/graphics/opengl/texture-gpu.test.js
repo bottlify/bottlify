@@ -21,7 +21,7 @@ import { TEX } from './formats.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { roomy } from '../../cache/testing.fixture.js';
+import { roomy, testScratch } from '../../cache/testing.fixture.js';
 
 /**
  * @param {string[]} [features] @param {boolean} [compressedTextures]  BC sampled as blocks
@@ -29,7 +29,7 @@ import { roomy } from '../../cache/testing.fixture.js';
  */
 function rig(features = [], compressedTextures = false, liveDump = null){
     const gpu = createFakeDevice({ features });
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const said = [];

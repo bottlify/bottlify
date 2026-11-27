@@ -30,7 +30,7 @@ import { FVF } from '../webgpu/internal/vertexformat.js';
 import { openRunCache } from '../../../process/run-cache.js';
 import { createScratches } from '../../cache/scratch.js';
 import { channelSpace, ownedSpace } from '../../cache/module.js';
-import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
+import { deviceRooms, testScratch } from '../../cache/testing.fixture.js';
 
 const RAM_BASE = 0x40000000;
 const ok = (/** @type {number} */ value)=>assert.equal(value, D3D_OK);
@@ -72,7 +72,7 @@ const callText = call=>JSON.stringify({ op: call.op, size: call.size, layout: ca
 async function run(seed, where, { mutate = false } = {}){
     const next = random(seed);
     const gpu = createFakeDevice();
-    const backend = createBackend({ scratches: roomy.api.scratch,
+    const backend = createBackend({ scratches: testScratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const runCache = await openRunCache({ budget: 64 << 20 });
