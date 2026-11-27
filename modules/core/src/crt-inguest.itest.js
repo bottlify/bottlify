@@ -20,6 +20,7 @@ import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
 import { ERANGE } from './layers/win32/msvcrt/globals.js';
 import { createMsvcrtFunctions } from './layers/win32/msvcrt/functions.js';
+import { guestOver } from './layers/win32/common/guest.fixture.js';
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -763,6 +764,7 @@ test('rand draws the runtime\'s sequence through the import, in the guest, on th
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
             new Uint8Array(length),
         writeMemory: ()=>{}, fillMemory: ()=>{}, readCString: ()=>'',
+        guest: guestOver(new Uint8Array(0x10000)),
         scanCString: ()=>({ index: 0, byte: 0 }), write: ()=>{}, callGuest: ()=>Promise.resolve(0),
     }));
     /** @type {Call[]} */
