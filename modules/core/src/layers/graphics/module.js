@@ -691,7 +691,7 @@ export function createGraphicsModule(){
              * them in plain memory.
              */
             const ownTexels = ()=>{
-                const owned = cache.owner?.('texels') ?? null;
+                const owned = cache?.owner?.('texels') ?? null;
                 if (owned)
                 {
                     state.texelOwners.push(owned);
