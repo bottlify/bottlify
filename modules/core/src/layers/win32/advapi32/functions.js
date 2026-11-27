@@ -39,6 +39,7 @@ import { isTextUnicode } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { writeZeros } from '../common/guest.js';
 import { utf16 } from '../common/utf16.js';
+import { foldName } from '../../../system/text.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -1809,7 +1810,7 @@ export function createRegistryFunctions(host){
      */
     const loaded = new Map();
     /** @param {number} root @param {string} name */
-    const loadedName = (root, name)=>`${root}\\${name.toLowerCase()}`;
+    const loadedName = (root, name)=>`${root}\\${foldName(name)}`;
 
     /**
      * RegLoadKey in either spelling: the file's tree under a new key of

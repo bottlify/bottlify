@@ -25,6 +25,7 @@
  */
 
 import { inView } from './wow64-registry.js';
+import { foldName } from '../../../system/text.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_NAME, processorCount,
 } from '../kernel32/processor.js';
@@ -107,14 +108,6 @@ export const MACHINE_ENVIRONMENT =
  * @property {StoredKey[]} keys
  */
 
-/**
- * Windows folds case with the invariant mapping, never the user's locale, so
- * `toLowerCase` rather than `toLocaleLowerCase` is the correct one here.
- *
- * @param {string} name
- */
-const fold = name=>name.toLowerCase();
-
 /** @param {string} name @returns {RegistryNode} */
 function makeKey(name){
     return { name, keys: new Map(), values: new Map(), keyClass: '' };
@@ -193,7 +186,7 @@ function keyFromJSON(stored){
     for (const value of stored?.values ?? [])
     {
         const name = value?.name ?? '';
-        key.values.set(fold(name), {
+        key.values.set(foldName(name), {
             name,
             type: value?.type >>> 0,
             data: Uint8Array.from(value?.data ?? []),
@@ -202,7 +195,7 @@ function keyFromJSON(stored){
     }
     for (const child of stored?.keys ?? [])
     {
-        key.keys.set(fold(child?.name ?? ''), keyFromJSON(child));
+        key.keys.set(foldName(child?.name ?? ''), keyFromJSON(child));
     }
     return key;
 }
@@ -812,7 +805,7 @@ function walk(node, parts){
     let at = node ?? null;
     for (const part of parts)
     {
-        at = at?.keys.get(fold(part)) ?? null;
+        at = at?.keys.get(foldName(part)) ?? null;
     }
     return at;
 }
@@ -985,11 +978,11 @@ export function createHive(
             let node = /** @type {RegistryNode} */ (roots.get(entry.root));
             for (const part of segments(entry.path))
             {
-                let next = node.keys.get(fold(part));
+                let next = node.keys.get(foldName(part));
                 if (!next)
                 {
                     next = makeKey(part);
-                    node.keys.set(fold(part), next);
+                    node.keys.set(foldName(part), next);
                 }
                 node = next;
             }
@@ -997,12 +990,12 @@ export function createHive(
             {
                 if (!Object.hasOwn(values, name))
                 {
-                    node.values.delete(fold(name));
+                    node.values.delete(foldName(name));
                 }
             }
             if (entry.subkeys)
             {
-                const kept = new Set(entry.subkeys.map(fold));
+                const kept = new Set(entry.subkeys.map(foldName));
                 for (const name of [...node.keys.keys()])
                 {
                     if (!kept.has(name))
@@ -1013,9 +1006,9 @@ export function createHive(
             }
             for (const [name, value] of Object.entries(values))
             {
-                if (volatile || !node.values.has(fold(name)) || entry.owned?.includes(name))
+                if (volatile || !node.values.has(foldName(name)) || entry.owned?.includes(name))
                 {
-                    node.values.set(fold(name), { furnished: true,
+                    node.values.set(foldName(name), { furnished: true,
                         ...typeof value === 'number'
                             ? { name, type: REG_DWORD, data: dword(value) }
                             : value instanceof Uint8Array
@@ -1052,7 +1045,7 @@ export function createHive(
         let node = key;
         for (const part of parts.slice(0, -1))
         {
-            const next = node.keys.get(fold(part));
+            const next = node.keys.get(foldName(part));
             if (!next)
             {
                 return null;
@@ -1097,11 +1090,11 @@ export function createHive(
         let created = false;
         for (const part of segments(path))
         {
-            let next = node.keys.get(fold(part));
+            let next = node.keys.get(foldName(part));
             if (!next)
             {
                 next = makeKey(part);
-                node.keys.set(fold(part), next);
+                node.keys.set(foldName(part), next);
                 created = true;
             }
             node = next;
@@ -1154,7 +1147,7 @@ export function createHive(
         {
             return 'missing';
         }
-        const doomed = target.parent.keys.get(fold(target.name));
+        const doomed = target.parent.keys.get(foldName(target.name));
         if (!doomed)
         {
             return 'missing';
@@ -1163,7 +1156,7 @@ export function createHive(
         {
             return 'has-subkeys';
         }
-        target.parent.keys.delete(fold(target.name));
+        target.parent.keys.delete(foldName(target.name));
         changed();
         return 'deleted';
     };
@@ -1330,9 +1323,10 @@ export function createHive(
             if (isClasses(key))
             {
                 const { user, machine } = sidesOf(key);
-                return user?.values.get(fold(name)) ?? machine?.values.get(fold(name)) ?? null;
+                const folded = foldName(name);
+                return user?.values.get(folded) ?? machine?.values.get(folded) ?? null;
             }
-            return key.values.get(fold(name)) ?? null;
+            return key.values.get(foldName(name)) ?? null;
         },
 
         /**
@@ -1350,7 +1344,7 @@ export function createHive(
             // A classes key both sides have since deleted takes the value nowhere.
             if (node)
             {
-                node.values.set(fold(name), value);
+                node.values.set(foldName(name), value);
                 changed();
             }
             return value;
@@ -1365,18 +1359,18 @@ export function createHive(
          * @returns {'renamed' | 'missing' | 'taken'}
          */
         rename(parent, name, to){
-            const node = isClasses(parent) ? null : parent.keys.get(fold(name));
+            const node = isClasses(parent) ? null : parent.keys.get(foldName(name));
             if (!node || isClasses(parent))
             {
                 return 'missing';
             }
-            if (fold(name) !== fold(to) && parent.keys.has(fold(to)))
+            if (foldName(name) !== foldName(to) && parent.keys.has(foldName(to)))
             {
                 return 'taken';
             }
-            parent.keys.delete(fold(name));
+            parent.keys.delete(foldName(name));
             node.name = to;
-            parent.keys.set(fold(to), node);
+            parent.keys.set(foldName(to), node);
             changed();
             return 'renamed';
         },
@@ -1418,7 +1412,7 @@ export function createHive(
 
         /** @param {RegistryKey} key @param {string} name @returns {boolean} */
         deleteValue(key, name){
-            const deleted = writable(key)?.values.delete(fold(name)) ?? false;
+            const deleted = writable(key)?.values.delete(foldName(name)) ?? false;
             if (deleted)
             {
                 changed();
