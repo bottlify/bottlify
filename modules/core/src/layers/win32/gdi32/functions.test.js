@@ -531,7 +531,7 @@ test('GetCurrentObject has an answer only for the types a DC selects', ()=>{
 test('CreatePenIndirect reads LOGPEN at the documented offsets', ()=>{
     const { fns, memory, hdc } = withDC();
     memory.putU32s(STRUCT + LOGPEN.lopnStyle, [PS_SOLID]);
-    memory.putU32s(STRUCT + LOGPEN.lopnWidthX, [3, 0]);
+    memory.putU32s(STRUCT + LOGPEN.lopnWidth, [3, 0]);
     memory.putU32s(STRUCT + LOGPEN.lopnColor, [0x00123456]);
 
     const pen = fns.CreatePenIndirect.handler([STRUCT]);
