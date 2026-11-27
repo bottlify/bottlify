@@ -182,15 +182,11 @@ test('at 64 bits past 4 GiB: _pctype is a whole pointer, strtok and _strdup whol
         let next = base + 0x1000;
         const table = createStringFunctions({
             guest: guestWindow(bytes, { base, pointerSize: 8 }),
-            readMemory: (at, length)=>bytes.slice(at - base, at - base + length),
-            writeMemory: (at, data)=>bytes.set(data, at - base),
-            scanCString: ()=>assert.fail('no scan here'),
             allocate: size=>{
                 const at = next;
                 next += size + 15 & ~15;
                 return at;
             },
-            pointerSize: 8,
         });
         const pointer = table._pctype.data();
         assert.equal(pointer.length, 8);

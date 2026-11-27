@@ -1237,15 +1237,7 @@ export function createMsvcrtFunctions(host){
 
     const narrow = {
         ...table,
-        ...createStringFunctions({
-            guest: host.guest,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            scanCString: host.scanCString,
-            allocate,
-            errno,
-            pointerSize: host.pointerSize,
-        }),
+        ...createStringFunctions({ guest: host.guest, allocate, errno }),
     };
 
     const wideClasses = createWideClassificationFunctions();
