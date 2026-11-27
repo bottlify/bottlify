@@ -11,6 +11,7 @@ import { createGlContext } from './context.js';
 import {
     chooseContextVersion, CREATE_CONTEXT_ERROR, DEFAULT_VERSION, IMPLEMENTED_VERSION, WGL_CONTEXT,
 } from './version.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 const { MAJOR_VERSION: MAJOR, MINOR_VERSION: MINOR, FLAGS, PROFILE_MASK: PROFILE } = WGL_CONTEXT;
 /** An implementation of the whole of 4.6, to read the rules past what this one has. */
@@ -75,7 +76,8 @@ test('3.1 and later, or forward-compatible, are the version asked for, core unle
 test('a context of 3.0 answers its version, extensions and flags; of 3.2 its profile too', ()=>{
     const extensions = ['GL_ARB_one', 'GL_EXT_two'];
     /** @param {any} version */
-    const make = version=>/** @type {any} */ (createGlContext({ extensions, version }));
+    const make = version=>/** @type {any} */ (createGlContext({ holds: roomy.api.hold,
+        extensions, version }));
     const old = make(undefined);
     assert.equal(old.glGetString(GL.VERSION), `${IMPLEMENTED_VERSION.major}.`
         + `${IMPLEMENTED_VERSION.minor}`);

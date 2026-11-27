@@ -19,6 +19,7 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @param {Uint32Array | null} order @param {number} size */
 const primitives = (order, size)=>{
@@ -59,7 +60,7 @@ test('glProvokingVertex sets the convention, the last by default', ()=>{
     const bytes = new Uint8Array(0x100);
     /** @type {any} */
     const gl = createGlContext({ memory: { read: (at, n)=>bytes.subarray(at, at + n),
-        write: (at, v)=>bytes.set(v, at) } });
+        write: (at, v)=>bytes.set(v, at) }, holds: roomy.api.hold });
     assert.deepEqual(gl.glGetIntegerv(GL.PROVOKING_VERTEX), [GL.LAST_VERTEX_CONVENTION]);
     gl.glProvokingVertex(GL.FIRST_VERTEX_CONVENTION);
     assert.deepEqual(gl.glGetIntegerv(GL.PROVOKING_VERTEX), [GL.FIRST_VERTEX_CONVENTION]);
@@ -71,14 +72,15 @@ test('glProvokingVertex sets the convention, the last by default', ()=>{
 test('a draw is turned round only where it has a flat value and the last vertex provokes',
     async()=>{
         const gpu = createFakeDevice();
-        const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+        const backend = createBackend({ scratches: roomy.api.scratch,
+            device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{} });
         const renderer = createGpuRenderer({ backend,
             createSampler: descriptor=>({ kind: 'sampler', descriptor }) });
         const bytes = new Uint8Array(0x1000);
         /** @type {any} */
         const gl = createGlContext({ memory: { read: (at, n)=>bytes.subarray(at, at + n),
-            write: (at, v)=>bytes.set(v, at) }, gpu: renderer });
+            write: (at, v)=>bytes.set(v, at) }, gpu: renderer, holds: roomy.api.hold });
         gl.attach({ width: 16, height: 16, doubleBuffered: true, depthBits: 24 });
         gl.glEnableClientState(GL.VERTEX_ARRAY);
         gl.glVertexPointer(2, GL.FLOAT, 8, 0x100);

@@ -26,7 +26,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { createHash } from 'node:crypto';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
@@ -212,13 +212,15 @@ function machine(guestCode, worker, eleven = false){
     const guest = { allocate, free: ()=>{}, readMemory: readBytes, writeMemory: writeBytes,
         watchWrites };
     const drawing = {
-        backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        backend: createBackend({ scratches: roomy.api.scratch,
+            device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
             now: ()=>0 }),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',
             id: `sampler-${JSON.stringify(descriptor)}`, descriptor }),
         createTexture: gpu.device.createTexture,
     };
     const libraries = createGraphicsLibraries({
+        scratches: roomy.api.scratch,
         graphics: {
             create: (/** @type {string} */ name, /** @type {any} */ caps)=>{
                 if (name !== 'd3d10')

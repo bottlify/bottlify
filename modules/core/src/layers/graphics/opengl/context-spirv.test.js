@@ -19,11 +19,12 @@ import { createGlContext } from './context.js';
 import { createOpengl } from './exports.js';
 import { computeRig } from './compute-fixture.js';
 import { spirvFixture } from './spirv-fixtures.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @returns {any} */
 function context(){
     const bytes = new Uint8Array(0x1000);
-    const gl = createGlContext({ memory: {
+    const gl = createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
     } });

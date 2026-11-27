@@ -17,7 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK } from './constants.js';
 import { D3DBLEND, D3DCLEAR, D3DPT, D3DTA, D3DTOP, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
@@ -87,6 +87,7 @@ function storedBytes(stored, values){
 function harness(features = []){
     const gpu = createFakeDevice({ features });
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{}, now: ()=>0,
     });
     const ram = new Uint8Array(RAM_SIZE);

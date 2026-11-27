@@ -24,7 +24,7 @@ import { createLogReader } from '../log/reader.js';
 import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK } from './d3d9/constants.js';
 import { D3DLOCK, D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
 import { IID_IDirectDraw } from './seam/iids.js';
-import { testCache } from '../cache/testing.fixture.js';
+import { roomy, testCache } from '../cache/testing.fixture.js';
 
 /** A host that hands over only what the module declares it requires. */
 async function hostWith(/** @type {any} */ memory){
@@ -1041,6 +1041,7 @@ test('dispose releases this machine\'s backend and leaves the run\'s presenter u
         const gpu = createFakeDevice();
         const ram = new Uint8Array(0x10000);
         const presenter = createPresenter({
+            scratches: roomy.api.scratch,
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             now: ()=>0,
         });
@@ -1082,6 +1083,7 @@ test('a child\'s machine that goes leaves its parent drawing from its own memory
     // through the parent's backend; the child's went with the child.
     const gpu = createFakeDevice();
     const presenter = createPresenter({
+        scratches: roomy.api.scratch,
         device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
         now: ()=>0,
     });
@@ -1184,6 +1186,7 @@ test('the display\'s gamma ramp is the run\'s: a device\'s goes with the machine
         gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler',
             descriptor });
         const presenter = createPresenter({
+            scratches: roomy.api.scratch,
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             now: ()=>0,
         });

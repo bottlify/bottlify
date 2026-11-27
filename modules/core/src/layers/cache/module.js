@@ -360,9 +360,10 @@ export function serveKeeper(server, keeper, { owner, onTail = ()=>{} }){
  * (`space.hold`: a played device's resource bytes, its scratches) is room the
  * worker waits for, as for a cold body: the keeper's thread answers it on its
  * event loop, so the wait ends as long as that thread never waits on the
- * worker. A page may not wait at all; a thread that may waits on a graphics
- * worker only for a Direct3D 8 or 9 lend it is reading, and a root that
- * lends holds nothing (`remote/worker.js`). The keeper never takes it back, cools it or
+ * worker for one. A page may not wait at all; a thread that may waits on a
+ * graphics worker only for a Direct3D 8 or 9 lend being read, which goes into
+ * the played memory alone and asks the keeper nothing (`remote/replay.js`
+ * `createPlayer`). The keeper never takes it back, cools it or
  * moves it; `release` lets go of it without a word across the channel (its
  * room the keeper's at its next sweep), and the owner's going takes back what
  * it still held (Cellar's `release`), counted in what it says it held, so it

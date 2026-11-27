@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { loopbackDirect3D } from './loopback.js';
 import { SWEEP_SLICE, createMirror, createPlayer, withMirrored } from './replay.js';
 import { OP, SECTION, WAIT, createWriter } from './wire.js';
@@ -14,7 +14,7 @@ import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d
 import { createReceiver, createSender } from './channel.js';
 import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { carriedTo } from './ring-fixtures.js';
-import { LEND_LEAST, createBorrower, createLender, createLendingBuffers } from './lending.js';
+import { LEND, LEND_LEAST, createBorrower, createLender, createLendingBuffers } from './lending.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
@@ -223,6 +223,35 @@ function toyAcross(lend, least = 0){
         },
     };
 }
+
+test('a lend is read into the played memory alone: nothing of the root is reached while the'
+    + ' program\'s thread may wait on the read', ()=>{
+    // The program's thread waits on the played side only for a lend being
+    // read (`lending.js`), and the keeper may be on that thread: a read that
+    // reached the device - its scratches, its holds, its texels - could ask
+    // the keeper for room and wait on the thread waiting on it.
+    const ram = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    const buffers = createLendingBuffers();
+    const states = new Int32Array(buffers.slots);
+    const lender = createLender({ ...buffers, memory: ram });
+    ram.set([1, 2, 3, 4], 0x100);
+    const slot = lender.lend(0x100, 4);
+    const root = new Proxy({}, { get: (_, key)=>{
+        throw new Error(`the root reached for ${String(key)} while a lend was read`);
+    } });
+    /** @type {number[][]} */
+    const shipped = [];
+    const player = createPlayer({ root, read: ()=>new Uint8Array(0),
+        ship: (address, bytes)=>{
+            assert.equal(Atomics.load(states, slot * 2), LEND.READING);
+            shipped.push([address, ...bytes]);
+        },
+        borrow: createBorrower({ ...buffers, memory: ram }) });
+    player.play(/** @type {any} */ ({ op: OP.LENT, lentCount: 1,
+        lent: Uint32Array.of(0x100, 4, slot) }));
+    assert.deepEqual(shipped, [[0x100, 1, 2, 3, 4]]);
+    assert.equal(Atomics.load(states, slot * 2), LEND.DONE);
+});
 
 test('bytes lent to the played side are what the program wrote before the unlock, though it'
     + ' locks and writes them again before they are played', ()=>{
@@ -830,7 +859,8 @@ function plain(value, depth = 0){
  */
 async function framesThrough(make, late = false){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const ram = new Uint8Array(4 << 20);
     let next = RAM_BASE + (2 << 20);
@@ -1407,7 +1437,8 @@ test('a surface a read-back is still filling keeps its memory until the pixels h
         const gpu = createFakeDevice();
         const services = {
             // A renderer that reads back, so the pixels come from the played side.
-            backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+            backend: createBackend({ scratches: roomy.api.scratch,
+                device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
                 now: ()=>0 }),
             createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',
                 id: `sampler-${JSON.stringify(descriptor)}`, descriptor }),

@@ -19,11 +19,13 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @param {object} [services] */
 function rig(services = {}){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {any[]} */
     const samplers = [];
     /** @type {string[]} */
@@ -44,7 +46,7 @@ function rig(services = {}){
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const context = createGlContext({ memory, gpu: renderer,
+    const context = createGlContext({ holds: roomy.api.hold, memory, gpu: renderer,
         divergence: (/** @type {string} */ d)=>divergences.push(d) });
     context.attach({ width: 64, height: 32, doubleBuffered: true, depthBits: 24 });
     context.glMatrixMode(GL.PROJECTION);

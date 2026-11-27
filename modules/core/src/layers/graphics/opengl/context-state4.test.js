@@ -17,6 +17,7 @@ import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { GL_EXTENSIONS } from './extensions.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** A context drawing through the fake device, and that device. */
 function rig(){
@@ -26,14 +27,15 @@ function rig(){
     const samplers = [];
     const gpu = createFakeDevice();
     const renderer = createGpuRenderer({
-        backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
+        backend: createBackend({ scratches: roomy.api.scratch,
+            device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
         createSampler: (/** @type {any} */ descriptor)=>{
             samplers.push(descriptor);
             return { kind: 'sampler', descriptor };
         },
         divergence: d=>said.push(d),
     });
-    const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, gpu: renderer }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true, depthBits: 24 });
     const triangle = ()=>{
         gl.glBegin(GL.TRIANGLES);

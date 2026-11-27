@@ -108,7 +108,7 @@ import { playedDirect3D10 } from './d3d10.js';
 import { createDirect3D10 } from '../d3d10/root.js';
 import { gpuFeaturesOf, gpuLimitsOf } from '../webgpu/features.js';
 import { channelSpace } from '../../cache/module.js';
-import { createScratches, plainHold } from '../../cache/scratch.js';
+import { createScratches } from '../../cache/scratch.js';
 
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
@@ -646,12 +646,11 @@ export function serveGraphics(scope, deps){
             ? channelSpace(options.cacheLink, options.cacheLink) : null;
         // What the root keeps between calls (its scratches) and for an
         // object's life (a Direct3D 10 resource's bytes), held under its
-        // names: the worker waits for that room on the keeper's thread, so a
-        // root that lends, whose program's thread may be that thread waiting
-        // on this one for a lend being read, would wait on itself: it holds
-        // plain memory until room is asked ahead for it.
-        const rooms = createScratches(!texelCache ? hold
-            : lending ? plainHold : texelCache.space.hold);
+        // names: the worker waits for that room on the keeper's thread. The
+        // program's thread, which may be that thread, waits on this one only
+        // for a lend being read, and a lend is read into the played memory
+        // alone (`replay.js` `createPlayer`), asking the keeper nothing.
+        const rooms = createScratches(texelCache ? texelCache.space.hold : hold);
         const roomServices = {
             scratches: (/** @type {string} */ name)=>rooms.scratch(name),
             holds: (/** @type {string} */ name, /** @type {number} */ length)=>

@@ -26,10 +26,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** A context attached to an 8x8 single-buffered drawable. */
 function drawing(){
-    const context = createGlContext();
+    const context = createGlContext({ holds: roomy.api.hold });
     context.attach({ width: 8, height: 8, doubleBuffered: false });
     return context;
 }

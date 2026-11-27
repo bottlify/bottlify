@@ -29,7 +29,7 @@ import { D3D10CreateDevice, D3D11CreateDevice } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { createScratches, roomFor } from '../../cache/scratch.js';
-import { deviceRooms, testCache } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy, testCache } from '../../cache/testing.fixture.js';
 
 /** @param {number} seed */
 const random = seed=>{
@@ -95,7 +95,8 @@ function guestMemory(){
  */
 function deviceOf(api, holds, guest){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue,
         presentTo: ()=>{}, now: ()=>0 });
     const options = {
         backend,

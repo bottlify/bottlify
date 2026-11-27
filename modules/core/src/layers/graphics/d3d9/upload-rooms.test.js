@@ -26,7 +26,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { createScratches } from '../../cache/scratch.js';
-import { deviceRooms, testCache } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy, testCache } from '../../cache/testing.fixture.js';
 
 const RAM_BASE = 0x40000000;
 
@@ -70,7 +70,8 @@ const callText = call=>JSON.stringify({ op: call.op, size: call.size, layout: ca
  */
 function deviceWith(scratches){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const ram = new Uint8Array(8 << 20);
     let free = RAM_BASE + (1 << 20);

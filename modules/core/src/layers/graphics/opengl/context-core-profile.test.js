@@ -13,10 +13,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @param {{ profile: number, flags?: number }} kind @returns {any} */
 function context({ profile, flags = 0 }){
-    const gl = createGlContext({ version: { major: 3, minor: 2, profile, flags },
+    const gl = createGlContext({ holds: roomy.api.hold,
+        version: { major: 3, minor: 2, profile, flags },
         extensions: ['GL_ARB_one', 'GL_ARB_compatibility'] });
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     return gl;
@@ -62,7 +64,7 @@ test('a compatibility profile keeps everything, and a debug context starts debug
     assert.equal(context({ profile: COMPATIBILITY }).glIsEnabled(GL.DEBUG_OUTPUT), GL.FALSE);
 
     const forward = createGlContext({ version: { major: 3, minor: 0, profile: 0,
-        flags: GL.CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT } });
+        flags: GL.CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT }, holds: roomy.api.hold });
     forward.attach({ width: 4, height: 4, doubleBuffered: true });
     /** @type {any} */ (forward).glBegin(GL.TRIANGLES);
     assert.equal(forward.glGetError(), GL.INVALID_OPERATION,
@@ -83,7 +85,8 @@ test('a core profile makes no object of a name never generated; a 3.1 or later c
     gl.glBindBufferARB(GL.ARRAY_BUFFER, buffer);
     assert.equal(gl.glGetError(), GL.NO_ERROR, 'a name generated');
     assert.equal(gl.glGetStringi(GL.EXTENSIONS, 1), null, 'a core profile has no compatibility');
-    const legacy = createGlContext({ version: { major: 2, minor: 1, profile: 0, flags: 0 },
+    const legacy = createGlContext({ holds: roomy.api.hold,
+        version: { major: 2, minor: 1, profile: 0, flags: 0 },
         extensions: ['GL_ARB_compatibility'] });
     assert.equal(legacy.glGetString(GL.EXTENSIONS), '', 'nor has 2.1 the name');
 

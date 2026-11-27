@@ -16,10 +16,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @returns {any} a context attached to a window */
 function fixture(){
-    const context = createGlContext({});
+    const context = createGlContext({ holds: roomy.api.hold, });
     context.attach({ width: 64, height: 32, doubleBuffered: true, depthBits: 24 });
     return context;
 }
@@ -339,7 +340,7 @@ test('GL_ARB_shader_objects reads the same objects by handle (Wine\'s test_share
 });
 
 test('program parameters are kept, and no program binary format is known (4.1)', ()=>{
-    const gl = /** @type {any} */ (createGlContext({}));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     const made = gl.glCreateProgram();
     assert.deepEqual(gl.glGetIntegerv(GL.NUM_PROGRAM_BINARY_FORMATS), [0]);

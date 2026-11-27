@@ -24,10 +24,12 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { GLSL_GEOMETRY_PASS_BINDING } from './glsl-wgsl.js';
 import { UNIFORM } from './wgsl.js';
 import { TEX } from './formats.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 function rig(){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const divergences = [];
     const renderer = createGpuRenderer({
@@ -42,7 +44,8 @@ function rig(){
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const gl = createGlContext({ memory, gpu: renderer, divergence: d=>divergences.push(d) });
+    const gl = createGlContext({ holds: roomy.api.hold,
+        memory, gpu: renderer, divergence: d=>divergences.push(d) });
     gl.attach({ width: 64, height: 32, doubleBuffered: true, depthBits: 24 });
     /** @param {number} at @param {number[]} values */
     const floats = (at, values)=>{

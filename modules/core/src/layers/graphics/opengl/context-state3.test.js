@@ -16,11 +16,13 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 test('glClampColor keeps what it is given, and says when that is not what is done', ()=>{
     /** @type {string[]} */
     const said = [];
-    const gl = /** @type {any} */ (createGlContext({ divergence: d=>said.push(d) }));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold,
+        divergence: d=>said.push(d) }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     assert.deepEqual([GL.CLAMP_VERTEX_COLOR, GL.CLAMP_FRAGMENT_COLOR, GL.CLAMP_READ_COLOR]
         .map(q=>gl.glGetIntegerv(q)[0]), [GL.TRUE, GL.FIXED_ONLY, GL.FIXED_ONLY]);
@@ -41,7 +43,7 @@ test('glClampColor keeps what it is given, and says when that is not what is don
 
 test('an integer border colour is kept as the integers given; the other integer parameters '
     + 'are judged as glTexParameteriv judges them', ()=>{
-    const gl = /** @type {any} */ (createGlContext({}));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     gl.glBindTexture(GL.TEXTURE_2D, 1);
     gl.texParameterI(GL.TEXTURE_2D, GL.TEXTURE_BORDER_COLOR, [7, -3, 300, 1]);
@@ -64,12 +66,14 @@ test('GL_DEPTH_CLAMP leaves depth unclipped where the device can, and says so wh
             const said = [];
             const gpu = createFakeDevice({ features });
             const renderer = createGpuRenderer({
-                backend: createBackend({ device: gpu.device, queue: gpu.queue,
+                backend: createBackend({ scratches: roomy.api.scratch,
+                    device: gpu.device, queue: gpu.queue,
                     presentTo: ()=>{} }),
                 createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
                 divergence: d=>said.push(d),
             });
-            const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+            const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold,
+                gpu: renderer }));
             gl.attach({ width: 4, height: 4, doubleBuffered: true, depthBits: 24 });
             const triangle = ()=>{
                 gl.glBegin(GL.TRIANGLES);
@@ -90,7 +94,7 @@ test('GL_DEPTH_CLAMP leaves depth unclipped where the device can, and says so wh
             assert.equal(unclipped, features.length > 0);
             assert.equal(said.some(d=>/DEPTH_CLAMP/.test(d)), features.length === 0);
         }
-        const gl = /** @type {any} */ (createGlContext({}));
+        const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
         gl.attach({ width: 4, height: 4, doubleBuffered: true });
         gl.glEnable(GL.TEXTURE_CUBE_MAP_SEAMLESS);
         assert.equal(gl.glIsEnabled(GL.TEXTURE_CUBE_MAP_SEAMLESS), GL.TRUE);

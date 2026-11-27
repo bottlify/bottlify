@@ -22,7 +22,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createCountCells, createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
@@ -252,6 +252,7 @@ function seamed(
             : undefined,
     });
     const libraries = createGraphicsLibraries({
+        scratches: roomy.api.scratch,
         graphics: {
             /** @param {string} name */
             create: name=>{

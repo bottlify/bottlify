@@ -19,10 +19,11 @@ import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { TEXTURE_IMMUTABLE_FORMAT, TEXTURE_IMMUTABLE_LEVELS } from './context-textures.js';
 import { TEX } from './formats.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @returns {any} */
 function fixture(){
-    const context = createGlContext({});
+    const context = createGlContext({ holds: roomy.api.hold, });
     context.attach({ width: 8, height: 4, doubleBuffered: true });
     context.glPixelStorei(GL.UNPACK_ALIGNMENT, 1);
     context.glPixelStorei(GL.PACK_ALIGNMENT, 1);

@@ -32,7 +32,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
@@ -234,6 +234,7 @@ function machine(version, options){
     /** @param {string} api @param {string} detail */
     const divergence = (api, detail)=>divergences.push(`${api}: ${detail}`);
     const libraries = createGraphicsLibraries({
+        scratches: roomy.api.scratch,
         graphics: {
             create: ()=>(options.recorded
                 ? loopbackDirect3D(version.factory, { ...deviceRooms(), divergence })

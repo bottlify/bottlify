@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D10Seam } from './d3d10.js';
@@ -98,7 +98,8 @@ function seamed(options = {}){
         unpublishInterface: (object, id)=>vtables.unpublish(object, id),
     });
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     /** @type {string[]} */
     const divergences = [];

@@ -6,7 +6,8 @@
 
 /**
  * Fails on a store kept beside the run's cache at a site: plain memory where
- * the cache has no room or there is none (`plainScratches`, `plainHold`), a
+ * the cache has no room or there is none (`plainScratches`, `plainHold`, gone
+ * from the cache layer and not to come back), a
  * site's own branch for a run without a cache (`cache === null`, `space ===
  * null`, `noCache`), or a store that keeps nothing in the cache's place
  * (`KEEP_NOTHING`). The run always has a cache, and what it has no room for
@@ -36,17 +37,6 @@ const SAID = /\b(?:plainScratches|plainHold|KEEP_NOTHING|noCache)\b|\b(?:cache|s
  * @type {Record<string, number>}
  */
 const BASELINE = {
-    // A played Direct3D 8 or 9 root that lends guest memory: the thread it
-    // would wait on for room may be the one waiting on it (asked ahead, it goes).
-    'modules/core/src/layers/graphics/remote/worker.js': 2,
-    // OpenGL's context's default holds, until its kernel is handed the cache's.
-    'modules/core/src/layers/graphics/opengl/context.js': 2,
-    // A DirectDraw blit handed no rooms, until the ddraw seam always hands them.
-    'modules/core/src/layers/graphics/ddraw/blit.js': 2,
-    // The presenter and the uniform ring handed no scratches, until every
-    // backend a test makes is handed the cache's.
-    'modules/core/src/layers/graphics/webgpu/internal/bindings.js': 2,
-    'modules/core/src/layers/graphics/webgpu/internal/presenter.js': 2,
     // A volume, and a session's files, with nowhere to keep what they read
     // again: a space that keeps nothing, until every one is handed a space.
     'modules/core/src/layers/win32/kernel32/vfs.js': 2,

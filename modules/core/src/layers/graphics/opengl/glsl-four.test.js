@@ -19,6 +19,7 @@ import { createGlContext } from './context.js';
 import { linkProgram } from './glsl-link.js';
 import { emitStage, interfaceStruct } from './glsl-wgsl.js';
 import { canonicalAttribName } from './arb-program.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 const PASS = `#version 400
 in vec4 position; out vec4 colour; void main() { colour = position; gl_Position = position; }`;
@@ -161,7 +162,7 @@ void main() { gl_Position = vec4(vec3(a) + b, 1.0) + vec4(m[3]); }`], 'vertex');
 });
 
 test('double uniforms: glUniform*d, their type, refusals, and what glGetUniform answers', ()=>{
-    const gl = /** @type {any} */ (createGlContext({}));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     const program = gl.glCreateProgram();
     for (const [type, text] of [[GL.VERTEX_SHADER, PASS], [GL.FRAGMENT_SHADER, `#version 400

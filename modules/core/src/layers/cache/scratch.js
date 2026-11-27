@@ -205,17 +205,3 @@ export function createScratches(hold){
 
 /** The scratches of a holder with no cache under it (`noCache`'s): every room refused. */
 export const noScratches = createScratches(null);
-
-/**
- * Plain memory as a hold, outside the run's budget, for the two places that
- * cannot wait for the cache's room yet: a played root that lends guest memory
- * (`remote/worker.js`: the thread it would wait on may be the one waiting on
- * it) and OpenGL's context's default (`opengl/context.js` `holdTexels`, until
- * it is handed its holds as every other device is). Nowhere else.
- *
- * @type {Hold}
- */
-export const plainHold = (key, length)=>({ bytes: new Uint8Array(length), release: ()=>{} });
-
-/** OpenGL's context's default (`plainHold`). */
-export const plainScratches = createScratches(plainHold);

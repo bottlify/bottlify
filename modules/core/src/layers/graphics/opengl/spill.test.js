@@ -23,6 +23,7 @@ import { openRunCache } from '../../../process/run-cache.js';
 import { channelSpace } from '../../cache/module.js';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -53,7 +54,8 @@ const S3TC = [null,
 async function run(seed, cached){
     const next = random(seed);
     const fake = createFakeDevice({});
-    const backend = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const runCache = cached ? await openRunCache({ budget: 64 << 20 }) : null;
     /** @type {ReturnType<typeof channelSpace> | null} */
     let texels = null;
@@ -67,7 +69,7 @@ async function run(seed, cached){
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
         texelCache: texels,
     });
-    const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, gpu: renderer }));
     gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
     const count = 4 + next() % 4;
     const names = gl.glGenTextures(count);
@@ -182,7 +184,8 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
     setFlagsFromString('--expose-gc');
     const gc = runInNewContext('gc');
     const fake = createFakeDevice({});
-    const backend = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const runCache = await openRunCache({ budget: 64 << 20 });
     /** @type {ReturnType<typeof channelSpace> | null} */
     let texels = null;
@@ -193,7 +196,7 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
         texelCache: texels,
     });
-    const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, gpu: renderer }));
     gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
     const [plainName, blocksName] = gl.glGenTextures(2);
     gl.glBindTexture(GL.TEXTURE_2D, plainName);
@@ -240,7 +243,8 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
 
 test('a level of the cache\'s unit of room moves, one below it stays', async()=>{
     const fake = createFakeDevice({});
-    const backend = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const runCache = await openRunCache({ budget: 64 << 20 });
     /** @type {ReturnType<typeof channelSpace> | null} */
     let texels = null;
@@ -251,7 +255,7 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
         texelCache: texels,
     });
-    const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, gpu: renderer }));
     gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
     gl.glGenTextures(1);
     gl.glBindTexture(GL.TEXTURE_2D, 1);
@@ -285,7 +289,8 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
 test('a texture the program deleted gives back what of it waited in the run\'s cache at the next '
     + 'look, and the root that goes gives back the rest', async()=>{
     const fake = createFakeDevice({});
-    const backend = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: fake.device, queue: fake.queue, presentTo: ()=>{} });
     const runCache = await openRunCache({ budget: 64 << 20 });
     /** @type {ReturnType<typeof channelSpace> | null} */
     let texels = null;
@@ -296,7 +301,7 @@ test('a texture the program deleted gives back what of it waited in the run\'s c
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
         texelCache: texels,
     });
-    const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, gpu: renderer }));
     gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
     const names = gl.glGenTextures(3);
     for (const name of names)

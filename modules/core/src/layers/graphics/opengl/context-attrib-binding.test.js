@@ -17,6 +17,7 @@ import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { GL_EXTENSIONS } from './extensions.js';
 import { instanceElements, planLayout } from './gpu-layout.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @returns {{ gl: any, floats: (at: number, values: number[]) => void }} */
 function fixture(){
@@ -24,7 +25,7 @@ function fixture(){
     const view = new DataView(bytes.buffer);
     /** @type {string[]} */
     const said = [];
-    const gl = createGlContext({ memory: {
+    const gl = createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.subarray(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
     }, keepPrimitives: true, divergence: d=>said.push(d) });
@@ -291,10 +292,11 @@ test('on the device a zero stride is an instance-stepped buffer of the one eleme
     const { createFakeDevice } = await import('../webgpu/internal/fake-device.js');
     const gpu = createFakeDevice();
     const renderer = createGpuRenderer({
-        backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
+        backend: createBackend({ scratches: roomy.api.scratch,
+            device: gpu.device, queue: gpu.queue, presentTo: ()=>{} }),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
     });
-    const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+    const gl = /** @type {any} */ (createGlContext({ holds: roomy.api.hold, gpu: renderer }));
     gl.attach({ width: 4, height: 4, doubleBuffered: true });
     const name = floatBuffer(gl, [0, 0, 1, 0, 0, 1]);
     // Attribute 0 is the vertex array: one position for every vertex.

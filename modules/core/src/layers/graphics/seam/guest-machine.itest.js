@@ -14,7 +14,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { createHash } from 'node:crypto';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
@@ -420,7 +420,8 @@ export function machine(version, guestCode, options = {}){
                 const services = { ...options.caps, allocate, free: ()=>{},
                     readMemory: readBytes, writeMemory: writeBytes, windowMemory: readBytes };
                 const drawing = gpu ? {
-                    backend: createBackend({ device: gpu.device, queue: gpu.queue,
+                    backend: createBackend({ scratches: roomy.api.scratch,
+                        device: gpu.device, queue: gpu.queue,
                         presentTo: ()=>{}, now: ()=>0 }),
                     createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',
                         id: `sampler-${JSON.stringify(descriptor)}`, descriptor }),

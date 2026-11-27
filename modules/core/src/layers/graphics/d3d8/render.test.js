@@ -26,7 +26,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import {
     D3DBLEND, D3DCLEAR, D3DCMP, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLIGHTTYPE, D3DLOCK, D3DMCS,
     D3DPOOL, D3DPT, D3DRS, D3DSWAPEFFECT, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS,
@@ -101,6 +101,7 @@ function harness(options = {}){
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: frame=>presented.push(frame),
@@ -2391,7 +2392,8 @@ test('recorded: frames replay in order, one at a time, however fast Present is c
 
 test('recorded: a textured draw without a sampler factory fails loudly, not white', ()=>{
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     const ram = new Uint8Array(RAM_SIZE);
     const d3d = createDirect3D8({ ...deviceRooms(), backend,
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),

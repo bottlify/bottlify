@@ -53,6 +53,7 @@ import {
     DDSCL_CREATEDEVICEWINDOW, DDSCL_SETFOCUSWINDOW, DDERR_NOFOCUSWINDOW, DDERR_NOHWND,
 } from '../ddraw/constants.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 const HWND = 0x00010044;
 const SCREEN = { width: 16, height: 16, bitsPerPixel: 32, displayWidth: 16, displayHeight: 16 };
@@ -221,6 +222,7 @@ function seamed(build = {}){
     // The display, as the app keeps it: a mode set is its size from then on.
     const display = { ...SCREEN };
     const libraries = createGraphicsLibraries({
+        scratches: roomy.api.scratch,
         graphics,
         memory: box.services,
         publishInterface: box.publishInterface,
@@ -1518,6 +1520,7 @@ function enumerating(){
     const calls = [];
     let cancelAfter = Infinity;
     const seam = createDirectDrawSeam({
+        scratches: roomy.api.scratch,
         publisher,
         memory: box.services,
         screen: ()=>SCREEN,
@@ -1695,7 +1698,8 @@ test('EnumSurfaces names all of them, or those that match the caps described', a
 test('without a way into the guest an enumeration names nothing and succeeds', ()=>{
     const box = machine();
     const publisher = createPublisher({ publishInterface: box.publishInterface });
-    const seam = createDirectDrawSeam({ publisher, memory: box.services, screen: ()=>SCREEN });
+    const seam = createDirectDrawSeam({ scratches: roomy.api.scratch,
+        publisher, memory: box.services, screen: ()=>SCREEN });
     const root = createDirectDraw({ version: 7 });
     const method = /** @type {any} */ (seam.interfaces.ddraw[3].methods.find(
         (/** @type {any} */ m)=>m.name === 'EnumDisplayModes'));
@@ -1718,6 +1722,7 @@ test('DirectDrawEnumerate names the primary display driver to its callback, the 
             return String.fromCharCode(...box.bytes.subarray(at, end));
         };
         const libraries = createGraphicsLibraries({
+            scratches: roomy.api.scratch,
             graphics: { create: ()=>null, available: ()=>false },
             memory: box.services,
             publishInterface: box.publishInterface,

@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { linesOf, polygonsOf } from './pipeline.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /**
  * A context attached to an 8x8 drawable, with a depth buffer unless told
@@ -29,7 +30,7 @@ import { linesOf, polygonsOf } from './pipeline.js';
  */
 function drawing(options = {}){
     /** @type {any} */
-    const context = createGlContext();
+    const context = createGlContext({ holds: roomy.api.hold });
     context.attach({ width: 8, height: 8, doubleBuffered: false,
         depthBits: options.depth === false ? 0 : 24 });
     context.glMatrixMode(GL.PROJECTION);

@@ -17,7 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { D3DFMT, D3DPOOL, D3DRS as D3DRS9, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import { D3DSAMP } from './samplerstates.js';
 import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
@@ -108,6 +108,7 @@ function harness(options = {}){
     /** What was said as lost. @type {string[]} */
     const losses = [];
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: ()=>{},

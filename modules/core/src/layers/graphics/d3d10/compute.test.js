@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import {
     D3D10_BIND, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_MAP, D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS,
     D3D11_BUFFER_UAV_FLAG, D3D11_RESOURCE_MISC, D3D_FEATURE_LEVEL, DXGI_FORMAT, S_OK,
@@ -44,7 +44,8 @@ function harness(createTexture, features = []){
     const gpu = createFakeDevice({ features });
     /** @type {string[]} */
     const divergences = [];
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue,
         presentTo: ()=>{}, now: ()=>0 });
     /** @type {import('./device.js').DeviceRequest11} */
     const out = { wantDevice: true, wantContext: true };

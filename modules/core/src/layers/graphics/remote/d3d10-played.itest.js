@@ -22,7 +22,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { createDirect3D10 } from '../d3d10/root.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
@@ -52,7 +52,8 @@ const floatBytes = floats=>new Uint8Array(Float32Array.from(floats).buffer);
 async function run(seed, steps, recorded){
     const gpu = createFakeDevice();
     const reads = gpuReads(gpu);
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const guest = guestMemory();
     /** @type {string[]} */

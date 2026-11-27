@@ -23,13 +23,15 @@ import { createGpuRenderer } from './gpu.js';
 import { createOpengl } from './exports.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** A 4x4 level whose texels are all different. */
 const LEVEL = Uint8Array.from({ length: 64 }, (_, at)=>(at * 7 + 3) & 0xff);
 
 function rig(){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const divergences = [];
     const renderer = createGpuRenderer({
@@ -38,7 +40,8 @@ function rig(){
         divergence: detail=>divergences.push(detail),
     });
     /** @type {any} */
-    const context = createGlContext({ gpu: renderer, divergence: d=>divergences.push(d) });
+    const context = createGlContext({ holds: roomy.api.hold,
+        gpu: renderer, divergence: d=>divergences.push(d) });
     context.attach({ width: 16, height: 16, doubleBuffered: true });
     context.glGenTextures(1);
     context.glBindTexture(GL.TEXTURE_2D, 1);
@@ -166,7 +169,8 @@ test('a read before the level is drawn answers at once from this side', ()=>{
 test('the exports write the device\'s answer into the program\'s memory once it is here',
     async()=>{
         const gpu = createFakeDevice();
-        const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+        const backend = createBackend({ scratches: roomy.api.scratch,
+            device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{} });
         const bytes = new Uint8Array(0x10000);
         let next = 0x100;

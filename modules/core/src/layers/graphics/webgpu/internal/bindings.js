@@ -24,7 +24,7 @@
  */
 
 import { FNV_OFFSET, fnv1a } from '../../../../system/hash.js';
-import { plainScratches } from '../../../cache/scratch.js';
+import { noScratches } from '../../../cache/scratch.js';
 
 /** @type {WeakMap<object, number>} */
 const identities = new WeakMap();
@@ -281,7 +281,7 @@ const UNIFORM_ALIGNMENT = 256;
  * @param {number} [options.capacity]  Bytes in the ring.
  * @param {number} [options.usage]
  * @param {import('../../../cache/scratch.js').Scratch} [options.staging]  where the copy of
- *     the ring is laid, held in the run's cache; plain memory if absent
+ *     the ring is laid, held in the run's cache; absent, refused (`NoRoom`)
  * @returns {any}
  */
 export function createUniformPool(options){
@@ -297,7 +297,7 @@ export function createUniformPool(options){
     /** @type {any} */
     let ring = null;
     /** The copy's room: as large as the ring, grown with it. */
-    const room = options.staging ?? plainScratches.scratch('webgpu/uniforms');
+    const room = options.staging ?? noScratches.scratch('webgpu/uniforms');
     /** @type {Uint8Array} */
     let staging = new Uint8Array(0);
     /**

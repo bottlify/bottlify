@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import {
     D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DPT, D3DSWAPEFFECT, D3DTOP, D3DTSS, D3D_OK,
 } from './constants.js';
@@ -68,6 +68,7 @@ function harness(){
     /** @type {string[]} */
     const reports = [];
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: ()=>{},

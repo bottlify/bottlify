@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { TESS } from './context-tessellation.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 const VS = `#version 150
 in vec4 position; out vec3 vColour;
@@ -49,7 +50,7 @@ function context(){
     /** @type {string[]} */
     const divergences = [];
     /** @type {any} */
-    const gl = createGlContext({ memory: {
+    const gl = createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
     }, divergence: d=>divergences.push(d) });

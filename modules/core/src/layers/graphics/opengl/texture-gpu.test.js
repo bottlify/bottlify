@@ -21,6 +21,7 @@ import { TEX } from './formats.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /**
  * @param {string[]} [features] @param {boolean} [compressedTextures]  BC sampled as blocks
@@ -28,7 +29,8 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
  */
 function rig(features = [], compressedTextures = false, liveDump = null){
     const gpu = createFakeDevice({ features });
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
     const said = [];
     const renderer = createGpuRenderer({
@@ -41,6 +43,7 @@ function rig(features = [], compressedTextures = false, liveDump = null){
     const bytes = new Uint8Array(0x10000);
     /** @type {any} */
     const context = createGlContext({
+        holds: roomy.api.hold,
         memory: {
             read: (/** @type {number} */ at, /** @type {number} */ length)=>
                 bytes.subarray(at, at + length),

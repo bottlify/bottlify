@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import { baseOf, compositionPlan, needsComposing } from './compose.js';
 import { createFakeDevice } from './fake-device.js';
 import { createPresenter } from './presenter.js';
+import { roomy } from '../../../cache/testing.fixture.js';
 
 /** A small generator, so a failing seed runs again the same. @param {number} seed */
 function random(seed){
@@ -132,6 +133,7 @@ for (let seed = 1; seed <= 24; seed++)
         const { layers, windows, foreground } = layout(seed);
         const gpu = createFakeDevice();
         const presenter = createPresenter({
+            scratches: roomy.api.scratch,
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             now: ()=>0, windows: ()=>windows, foreground: ()=>foreground,
         });
@@ -194,6 +196,7 @@ test('a frame of a process with no window showing is kept, not shown over the on
         const windows = [{ processId: 1, rect, visible: true },
             { processId: 2, rect, visible: false }];
         const presenter = createPresenter({
+            scratches: roomy.api.scratch,
             device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
             now: ()=>0, windows: ()=>windows, foreground: ()=>null,
         });

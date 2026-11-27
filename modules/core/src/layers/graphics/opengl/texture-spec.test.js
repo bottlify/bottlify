@@ -17,6 +17,7 @@ import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { sample2D } from './texture.js';
 import { packImage } from './context-pixels.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @type {string[]} what the last context made said */
 let said = [];
@@ -26,6 +27,7 @@ function gl(){
     said = [];
     /** @type {any} */
     const context = createGlContext({
+        holds: roomy.api.hold,
         memory: {
             read: (/** @type {number} */ at, /** @type {number} */ length)=>
                 bytes.subarray(at, at + length),

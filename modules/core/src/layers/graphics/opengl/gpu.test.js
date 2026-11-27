@@ -14,6 +14,7 @@ import { COPY_UNIFORM_FLOATS, UNIFORM } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { dxt1ToAstc } from '../webgpu/internal/astc.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /**
  * A context on a renderer on a backend on a recording device: what the
@@ -44,6 +45,7 @@ function rig(services = {}){
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device, queue: gpu.queue, presentTo: frame=>presented.push(frame),
     });
     /** @type {string[]} */
@@ -61,7 +63,8 @@ function rig(services = {}){
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const context = createGlContext({ memory, gpu: renderer, divergence: d=>divergences.push(d) });
+    const context = createGlContext({ holds: roomy.api.hold,
+        memory, gpu: renderer, divergence: d=>divergences.push(d) });
     context.attach({ width: 64, height: 32, doubleBuffered: true, depthBits: 24 });
     context.glMatrixMode(GL.PROJECTION);
     context.glLoadIdentity();
@@ -1779,6 +1782,7 @@ test('a program draw on the processor path is reported and draws nothing', ()=>{
     const divergences = [];
     /** @type {any} */
     const context = createGlContext({
+        holds: roomy.api.hold,
         memory: {
             read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.subarray(at, at + n),
             write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
@@ -2231,7 +2235,8 @@ test('a context whose twin draws keeps no texture data, only its shapes', ()=>{
     /** @type {string[]} */
     const divergences = [];
     /** @type {any} */
-    const context = createGlContext({ keepTexels: false, divergence: d=>divergences.push(d) });
+    const context = createGlContext({ holds: roomy.api.hold,
+        keepTexels: false, divergence: d=>divergences.push(d) });
     context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
     context.glGenTextures(2);
     context.glBindTexture(GL.TEXTURE_2D, 1);
@@ -2419,7 +2424,7 @@ test('a window\'s buffers are the window\'s: another context on it reads what th
     async()=>{
         const r = rig();
         /** @type {any} */
-        const second = createGlContext({ gpu: r.renderer });
+        const second = createGlContext({ holds: roomy.api.hold, gpu: r.renderer });
         const window = { width: 8, height: 4, doubleBuffered: true, key: 'window:1' };
         r.context.attach(window);
         second.attach(window);
@@ -2487,7 +2492,7 @@ test('a context left draws what it recorded, and another reads that drawable as 
         const r = rig();
         const pbuffer = { width: 16, height: 8, doubleBuffered: false, key: 'pbuffer:1' };
         /** @type {any} */
-        const drawer = createGlContext({ gpu: r.renderer });
+        const drawer = createGlContext({ holds: roomy.api.hold, gpu: r.renderer });
         drawer.attach(pbuffer);
         const colour = textureLabelled(r, /gl-colour/);
         colour.bytes.fill(0x30);

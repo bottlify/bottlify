@@ -14,7 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { bufferLockFlags, createDirect3D7, d3dFormatOf } from './device.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DERR_INBEGINSTATEBLOCK,
@@ -761,6 +761,7 @@ test('the material, clip status and clip planes read back as copies', ()=>{
 function recorded(options = {}){
     const gpu = createFakeDevice();
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: ()=>{},

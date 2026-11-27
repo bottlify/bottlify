@@ -18,6 +18,7 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 const VS = `#version 400
 in vec4 position; out vec4 colour; void main() { colour = position; gl_Position = position; }`;
@@ -39,7 +40,8 @@ const FRAGMENT_SUBROUTINE_UNIFORM = 0x92f2;
 
 function rig(){
     const gpu = createFakeDevice();
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     const renderer = createGpuRenderer({ backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }), divergence: ()=>{} });
     const bytes = new Uint8Array(0x10000);
@@ -49,7 +51,7 @@ function rig(){
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>bytes.set(value, at),
     };
     /** @type {any} */
-    const gl = createGlContext({ memory, gpu: renderer });
+    const gl = createGlContext({ holds: roomy.api.hold, memory, gpu: renderer });
     gl.attach({ width: 8, height: 8, doubleBuffered: true });
     const program = gl.glCreateProgram();
     for (const [type, text] of [[GL.VERTEX_SHADER, VS], [GL.FRAGMENT_SHADER, FS]])

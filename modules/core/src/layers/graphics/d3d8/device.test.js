@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import {
     D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
     D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER,
@@ -2251,6 +2251,7 @@ test('Clear takes the rectangle count at its word and the missing array as the w
         // target as it was, Clear(1, NULL) succeeds and clears all of it.
         const gpu = createFakeDevice();
         const backend = createBackend({
+            scratches: roomy.api.scratch,
             device: gpu.device, queue: gpu.queue, presentTo: ()=>{}, now: ()=>0,
         });
         const device = createDevice({ caps: { backend, readMemory: ()=>new Uint8Array(0) } });

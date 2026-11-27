@@ -84,7 +84,7 @@ import {
 } from './context-legacy.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { GL_COMMANDS } from './commands.js';
-import { plainScratches } from '../../cache/scratch.js';
+import { noScratches } from '../../cache/scratch.js';
 
 /**
  * What this implementation answers glGetString with, but for the versions,
@@ -313,7 +313,7 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
  *           Memory held in the run's cache for as long as what keeps it lives: the
  *           RGBA a level's data or blocks make for the processor's rasteriser, which
- *           it samples in place every draw. Plain memory if absent.
+ *           it samples in place every draw. Absent, every one is refused (`NoRoom`).
  * @property {boolean} [keepPrimitives]
  *           Every primitive drawn is kept, with its vertices, for
  *           `submittedPrimitives` to answer -- what a test reads back to see
@@ -592,7 +592,7 @@ export function createGlContext(options = {}){
         gpuBacked: ()=>gpu !== null && attached,
         keepTexels: options.keepTexels !== false,
         levels: gpu ? null : options.levels ?? null,
-        holdTexels: length=>(options.holds ?? plainScratches.hold)('gl/rgba', length),
+        holdTexels: length=>(options.holds ?? noScratches.hold)('gl/rgba', length),
         currentVertex,
         currentAttributes,
         side: {},

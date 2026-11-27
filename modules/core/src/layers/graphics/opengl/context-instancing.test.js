@@ -14,12 +14,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { roomy } from '../../cache/testing.fixture.js';
 
 /** @returns {{ gl: any, floats: (at: number, values: number[]) => void, words: (at: number, values: number[]) => void }} */
 function fixture(){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
-    const gl = createGlContext({ memory: {
+    const gl = createGlContext({ holds: roomy.api.hold, memory: {
         read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.subarray(at, at + n),
         write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
     }, keepPrimitives: true });

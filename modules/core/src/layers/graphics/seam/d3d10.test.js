@@ -19,7 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import {
@@ -205,6 +205,7 @@ function seamed(assembly = {}){
     /** @type {string[]} */
     const divergences = [];
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: frame=>presented.push(frame),
@@ -2619,11 +2620,13 @@ test('the libraries hand DXGI the window\'s client area for a swap chain asked f
     ()=>{
         const box = machine();
         const gpu = createFakeDevice();
-        const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+        const backend = createBackend({ scratches: roomy.api.scratch,
+            device: gpu.device, queue: gpu.queue,
             presentTo: ()=>{}, now: ()=>0 });
         /** @type {number[]} */
         const measured = [];
         const { libraries } = createGraphicsLibraries({
+            scratches: roomy.api.scratch,
             graphics: {
                 create: (/** @type {string} */ name, /** @type {any} */ caps)=>(name === 'd3d10'
                     ? createDirect3D10({ ...deviceRooms(), ...caps, backend,
@@ -2690,6 +2693,7 @@ test('DXGI names the adapter, the output and the monitor as user32 and Direct3D 
     const box = machine();
     let display = { width: 1280, height: 720, bitsPerPixel: 32 };
     const { libraries } = createGraphicsLibraries({
+        scratches: roomy.api.scratch,
         graphics: { create: (/** @type {string} */ name, /** @type {any} */ caps)=>
             createDirect3D10({ ...deviceRooms(), ...caps }), available: ()=>false,
         adapter: ()=>({ vendor: 'nvidia' }) },

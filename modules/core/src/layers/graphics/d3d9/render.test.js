@@ -25,7 +25,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceRooms } from '../../cache/testing.fixture.js';
+import { deviceRooms, roomy } from '../../cache/testing.fixture.js';
 import {
     D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
 } from './constants.js';
@@ -73,6 +73,7 @@ function harness(options = {}){
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
+        scratches: roomy.api.scratch,
         device: gpu.device,
         queue: gpu.queue,
         presentTo: frame=>presented.push(frame),
@@ -1743,7 +1744,8 @@ test('a present moves the back buffers\' contents one place down', async()=>{
     // was, the first holding what the second held after a present and the
     // last what was presented.
     const gpu = createFakeDevice({});
-    const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+    const backend = createBackend({ scratches: roomy.api.scratch,
+        device: gpu.device, queue: gpu.queue,
         presentTo: ()=>{}, now: ()=>0 });
     let next = RAM_BASE;
     const d3d = createDirect3D9({ ...deviceRooms(), backend,
