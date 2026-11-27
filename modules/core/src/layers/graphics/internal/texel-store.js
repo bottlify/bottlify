@@ -100,20 +100,6 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
     };
 
     /**
-     * A body the cache had no room for, its bytes let go of: read as zeros
-     * from here, the loss said once.
-     *
-     * @param {Body} body
-     */
-    const refuse = body=>{
-        body.name = null;
-        counts.refused++;
-        counts.lost++;
-        divergence?.(`texels the run's cache had no room for (${body.length} bytes)`
-            + ' read as zeros', 'loss');
-    };
-
-    /**
      * Room for a body, asked for without waiting: the body moves into it once
      * granted, unless it was dropped or taken meanwhile, when the room is let
      * go of unwritten.
@@ -137,23 +123,20 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
                 return;
             }
             // Still held under its key, a body has not moved: its bytes are here.
+            // Refused, they go all the same, and the body is lost at its read.
             const moved = granted && into.put(name, /** @type {Uint8Array} */ (body.bytes));
             body.bytes = null;
             counts.plainBytes -= body.length;
-            if (!moved)
-            {
-                refuse(body);
-                return;
-            }
             counts.cachedBytes += body.length;
-            counts.moved++;
-            counts.movedBytes += body.length;
+            counts[moved ? 'moved' : 'refused']++;
+            counts.movedBytes += moved ? body.length : 0;
         }, ()=>{
+            counts.refused++;
             if (bodies.get(key) === body)
             {
                 body.bytes = null;
                 counts.plainBytes -= body.length;
-                refuse(body);
+                counts.cachedBytes += body.length;
             }
         });
     };
@@ -171,13 +154,9 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
         {
             return read(body.bytes);
         }
-        if (body.name === null)
-        {
-            return read(new Uint8Array(body.length));
-        }
         let found = false;
         /** @type {T | undefined} */
-        const value = cache?.space.with(body.name, bytes=>{
+        const value = cache?.space.with(/** @type {string} */ (body.name), bytes=>{
             found = true;
             return read(bytes);
         }, { wait: true });
@@ -188,7 +167,7 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
         counts.lost++;
         counts.cachedBytes -= body.length;
         bodies.delete(key);
-        divergence?.(`texels kept in the run's cache (${body.length} bytes) could not be read`
+        divergence?.(`texels handed to the run's cache (${body.length} bytes) could not be read`
             + ' back: they read as zeros', 'loss');
         return read(new Uint8Array(body.length));
     };
