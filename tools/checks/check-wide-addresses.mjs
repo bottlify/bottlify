@@ -70,7 +70,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { isMain } from '../lib/common.mjs';
-import { noCache } from '../../modules/core/src/layers/cache/module.js';
+import { testCache } from '../../modules/core/src/layers/cache/testing.fixture.js';
 import { testPageFile } from '../../modules/core/src/process/page-file.fixture.js';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 import { standIn } from './check-guest-pointers.mjs';
@@ -174,8 +174,8 @@ export async function layerAt(base){
     const apis = {
         memory,
         filesystem,
-        // The run's cache as a machine built alone has it: none, every read a miss.
-        cache: noCache,
+        // The run's cache as a test makes it: a real Cellar in memory.
+        cache: (await testCache()).api,
         log: standIn('log', { enabled: ()=>false, Level: {}, write: ()=>{} }),
         kernel: standIn('kernel', {
             // Where the win32 layer lends the pool its thread stacks, at create.
