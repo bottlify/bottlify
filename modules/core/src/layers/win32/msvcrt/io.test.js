@@ -874,8 +874,8 @@ test('__pioinfo holds each descriptor of its first block as a program reads it i
     const TABLE = 0x80000;
     let placed = 0;
     const descriptors = createDescriptors({
-        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory,
-        ioinfo: ()=>(placed === 0 ? [] : [{ at: placed, layout: IOINFO_LAYOUTS.msvcrt }]),
+        files, handles, errno: ()=>{}, guest: memory.guest,
+        ioinfo: ()=>(placed === 0 ? [] : [{ at: placed, layout: IOINFO_LAYOUTS.msvcrt.at(4) }]),
     });
     const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
         descriptors));
@@ -928,14 +928,14 @@ test('MSVCR80\'s __pioinfo is 64-byte entries: the lock made, then textmode and 
         { directories: ['C:\\', 'C:\\game'] });
     const handles = fakeHandles(files);
     const [OLD, NEW] = [0x80000, 0x90000];
-    const tables = [{ at: OLD, layout: IOINFO_LAYOUTS.msvcrt },
-        { at: NEW, layout: IOINFO_LAYOUTS.msvcr80 }];
+    const tables = [{ at: OLD, layout: IOINFO_LAYOUTS.msvcrt.at(4) },
+        { at: NEW, layout: IOINFO_LAYOUTS.msvcr80.at(4) }];
     const descriptors = createDescriptors({
-        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory, ioinfo: ()=>tables,
+        files, handles, errno: ()=>{}, guest: memory.guest, ioinfo: ()=>tables,
     });
     const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
         descriptors));
-    const later = ioinfoExport(descriptors, IOINFO_LAYOUTS.msvcr80);
+    const later = ioinfoExport(descriptors, IOINFO_LAYOUTS.msvcr80.at(4));
     assert.equal(later.data().length, 256 + 32 * 64);
     memory.writeMemory(OLD, fns.__pioinfo.data());
     memory.writeMemory(NEW, later.data());
@@ -965,6 +965,55 @@ test('MSVCR80\'s __pioinfo is 64-byte entries: the lock made, then textmode and 
     const utf8 = open(O_U8TEXT);
     assert.deepEqual([entry(utf8).lock, entry(utf8).mode], [1, 1]);
 });
+
+test('at 64 bits past 4 GiB: __pioinfo[i][j].osfhnd is the handle, the table laid out at 8',
+    ()=>{
+        // x64's ioinfo: an intptr_t handle, wxflag at 8, exflag at 12, a
+        // 40-byte critical section from 16: 56 bytes, MSVCR80's 88 with
+        // textmode at 56; __pioinfo's 64 block pointers eight bytes each.
+        const base = 0x100000000;
+        const bytes = new Uint8Array(0x4000);
+        const guest = guestWindow(bytes, { base, pointerSize: 8 });
+        const files = fakeVolume({ 'C:\\game\\info.tst': new Uint8Array(0) },
+            { directories: ['C:\\', 'C:\\game'] });
+        const handles = fakeHandles(files);
+        const [OLD, NEW] = [base, base + 0x1000];
+        const old = IOINFO_LAYOUTS.msvcrt.at(8);
+        const later = IOINFO_LAYOUTS.msvcr80.at(8);
+        assert.deepEqual([old.SIZE, old.osfhnd, old.wxflag, old.exflag, old.crit],
+            [56, 0, 8, 12, 16]);
+        assert.deepEqual([later.SIZE, later.textmode], [88, 56]);
+        const descriptors = createDescriptors({ files, handles, errno: ()=>{}, guest,
+            ioinfo: ()=>[{ at: OLD, layout: old }, { at: NEW, layout: later }] });
+        const fns = /** @type {Record<string, any>} */ (createIoFunctions({ guest,
+            files }, descriptors));
+        // Placed as the loader places them, the first block pointer whole.
+        for (const [at, made] of [[OLD, fns.__pioinfo], [NEW, ioinfoExport(descriptors, later)]])
+        {
+            assert.deepEqual(made.pointers, [{ at: 0, to: '__pioinfo', offset: 512 }]);
+            guest.setBytes(at, made.data());
+            guest.setPtr(at, at + made.pointers[0].offset);
+        }
+        /** __pioinfo[fd >> 5][fd & 31] of a table. @param {number} table @param {number} fd */
+        const osfhnd = (table, fd)=>{
+            const layout = table === OLD ? old : later;
+            const entry = guest.ptr(table + (fd >> 5) * 8) + (fd & 31) * layout.SIZE;
+            return { handle: guest.u32(entry) + guest.u32(entry + 4) * 2 ** 32,
+                wxflag: guest.u8(entry + layout.wxflag) };
+        };
+        assert.deepEqual(osfhnd(OLD, 1), { handle: 2, wxflag: 0x01 | 0x40 | 0x80 }, 'stdout');
+        assert.equal(osfhnd(NEW, 7).handle, 2 ** 64 - 1, 'not open: INVALID_HANDLE_VALUE whole');
+        guest.writeAnsi(base + 0x3000, 'C:\\game\\info.tst');
+        const opened = fns._open.handler([base + 0x3000,
+            O_CREAT | O_TRUNC | O_WRONLY | O_WTEXT, 0]);
+        const handle = fns._get_osfhandle.handler([opened]);
+        for (const table of [OLD, NEW])
+        {
+            assert.deepEqual(osfhnd(table, opened), { handle, wxflag: 0x01 | 0x80 });
+        }
+        assert.equal(guest.u8(NEW + 512 + opened * 88 + 56), 0x82, 'textmode past the lock');
+        assert.equal(guest.u32(OLD + 512 + opened * 56 + 12), 0x0e, 'exflag at 12');
+    });
 
 test('_wopen, _sopen and _wsopen open as _open does, the share flag ignored', ()=>{
     const { memory, fns, files, errno } = build({ 'C:\\game\\caf\u00e9.bin': bytesOf('xyz') });

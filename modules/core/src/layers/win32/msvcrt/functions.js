@@ -1187,7 +1187,7 @@ export function createMsvcrtFunctions(host){
         ? createDescriptors({
             files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
             handles: host.handles,
-            writeMemory: host.writeMemory,
+            guest: host.guest,
             ...host.ioinfo ? { ioinfo: host.ioinfo } : {},
         })
         : null;

@@ -171,7 +171,8 @@ export function createMsvcr80Functions(crt, host){
         // `__pioinfo` in this runtime's layout, over msvcrt's descriptors:
         // a program built against it reads `textmode` past the lock.
         ...(/** @type {any} */ (crt)[IOINFO_EXPORT]
-            ? { __pioinfo: /** @type {any} */ (crt)[IOINFO_EXPORT](IOINFO_LAYOUTS.msvcr80) }
+            ? { __pioinfo: /** @type {any} */ (crt)[IOINFO_EXPORT](
+                IOINFO_LAYOUTS.msvcr80.at(guest.pointerSize)) }
             : {}),
 
         _encode_pointer: encode,
