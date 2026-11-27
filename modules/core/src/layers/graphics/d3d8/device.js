@@ -303,6 +303,8 @@ function isTransformType(type){
  * @property {boolean} [fog]
  * @property {import('../internal/texel-store.js').TexelCache | null} [texelCache]  The
  *     renderer's (`createRenderer`).
+ * @property {(name: string) => import('../../cache/scratch.js').Scratch} [scratches]  The
+ *     renderer's (`createRenderer`).
  *     Whether fog is applied at all. Off, every draw renders as if the
  *     program had never enabled it: a frame that clears up with it was fog.
  * @property {boolean} [nanProbe]
@@ -455,6 +457,7 @@ export function createDirect3D8(options = {}){
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted, leftStorage,
         whileStill, rectangleBump, renderedElsewhere, watchWrites, verifyDynamic, texelCache,
+        scratches,
         ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -466,6 +469,7 @@ export function createDirect3D8(options = {}){
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted, leftStorage,
         whileStill, rectangleBump, renderedElsewhere, watchWrites, verifyDynamic, texelCache,
+        scratches,
     };
     if (backend && !readMemory)
     {
@@ -870,6 +874,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             probeTexture: services.probeTexture ?? null,
             fog: services.fog,
             texelCache: services.texelCache ?? null,
+            scratches: services.scratches,
             mips: services.mips,
             nanProbe: services.nanProbe === true,
             verifyDynamic: services.verifyDynamic === true,

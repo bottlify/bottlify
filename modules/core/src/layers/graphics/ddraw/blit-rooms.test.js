@@ -9,10 +9,10 @@
  * ways - in rooms held in the run's cache, too small a cache for some of
  * them, so that those are plain memory; in rooms whose every grow hands back
  * memory full of what an earlier holder left there, as a block of the cache
- * may; and with no rooms at all - and every answer and every byte of guest
- * memory compared. A blit that read a byte of its room it did not write in
- * the same call, or that held two views of one room at once, answers
- * differently in one of them.
+ * may; and in rooms that are bytes of their own each call - and every
+ * answer and every byte of guest memory compared. A blit that read a byte of
+ * its room it did not write in the same call, or that held two views of one
+ * room at once, answers differently in one of them.
  */
 
 import { test } from 'node:test';
@@ -29,6 +29,15 @@ import { createScratches } from '../../cache/scratch.js';
 import { testCache } from '../../cache/testing.fixture.js';
 
 const MEMORY = 1 << 18;
+
+/**
+ * The arm the others are held to: a scratch that hands out bytes of their
+ * own every call, as a converter made before it had rooms, so no view of it
+ * is ever written over by a later one.
+ *
+ * @type {import('../../cache/scratch.js').Scratch}
+ */
+const FRESH = { bytes: length=>new Uint8Array(length), release: ()=>{} };
 
 /** @param {number} seed */
 const random = seed=>{
@@ -128,14 +137,14 @@ const dirtyRooms = ()=>blitRooms(createScratches((_key, length)=>({
     bytes: new Uint8Array(length + 4096).fill(0xcd).subarray(4096), release: ()=>{} })).scratch);
 
 test('gate: a blit answers and writes the same in rooms of the run\'s cache, in rooms '
-    + 'left dirty and in none', async()=>{
+    + 'left dirty and in fresh ones', async()=>{
     // A small cache: a room past its segment is plain memory, the rest held.
     const cache = await testCache({ budget: 1 << 16, segmentBytes: 1 << 15 });
     const heldScratches = createScratches(cache.space('scratch').hold ?? null);
     const arms = [
         { rooms: blitRooms(heldScratches.scratch), bytes: new Uint8Array(MEMORY) },
         { rooms: dirtyRooms(), bytes: new Uint8Array(MEMORY) },
-        { rooms: undefined, bytes: new Uint8Array(MEMORY) },
+        { rooms: blitRooms(()=>FRESH), bytes: new Uint8Array(MEMORY) },
     ];
     const next = random(0x5eed);
     let made = 0;
@@ -150,12 +159,12 @@ test('gate: a blit answers and writes the same in rooms of the run\'s cache, in 
             return call(memoryOver(arm.bytes, windowed), arm.rooms);
         });
         made += answers[2] === 0 ? 1 : 0;
-        assert.equal(answers[0], answers[2], `blit ${index}: held rooms answer as none`);
-        assert.equal(answers[1], answers[2], `blit ${index}: dirty rooms answer as none`);
+        assert.equal(answers[0], answers[2], `blit ${index}: held rooms answer as fresh ones`);
+        assert.equal(answers[1], answers[2], `blit ${index}: dirty rooms answer as fresh ones`);
         assert.ok(arms[0].bytes.every((byte, at)=>byte === arms[2].bytes[at]),
-            `blit ${index}: held rooms write as none`);
+            `blit ${index}: held rooms write as fresh ones`);
         assert.ok(arms[1].bytes.every((byte, at)=>byte === arms[2].bytes[at]),
-            `blit ${index}: dirty rooms write as none`);
+            `blit ${index}: dirty rooms write as fresh ones`);
     }
     assert.ok(made > 200, `most of the blits are made (${made})`);
     const figures = heldScratches.figures();

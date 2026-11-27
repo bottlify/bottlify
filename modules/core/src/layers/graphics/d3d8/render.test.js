@@ -5114,7 +5114,9 @@ test('a texture written in a rectangle sends the rectangle\'s rows, read where t
         last.destination.origin.y], [8, 4, 16, 10]);
     assert.deepEqual([...last.bytes], [10, 11, 12, 13].flatMap(value=>Array(32).fill(value)));
     assert.equal(handed.length, 1);
-    assert.equal(handed[0].buffer.byteLength, 8 * 4 * 4, 'the rows laid tight, once');
+    // Laid tight in the renderer's room for it, not in the guest's bytes.
+    assert.equal(handed[0].length, 8 * 4 * 4, 'the rows laid tight, once');
+    assert.notEqual(handed[0].buffer.byteLength, RAM_SIZE);
 
     // All of it said dirty: rows as wide as the pitch go up as they lie.
     assert.equal(texture.AddDirtyRect(null), D3D_OK);

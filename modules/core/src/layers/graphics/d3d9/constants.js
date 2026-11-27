@@ -595,16 +595,18 @@ export function surfacePitch(format, width){
  * @param {Uint8Array} bytes  `rows` rows at the pitch.
  * @param {number} format @param {number} width @param {number} rows
  * @param {number} [pitch]  The surface's own, where it is not `surfacePitch`'s.
+ * @param {import('../../cache/scratch.js').Scratch} [into]  where rows taken out go, for a
+ *     caller that hands them on before it asks again; bytes of their own if absent
  * @returns {Uint8Array}
  */
-export function tightRows(bytes, format, width, rows, pitch = surfacePitch(format, width)){
+export function tightRows(bytes, format, width, rows, pitch = surfacePitch(format, width), into){
     const info = FORMAT_INFO[format];
     const row = width * (info?.bytesPerPixel ?? 0);
     if (!info || info.blockSize !== undefined || row === pitch || row === 0)
     {
         return bytes;
     }
-    const out = new Uint8Array(row * rows);
+    const out = into ? into.bytes(row * rows) : new Uint8Array(row * rows);
     for (let y = 0; y < rows; y++)
     {
         out.set(bytes.subarray(y * pitch, y * pitch + row), y * row);
