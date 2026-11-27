@@ -79,16 +79,6 @@ async function run(t, name, wide){
     return { code, stopped, text: output.join(''), suspended: bridge?.metrics?.suspended };
 }
 
-/**
- * Where the run over a wide window stops today, and why: a check reached
- * there fails the test too, so this only moves on. EnumSystemLocalesA's
- * signature comment names it and EnumSystemLocalesW together (`A/W`), which
- * the signature table (`check-pointer-arguments.mjs`) does not read, so its
- * callback is not declared an address and a 64-bit caller's past 4 GiB is
- * called at its low dword.
- */
-const WIDE_STOPS_AT = 'a throw out of a callback the system made';
-
 for (const [name, handler, wide] of /** @type {[string, string, boolean][]} */ ([
     ['cxxeh64', '__CxxFrameHandler3', false], ['cxxeh64fh4', '__CxxFrameHandler4', false],
     ['cxxeh64', '__CxxFrameHandler3', true], ['cxxeh64fh4', '__CxxFrameHandler4', true]]))
@@ -98,15 +88,6 @@ for (const [name, handler, wide] of /** @type {[string, string, boolean][]} */ (
             const { code, stopped, text, suspended } = await run(t, name, wide);
             const lines = text.split('\r\n').filter(Boolean);
             assert.deepEqual(lines.filter(line=>!line.startsWith('ok   ')), [], text);
-            if (wide)
-            {
-                assert.deepEqual(lines.map(line=>line.slice(5)),
-                    PROPERTIES.slice(0, PROPERTIES.indexOf(WIDE_STOPS_AT)),
-                    'every one before the stop was reached, and none past it');
-                // On whatever the low dword's memory holds: a fault, an int.
-                assert.notEqual(stopped, null, 'the run stops there');
-                return;
-            }
             assert.equal(stopped, null);
             assert.deepEqual(lines.map(line=>line.slice(5)), PROPERTIES, 'every one was reached');
             assert.equal(code, 0, text);
