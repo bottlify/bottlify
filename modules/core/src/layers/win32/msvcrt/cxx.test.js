@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CHKESP_CODE, createCxxFunctions, EH_PROLOG_CODE } from './cxx.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /**
  * Builds the RTTI graph a compiler emits for one class, laid out exactly as
@@ -89,7 +90,6 @@ const build = ()=>{
         graph: buildHierarchy(memory),
         table: /** @type {Record<string, any>} */ (createCxxFunctions({
             guest: memory.guest,
-            readCString: memory.readCString,
             abort: message=>aborted.push(message),
         })),
     };
@@ -138,4 +138,38 @@ test('_chkesp is a bare ret in the guest: the checked result in EAX and the flag
     assert.equal(table._chkesp.handler, undefined, 'no host crossing to answer in EAX');
     assert.deepEqual([...table._chkesp.code()], [0xc3]);
     assert.equal(CHKESP_CODE, table._chkesp.code());
+});
+
+test('at 64 bits past 4 GiB: the locator a whole pointer below the vtable, its type an offset'
+    + ' from the image', ()=>{
+    // MSVC's x64 RTTICompleteObjectLocator: signature 1, offset, cdOffset,
+    // then the type descriptor, the hierarchy and the locator itself as
+    // offsets from the image's base (pSelf); a type descriptor is two
+    // pointers and then the decorated name.
+    const image = 0x140000000;
+    const bytes = new Uint8Array(0x4000);
+    const view = new DataView(bytes.buffer);
+    /** @param {number} at @param {number} value */
+    const quad = (at, value)=>{
+        view.setUint32(at, value % 2 ** 32, true);
+        view.setUint32(at + 4, Math.floor(value / 2 ** 32), true);
+    };
+    const TYPE = 0x2000;
+    bytes.set([...'.?AVDerived@@\0'].map(c=>c.charCodeAt(0)), TYPE + 16);
+    const LOCATOR = 0x2100;
+    view.setUint32(LOCATOR, 1, true);
+    view.setUint32(LOCATOR + 4, 16, true);
+    view.setUint32(LOCATOR + 12, TYPE, true);
+    view.setUint32(LOCATOR + 20, LOCATOR, true);
+    const VTABLE = 0x2208;
+    quad(VTABLE - 8, image + LOCATOR);
+    const OBJECT = 0x3000;
+    quad(OBJECT + 16, image + VTABLE);
+    const table = /** @type {Record<string, any>} */ (createCxxFunctions({
+        guest: guestWindow(bytes, { base: image, pointerSize: 8 }) }));
+    const subobject = image + OBJECT + 16;
+    assert.equal(table.__RTtypeid.handler([subobject]), image + TYPE);
+    assert.equal(table.__RTCastToVoid.handler([subobject]), image + OBJECT);
+    const raw = table['?raw_name@type_info@@QEBAPEBDXZ'];
+    assert.equal(raw.handler([image + TYPE]), image + TYPE + 16, 'past the two pointers');
 });
