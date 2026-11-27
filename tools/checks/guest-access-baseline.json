@@ -737,10 +737,6 @@
    "accessor readU32": 1,
    "accessor writeU32": 1
   },
-  "msvcrt/sort.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
   "msvcrt/startup.js": {
    "accessor dword": 1,
    "accessor readPointer": 1,

@@ -1472,8 +1472,7 @@ export function createMsvcrtFunctions(host){
          */
         sscanf: variadicEntry(2, scanList, scans.sscanf),
         ...createSortFunctions({
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
+            guest: host.guest,
             callGuest: host.callGuest,
             errno,
             ...host.currentThread ? { currentThread: host.currentThread } : {},

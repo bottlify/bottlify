@@ -10,6 +10,7 @@ import { createNtdllCrt } from './crt.js';
 import { createConversionFunctions } from '../msvcrt/convert.js';
 import { createScanFunctions } from '../msvcrt/scan.js';
 import { createSortFunctions } from '../msvcrt/sort.js';
+import { guestWindow } from '../msvcrt/guest-window.fixture.js';
 
 const machine = ()=>{
     const memory = new Uint8Array(0x1000);
@@ -151,11 +152,11 @@ test('sscanf reads no floating-point field, and stops at one', ()=>{
 });
 
 test('qsort puts equal elements where msvcrt.dll\'s own sort puts them', async()=>{
-    const { view, io } = memoryIo();
+    const { memory, view, io } = memoryIo();
     const words = ['Hello', 'Wine', 'World', '!', 'wine', 'Sorted', 'WINE'];
     const COMPARE = 0x9000;
     const msvcrt = createSortFunctions({
-        ...io,
+        guest: guestWindow(memory),
         // The comparator: the words the two elements index, folded to lower case.
         callGuest: async(entry, [left, right])=>{
             assert.equal(entry, COMPARE);

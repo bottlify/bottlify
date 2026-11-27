@@ -34,8 +34,7 @@ const SHORT_RUN = 8;
 
 /**
  * @typedef {Object} SortHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(entry: number, args: number[], thread?: any) => Promise<number>} callGuest
  * @property {() => any} [currentThread]
  * @property {(code: number) => void} [errno]
@@ -51,24 +50,15 @@ export function createSortFunctions(host){
      */
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
 
-    /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
-        .getUint32(0, true);
+    const { guest } = host;
 
-    // A dword's bytes for every count lsearch stores: writeMemory has put
-    // them in guest memory by the time it returns.
-    const dword = new Uint8Array(4);
-    const dwordView = new DataView(dword.buffer);
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        dwordView.setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), dword);
-    };
+    /** The two elements a swap holds, grown for a wider one: no buffer made a swap. */
+    let left = new Uint8Array(16);
+    let right = new Uint8Array(16);
 
     /**
-     * Two elements exchanged in place. Both are read before either is
-     * written, each a copy of its own (`MsvcrtHost.readMemory`): the write
-     * of one lands on the other.
+     * Two elements exchanged in place, both read before either is written:
+     * the write of one lands on the other.
      *
      * @param {number} a @param {number} b @param {number} width
      */
@@ -77,10 +67,15 @@ export function createSortFunctions(host){
         {
             return;
         }
-        const left = host.readMemory(a, width);
-        const right = host.readMemory(b, width);
-        host.writeMemory(a, right);
-        host.writeMemory(b, left);
+        if (left.length < width)
+        {
+            left = new Uint8Array(width);
+            right = new Uint8Array(width);
+        }
+        guest.bytes(a, width, left);
+        guest.bytes(b, width, right);
+        guest.setBytes(a, right.subarray(0, width));
+        guest.setBytes(b, left.subarray(0, width));
     };
 
     /**
@@ -222,7 +217,7 @@ export function createSortFunctions(host){
     const find = async(key, base, count, width, compare)=>{
         for (let i = 0; i < count; i++)
         {
-            const element = (base + i * width) >>> 0;
+            const element = wholeAddress(base + i * width);
             if (await compare(element) === 0)
             {
                 return element;
@@ -240,13 +235,13 @@ export function createSortFunctions(host){
          * sorted for no array, a width of zero or no comparator.
          */
         [WINDOWS_SORT]: cdecl(16, ([base, num, width, compare])=>{
-            if ((base >>> 0) === 0 || (width >>> 0) === 0 || (compare >>> 0) === 0)
+            if (wholeAddress(base) === 0 || (width >>> 0) === 0 || wholeAddress(compare) === 0)
             {
                 return 0;
             }
             const thread = host.currentThread?.();
-            return sort(base >>> 0, num >>> 0, width >>> 0,
-                (left, right)=>ask(compare, [left >>> 0, right >>> 0], thread)).then(()=>0);
+            return sort(wholeAddress(base), num >>> 0, width >>> 0,
+                (a, b)=>ask(compare, [a, b], thread)).then(()=>0);
         }),
 
         /**
@@ -258,15 +253,15 @@ export function createSortFunctions(host){
          * nothing sorted.
          */
         qsort_s: cdecl(20, ([base, num, width, compare, context])=>{
-            if (((base >>> 0) === 0 && (num >>> 0) !== 0) || (width >>> 0) === 0
-                || (compare >>> 0) === 0)
+            if ((wholeAddress(base) === 0 && (num >>> 0) !== 0) || (width >>> 0) === 0
+                || wholeAddress(compare) === 0)
             {
                 host.errno?.(EINVAL);
                 return 0;
             }
             const thread = host.currentThread?.();
-            return sort(base >>> 0, num >>> 0, width >>> 0,
-                (left, right)=>ask(compare, [context, left >>> 0, right >>> 0], thread))
+            return sort(wholeAddress(base), num >>> 0, width >>> 0,
+                (a, b)=>ask(compare, [context, a, b], thread))
                 .then(()=>0);
         }),
 
@@ -280,15 +275,15 @@ export function createSortFunctions(host){
          * EINVAL for no key, array, count, width or comparator.
          */
         _lfind_s: { ...cdecl(24, ([key, base, num, width, compare, context])=>{
-            if ((key >>> 0) === 0 || (base >>> 0) === 0 || (num >>> 0) === 0
-                || (width >>> 0) === 0 || (compare >>> 0) === 0)
+            if (wholeAddress(key) === 0 || wholeAddress(base) === 0 || wholeAddress(num) === 0
+                || (width >>> 0) === 0 || wholeAddress(compare) === 0)
             {
                 host.errno?.(EINVAL);
                 return 0;
             }
             const thread = host.currentThread?.();
-            return find(key, base >>> 0, readU32(num), width >>> 0,
-                element=>ask(compare, [context, key >>> 0, element], thread));
+            return find(key, wholeAddress(base), guest.u32(num), width >>> 0,
+                element=>ask(compare, [context, wholeAddress(key), element], thread));
         }), returns: 'pointer' },
 
         /**
@@ -296,14 +291,14 @@ export function createSortFunctions(host){
          *              unsigned int width, int (*compare)(const void *, const void *))
          */
         _lfind: { ...cdecl(20, ([key, base, num, width, compare])=>{
-            if ((num >>> 0) === 0 || (compare >>> 0) === 0)
+            if (wholeAddress(num) === 0 || wholeAddress(compare) === 0)
             {
                 host.errno?.(EINVAL);
                 return 0;
             }
             const thread = host.currentThread?.();
-            return find(key, base >>> 0, readU32(num), width >>> 0,
-                element=>ask(compare, [key >>> 0, element], thread));
+            return find(key, wholeAddress(base), guest.u32(num), width >>> 0,
+                element=>ask(compare, [wholeAddress(key), element], thread));
         }), returns: 'pointer' },
 
         /**
@@ -313,22 +308,22 @@ export function createSortFunctions(host){
          * _lfind, and a key not found appended to the array, the count raised.
          */
         _lsearch: { ...cdecl(20, ([key, base, num, width, compare])=>{
-            if ((num >>> 0) === 0 || (compare >>> 0) === 0)
+            if (wholeAddress(num) === 0 || wholeAddress(compare) === 0)
             {
                 host.errno?.(EINVAL);
                 return 0;
             }
             const thread = host.currentThread?.();
-            const count = readU32(num);
-            return find(key, base >>> 0, count, width >>> 0,
-                element=>ask(compare, [key >>> 0, element], thread)).then(found=>{
+            const count = guest.u32(num);
+            return find(key, wholeAddress(base), count, width >>> 0,
+                element=>ask(compare, [wholeAddress(key), element], thread)).then(found=>{
                 if (found !== 0)
                 {
                     return found;
                 }
-                const end = (base + count * width) >>> 0;
-                host.writeMemory(end, host.readMemory(wholeAddress(key), width >>> 0));
-                writeU32(num, count + 1);
+                const end = wholeAddress(base + count * width);
+                guest.copy(end, key, width >>> 0);
+                guest.set32(num, count + 1);
                 return end;
             });
         }), returns: 'pointer' },
