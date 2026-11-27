@@ -388,12 +388,17 @@ export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt =
  * @param {() => number | null} [options.foreground]
  *        The process of the run's foreground window, whose picture is the screen
  *        under the windows.
- * @param {(frame: { pixels: Uint8Array, width: number, height: number,
- *     bytesPerRow: number, format: string }) => void} [options.sendFrame]
- *        Where a process with no GPU of its own -- one in a worker of its own
- *        -- sends a surface's picture, in the bytes an upload would carry, for
- *        the thread that has the GPU to show. Each frame's bytes are its own,
- *        so the receiver may take them.
+ * @param {{ send: (frame: { pixels: Uint8Array, width: number, height: number,
+ *     bytesPerRow: number, format: string }) => void,
+ *     bytes?: (length: number) => Uint8Array,
+ *     figures?: () => Record<string, number> }} [options.display]
+ *        Where a process with no GPU of its own - one in a worker of its own -
+ *        sends a surface's picture, in the bytes an upload would carry, for
+ *        the thread that has the GPU to show (`send`). The receiver takes
+ *        each frame's bytes; `bytes` answers the buffer the next is written
+ *        into, one handed back by the receiver where one has come
+ *        (`remote/frame-rotation.js`), a new array each frame where absent;
+ *        `figures` counts them for the report.
  * @param {(name: string) => import('../../../cache/scratch.js').Scratch} [options.scratches]
  *        Memory the presenter keeps between frames, held in the run's cache:
  *        where a surface in guest memory is converted on its way up. Plain
@@ -481,7 +486,7 @@ export function createPresenter(options = {}){
     /**
      * Where a surface is converted on its way up, kept from frame to frame:
      * the upload copies it before it returns. A frame sent elsewhere
-     * (`sendFrame`) is bytes of its own, which the receiver takes.
+     * (`display`) is bytes the receiver takes, and hands back.
      */
     const converted = (options.scratches ?? (name=>plainScratches.scratch(name)))(
         'present/converted');
@@ -704,13 +709,15 @@ export function createPresenter(options = {}){
             counters.shownByOwner++;
             return owner();
         }
-        if (options.sendFrame)
+        const { display } = options;
+        if (display)
         {
-            const pixels = new Uint8Array(surface.width * 4 * surface.height);
+            const length = surface.width * 4 * surface.height;
+            const pixels = display.bytes ? display.bytes(length) : new Uint8Array(length);
             convert(from, surface, pixels);
             counters.uploads++;
             counters.bytes += pixels.byteLength;
-            options.sendFrame({ pixels, width: surface.width, height: surface.height,
+            display.send({ pixels, width: surface.width, height: surface.height,
                 bytesPerRow: surface.width * 4, format: FORMAT });
             return undefined;
         }
@@ -1371,6 +1378,8 @@ export function createPresenter(options = {}){
                 attached: attachments.length - 1,
                 failures: [...failures],
                 latency: latency.diagnostics(),
+                // The buffers frames were sent in: made, and handed back to be reused.
+                sent: options.display?.figures?.() ?? null,
                 disposed,
             };
         },

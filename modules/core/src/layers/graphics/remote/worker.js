@@ -98,6 +98,7 @@ import { createCapture } from './capture.js';
 import { SAID_STRINGS, createReceiver, sharedNow } from './channel.js';
 import { KIND, openRingOut } from './ring.js';
 import { createBorrower } from './lending.js';
+import { createFrameRotation } from './frame-rotation.js';
 import { playedDirect3D } from './direct3d.js';
 import { storeCount as storeCountIn } from '../seam/block.js';
 import { playedOpengl } from './opengl.js';
@@ -475,10 +476,13 @@ export function serveGraphics(scope, deps){
         device.queue.submit([encoder.finish()]);
         buffer.mapAsync(MAP_READ).then(()=>{
             // The one copy: a mapped range is the buffer's until it is unmapped.
-            const pixels = new Uint8Array(buffer.getMappedRange()).slice();
+            // Into a buffer an earlier frame crossed in and was handed back.
+            const pixels = sentBuffers.bytes(bytesPerRow * height);
+            pixels.set(new Uint8Array(buffer.getMappedRange()));
             buffer.unmap();
             scope.postMessage({ type: 'frame', pixels, bytesPerRow, width, height, frameIndex,
-                format, dropped, source: surface.source, ...sentWith(surface, serial) },
+                format, dropped, source: surface.source, ...sentWith(surface, serial),
+                buffers: sentBuffers.figures() },
             [pixels.buffer]);
         }, ()=>{
             readBack?.buffer.destroy();
@@ -486,6 +490,8 @@ export function serveGraphics(scope, deps){
             sending = false;
         });
     };
+    /** The buffers frames read back cross in, handed back with each answer. */
+    const sentBuffers = createFrameRotation();
     /**
      * The buffer frames are read back through, kept while frames are the
      * same size on the same device: one frame is in flight at a time
@@ -932,6 +938,7 @@ export function serveGraphics(scope, deps){
                 shownWord = data.word instanceof Int32Array ? data.word : null;
                 break;
             case 'shown':
+                sentBuffers.give(data.pixels);
                 if (typeof data.at === 'number')
                 {
                     const took = Math.max(0, sharedNow() - data.at);

@@ -443,11 +443,16 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
         assert.equal(frames()[1].bitmap, undefined);
         assert.ok(frames()[1].pixels instanceof Uint8Array, 'then bytes');
         assert.equal(frames()[1].width, 8);
-        scope.onmessage({ data: { type: 'shown' } });
+        assert.equal(frames()[1].buffers.made, 1, 'nothing handed back yet: a buffer made');
+        // The buffer comes back with the answer, as the program's thread hands it.
+        const handed = frames()[1].pixels.slice().buffer;
+        scope.onmessage({ data: { type: 'shown', pixels: handed } });
         await draw(0xff000003);
         assert.equal(frames().length, 3);
         assert.deepEqual([frames()[1].pixels[0], frames()[2].pixels[0]], [2, 3],
             'each frame its own picture, the one sent before left as it was');
+        assert.equal(frames()[2].pixels.buffer, handed, 'the next written into the buffer back');
+        assert.deepEqual([frames()[2].buffers.made, frames()[2].buffers.reused], [1, 1]);
         const readBacks = gpu.of('createBuffer').filter((/** @type {any} */ call)=>
             (call.descriptor.usage & 1) !== 0);
         assert.equal(readBacks.length, 1, 'frames of one size read back through one buffer');

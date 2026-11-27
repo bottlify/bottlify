@@ -97,7 +97,13 @@ flowchart TB
   way, where the graphics layer made them; the run's presenter, which the run makes outside
   the layer, holds them under names of the run's own (`RunCache.scratch`), and the backend in
   the graphics worker under names the run hands it when the run starts (`remote/connect.js`
-  `lendBackend`), plain memory until then. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
+  `lendBackend`), plain memory until then. A picture sent to another thread as bytes - a
+  process in a worker of its own, or the graphics worker's frames where the page cannot take a
+  picture from it - is transferred, and the thread that shows it hands the buffer back with its
+  answer once it is copied onto its device: the next frame of that size is written into it, so
+  two or three buffers carry every frame (`remote/frame-rotation.js`), a new one made only while
+  none has come back, and counted (`sent` in the presenter's report, `handoff.buffers` in the
+  graphics worker's). An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
   it while the level is unchanged. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of

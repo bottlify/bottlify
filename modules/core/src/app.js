@@ -4052,7 +4052,7 @@ export async function createApp(options){
         })
         // A process in a worker of its own has no GPU: its surfaces' pictures
         // go to the thread that has one, as bytes, each burst as it flushes.
-        : options.graphics?.display ? createPresenter({ sendFrame: options.graphics.display })
+        : options.graphics?.display ? createPresenter({ display: options.graphics.display })
             : null);
 
     // The translation store is the run's as well: a child's machine is built

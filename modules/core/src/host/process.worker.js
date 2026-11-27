@@ -31,6 +31,7 @@ import { remoteStore } from '../layers/cpu/internal/store-link.js';
 import { ringPacing } from './ring-pacing.js';
 import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
+import { createFrameRotation } from '../layers/graphics/remote/frame-rotation.js';
 import { plainEvent } from '../system/events-across.js';
 import { handedFiles } from '../system/inherited-files.js';
 import { remoteCacheOwners, remoteCacheReader } from '../process/run-cache.js';
@@ -68,15 +69,24 @@ const heapNow = ()=>{
  * The pictures of this process's surfaces, sent on `port` as the graphics
  * worker sends its frames, for the thread with the GPU to show. What it says
  * back once one is shown is not waited on: this thread blocks while it idles,
- * and a picture painted just before would wait with it.
+ * and a picture painted just before would wait with it. The answer carries
+ * the frame's buffer back, which a later frame is written into
+ * (`frame-rotation.js`); until one has come back a frame takes a new one.
  *
  * @param {MessagePort} port
  */
-const sendFrames = port=>{
-    port.onmessage = ()=>{};
+export const sendFrames = port=>{
+    const rotation = createFrameRotation();
+    port.onmessage = ({ data })=>rotation.give(data?.pixels);
     let frameIndex = 0;
-    return (/** @type {{ pixels: Uint8Array }} */ frame)=>port.postMessage(
-        { type: 'frame', ...frame, frameIndex: ++frameIndex }, [frame.pixels.buffer]);
+    return {
+        bytes: rotation.bytes,
+        /** @param {{ pixels: Uint8Array, width: number, height: number, bytesPerRow: number,
+         *     format: string }} frame */
+        send: frame=>port.postMessage({ type: 'frame', ...frame, frameIndex: ++frameIndex },
+            [frame.pixels.buffer]),
+        figures: rotation.figures,
+    };
 };
 
 /**

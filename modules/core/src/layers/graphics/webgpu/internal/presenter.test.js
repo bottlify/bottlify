@@ -21,6 +21,7 @@ import {
 } from './presenter.js';
 import { createScratches } from '../../../cache/scratch.js';
 import { testCache } from '../../../cache/testing.fixture.js';
+import { createFrameRotation } from '../../remote/frame-rotation.js';
 
 /**
  * Guest memory is a flat buffer; surfaces are wherever the test puts them.
@@ -176,7 +177,7 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
         presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, gammaShown: 0,
         dropped: 0, layered: 0, composed: 0, unshown: 0, veiled: 0, shownBy: {}, lastBuffer: 0x1000,
         pending: false, claimed: 0, attached: 0, gamma: false, failures: [], disposed: false,
-        framesFrom: {}, uploadsFrom: { unnamed: 1 }, layers: [], composes: false,
+        sent: null, framesFrom: {}, uploadsFrom: { unnamed: 1 }, layers: [], composes: false,
         // No queue was handed over, so nothing is counted against the bound.
         latency: { limit: 3, counting: false, inFlight: 0, peak: 0, frames: 0, held: 0,
             heldMs: 0, waiting: 0, timed: 0, toQueueMs: 0, gpuMs: 0 },
@@ -718,7 +719,7 @@ test('gate: the bytes a presenter sends are the bytes it would upload, for every
             windowMemory: windowed
                 ? (address, length)=>h.ram.subarray(address, address + length) : undefined,
             schedule: flush=>scheduled.push(flush),
-            sendFrame: frame=>sent.push(frame),
+            display: { send: frame=>sent.push(frame) },
         });
         const bitCount = [8, 16, 32][next() % 3];
         const width = 1 + next() % 40;
@@ -750,7 +751,7 @@ test('a sending presenter hands each frame its own bytes, which the receiver may
     const presenter = createPresenter({
         readMemory: (address, length)=>ram.slice(address, address + length),
         schedule: flush=>scheduled.push(flush),
-        sendFrame: frame=>sent.push(frame),
+        display: { send: frame=>sent.push(frame) },
     });
     const surface = { buffer: 0, width: 2, height: 2, pitch: 8, bitCount: 32, palette: null };
     presenter.present(surface);
@@ -762,6 +763,86 @@ test('a sending presenter hands each frame its own bytes, which the receiver may
     assert.notEqual(sent[0].pixels.buffer, sent[1].pixels.buffer,
         'a buffer handed over is never written again');
     assert.deepEqual([sent[0].pixels[0], sent[1].pixels[0]], [0, 0x7f]);
+});
+
+test('gate: frames sent in buffers the receiver hands back are the bytes of frames sent in '
+    + 'buffers of their own, and a few buffers carry them all', ()=>{
+    let seed = 0xb0ff;
+    const next = ()=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return seed >>> 8;
+    };
+    for (const windowed of [false, true])
+    {
+        const ram = new Uint8Array(0x10000);
+        /** @type {(() => void)[]} */
+        const scheduled = [];
+        /** @param {any} display */
+        const arm = display=>createPresenter({
+            readMemory: (address, length)=>ram.slice(address, address + length),
+            windowMemory: windowed ? (address, length)=>ram.subarray(address, address + length)
+                : undefined,
+            schedule: flush=>scheduled.push(flush),
+            display,
+        });
+        /** @type {Uint8Array[]} */
+        const plain = [];
+        const plainArm = arm({ send: (/** @type {any} */ frame)=>plain.push(frame.pixels) });
+        const rotation = createFrameRotation();
+        /** @type {Uint8Array[]} */
+        const received = [];
+        /** Buffers on their way back, one frame behind, as a receiver answers. @type {ArrayBuffer[]} */
+        const coming = [];
+        const rotating = arm({
+            bytes: rotation.bytes,
+            figures: rotation.figures,
+            send: (/** @type {any} */ frame)=>{
+                // Taken as a transfer takes it: the sender's view is detached.
+                const taken = structuredClone(frame.pixels, { transfer: [frame.pixels.buffer] });
+                assert.equal(frame.pixels.byteLength, 0, 'the sender keeps nothing it sent');
+                received.push(taken.slice());
+                coming.push(taken.buffer);
+                if (coming.length > 1)
+                {
+                    rotation.give(coming.shift());
+                }
+            },
+        });
+        let sizes = 0;
+        /** @type {any} */
+        let surface = null;
+        for (let frame = 0; frame < 120; frame++)
+        {
+            for (let at = 0; at < ram.length; at++)
+            {
+                ram[at] = next() & 0xff;
+            }
+            // A mode change now and then: a buffer of the old size is not reused.
+            if (surface === null || next() % 30 === 0)
+            {
+                const bitCount = [8, 16, 32][next() % 3];
+                const width = 1 + next() % 60;
+                const height = 1 + next() % 40;
+                surface = { buffer: 0x400 + next() % 0x400, width, height,
+                    pitch: width * (bitCount >>> 3) + next() % 9, bitCount, palette: null };
+                sizes++;
+            }
+            surface.palette = surface.bitCount === 8
+                ? Array.from({ length: 256 }, ()=>next()) : null;
+            plainArm.present(surface);
+            rotating.present(surface);
+            scheduled.splice(0).forEach(flush=>flush());
+            assert.deepEqual(received.at(-1), plain.at(-1),
+                JSON.stringify({ frame, windowed, ...surface, palette: undefined }));
+        }
+        const figures = rotating.diagnostics().sent ?? assert.fail('no figures');
+        assert.equal(figures.made + figures.reused, 120, 'every frame took a buffer');
+        assert.ok(figures.made <= sizes * 2,
+            `two buffers a size, one in flight and one on its way back (${figures.made} for `
+            + `${sizes} sizes)`);
+        assert.ok(figures.reused > 100, `reused frame after frame (${figures.reused})`);
+        assert.equal(plainArm.diagnostics().sent, null, 'the plain arm counts no rotation');
+    }
 });
 
 test('with a GPU and no canvas the screen is still composed of every process\'s picture, and'
@@ -886,7 +967,7 @@ test('gate: a surface converted in a room of the run\'s cache, in a dirty one an
             windowMemory: windowed ? (address, length)=>ram.subarray(address, address + length)
                 : undefined,
             schedule: flush=>scheduled.push(flush),
-            sendFrame: frame=>sent.push(frame),
+            display: { send: frame=>sent.push(frame) },
         });
         // One presenter, frame after frame, of surfaces that grow and shrink:
         // its room is reused, and a smaller picture after a larger one reads
