@@ -2438,12 +2438,12 @@ test('a DXT1 base narrower than one block is refused; a decoded one lies in B, G
         assert.equal(surface.descriptor.format, 'bgra8unorm');
         const written = gpu.of('writeTexture').find(w=>w.destination.texture === surface.texture);
         assert.ok(written, 'the level travelled decoded');
-        // A block of 0x07 bytes: both endpoints 0x0707 (r 0, g 227, b 57 widened
+        // A block of 0x07 bytes: both endpoints 0x0707 (r 0, g 227, b 58 as normalised
         // from 5-6-5), index bits 0b00000111 -- the first texel index 3, which
         // the punch-through mode makes transparent black, the second index 1,
         // the colour. It has to lie as B, G, R, A, the order the texture is
         // stored in, or red and blue trade places on every DXT texture.
-        assert.deepEqual([...written.bytes.subarray(4, 8)], [57, 227, 0, 0xff],
+        assert.deepEqual([...written.bytes.subarray(4, 8)], [58, 227, 0, 0xff],
             'blue byte first');
     });
 

@@ -167,7 +167,8 @@ flowchart TB
 - **Textures** of up to eight bits a channel go to the GPU as `bgra8unorm`, those of sixteen and
   thirty-two bits a channel as half floats (`rgba16float`, `rg16float`, `r16float`), the formats
   every WebGPU device filters and blends; DXT-compressed ones are decoded on the CPU by
-  default (`graphics.compressedTextures` in [`core/configuration.md`](../core/configuration.md#graphics)).
+  default (`graphics.compressedTextures` in [`core/configuration.md`](../core/configuration.md#graphics)),
+  through the one S3TC codec D3DX reads and writes them with too (media's `internal/s3tc.js`).
   In Direct3D 10 and 11 a DXT volume stays compressed only where the GPU has
   `texture-compression-bc-sliced-3d`, and a 16-bit normalised texture is kept in 32-bit floats
   where those filter: a browser samples its 16-bit normalised formats unfiltered alone. A

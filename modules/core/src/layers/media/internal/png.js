@@ -7,9 +7,8 @@
 /**
  * PNG files, read into B, G, R, A bytes the way D3DX's file loaders take every
  * image: the chunks of the W3C PNG specification -- IHDR, PLTE, tRNS and the
- * IDAT run, whose zlib stream the cabinet layer's deflate decoder inflates --
- * every colour type at every bit depth it allows, the five row filters, and
- * Adam7 interlacing.
+ * IDAT run, whose zlib stream inflate.js inflates -- every colour type at
+ * every bit depth it allows, the five row filters, and Adam7 interlacing.
  *
  * The format D3DXIMAGE_INFO names is the one the file's pixels hold as
  * Windows' imaging component decodes them, which is what D3DX reads a PNG
@@ -17,7 +16,7 @@
  * sixteen bits a channel A16B16G16R16.
  */
 
-import { createInflater, InflateError } from '../cabinet/inflate.js';
+import { createInflater, InflateError } from './inflate.js';
 
 const SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 

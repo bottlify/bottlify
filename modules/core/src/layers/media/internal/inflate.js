@@ -5,7 +5,8 @@
  */
 
 /**
- * Deflate decoding (RFC 1951), as a cabinet's MSZIP folders use it.
+ * Deflate decoding (RFC 1951): a PNG's zlib stream (png.js), and a cabinet's
+ * MSZIP folders.
  *
  * The Cabinet SDK's MSZIP description is short: every CFDATA block is the
  * two bytes `CK` and then one complete deflate stream -- stored, fixed or

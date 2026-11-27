@@ -59,7 +59,7 @@ import {
 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE, MAX_STREAMS } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
-import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { decodeS3tc } from '../../media/internal/s3tc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
 import { convertTexels } from '../d3d10/blocks.js';
 import { storedToHalves } from '../d3d9/half.js';
@@ -894,12 +894,12 @@ const COMPRESSED_FORMAT = Object.freeze({
 
 /**
  * The S3TC block kind a DXTn format shares, for the layer's shared decoder
- * (`webgpu/internal/s3tc.js`): the block bits DXTn and S3TC name are
+ * (`media/internal/s3tc.js`): the block bits DXTn and S3TC name are
  * identical. DXT2/DXT4 decode as their unmultiplied siblings DXT3/DXT5, the
  * same substitution `COMPRESSED_FORMAT` already makes for the kept-compressed
  * path.
  *
- * @type {Readonly<Record<number, import('../webgpu/internal/s3tc.js').S3tcKind>>}
+ * @type {Readonly<Record<number, import('../../media/internal/s3tc.js').S3tcKind>>}
  */
 const S3TC_OF = Object.freeze({
     [D3DFMT.DXT1]: 'dxt1',

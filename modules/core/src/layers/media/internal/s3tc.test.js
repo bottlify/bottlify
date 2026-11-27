@@ -5,13 +5,14 @@
  */
 
 /**
- * S3TC/DXTn block decoding: every expectation is a byte, so a change to the
+ * S3TC/DXTn blocks: every expectation is a byte, so a change to the
  * arithmetic is a changed picture that these tests exist to notice.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compressedBytes, decodeS3tc, encodeS3tc } from './s3tc.js';
+import { compressedBytes, decodeAlphaBlock, decodeS3tc, encodeAlphaBlock, encodeS3tc }
+    from './s3tc.js';
 
 /**
  * A result that must be there: the test says so before it reads it.
@@ -221,5 +222,144 @@ test('encoding: DXT5 alpha keeps a ramp within half a step, every index in its p
     for (let k = 0; k < 16; k++)
     {
         assert.ok(Math.abs(back[k * 4 + 3] - k * 17) <= 19, `texel ${k}: ${back[k * 4 + 3]}`);
+    }
+    // The block on its own, as BC4 and BC5 use it, is DXT5's alpha half.
+    assert.deepEqual([...decodeAlphaBlock(block, 0)], [...back].filter((_, i)=>i % 4 === 3));
+    const alone = new Uint8Array(8);
+    encodeAlphaBlock(ramp.filter((_, i)=>i % 4 === 3), alone, 0);
+    assert.deepEqual([...alone], [...block.subarray(0, 8)]);
+    assert.deepEqual([...decodeAlphaBlock(new Uint8Array([9, 9, 0, 0, 0, 0, 0, 0]), 0)],
+        new Array(16).fill(9), 'one value is its own end');
+});
+
+/**
+ * One texel of an S3TC image as the specification writes it out: the
+ * endpoints normalised (a field over its maximum), each blended entry the
+ * weighted sum of those, the result the nearest byte. Written per texel and
+ * reading its bits one by one, so it shares nothing with the decoder but the
+ * arithmetic the specification states.
+ *
+ * @param {Uint8Array} bytes @param {import('./s3tc.js').S3tcKind} kind
+ * @param {number} width @param {number} x @param {number} y
+ * @returns {number[]} r, g, b, a
+ */
+function specTexel(bytes, kind, width, x, y){
+    const size = kind === 'dxt1' ? 8 : 16;
+    const block = (Math.floor(y / 4) * Math.ceil(width / 4) + Math.floor(x / 4)) * size;
+    const k = (y & 3) * 4 + (x & 3);
+    /** @param {number} at @param {number} first @param {number} count */
+    const bits = (at, first, count)=>{
+        let value = 0;
+        for (let i = count - 1; i >= 0; i--)
+        {
+            const bit = first + i;
+            value = value * 2 + ((bytes[at + (bit >> 3)] >> (bit & 7)) & 1);
+        }
+        return value;
+    };
+    const colourAt = kind === 'dxt1' ? block : block + 8;
+    const c0 = bits(colourAt, 0, 16);
+    const c1 = bits(colourAt, 16, 16);
+    const index = bits(colourAt, 32 + k * 2, 2);
+    const four = kind !== 'dxt1' || c0 > c1;
+    /** [shift, max] of red, green, blue. */
+    const fields = [[11, 31], [5, 63], [0, 31]];
+    // The weights of colour0 and colour1 in each index, and their sum.
+    const weights = four ? [[1, 0, 1], [0, 1, 1], [2, 1, 3], [1, 2, 3]]
+        : [[1, 0, 1], [0, 1, 1], [1, 1, 2], null];
+    const weight = weights[index];
+    if (weight === null)
+    {
+        return [0, 0, 0, 0];
+    }
+    const rgb = fields.map(([shift, max])=>Math.round(
+        (weight[0] * ((c0 >> shift) & max) + weight[1] * ((c1 >> shift) & max)) * 255
+        / (weight[2] * max)));
+    if (kind === 'dxt1')
+    {
+        return [...rgb, 255];
+    }
+    if (kind === 'dxt3')
+    {
+        return [...rgb, Math.round(bits(block, k * 4, 4) * 255 / 15)];
+    }
+    const a0 = bytes[block];
+    const a1 = bytes[block + 1];
+    const i = bits(block, 16 + k * 3, 3);
+    const steps = a0 > a1 ? 7 : 5;
+    let alpha = i === 0 ? a0 : a1;
+    if (i >= 2)
+    {
+        alpha = steps === 5 && i >= 6 ? (i === 6 ? 0 : 255)
+            : Math.round(((steps + 1 - i) * a0 + (i - 1) * a1) / steps);
+    }
+    return [...rgb, alpha];
+}
+
+test('every texel of seeded images is the specification\'s byte, in every kind and shape', ()=>{
+    let seed = 0x5eed;
+    const next = ()=>(seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 24;
+    for (const kind of /** @type {const} */ (['dxt1', 'dxt3', 'dxt5']))
+    {
+        for (const [width, height] of [[1, 1], [3, 5], [4, 4], [13, 7], [64, 64]])
+        {
+            const bytes = Uint8Array.from({ length: compressedBytes(kind, width, height) }, next);
+            const texels = some(decodeS3tc(bytes, kind, width, height));
+            for (let y = 0; y < height; y++)
+            {
+                for (let x = 0; x < width; x++)
+                {
+                    const at = (y * width + x) * 4;
+                    assert.deepEqual([...texels.subarray(at, at + 4)],
+                        specTexel(bytes, kind, width, x, y),
+                        `${kind} ${width}x${height} (${x}, ${y})`);
+                }
+            }
+        }
+    }
+});
+
+test('an endpoint is its field over the maximum, not the field\'s bits repeated', ()=>{
+    // Red 3 of 31 is 24.68, so 25, where bit replication (3 << 3 | 3 >> 2)
+    // answers 24; green 1 of 63 is 4.05, so 4.
+    const block = new Uint8Array(8);
+    new DataView(block.buffer).setUint16(0, 3 << 11 | 1 << 5, true);
+    assert.deepEqual([...some(decodeS3tc(block, 'dxt1', 4, 4)).subarray(0, 4)], [25, 4, 0, 255]);
+});
+
+test('encoding: every texel is the nearest of the colours its block decodes to', ()=>{
+    // Whatever endpoints the fit chose, an index the decoder reads as a worse
+    // colour than another of the same block is a picture lost to the encoder.
+    let seed = 99;
+    const next = ()=>(seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 24;
+    for (const kind of /** @type {const} */ (['dxt1', 'dxt3', 'dxt5']))
+    {
+        for (let n = 0; n < 50; n++)
+        {
+            const texels = Uint8Array.from({ length: 16 * 4 }, next);
+            const blocks = new Uint8Array(compressedBytes(kind, 4, 4));
+            encodeS3tc(texels, kind, 4, 4, blocks);
+            const back = some(decodeS3tc(blocks, kind, 4, 4));
+            // Every colour the block can decode to, read back through each index.
+            const colourAt = kind === 'dxt1' ? 0 : 8;
+            const options = [0, 1, 2, 3].map(index=>{
+                const probe = blocks.slice();
+                new DataView(probe.buffer).setUint32(colourAt + 4, index * 0x55555555 >>> 0, true);
+                return [...some(decodeS3tc(probe, kind, 4, 4)).subarray(0, 4)];
+            }).filter(option=>option[3] !== 0 || kind !== 'dxt1');
+            for (let k = 0; k < 16; k++)
+            {
+                const t = [...texels.subarray(k * 4, k * 4 + 3)];
+                /** @param {number[]} c */
+                const error = c=>c.slice(0, 3).reduce((s, v, i)=>s + (v - t[i]) ** 2, 0);
+                if (kind === 'dxt1' && texels[k * 4 + 3] < 128)
+                {
+                    assert.equal(back[k * 4 + 3], 0, `${kind} #${n} texel ${k} stays a hole`);
+                    continue;
+                }
+                assert.equal(error([...back.subarray(k * 4, k * 4 + 3)]),
+                    Math.min(...options.map(error)), `${kind} #${n} texel ${k}`);
+            }
+        }
     }
 });

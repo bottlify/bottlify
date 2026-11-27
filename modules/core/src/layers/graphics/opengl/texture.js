@@ -37,7 +37,7 @@
 import { GL } from './constants.js';
 import {
     compressedBytes as s3tcCompressedBytes, decodeS3tc as decodeS3tcOf,
-} from '../webgpu/internal/s3tc.js';
+} from '../../media/internal/s3tc.js';
 
 /**
  * @typedef {Object} UnpackState
@@ -474,10 +474,10 @@ export function conformTexels(texels, baseFormat){
 
 /**
  * The GL S3TC enum, mapped to the format-neutral kind the decoder in
- * `webgpu/internal/s3tc.js` takes: the block layout is the API-neutral part,
+ * `media/internal/s3tc.js` takes: the block layout is the API-neutral part,
  * and this table is the whole of what is GL-specific about reading it.
  *
- * @type {Readonly<Record<number, import('../webgpu/internal/s3tc.js').S3tcKind>>}
+ * @type {Readonly<Record<number, import('../../media/internal/s3tc.js').S3tcKind>>}
  */
 const S3TC_KIND = Object.freeze({
     [GL.COMPRESSED_RGB_S3TC_DXT1_EXT]: 'dxt1',

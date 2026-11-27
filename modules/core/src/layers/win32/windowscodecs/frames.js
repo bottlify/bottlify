@@ -27,7 +27,7 @@
 
 import { bitmapPixels, readJpeg } from '../d3dx9/images.js';
 import { FMT } from '../d3dx9/pixels.js';
-import { readPng, readPngPixels } from '../d3dx9/png.js';
+import { readPng, readPngPixels } from '../../media/internal/png.js';
 import { decodeGifFrames, isGif } from '../../media/internal/gif.js';
 import { decodeTiff, isTiff } from '../../media/internal/tiff.js';
 import { decodeJpeg, readJpegHeader } from '../../media/internal/jpeg.js';
