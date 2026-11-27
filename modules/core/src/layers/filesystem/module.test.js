@@ -736,12 +736,8 @@ test('a directory is not moved into itself: refused, and left where it was', asy
 test('the writable layer says what it holds, and on a page file holds no more than its pool',
     async()=>{
         const at = (/** @type {string[]} */ ...parts)=>['C:', ...parts].join(String.fromCharCode(92));
-        const alone = createFilesystemModule();
-        const none = await alone.create({});
-        assert.throws(()=>none.open(at('setup.tmp'),
-            { write: true, disposition: none.Disposition.CREATE_NEW }), /no page file/,
-        'a volume handed no page file has nowhere to keep a write');
-        await alone.dispose();
+        await assert.rejects(createFilesystemModule().create({}), /no page file/,
+            'a volume handed no page file has nowhere to keep a write');
 
         const { keeper, space } = await pieceSpace(cacheSpace, { budget: 4 * PIECE_SIZE });
         const paged = createFilesystemModule();
