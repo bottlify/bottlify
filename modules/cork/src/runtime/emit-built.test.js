@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { formRegion } from '../region.js';
-import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
+import { emitBatch, relinkBatch } from './emit-built.js';
+import { keptEmitCache } from './kept.js';
 import { ownLayout } from './layout.js';
 
 const FEATURES = { simd: true, tailCalls: true, defaultNaNNegative: false };
@@ -16,6 +17,17 @@ const OPTIONS = { hash: true, place: true, trapPort: 0xb077, profileCalls: true 
 const FORM = { maxBlocks: 128, maxBytes: 8192, leafCalls: true };
 const BASE = 0x401000;
 const layout = ownLayout({ ramSize: 16 << 20, hashSlots: 1 << 16 });
+
+/** The functions kept over a space with room for all, as the run's cache keeps them. */
+const roomyCache = ()=>{
+    /** @type {Map<string, Uint8Array>} */
+    const bodies = new Map();
+    return keptEmitCache({
+        with: (name, read)=>(bodies.has(name) ? read(/** @type {Uint8Array} */ (bodies.get(name)))
+            : undefined),
+        put: (name, bytes)=>Boolean(bodies.set(name, bytes)),
+    });
+};
 
 /**
  * A relink of the regions at a benchmark program's first block starts, over a
@@ -66,7 +78,7 @@ test('a relink takes the functions a batch emitted before, the same bytes as emi
     + ' them again', ()=>{
     const relink = relinkOf('load-x87', 24);
     const fresh = relinkBatch(relink, layout, FEATURES, OPTIONS);
-    const cache = createEmitCache();
+    const cache = roomyCache();
     const first = relinkBatch(relink, layout, FEATURES, OPTIONS, cache);
     assert.equal(cache.hits, 0);
     assert.deepEqual(first.module, fresh.module);
@@ -86,7 +98,7 @@ test('a relink takes the functions a batch emitted before, the same bytes as emi
 
 test('a job that asks the emitter for anything else takes no other job\'s function', ()=>{
     const relink = relinkOf('game-x87', 6);
-    const cache = createEmitCache();
+    const cache = roomyCache();
     relinkBatch(relink, layout, FEATURES, OPTIONS, cache);
     const checked = { ...relink, jobs: relink.jobs.map(job=>({ ...job, checked: true })) };
     const kept = relinkBatch(checked, layout, FEATURES, OPTIONS, cache);
@@ -99,7 +111,7 @@ test('a job that asks the emitter for anything else takes no other job\'s functi
 test('a region whose bytes changed is formed again and answered changed, whatever the'
     + ' cache holds', ()=>{
     const relink = relinkOf('crc-x87', 4);
-    const cache = createEmitCache();
+    const cache = roomyCache();
     relinkBatch(relink, layout, FEATURES, OPTIONS, cache);
     const pages = relink.pages.map(([page, bytes])=>
         /** @type {[number, Uint8Array]} */ ([page, bytes.slice()]));
@@ -110,29 +122,13 @@ test('a region whose bytes changed is formed again and answered changed, whateve
     assert.deepEqual(changed.results[0], { ok: false, message: 'changed' });
 });
 
-test('the cache keeps the functions used last, within its size', ()=>{
-    const relink = relinkOf('load-x87', 40);
-    const whole = createEmitCache();
-    relinkBatch(relink, layout, FEATURES, OPTIONS, whole);
-    assert.equal(whole.kept.size, relink.jobs.length);
-    const cache = createEmitCache(whole.bytes >> 2);
-    relinkBatch(relink, layout, FEATURES, OPTIONS, cache);
-    assert.ok(cache.bytes <= cache.limit, `${cache.bytes} kept`);
-    assert.ok(cache.kept.size < relink.jobs.length, `${cache.kept.size} kept`);
-    // The last one emitted is still there, the first is not.
-    relinkBatch({ ...relink, jobs: relink.jobs.slice(-1) }, layout, FEATURES, OPTIONS, cache);
-    assert.equal(cache.hits, 1);
-    relinkBatch({ ...relink, jobs: relink.jobs.slice(0, 1) }, layout, FEATURES, OPTIONS, cache);
-    assert.equal(cache.hits, 1);
-});
-
 test('a batch of formed regions and a relink of the same share what was emitted', ()=>{
     const relink = relinkOf('game-x87', 6);
     const byPage = new Map(relink.pages);
     const read = (/** @type {number} */ address)=>byPage.get(address >>> 12)?.[address & 0xfff]
         ?? 0;
     const translatable = (/** @type {number} */ address)=>byPage.has(address >>> 12);
-    const cache = createEmitCache();
+    const cache = roomyCache();
     const jobs = relink.jobs.map(({ entry })=>({
         region: formRegion(read, entry, { ...FORM, translatable }), entryTop: 0,
     }));

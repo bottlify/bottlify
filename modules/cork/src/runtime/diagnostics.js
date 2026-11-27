@@ -806,9 +806,11 @@ export function createDiagnostics(state){
             translators: rt.translators.length,
             translatorsReady: rt.translators.filter(one=>one.ready).length,
             // Taken here and by this runtime's workers; the run's cache counts its bytes.
-            ...(rt.kept === null ? {} : { kept: {
-                hits: rt.emitCache.hits + rt.keptCounts.workerHits,
-                inlineHits: rt.emitCache.hits, handed: rt.keptCounts.handed } }),
+            kept: rt.emitCache === undefined
+                ? 'not kept: the host gave no run\'s cache (`kept`), so a relink emits every'
+                    + ' function again'
+                : { hits: rt.emitCache.hits + rt.keptCounts.workerHits,
+                    inlineHits: rt.emitCache.hits, handed: rt.keptCounts.handed },
             batchesOut: rt.translators.filter(one=>one.pending !== null).length,
         };
     };

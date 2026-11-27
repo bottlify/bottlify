@@ -36,13 +36,15 @@ const lockOf = name=>`bottlify-run:${name}`;
 /**
  * Opens a folder of its own for a run, or answers null where there is none to
  * be had for synchronous files: no origin file system, or a thread with no
- * synchronous access handles (a page's own thread).
+ * synchronous access handles (a page's own thread). One the origin has and
+ * refuses is null too, and said (`onFailure`): what the run lets go of from
+ * memory has nowhere to go.
  *
- * @param {{ root?: any }} [options]  `root`: the origin's file system by default;
- *     a test hands in its own
+ * @param {{ root?: any, onFailure?: (error: any) => void }} [options]  `root`: the
+ *     origin's file system by default; a test hands in its own
  * @returns {Promise<RunFolder | null>}
  */
-export async function openRunFolder({ root } = {}){
+export async function openRunFolder({ root, onFailure = ()=>{} } = {}){
     const nav = /** @type {any} */ (globalThis).navigator;
     let base = root;
     if (!base)
@@ -100,8 +102,9 @@ export async function openRunFolder({ root } = {}){
             },
         };
     }
-    catch {
+    catch (e){
         unlock();
+        onFailure(e);
         return null;
     }
 }

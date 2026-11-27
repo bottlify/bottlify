@@ -17,7 +17,6 @@
  */
 
 import { CallStack } from '../emit/region.js';
-import { createEmitCache } from './emit-built.js';
 import { keptEmitCache, putAll } from './kept.js';
 import { ANY_TOP, keyOf } from './entries.js';
 import { spansOf } from './summary.js';
@@ -147,11 +146,12 @@ export function createTranslators(state){
     /** The run's cache the host gives the functions emitted to (`KeptStore`): every
      * thread of the run reads them there in place, this one writes them. */
     const kept = settings.kept ?? null;
-    /** What emitting inline keeps for a relink to take again: the run's cache, or a cache
-     * of this thread's own where there is none (a worker keeps its own then too). */
     /** The functions translation workers took from the run's cache, and handed over to keep. */
     const keptCounts = { workerHits: 0, handed: 0 };
-    const emitCache = kept !== null ? keptEmitCache(kept.space) : createEmitCache();
+    /** What emitting inline keeps for a relink to take again: the run's cache, and nothing
+     * where the host gave none - a relink then emits every function again, which the
+     * diagnostics say (`kept`). */
+    const emitCache = kept !== null ? keptEmitCache(kept.space) : undefined;
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
         countTransfers: transfersCounted,
