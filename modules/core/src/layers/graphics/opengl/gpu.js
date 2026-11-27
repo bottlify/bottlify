@@ -65,6 +65,7 @@ import { createGlGeometry } from './gpu-geometry.js';
 import { TESS_DRAW_ENTRIES, createGlTessellation } from './gpu-tessellation.js';
 import { createGlCompute, createGlMemory } from './gpu-compute.js';
 import { IMAGE_FORMATS } from './glsl-storage.js';
+import { KEPT_FROM, createTexelStore } from '../internal/texel-store.js';
 
 /** The formats an image unit binds a texture's storage in: WebGPU's storage formats. */
 const IMAGE_STORAGE = new Set(IMAGE_FORMATS.map(([, , format])=>format));
@@ -128,16 +129,6 @@ const BOUND_TARGETS = Object.freeze({
 /** @type {readonly UniformBlockBinding[]} */
 const NO_BLOCKS = Object.freeze([]);
 
-/**
- * Bytes of a level's texels or blocks below which they are not moved into the
- * run's cache (`spill`): the cache's unit of room. A body there holds at least
- * a unit while it is hot (4 KiB, Cellar's buddy block), and costs about 0.6 KB
- * here for its name and accessor and 90 bytes of the cache's index: a smaller
- * level would hold more of the cache than it lets go of here. A mip chain's
- * levels are each a quarter of the one above, so its one level from a unit up
- * to four holds three quarters of the bytes of its levels under four units.
- */
-const SPILL_FROM = 4 * 1024;
 
 /** The formats every drawable is backed by. */
 const COLOUR_FORMAT = 'bgra8unorm';
@@ -271,10 +262,9 @@ const ASTC_FORMATS = Object.freeze({
  * @property {boolean} [compressedTextures]  the device has `texture-compression-bc`:
  *           an S3TC texture whose every level kept its blocks travels as
  *           blocks instead of the texels the context decoded them into
- * @property {{ space: import('../../cache/module.js').CacheSpace,
- *     ask: (key: string, length: number) => Promise<boolean>,
- *     put: (key: string, bytes: Uint8Array) => boolean } | null} [texelCache]  the run's
- *           cache (`channelSpace`), where texels no draw has needed wait (`spill`)
+ * @property {import('../internal/texel-store.js').TexelCache | null} [texelCache]  the
+ *           root's names in the run's cache (`channelSpace`), where texels no draw has
+ *           needed wait (`spill`)
  * @property {boolean} [astcTextures]  the device has `texture-compression-astc` and
  *           no BC: a DXT1 texture whose every level kept its blocks, none of
  *           them with a texel of the fourth colour, travels as ASTC 4x4 blocks
@@ -535,36 +525,44 @@ export function createGpuRenderer(services){
     const BufferUsage = backend.BufferUsage;
     const TextureUsage = backend.TextureUsage;
     const liveDump = services.liveDump ?? null;
-    /** The run's cache, where texels no draw has needed yet wait (`spill`). */
-    const texelCache = services.texelCache ?? null;
     /**
-     * What of a level can wait in the run's cache (`spill`): its texels, and
-     * the blocks of an S3TC level kept compressed (a device without them
-     * decodes them at the upload). `bytesOf` names the bytes a value holds and
-     * `made` makes the value again from them; `spilling` holds the levels asked
-     * room for and not written yet, `names` the cache name a spilled level's
-     * bytes wait under.
+     * Where texels and blocks no draw has needed yet wait (`spill`): the
+     * device's texel store, over the run's cache where the root has its names
+     * there; without them a move is no move, and nothing is spilled.
+     */
+    const texelStore = createTexelStore({ cache: services.texelCache ?? null,
+        divergence: (detail, severity)=>services.divergence?.(`a texture's ${detail}: it draws`
+            + ' blank', severity) });
+    /**
+     * What of a level can wait in the store (`spill`): its texels, and the
+     * blocks of an S3TC level kept compressed (a device without them decodes
+     * them at the upload). `bytesOf` names the bytes a value holds and `made`
+     * makes the value again from them; `names` the key a level's bytes wait
+     * under.
      *
      * @typedef {{ property: 'texels' | 'compressed',
      *     bytesOf: (value: any) => Uint8Array | null,
-     *     made: (bytes: Uint8Array, format: number) => any, spilling: WeakSet<object>,
+     *     made: (bytes: Uint8Array, format: number) => any,
      *     names: WeakMap<object, string> }} Spillable
      */
     /** @type {readonly Spillable[]} */
     const spillable = [
         { property: 'texels', bytesOf: value=>(value instanceof Uint8Array ? value : null),
-            made: bytes=>bytes, spilling: new WeakSet(), names: new WeakMap() },
+            made: bytes=>bytes, names: new WeakMap() },
         { property: 'compressed',
             bytesOf: value=>(value?.bytes instanceof Uint8Array ? value.bytes : null),
-            made: (bytes, format)=>({ format, bytes }), spilling: new WeakSet(),
-            names: new WeakMap() },
+            made: (bytes, format)=>({ format, bytes }), names: new WeakMap() },
     ];
+    const [spilledTexels] = spillable;
+    // A key a level, never the texture's name and level: a name the program
+    // deleted and made again would meet the bytes of the one before it until
+    // the next `spill` let them go.
     let spillNames = 0;
-    const spills = { levels: 0, bytes: 0, blockBytes: 0, back: 0, backBytes: 0, refused: 0,
-        lost: 0, forgotten: 0 };
+    const spills = { levels: 0, bytes: 0, blockBytes: 0, back: 0, backBytes: 0, inPlace: 0,
+        forgotten: 0 };
     /**
-     * The texture each name waiting in the cache is a level of: a level of
-     * one the program deleted is read by nothing, and its name is let go of at
+     * The texture each key waiting in the store is a level of: a level of
+     * one the program deleted is read by nothing, and its key is let go of at
      * the next `spill`, which is handed the textures that are alive.
      *
      * @type {Map<string, object>}
@@ -574,60 +572,52 @@ export function createGpuRenderer(services){
     const plain = (image, property, value)=>Object.defineProperty(image, property,
         { value, writable: true, configurable: true, enumerable: true });
     /**
-     * A level whose bytes of one kind wait in the run's cache under `name`:
-     * the property reads them back (`takeBack`) and a write over it drops them.
+     * A level whose bytes of one kind wait in the store under `key`: the
+     * property takes them back (`takeBack`) and a write over it drops them.
      * Made apart from `spillLevel`, so its accessors hold no reference to the
      * bytes they let go of.
      *
-     * @param {Spillable} kind @param {object} texture @param {object} image @param {string} name
-     * @param {number} length @param {number} format  an S3TC level's format
+     * @param {Spillable} kind @param {object} texture @param {object} image @param {string} key
+     * @param {number} format  an S3TC level's format
      */
-    const waiting = (kind, texture, image, name, length, format)=>{
-        kind.names.set(image, name);
-        spilledOf.set(name, texture);
+    const waiting = (kind, texture, image, key, format)=>{
+        kind.names.set(image, key);
+        spilledOf.set(key, texture);
         Object.defineProperty(image, kind.property, {
             configurable: true, enumerable: true,
             get(){
-                return takeBack(kind, image, name, length, format);
+                return takeBack(kind, image, key, format);
             },
             set(value){
                 plain(image, kind.property, value);
                 kind.names.delete(image);
-                spilledOf.delete(name);
-                texelCache?.space.drop(name);
+                spilledOf.delete(key);
+                texelStore.drop(key);
             },
         });
     };
     /**
-     * A spilled level's bytes back from the cache, the level plain again:
-     * brought back from the disk first where they went there.
+     * A waiting level's bytes back as the level's own, the level plain again:
+     * a reader through the property may write them in place, so they are
+     * the level's and not a view of the cache (`TexelStore.take`).
      *
-     * @param {Spillable} kind @param {object} image @param {string} name
-     * @param {number} length @param {number} format
+     * @param {Spillable} kind @param {object} image @param {string} key @param {number} format
      */
-    const takeBack = (kind, image, name, length, format)=>{
-        let bytes = texelCache?.space.with(name, (/** @type {Uint8Array} */ body)=>body.slice(),
-            { wait: true }) ?? null;
-        if (bytes === null)
-        {
-            spills.lost++;
-            services.divergence?.('a texture\'s texels kept in the run\'s cache could not be read'
-                + ' back: it draws blank', 'loss');
-            bytes = new Uint8Array(length);
-        }
-        const value = kind.made(bytes, format);
+    const takeBack = (kind, image, key, format)=>{
+        const length = texelStore.lengthOf(key);
+        const value = kind.made(texelStore.take(key) ?? new Uint8Array(length), format);
         plain(image, kind.property, value);
         kind.names.delete(image);
-        spilledOf.delete(name);
-        texelCache?.space.drop(name);
+        spilledOf.delete(key);
         spills.back++;
         spills.backBytes += length;
         return value;
     };
     /**
-     * One level's bytes of one kind moved into the run's cache (`spill`), if
-     * they are a plain value large enough: room is asked for without waiting,
-     * and a level changed or drawn meanwhile keeps its own.
+     * One level's bytes of one kind handed to the store (`spill`), if they
+     * are a plain value large enough: they move into the run's cache once it
+     * grants their room, and a write or a read meanwhile meets them in the
+     * store.
      *
      * @param {Spillable} kind @param {any} texture @param {object} image
      */
@@ -635,38 +625,16 @@ export function createGpuRenderer(services){
         const held = Object.getOwnPropertyDescriptor(image, kind.property);
         const was = held && 'value' in held ? held.value : null;
         const bytes = kind.bytesOf(was);
-        if (texelCache === null || bytes === null || bytes.byteLength < SPILL_FROM
-            || kind.spilling.has(image))
+        if (bytes === null || bytes.byteLength < KEPT_FROM)
         {
             return;
         }
-        const cache = texelCache;
-        kind.spilling.add(image);
-        const name = String(++spillNames);
-        cache.ask(name, bytes.byteLength).then((/** @type {boolean} */ granted)=>{
-            kind.spilling.delete(image);
-            if (!granted)
-            {
-                spills.refused++;
-                return;
-            }
-            // Granted room is taken whatever happened since, so it is not
-            // left half made; a level changed or drawn since keeps its own.
-            cache.put(name, bytes);
-            const now = Object.getOwnPropertyDescriptor(image, kind.property);
-            if (now?.value !== was || textures.has(texture))
-            {
-                cache.space.drop(name);
-                return;
-            }
-            spills.levels++;
-            spills.bytes += bytes.byteLength;
-            spills.blockBytes += kind.property === 'compressed' ? bytes.byteLength : 0;
-            waiting(kind, texture, image, name, bytes.byteLength, was?.format ?? 0);
-        }, ()=>{
-            kind.spilling.delete(image);
-            spills.refused++;
-        });
+        const key = String(++spillNames);
+        texelStore.put(key, bytes);
+        spills.levels++;
+        spills.bytes += bytes.byteLength;
+        spills.blockBytes += kind.property === 'compressed' ? bytes.byteLength : 0;
+        waiting(kind, texture, image, key, was?.format ?? 0);
     };
     // Whether this frame is written down, and which textures' draws it drops:
     // what the run asked at its start, or what a page asked of the running
@@ -1537,13 +1505,14 @@ export function createGpuRenderer(services){
      * the level itself is a full-width buffer.
      *
      * @param {import('./objects.js').TextureLevel} image
+     * @param {Uint8Array | null | undefined} texels  the level's, read once: a compressed
+     *     level on a device decodes at each read, and a level waiting in the store is read
+     *     there in place
      * @param {import('./objects.js').DirtyRect} rect
      * @param {boolean} own  bytes of their own, never a view of the level
      * @returns {Uint8Array}
      */
-    const sliceRect = (image, rect, own)=>{
-        // Read once: a compressed level on a device decodes at each read.
-        const texels = image.texels;
+    const sliceRect = (image, texels, rect, own)=>{
         if (!texels)
         {
             // A level given a shape and no data -- what a framebuffer object
@@ -2003,6 +1972,8 @@ export function createGpuRenderer(services){
             levels++;
         }
         const bcFormat = bcFormatOf(texture, levels, cube);
+        // Whether the levels' texels and blocks are let go of once uploaded (below).
+        const letsGo = !bcFormat && !fixedDump && probeSpec === null;
         const format = bcFormat ?? TEXTURE_FORMAT;
         let record = textures.get(texture);
         /** The copy a changed shape replaces: what it holds of a let-go level is carried over. */
@@ -2133,20 +2104,35 @@ export function createGpuRenderer(services){
                 stats.decoded.blockBytes += image.compressed.bytes.byteLength;
                 stats.decoded.texelBytes += image.width * image.height * 4;
             }
-            for (const area of areasOf(rect, image))
+            /** @param {Uint8Array | null | undefined} texels */
+            const uploadAreas = texels=>{
+                for (const area of areasOf(rect, image))
+                {
+                    upload({
+                        texture: record.gpu.texture,
+                        format: TEXTURE_FORMAT,
+                        mipLevel: level,
+                        width: area.width,
+                        height: area.height,
+                        origin: { x: area.x, y: area.y, z: face },
+                        // A command keeps bytes of its own: rows taken whole
+                        // would be a view of the level the program goes on
+                        // writing, or of the store's memory.
+                        data: sliceRect(image, texels, area, ordered),
+                    });
+                }
+            };
+            // A level waiting in the store that is let go of below goes up
+            // from where it waits: taken back, it would be copied out only to
+            // be let go of.
+            const waits = letsGo ? spilledTexels.names.get(image) : undefined;
+            if (waits === undefined)
             {
-                upload({
-                    texture: record.gpu.texture,
-                    format: TEXTURE_FORMAT,
-                    mipLevel: level,
-                    width: area.width,
-                    height: area.height,
-                    origin: { x: area.x, y: area.y, z: face },
-                    // A command keeps bytes of its own: rows taken whole
-                    // would be a view of the level the program goes on writing.
-                    data: sliceRect(image, area, ordered),
-                });
+                uploadAreas(image.texels);
+                continue;
             }
+            texelStore.with(waits, uploadAreas);
+            spills.inPlace++;
         }
         texture.dirty.clear();
         record.usedIn = recording.id;
@@ -2160,12 +2146,15 @@ export function createGpuRenderer(services){
         // go the same way (the Doom 3 demo's drawn textures: 18 MB): the
         // device holds what they decode to. A run that dumps or probes its
         // draws from its start keeps them for the dump's census.
-        if (!bcFormat && !fixedDump && probeSpec === null)
+        if (letsGo)
         {
             for (const [key, image] of texture.levels)
             {
                 const level = key % FACE_STRIDE;
-                const texels = Object.getOwnPropertyDescriptor(image, 'texels')?.value;
+                const waits = spilledTexels.names.get(image);
+                const texels = waits === undefined
+                    ? Object.getOwnPropertyDescriptor(image, 'texels')?.value?.byteLength ?? 0
+                    : texelStore.lengthOf(waits);
                 const blocks = Object.getOwnPropertyDescriptor(image, 'compressed')?.value;
                 if (level >= levels || !texels && !blocks)
                 {
@@ -2173,7 +2162,7 @@ export function createGpuRenderer(services){
                 }
                 if (texels)
                 {
-                    stats.letGo += texels.byteLength;
+                    stats.letGo += texels;
                     image.texels = null;
                 }
                 if (blocks)
@@ -6123,29 +6112,30 @@ export function createGpuRenderer(services){
 
         /**
          * The texels of the given textures that no draw has needed, and the
-         * blocks of those kept compressed, moved into the run's cache: a
-         * level's bytes wait there under a name, and their first reader takes
-         * them back as they were (the property reads them and is a plain value
-         * again), so a write into the level in place, a decode, an upload or a
-         * read-back meets the same bytes. Room is asked for without waiting; a level
-         * changed meanwhile stays here. Small levels stay: a name costs more.
+         * blocks of those kept compressed, handed to the texel store, which
+         * moves them into the run's cache: a level's bytes wait there under a
+         * key, and their first reader through the property takes them back as
+         * they were (the property is a plain value again), so a write into the
+         * level in place, a decode or a read-back meets the same bytes; the
+         * first draw's upload of a level it then lets go of reads them in
+         * place. Small levels stay: a key costs more.
          * `all` is every texture alive: the levels waiting there of one not
          * among them, which the program deleted, are let go of.
          *
          * @param {Iterable<any>} all
          */
         spill(all){
-            if (texelCache === null)
+            if (!texelStore.cached)
             {
                 return;
             }
             const alive = new Set(all);
-            for (const [name, texture] of spilledOf)
+            for (const [key, texture] of spilledOf)
             {
                 if (!alive.has(texture))
                 {
-                    spilledOf.delete(name);
-                    texelCache.space.drop(name);
+                    spilledOf.delete(key);
+                    texelStore.drop(key);
                     spills.forgotten++;
                 }
             }
@@ -6218,7 +6208,7 @@ export function createGpuRenderer(services){
         diagnostics: ()=>({
             ...stats,
             // Texels and blocks moved into the run's cache while undrawn, and taken back.
-            spills: texelCache === null ? 'no cache' : { ...spills },
+            spills: texelStore.cached ? { ...spills, store: texelStore.figures() } : 'no cache',
             resident: pipelines.size,
             samplers: samplers.size,
             unflushed: unflushed.size,

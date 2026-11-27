@@ -252,8 +252,10 @@ function queuedBytes(gpu, at, length){
  *
  * A draw's texture is the reference surface of the texture its stage binds
  * when the frame drew or copied into that texture, and the texels the queue
- * carried for it otherwise. An upload command carries its own texels; a copy
- * moves rows between two surfaces.
+ * carried for it otherwise. An upload command's texels are what the queue
+ * carried for it: the staging rows its replay wrote and copied into the
+ * texture (the store that held them let them go with the frame); a copy moves
+ * rows between two surfaces.
  *
  * @param {ReturnType<typeof harness>} h
  * @returns {{ of: (surface: any) => any, frame: any[] }}
@@ -287,6 +289,42 @@ function rasterise(h){
     /** @type {any} */
     let target = null;
     const frame = h.device.diagnostics().lastFrame;
+    /**
+     * The staged copies into each texture, from the last: the frame's uploads
+     * into it are the last of them, in the frame's order.
+     *
+     * @type {Map<any, any[]>}
+     */
+    const staged = new Map();
+    for (const command of frame)
+    {
+        if (command.kind === 'upload')
+        {
+            const texture = command.surface.texture;
+            if (!staged.has(texture))
+            {
+                const copies = h.gpu.of('copyBufferToTexture').filter((/** @type {any} */ copy)=>
+                    copy.destination.texture === texture);
+                const uploads = frame.filter((/** @type {any} */ one)=>one.kind === 'upload'
+                    && one.surface.texture === texture).length;
+                staged.set(texture, copies.slice(copies.length - uploads));
+            }
+        }
+    }
+    /** @param {any} command an upload's @returns {Uint8Array} its texels, rows tight */
+    const uploadedBy = command=>{
+        const copy = /** @type {any[]} */ (staged.get(command.surface.texture)).shift();
+        const written = h.gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer === copy.source.buffer).at(-1);
+        const row = command.width * 4;
+        const tight = new Uint8Array(row * command.height);
+        for (let at = 0; at < command.height; at++)
+        {
+            tight.set(written.bytes.subarray(at * copy.source.bytesPerRow,
+                at * copy.source.bytesPerRow + row), at * row);
+        }
+        return tight;
+    };
     for (const command of frame)
     {
         if (command.kind === 'pass')
@@ -305,7 +343,7 @@ function rasterise(h){
         {
             const into = of(command.surface);
             assert.equal(command.mipLevel, 0, 'the evaluator keeps top levels only');
-            into.bytes.set(command.texels.subarray(0, into.bytes.length));
+            into.bytes.set(uploadedBy(command).subarray(0, into.bytes.length));
             continue;
         }
         if (command.kind === 'copy')

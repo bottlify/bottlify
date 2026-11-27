@@ -92,11 +92,12 @@ async function run(seed, cached){
     if (texels)
     {
         renderer.spill(all());
-        for (let turns = 0; turns < 1000 && /** @type {any} */ (renderer.diagnostics()).spills.levels < count; turns++)
+        const moved = ()=>/** @type {any} */ (renderer.diagnostics()).spills.store.moved;
+        for (let turns = 0; turns < 1000 && moved() < count; turns++)
         {
             await turn();
         }
-        assert.equal(/** @type {any} */ (renderer.diagnostics()).spills.levels, count, 'every undrawn level moved');
+        assert.equal(moved(), count, 'every undrawn level moved');
         const held = renderer.heldTexels(all());
         assert.equal(held.undrawnBytes, 0, 'none of their texels left on this thread');
         assert.equal(held.undrawnBlockBytes, 0, 'none of their blocks left on this thread');
@@ -152,6 +153,7 @@ async function run(seed, cached){
 test('texels and blocks no draw needed wait in the run\'s cache and come back as they were',
     async()=>{
         let blockBytes = 0;
+        let inPlace = 0;
         for (const seed of [1, 2, 3, 4, 5, 6])
         {
             const plain = await run(seed, false);
@@ -160,14 +162,18 @@ test('texels and blocks no draw needed wait in the run\'s cache and come back as
             assert.deepEqual(cached.uploads, plain.uploads, `seed ${seed}`);
             assert.ok(plain.readBacks.length > 0, `seed ${seed}: levels read back`);
             assert.deepEqual(cached.readBacks, plain.readBacks, `seed ${seed}: read back as made`);
-            assert.equal(cached.figures.spills.back, cached.figures.spills.levels,
-                `seed ${seed}: every level taken back at its first draw`);
-            assert.equal(cached.figures.spills.lost, 0);
+            // Taken back by a read before the draw or by a write into it in
+            // place, or read in place by the draw's upload that lets it go.
+            assert.equal(cached.figures.spills.back + cached.figures.spills.inPlace,
+                cached.figures.spills.levels, `seed ${seed}: every level read at its first draw`);
+            assert.equal(cached.figures.spills.store.lost, 0);
+            inPlace += cached.figures.spills.inPlace;
             assert.equal(cached.left, 0, `seed ${seed}: no body left in the cache`);
             assert.equal(plain.figures.spills, 'no cache');
             blockBytes += cached.figures.spills.blockBytes;
         }
         assert.ok(blockBytes > 0, 'S3TC blocks among what waited');
+        assert.ok(inPlace > 0, 'texels uploaded from where they waited, not taken back');
     });
 
 test('a level\'s texels and blocks that wait in the run\'s cache are let go here', async()=>{
@@ -204,7 +210,7 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
     const texelsHeld = new WeakRef(own(levelOf(plainName), 'texels'));
     const blocksHeld = new WeakRef(own(levelOf(blocksName), 'compressed').bytes);
     renderer.spill([...objects.values()]);
-    const moved = ()=>/** @type {any} */ (renderer.diagnostics()).spills.levels;
+    const moved = ()=>/** @type {any} */ (renderer.diagnostics()).spills.store.moved;
     for (let turns = 0; turns < 1000 && moved() < 2; turns++)
     {
         await turn();
@@ -258,7 +264,8 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
     const all = [...gl.shareGroup.textures.objects.values()];
     renderer.spill(all);
     const figures = ()=>/** @type {any} */ (renderer.diagnostics()).spills;
-    for (let turns = 0; turns < 1000 && figures().levels + figures().refused < 1; turns++)
+    for (let turns = 0; turns < 1000 && figures().store.moved + figures().store.refused < 1;
+        turns++)
     {
         await turn();
     }
@@ -266,7 +273,7 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
     {
         await turn();
     }
-    const moved = { levels: figures().levels, bytes: figures().bytes };
+    const moved = { levels: figures().store.moved, bytes: figures().store.movedBytes };
     const back = gl.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE)
         .every((/** @type {number} */ byte)=>byte === 1);
     runCache.close();
@@ -300,7 +307,7 @@ test('a texture the program deleted gives back what of it waited in the run\'s c
     }
     const all = ()=>[...gl.shareGroup.textures.objects.values()];
     renderer.spill(all());
-    const moved = ()=>/** @type {any} */ (renderer.diagnostics()).spills.levels;
+    const moved = ()=>/** @type {any} */ (renderer.diagnostics()).spills.store.moved;
     for (let turns = 0; turns < 1000 && moved() < 3; turns++)
     {
         await turn();

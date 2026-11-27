@@ -688,7 +688,7 @@ export function createGraphicsModule(){
              * @param {any} services
              */
             const direct3d = (name, factory, services)=>(remote
-                ? remote.root(name, factory, services)
+                ? remote.root(name, factory, services, cache)
                 : factory(services));
             /**
              * Direct3D 10's root, drawn here or in the graphics worker.

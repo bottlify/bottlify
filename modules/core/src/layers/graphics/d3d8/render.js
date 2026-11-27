@@ -60,6 +60,7 @@ import {
 import { D3DDECLUSAGE, MAX_STREAMS } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../../media/internal/s3tc.js';
+import { createTexelStore } from '../internal/texel-store.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
 import { convertTexels } from '../d3d10/blocks.js';
 import { storedToHalves } from '../d3d9/half.js';
@@ -3298,6 +3299,10 @@ const CLEAR_STRIDE = 20;
  * @property {boolean} [keepConstantBlocks]  Whether a shader draw's integer and
  *     boolean blocks are the last draw's while their files hold still (the
  *     default) or taken again for every draw: the gate's second path.
+ * @property {import('../internal/texel-store.js').TexelCache | null} [texelCache]
+ *     The root's names in the run's cache (`channelSpace`), where the texels of an
+ *     upload that waits for its frame's replay are kept (`uploadTexels`); none keeps
+ *     them in plain memory.
  */
 
 /** D3DUSAGE_DYNAMIC: a buffer the program keeps writing. */
@@ -3400,6 +3405,18 @@ export function createRenderer(options){
     const maxDrawsNow = ()=>((liveDump?.maxDraws ?? -1) >= 0
         ? /** @type {number} */ (liveDump?.maxDraws) : fixedMaxDraws);
     const divergence = options.divergence ?? null;
+    /**
+     * Where an upload that waits in its frame's order keeps its texels until
+     * the frame is let go of (`releaseFrame`): the texels as they stood when
+     * it was recorded, the only copy of them, since the guest may write the
+     * level again before the replay. An upload that goes to the queue at once
+     * reads guest memory, or bytes made for it, and keeps nothing.
+     */
+    const texelStore = createTexelStore({ cache: options.texelCache ?? null,
+        divergence: (detail, severity)=>divergence?.('Direct3D', `an upload's ${detail}`,
+            severity) });
+    /** The key of the next upload kept in the store: each upload its own. */
+    let keptUploads = 0;
     // One id or several, comma-separated: a picture painted by a family of
     // draws is only removed by removing the family.
     const fixedSkips = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
@@ -5722,7 +5739,13 @@ export function createRenderer(options){
     const uploadTexels = (surface, upload, ordered)=>{
         if (ordered)
         {
-            ensureFrame().commands.push({ kind: 'upload', surface, ...upload });
+            const frame = ensureFrame();
+            const key = String(++keptUploads);
+            // The texels are the caller's own when ordered: handed over, not copied,
+            // and the command holds only their key.
+            texelStore.put(key, upload.texels);
+            frame.texels.push(key);
+            frame.commands.push({ kind: 'upload', surface, ...upload, texels: null, key });
             return;
         }
         backend.uploadTexture({
@@ -6141,6 +6164,20 @@ export function createRenderer(options){
     /** Arenas of frames already replayed, for the next recording to take. @type {any[]} */
     const arenas = [];
     /**
+     * A frame replayed for the last time: its arena for the next recording,
+     * and the texels its uploads kept in the store let go of.
+     *
+     * @param {any} recorded
+     */
+    const releaseFrame = recorded=>{
+        arenas.push(recorded.arena);
+        for (const key of recorded.texels)
+        {
+            texelStore.drop(key);
+        }
+        recorded.texels.length = 0;
+    };
+    /**
      * What one frame drew, as it is being recorded: closed out at present.
      *
      * `textures` counts the textures sampled, each once (`countedIn`), and a
@@ -6256,6 +6293,8 @@ export function createRenderer(options){
             arena.reset();
             recording = {
                 commands: [], pipelines: [], pass: null, viewport: null, scissor: '', arena,
+                // The keys of its uploads' texels in the store, let go of with the arena.
+                texels: /** @type {string[]} */ ([]),
                 drawsTaken: 0, cut: /** @type {number | undefined} */ (undefined), parked: false,
             };
         }
@@ -11500,7 +11539,7 @@ export function createRenderer(options){
             {
                 if (lastShown?.recorded.parked)
                 {
-                    arenas.push(lastShown.recorded.arena);
+                    releaseFrame(lastShown.recorded);
                 }
                 lastShown = { recorded, surface };
                 liveDump.replayLast = replayLast;
@@ -11667,6 +11706,8 @@ export function createRenderer(options){
                     ms: Math.round(counters.pipelineWaits.ms),
                     worst: Math.round(counters.pipelineWaits.worst) },
                 ...verify ? { verifyDynamic: verify.figures() } : {},
+                // What the uploads waiting for their frames keep, and where.
+                keptTexels: texelStore.figures(),
                 statesNamed: counters.statesNamed,
                 programs: programs.stats(),
                 // The fixed-function pipelines the backend built, and the GPU's
@@ -11947,7 +11988,7 @@ export function createRenderer(options){
                 }
                 else
                 {
-                    arenas.push(recorded.arena);
+                    releaseFrame(recorded);
                 }
             }
             // Ended whatever happened. One object owns the command encoder and
@@ -12309,18 +12350,27 @@ export function createRenderer(options){
             if (command.kind === 'upload')
             {
                 giveBack();
-                backend.uploadTexture({
+                // The frame holds its uploads' keys until it is let go of: one
+                // missing is the frame's texels lost, not an upload to skip.
+                if (!texelStore.has(command.key))
+                {
+                    divergence?.('Direct3D', 'an upload\'s texels were let go of before its'
+                        + ' frame was replayed: the level keeps what it held', 'loss');
+                }
+                // Read where the store keeps them: the staging copy is made
+                // before the call returns.
+                texelStore.with(command.key, data=>backend.uploadTexture({
                     texture: command.surface.texture,
                     format: command.format,
                     mipLevel: command.mipLevel,
                     width: command.width,
                     height: command.height,
-                    data: command.texels,
+                    data,
                     staging: true,
                     ...(command.layer || command.x || command.y ? { origin: { x: command.x ?? 0,
                         y: command.y ?? 0, z: command.layer ?? 0 } } : {}),
                     ...(command.depth ? { depthOrArrayLayers: command.depth } : {}),
-                });
+                }));
                 pass = null;
                 continue;
             }

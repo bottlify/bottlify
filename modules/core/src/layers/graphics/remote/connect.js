@@ -30,6 +30,12 @@ import { recordedDirect3D10 } from './d3d10.js';
  */
 const BATCH_GAP_MS = 1;
 
+/**
+ * The roots whose worker side keeps texels past a call (`internal/texel-store.js`),
+ * each under names of its own in the run's cache.
+ */
+const KEEPS_TEXELS = new Set(['opengl', 'd3d8', 'd3d9']);
+
 const USAGE = { COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04, RENDER_ATTACHMENT: 0x10 };
 
 /**
@@ -521,7 +527,9 @@ export function connectGraphicsWorker(options){
          * @param {string} api @param {any} factory @param {any} services
          * @param {{ join: (post: (message: any) => void) => any,
          *     serve: import('../../cache/module.js').Serve } | null} [cache]  the run's cache,
-         *     which an OpenGL root's worker side keeps idle texels in, names of its own
+         *     which the worker side of a root that keeps texels (OpenGL's idle levels,
+         *     Direct3D 8 and 9's uploads waiting for their frame) keeps them in, names of
+         *     its own
          */
         root(api, factory, services, cache = null){
             // Numbered across every connection on this thread's worker, as
@@ -534,7 +542,7 @@ export function connectGraphicsWorker(options){
             // reach the worker's side of the root by message, which carries
             // memory as a ring cannot. The root is the owner of its texels'
             // names, let go of when it goes.
-            const served = api === 'opengl' ? cache?.serve('texels') ?? null : null;
+            const served = KEEPS_TEXELS.has(api) ? cache?.serve('texels') ?? null : null;
             const joined = served === null ? null
                 : cache?.join((/** @type {any} */ message)=>worker.postMessage({ type: 'cache',
                     root: id, message })) ?? null;

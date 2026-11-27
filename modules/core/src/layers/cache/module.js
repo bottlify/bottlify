@@ -412,6 +412,22 @@ export function channelSpace(joined, { channel, prefix }){
         },
         /** @param {string} key @param {Uint8Array} bytes */
         put: (key, bytes)=>space.put(key, bytes),
+        /**
+         * Room granted for `key` (`ask`) let go of unwritten, where what it was
+         * asked for went before it came: taken as a reserve takes it and
+         * abandoned, so the keeper has it back at its next sweep rather than
+         * at the owner's end, and nothing is written into it to be dropped.
+         *
+         * @param {string} key @param {number} length
+         */
+        forgo: (key, length)=>{
+            const whole = `${prefix}${key}`;
+            if (granted.has(whole) && reader.reserve(whole, length,
+                { onlyCopy: true, disk: 'run' }) !== null)
+            {
+                reader.abandon(whole);
+            }
+        },
         adopt: (/** @type {any} */ message)=>{
             reader.adopt(message);
             if (message?.segment !== undefined && message.buffer)
