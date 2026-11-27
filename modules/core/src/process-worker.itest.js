@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createApp } from './app.js';
 import { READ_AHEAD_BYTES } from './process/bundle-mount.js';
+import { ARENA_BYTES } from './layers/audio/output/mix.js';
 import { writeBundle } from './bundle-node.js';
 import { Worker } from 'node:worker_threads';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
@@ -402,12 +403,13 @@ test('a child in a worker of its own mixes on the run\'s table in a span its par
     app.on('process-started', ()=>parentFree.push(arenaFree()));
     app.on('process-resumed', (/** @type {any} */ event)=>childLayers.push(event.diagnostics));
     assert.equal(await app.run({ timeoutMs: 90_000 }), 0);
-    assert.deepEqual(parentFree, [8 << 20, 8 << 20],
-        'the system lent the program eight of its sixteen MiB, and nothing more for its child');
+    // The system lends the program 8 MiB of its arena, whatever the arena's size.
+    assert.deepEqual(parentFree, [ARENA_BYTES - (8 << 20), ARENA_BYTES - (8 << 20)],
+        'the system lent the program eight MiB of its arena, and nothing more for its child');
     assert.equal(childLayers[0]?.find((/** @type {any} */ layer)=>layer.name === 'audio')
         ?.metrics.arenaFree, 4 << 20,
     'the child mixed in four of the program\'s eight, on the run\'s table');
-    assert.equal(arenaFree(), 16 << 20, 'all given back once both were gone');
+    assert.equal(arenaFree(), ARENA_BYTES, 'all given back once both were gone');
 });
 
 for (const where of ['in its own place', 'in a worker of its own'])
