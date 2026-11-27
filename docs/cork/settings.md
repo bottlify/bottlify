@@ -22,7 +22,7 @@ page or the core's `EngineConfig` parts from it.
 | `worker` | on where `Worker` exists, unless `feed` is `'slice'` | Emit and compile in translation workers; `false` translates on the calling thread. |
 | `workerUrl` | beside the runtime | Where `translator.worker.js` is, when a bundler moves it. |
 | `translators` | 1 | Workers the runtime opens itself; 0 when a host's pool lends them. |
-| `kept` | none | The run's cache the functions emitted are kept in (`KeptStore`), read in place by every thread of the run; absent, each thread keeps its own. |
+| `kept` | none | The run's cache the functions emitted are kept in (`KeptStore`), read in place by every thread of the run; absent, none is kept and a relink emits each again. |
 | `sharedCode` | none | Where the process's record of code shared between its executors lies and which executor this runtime is, when other executors share its page flags. |
 | `doorbell` | none | The words a translation worker rings after it answers: the count of answers posted and the bell the engine thread sleeps on, its count followed by the count of the waits asleep on it. |
 | `tablesZeroed` | `false` | The host made the tables zero itself (a memory just made, or zeroed where they lie): the entry hash is not cleared at the start, which made all of it resident. |

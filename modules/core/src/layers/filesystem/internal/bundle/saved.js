@@ -35,10 +35,25 @@ export const blockCacheName = (id, fingerprint)=>`${id}-${fingerprint}`;
 export const fileNameOf = name=>name.replace(/[^A-Za-z0-9._-]/g, '_');
 
 /**
+ * A file or folder the origin does not have is a miss; any other refusal (a
+ * security error, a lock, a broken file system) is not, and goes to the caller.
+ *
+ * @param {any} error @returns {null}
+ */
+const notFound = error=>{
+    if (error?.name === 'NotFoundError')
+    {
+        return null;
+    }
+    throw error;
+};
+
+/**
  * The bodies a keeper's disk holds as its last saved index names them, read
  * without opening anything for writing (a page asking, the engine elsewhere):
  * each body's pack and place, by name, those past their pack's end left out.
- * Null where the bundle has no directory or no index.
+ * Null where the bundle has no directory or no index; an error of the origin's
+ * other than a file not found rejects.
  *
  * Cellar reads its index (`readSaved`); `cache.test.js` saves one with
  * Cellar's own keeper and reads it back here.
@@ -50,22 +65,13 @@ export const fileNameOf = name=>name.replace(/[^A-Za-z0-9._-]/g, '_');
  */
 export async function savedBlocks(root, name){
     /** @param {any} directory @param {string} file @returns {Promise<Blob | null>} */
-    const fileOf = async(directory, file)=>{
-        try
-        {
-            return await (await directory.getFileHandle(file)).getFile();
-        }
-        catch {
-            return null;
-        }
-    };
-    let directory;
-    try
+    const fileOf = (directory, file)=>directory.getFileHandle(file)
+        .then((/** @type {any} */ handle)=>handle.getFile()).catch(notFound);
+    const directory = await root.getDirectoryHandle(BLOCK_DIRECTORY)
+        .then((/** @type {any} */ blocks)=>blocks.getDirectoryHandle(fileNameOf(name)))
+        .catch(notFound);
+    if (directory === null)
     {
-        directory = await (await root.getDirectoryHandle(BLOCK_DIRECTORY))
-            .getDirectoryHandle(fileNameOf(name));
-    }
-    catch {
         return null;
     }
     /** @type {(Uint8Array | null)[]} */

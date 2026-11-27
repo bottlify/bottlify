@@ -24,6 +24,7 @@
 
 import { createComObject } from '../ole32/objects.js';
 import { createDeviceCalls } from '../d3dx9/device.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;
@@ -377,7 +378,7 @@ export function createThreadPumps(host, prefix){
                 }
                 const pointer = make((ioThreads >>> 0) || 1,
                     (processThreads >>> 0) || DEFAULT_PROCESS_THREADS);
-                putU32s(out >>> 0, [pointer]);
+                putU32s(wholeAddress(out), [pointer]);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },

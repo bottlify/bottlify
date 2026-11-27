@@ -229,7 +229,7 @@ export function activeScript(host, language){
      * @returns {Promise<T>}
      */
     const lend = async(bytes, use)=>{
-        const block = host.com.allocate(bytes) >>> 0;
+        const block = wholeAddress(host.com.allocate(bytes));
         if (block === 0)
         {
             throw new ExternalError(E_OUTOFMEMORY);

@@ -127,10 +127,10 @@ export function createSteamObjects(host, behaviours){
                 return 0;
             }
             const methods = layout.split(',').map(entry=>slot(version, entry));
-            const table = host.allocate(methods.length * width.size) >>> 0;
+            const table = wholeAddress(host.allocate(methods.length * width.size));
             host.writeMemory(table, width.array(methods).subarray(0, methods.length * width.size));
             // The object: its vtable pointer, and room past it nobody reads.
-            const object = host.allocate(16) >>> 0;
+            const object = wholeAddress(host.allocate(16));
             host.writeMemory(object, width.bytes(table));
             objects.set(version, object);
             return object;

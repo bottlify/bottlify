@@ -11,6 +11,7 @@ import {
 } from './time.js';
 import { fakeMemory, fakeFpu } from './harness.test.js';
 import { guestWindow } from './guest-window.fixture.js';
+import { declaredTable, longCall } from '../common/long-call.fixture.js';
 
 /** 2003-07-03T12:34:56Z, a Thursday. */
 const WALL = Date.UTC(2003, 6, 3, 12, 34, 56);
@@ -505,4 +506,48 @@ test('at 64 bits past 4 GiB: time_t is an __int64, the names\' pointers are quad
     assert.equal(table._Strftime.handler([base + 0x300, 32, base + 0x140, base + 0x200,
         names]), 'Thu July'.length);
     assert.equal(guest.cstr(base + 0x300, 32), 'Thu July');
+});
+
+test('at 64 bits past 4 GiB: every spelling of a conversion takes and answers its pointers'
+    + ' whole as the bridge hands them', async()=>{
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x2000);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    let next = base + 0x1000;
+    const table = declaredTable(/** @type {Record<string, any>} */ (createTimeFunctions({
+        guest,
+        allocate: size=>{
+            const at = next;
+            next += size + 15 & ~15;
+            return at;
+        },
+        systemTimeMs: ()=>WALL,
+        now: ()=>0,
+        setRegisters: ()=>{},
+    })));
+    const time = base + 0x10;
+    guest.set64(time, BigInt(WALL / 1000));
+    /** @param {bigint} rax */
+    const inWindow = rax=>rax >= BigInt(base) && rax < BigInt(base + bytes.length);
+    for (const name of ['_localtime64', '_gmtime64', '_ctime64', '_wctime64'])
+    {
+        assert.ok(inWindow(await longCall(table[name], [time])), name);
+    }
+    guest.set32(time, WALL / 1000);
+    for (const name of ['_localtime32', '_gmtime32', '_ctime32', '_wctime32'])
+    {
+        assert.ok(inWindow(await longCall(table[name], [time])), name);
+    }
+    await longCall(table._localtime32_s, [base + 0x100, time]);
+    assert.equal(guest.i32(base + 0x100 + TM.YEAR), 103, 'into the caller\'s tm');
+    assert.equal(await longCall(table._ctime32_s, [base + 0x200, 64, time]), 0n);
+    assert.match(guest.cstr(base + 0x200, 64), /2003/);
+    assert.equal(await longCall(table._strtime_s, [base + 0x300, 16]), 0n);
+    assert.equal(await longCall(table._time32, [base + 0x400]), BigInt(WALL / 1000));
+    assert.equal(guest.u32(base + 0x400), WALL / 1000);
+    assert.equal(await longCall(table._mktime32, [base + 0x100]), BigInt(WALL / 1000));
+    assert.equal(await longCall(table._get_daylight, [base + 0x500]), 0n);
+    await longCall(table._ftime, [base + 0x600]);
+    assert.equal(Number(guest.i64(base + 0x600)), Math.floor(WALL / 1000));
+    assert.ok(inWindow(await longCall(table._Getmonths, [])), 'a block of its own, whole');
 });

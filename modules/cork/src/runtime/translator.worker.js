@@ -23,7 +23,7 @@
 
 import { createReader } from '@bottlify/cellar';
 import { moduleDigest, packRegion } from './cache.js';
-import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
+import { emitBatch, relinkBatch } from './emit-built.js';
 import { keptEmitCache, readingSpace } from './kept.js';
 
 /**
@@ -45,7 +45,7 @@ const sinceEpoch = (/** @type {number} */ epoch)=>
  * One runtime this worker serves: the worker's own scope, when a runtime
  * opened it, or a port a pool handed it, when the pool lends it to a process.
  * Each keeps what its runtime gave: the functions emitted before (the run's
- * cache, or a cache of the connection's own where the runtime has none),
+ * cache, and none where the runtime has none),
  * whose layout, features and options key them, and the doorbell to ring once
  * an answer is posted -- an engine thread that is never handed its
  * event loop on a timer hears the answer by it at its next turn, rather than
@@ -54,8 +54,8 @@ const sinceEpoch = (/** @type {number} */ epoch)=>
  * @param {(message: any, transfer: any[]) => void} send
  */
 function connection(send){
-    /** @type {import('./emit-built.js').EmitCache} */
-    let cache = createEmitCache();
+    /** @type {import('./emit-built.js').EmitCache | undefined} */
+    let cache;
     /**
      * The run's cache as this worker reads it, where its runtime joined it:
      * the functions every thread of the run kept, read in place; what this
@@ -136,7 +136,7 @@ function connection(send){
         // worker has said nothing for long, and knows the region it stopped at.
         const telling = { ...options, progress: (/** @type {number} */ index)=>
             send({ id, alive: index }, []) };
-        const hitsBefore = cache.hits;
+        const hitsBefore = cache?.hits ?? 0;
         try
         {
             const batch = relink
@@ -180,7 +180,7 @@ function connection(send){
             // The functions this batch emitted, for the runtime's thread to keep.
             const handed = kept?.space.taken() ?? [];
             send({ id, batch, compiled, busyMs, compileMs, packMs,
-                keptHits: cache.hits - hitsBefore,
+                keptHits: (cache?.hits ?? 0) - hitsBefore,
                 ...handed.length > 0 ? { kept: handed } : {} }, [batch.module.buffer,
                 ...batch.packed === undefined ? [] : [batch.packed.buffer],
                 ...handed.map(one=>one.bytes.buffer)]);

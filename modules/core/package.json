@@ -167,7 +167,7 @@
     "src/zstd.js"
   ],
   "dependencies": {
-    "@bottlify/cellar": "github:bottlify/cellar#c8731f2fc84e53002b18955baceaa5c556bd17d9",
+    "@bottlify/cellar": "github:bottlify/cellar#16f8dae174880450daa41262a3e49f0e3c60acd3",
     "@bottlify/cork": "~1.1.0"
   },
   "scripts": {

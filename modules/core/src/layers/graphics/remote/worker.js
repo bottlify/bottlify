@@ -69,7 +69,9 @@
  *   { type: 'frame', bitmap, frameIndex, format, dropped, source, serial, sentAt, waitedMs,
  *     back }
  *   { type: 'frame', pixels, bytesPerRow, width, height, frameIndex, format, dropped, source,
- *     serial, sentAt, waitedMs, back }
+ *     serial, sentAt, waitedMs, back }  `pixels` a view of memory held in the run's cache,
+ *                                    read in place there and let go of at its `shown`
+ *   { type: 'unshown', message }     a frame read back found no room in the run's cache
  *   { type: 'frame', frameIndex, source }  under 'count', every frame presented
  *                                    one at a time, the newest presented of a process,
  *                                    the processes in turn; `serial` counts the frames
@@ -478,17 +480,42 @@ export function serveGraphics(scope, deps){
         device.queue.submit([encoder.finish()]);
         buffer.mapAsync(MAP_READ).then(()=>{
             // The one copy: a mapped range is the buffer's until it is unmapped.
-            const pixels = new Uint8Array(buffer.getMappedRange()).slice();
+            // Into memory held in the run's cache, read in place by the
+            // program's thread; the frame before, one in flight at a time, was
+            // shown, and the room it let go of is the keeper's again at this hold.
+            letGoHeld();
+            const held = backendCache?.space.hold?.('frame', bytesPerRow * height) ?? null;
+            if (held === null)
+            {
+                buffer.unmap();
+                sending = false;
+                if (unshown++ === 0)
+                {
+                    scope.postMessage({ type: 'unshown', message: `a frame of ${bytesPerRow
+                        * height} bytes found no room in the run's cache, and is not shown` });
+                }
+                return;
+            }
+            held.bytes.set(new Uint8Array(buffer.getMappedRange()));
             buffer.unmap();
-            scope.postMessage({ type: 'frame', pixels, bytesPerRow, width, height, frameIndex,
-                format, dropped, source: surface.source, ...sentWith(surface, serial) },
-            [pixels.buffer]);
+            heldFrame = held.release;
+            scope.postMessage({ type: 'frame', pixels: held.bytes, bytesPerRow, width, height,
+                frameIndex, format, dropped, source: surface.source,
+                ...sentWith(surface, serial) });
         }, ()=>{
             readBack?.buffer.destroy();
             readBack = null;
             sending = false;
         });
     };
+    /** What lets go of the frame read back last, until it is shown. @type {(() => void) | null} */
+    let heldFrame = null;
+    const letGoHeld = ()=>{
+        heldFrame?.();
+        heldFrame = null;
+    };
+    /** Frames read back that found no room. */
+    let unshown = 0;
     /**
      * The buffer frames are read back through, kept while frames are the
      * same size on the same device: one frame is in flight at a time
@@ -722,6 +749,8 @@ export function serveGraphics(scope, deps){
                 ...options,
                 cacheLink: undefined,
                 texelCache,
+                // The RGBA its contexts on the processor sample, held as the rooms are.
+                holds: roomServices.holds,
                 liveDump,
                 backend: ()=>backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
@@ -951,6 +980,7 @@ export function serveGraphics(scope, deps){
                 {
                     break;
                 }
+                letGoHeld();
                 sending = false;
                 opened?.then(({ device })=>send(device), ()=>{});
                 break;
@@ -965,6 +995,7 @@ export function serveGraphics(scope, deps){
                 if (data.cache)
                 {
                     backendRooms.releaseAll();
+                    letGoHeld();
                     backendCache?.close();
                     backendCache = channelSpace(data.cache, data.cache);
                 }

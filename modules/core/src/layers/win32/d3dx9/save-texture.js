@@ -407,8 +407,8 @@ export function createTextureSaver(host, buffers){
             }
             const thread = host.currentThread?.();
             return encode(api, fileFormat >>> 0, palette, surface
-                ? surfaceLevel(api, source >>> 0, rect, fileFormat >>> 0, thread)
-                : textureLevels(api, source >>> 0, fileFormat >>> 0, thread))
+                ? surfaceLevel(api, wholeAddress(source), rect, fileFormat >>> 0, thread)
+                : textureLevels(api, wholeAddress(source), fileFormat >>> 0, thread))
                 .then(async made=>{
                     if (typeof made === 'number')
                     {
@@ -439,10 +439,10 @@ export function createTextureSaver(host, buffers){
             }
             const thread = host.currentThread?.();
             return encode(api, fileFormat >>> 0, palette, surface
-                ? surfaceLevel(api, source >>> 0, rect, fileFormat >>> 0, thread)
-                : textureLevels(api, source >>> 0, fileFormat >>> 0, thread))
+                ? surfaceLevel(api, wholeAddress(source), rect, fileFormat >>> 0, thread)
+                : textureLevels(api, wholeAddress(source), fileFormat >>> 0, thread))
                 .then(made=>(typeof made === 'number' ? made
-                    : buffers.giveBuffer(out >>> 0, made)));
+                    : buffers.giveBuffer(wholeAddress(out), made)));
         },
     });
 

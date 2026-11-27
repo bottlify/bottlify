@@ -3989,7 +3989,7 @@ export function createHeapFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                if (!heaps.has(handle >>> 0))
+                if (!heaps.has(wholeAddress(handle)))
                 {
                     return 0;
                 }

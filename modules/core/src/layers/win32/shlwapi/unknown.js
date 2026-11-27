@@ -367,7 +367,8 @@ export function createUnknownFunctions(host){
                         return asked;
                     }
                     const answer = await callMethod(provider, SLOT_QUERY_SERVICE,
-                        [service >>> 0, interfaceId >>> 0, wholeAddress(out)], thread);
+                        [wholeAddress(service), wholeAddress(interfaceId), wholeAddress(out)],
+                        thread);
                     await callMethod(provider, SLOT_RELEASE, [], thread);
                     return answer;
                 }
@@ -564,7 +565,7 @@ export function createUnknownFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([folder, ...rest])=>(wholeAddress(folder) === 0 ? E_INVALIDARG
-                : callMethod(wholeAddress(folder), 4, rest.map(value=>value >>> 0),
+                : callMethod(wholeAddress(folder), 4, rest.map(wholeAddress),
                     host.callerThread())),
         },
 
@@ -752,9 +753,9 @@ export function createUnknownFunctions(host){
             handler: async(/** @type {number[]} */ args)=>{
                 if (clears !== undefined && (args[clears] >>> 0) !== 0)
                 {
-                    host.writeMemory(args[clears] >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(args[clears]), dword(0));
                 }
-                const object = args[0] >>> 0;
+                const object = wholeAddress(args[0]);
                 if (object === 0)
                 {
                     return E_FAIL;
@@ -766,7 +767,7 @@ export function createUnknownFunctions(host){
                     if (found !== 0)
                     {
                         const answer = await callMethod(found, slot,
-                            pick(args).map(value=>value >>> 0), thread);
+                            pick(args).map(wholeAddress), thread);
                         await callMethod(found, SLOT_RELEASE, [], thread);
                         return answer;
                     }

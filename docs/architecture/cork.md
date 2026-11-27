@@ -51,9 +51,10 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   read in place by every thread and handed back only under their own key and shape. They stay
   however long idle and leave when the cache's room is wanted, under its one budget. The thread
   that writes the run's cache keeps them; a translation thread or an executor in a worker reads
-  them in place and hands what it emitted to that thread with its answer. Without them a relink
-  emits again what was emitted: a translation thread was busy 23.3 s instead of 14.6 s while a
-  game loaded.
+  them in place and hands what it emitted to that thread with its answer. Nothing else keeps
+  them: a runtime given no run's cache (`kept`) keeps none, and its diagnostics' `kept` says so.
+  Without them a relink emits again what was emitted: a translation thread was busy 23.3 s
+  instead of 14.6 s while a game loaded.
 - **The pool's driver.** Every 500 ms it reads from shared memory how long each translation thread
   worked and how many regions it emitted (the threads write it there). One more joins a process
   when the median load of those already working for it reaches 80 %, at most `hardwareConcurrency`

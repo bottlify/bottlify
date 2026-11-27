@@ -11,6 +11,7 @@ import { createLsaFunctions } from './lsa.js';
 import { USER_SID_TEXT, aceBytes, aclBytes, parseSid } from './tokens.js';
 import { createHive } from './registry.js';
 import { createRegistryService } from './registry-service.js';
+import { declaredTable, longCall } from '../common/long-call.fixture.js';
 
 /* The contract's numbers, restated so a wrong constant in the module cannot
  * hide behind the test importing it. */
@@ -436,4 +437,40 @@ test('LsaNtStatusToWinError maps a status as RtlNtStatusToDosError does', ()=>{
     assert.equal(env.call('LsaNtStatusToWinError', 0), 0);
     assert.equal(env.call('LsaNtStatusToWinError', 0xc0000034), 2, 'ERROR_FILE_NOT_FOUND');
     assert.equal(env.call('LsaNtStatusToWinError', 0xc0000022), 5, 'ERROR_ACCESS_DENIED');
+});
+
+test('at 64 bits past 4 GiB: a trustee and its objects are laid out a pointer wide, their'
+    + ' pointers whole', async()=>{
+    const base = 0x140000000;
+    const memory = new Uint8Array(0x1000);
+    const view = new DataView(memory.buffer);
+    const fns = declaredTable(/** @type {Record<string, any>} */ (createSecurityFunctions({
+        pointerSize: 8,
+        readMemory: (at, length)=>memory.subarray(at - base, at - base + length),
+        writeMemory: (at, bytes)=>memory.set(bytes, at - base),
+        readCString: ()=>'',
+        setLastError: ()=>{},
+        allocate: ()=>base + 0x800,
+    })));
+    /** @param {number} at */
+    const quad = at=>Number(view.getBigUint64(at - base, true));
+    const trustee = base + 0x100;
+    const objects = base + 0x200;
+    const sid = base + 0x300;
+    memory.fill(0xff, 0x100, 0x100 + 32);
+    await longCall(fns.BuildTrusteeWithObjectsAndSidA, [trustee, objects, 0, 0, sid]);
+    // TRUSTEE: the multiple trustee, the operation at 8, form 12, type 16, the name at 24.
+    assert.deepEqual([quad(trustee), view.getUint32(0x108, true), view.getUint32(0x10c, true),
+        view.getUint32(0x110, true), quad(trustee + 24)],
+    [0, 0, TRUSTEE_IS_OBJECTS_AND_SID, 0, objects]);
+    assert.equal(quad(objects + 40), sid, 'OBJECTS_AND_SID\'s SID after the two GUIDs, aligned');
+    assert.equal(await longCall(fns.GetTrusteeNameA, [trustee]), BigInt(objects));
+    assert.equal(await longCall(fns.GetTrusteeFormW, [trustee]),
+        BigInt(TRUSTEE_IS_OBJECTS_AND_SID));
+    const names = base + 0x400;
+    await longCall(fns.BuildTrusteeWithObjectsAndNameW, [trustee, names, 1, base + 0x10, 0,
+        base + 0x20]);
+    // OBJECTS_AND_NAME: present, the object type, then three names a pointer each.
+    assert.deepEqual([view.getUint32(0x400, true), view.getUint32(0x404, true), quad(names + 8),
+        quad(names + 16), quad(names + 24)], [1, 1, base + 0x10, 0, base + 0x20]);
 });

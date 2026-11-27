@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    HIGH, LOW, mangledPointers, raxOf, sameAnswer, writeDifferences,
+    HIGH, LOW, cutHandlers, mangledPointers, raxOf, sameAnswer, writeDifferences,
 } from './check-wide-addresses.mjs';
 
 test('RAX is a dword sign-extended, a bigint whole, nothing for no number', ()=>{
@@ -58,6 +58,26 @@ test('a written dword may differ by the distance where it points into the window
     assert.deepEqual(writeDifferences(before, low, before, high, LOW, HIGH), [4, 8]);
 });
 
+test('a quadword into the window moved by the whole distance past 4 GiB is no difference', ()=>{
+    const far = 0x140000000;
+    const before = new Uint8Array(24);
+    const low = new Uint8Array(24);
+    const high = new Uint8Array(24);
+    const lowView = new DataView(low.buffer);
+    const highView = new DataView(high.buffer);
+    // A 64-bit pointer written whole: its upper dword is 0 low and 1 high.
+    lowView.setBigUint64(0, BigInt(LOW + 0x10), true);
+    highView.setBigUint64(0, BigInt(far + 0x10), true);
+    assert.deepEqual(writeDifferences(before, low, before, high, LOW, far), []);
+    // Its upper dword written signed is a difference.
+    highView.setUint32(4, 0xffffffff, true);
+    assert.deepEqual(writeDifferences(before, low, before, high, LOW, far), [4]);
+    // A quadword off an 8-byte boundary is judged by its dwords.
+    lowView.setBigUint64(12, BigInt(LOW + 0x10), true);
+    highView.setBigUint64(12, BigInt(far + 0x10), true);
+    assert.deepEqual(writeDifferences(before, low, before, high, LOW, far), [4, 16]);
+});
+
 test('what a call did not write is not its own, however the windows had parted', ()=>{
     const lowBefore = Uint8Array.of(1, 0, 0, 0);
     const highBefore = Uint8Array.of(2, 0, 0, 0);
@@ -90,3 +110,26 @@ test('an MSVC name says which of its arguments are addresses', ()=>{
     assert.deepEqual(mangledPointers('?max_size@?$allocator@D@std@@QBEIXZ'), [0], 'const, 32-bit');
     assert.equal(mangledPointers('GetProcessHeap'), null);
 });
+
+test('a handler that cuts an address it is handed whole is found by its own source', ()=>{
+    // A helper makes both spellings' spec, under no signature comment of its
+    // own; one cuts the declared address, the other keeps it.
+    const make = (/** @type {boolean} */ keep)=>({
+        argBytes: 8, addresses: [1],
+        handler: keep ? (/** @type {number[]} */ [, out])=>write(wholeAddress(out))
+            : (/** @type {number[]} */ [, out])=>write(out >>> 0),
+    });
+    const shared = make(false);
+    const libraries = {
+        'A.dll': { CutA: shared, CutW: shared, Kept: make(true),
+            Undeclared: { argBytes: 4, handler: (/** @type {number[]} */ [at])=>at >>> 0 } },
+    };
+    assert.deepEqual([...cutHandlers(libraries)], [['A.dll!CutA', ['out >>> 0']]],
+        'once for a spec under two names; none where nothing is handed whole');
+    assert.deepEqual([...cutHandlers(libraries, /Kept/)], []);
+});
+
+/** @param {number} at */
+const write = at=>at;
+/** @param {number} at */
+const wholeAddress = at=>at;

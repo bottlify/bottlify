@@ -187,7 +187,7 @@ export function WideCharToMultiByte({ u16, setU8, setU32, host }, page, flags, s
  * method it writes.
  *
  * @guestCode stdcall
- * @param {u32} process @param {u32} base @param {u32} size
+ * @param {u32} process @param {ptr} base @param {u32} size
  * @returns {i32}
  */
 export function FlushInstructionCache(process, base, size){ // eslint-disable-line no-unused-vars

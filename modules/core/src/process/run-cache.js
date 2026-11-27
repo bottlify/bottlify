@@ -53,12 +53,14 @@ const SWEEP_MS = 1000;
 /**
  * @param {{ budget?: number,
  *     runFolder?: import('../layers/filesystem/internal/run-folder.js').RunFolder | null,
- *     onTail?: (tail: import('../layers/cache/module.js').OwnerTail) => void }} [opened]
+ *     onTail?: (tail: import('../layers/cache/module.js').OwnerTail) => void,
+ *     onLoss?: (detail: string) => void }} [opened]
  *     `runFolder`: where the cache's disk is made; none, a cache in memory alone;
- *     `onTail`: an owner that went left bodies under its names past what it held
+ *     `onTail`: an owner that went left bodies under its names past what it held;
+ *     `onLoss`: the disk in the run's folder did not open, said once
  */
 export async function openRunCache(opened = {}){
-    const { budget = RUN_CACHE_BYTES, runFolder = null, onTail = ()=>{} } = opened;
+    const { budget = RUN_CACHE_BYTES, runFolder = null, onTail = ()=>{}, onLoss = ()=>{} } = opened;
     /** What each thread reading is told of a segment made or let go. @type {Set<(message: any) => void>} */
     const told = new Set();
     /**
@@ -91,23 +93,29 @@ export async function openRunCache(opened = {}){
         },
     });
     let letGo = ()=>{};
+    /** Why a folder was given and the cache has no disk in it; null where it has one, or none was given. */
+    let diskLost = /** @type {string | null} */ (null);
     let keeper;
-    try
+    if (runFolder === null)
     {
-        if (runFolder === null)
-        {
-            throw new Error('no folder');
-        }
-        letGo = runFolder.use();
-        keeper = await open(opfsDisk(await runFolder.folder.getDirectoryHandle('cache',
-            { create: true })));
-    }
-    catch {
-        // A folder whose files do not open (a thread with no synchronous
-        // handle) leaves the cache in memory, as without a folder.
-        letGo();
-        letGo = ()=>{};
         keeper = await open(null);
+    }
+    else
+    {
+        letGo = runFolder.use();
+        const disk = await runFolder.folder.getDirectoryHandle('cache', { create: true })
+            .then((/** @type {any} */ folder)=>opfsDisk(folder), (/** @type {any} */ error)=>{
+                // The bodies that are the only copy for the run have nowhere
+                // to go: those the budget has no room for are refused.
+                diskLost = String(error?.message ?? error);
+                onLoss(`the run's folder has no cache in it (${diskLost}): the bodies that are`
+                    + ' the only copy for the run stay in memory, and those past its budget are'
+                    + ' refused');
+                letGo();
+                letGo = ()=>{};
+                return null;
+            });
+        keeper = await open(disk);
     }
     /**
      * The spaces names were reserved under, by what comes before a name's
@@ -228,7 +236,7 @@ export async function openRunCache(opened = {}){
             peakPlacedBytes: peak.placedBytes, peakRoundingBytes: peak.roundingBytes,
             peakSpaces: peak.spaces, owners, ownerTails: { ...tails },
             // Threads joined but this one's own reader, and owners' channels open.
-            joined: told.size - 1, served: served.size };
+            joined: told.size - 1, served: served.size, diskLost };
     };
     const sweeping = setInterval(()=>{
         // Read before the sweep lets idle bodies and empty segments go.

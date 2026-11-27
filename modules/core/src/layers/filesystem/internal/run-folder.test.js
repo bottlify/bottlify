@@ -36,3 +36,14 @@ test('a run\'s folder takes away what runs that are gone left, and goes once its
     await settle();
     assert.deepEqual(opfs.names('bottlify-runs'), [], 'gone with its last user');
 });
+
+test('a run\'s folder the origin refuses is null, and said', async()=>{
+    /** @type {any[]} */
+    const said = [];
+    const root = { getDirectoryHandle: async()=>{
+        throw new DOMException('no room', 'QuotaExceededError');
+    } };
+    assert.equal(await openRunFolder({ root, onFailure: error=>said.push(error) }), null);
+    assert.equal(said.length, 1);
+    assert.equal(said[0].name, 'QuotaExceededError');
+});

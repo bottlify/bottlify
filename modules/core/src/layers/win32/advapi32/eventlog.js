@@ -333,14 +333,14 @@ export function createEventLogFunctions(host){
 
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory?.(address >>> 0, 4);
+        const bytes = host.readMemory?.(wholeAddress(address), 4);
         return bytes ? (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0 : 0;
     };
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory?.(address >>> 0, bytes);
+        host.writeMemory?.(wholeAddress(address), bytes);
     };
 
     /** @param {boolean} wide @returns {Reader} */
@@ -593,7 +593,7 @@ export function createEventLogFunctions(host){
             {
                 return fail(ERROR_INVALID_HANDLE);
             }
-            const error = backup(records, readerOf(wide)(fileName >>> 0, MAX_NAME));
+            const error = backup(records, readerOf(wide)(wholeAddress(fileName), MAX_NAME));
             return error === ERROR_SUCCESS ? 1 : fail(error);
         },
     });
@@ -649,7 +649,8 @@ export function createEventLogFunctions(host){
             }
             if ((fileName >>> 0) !== 0)
             {
-                const error = backup(object.log.records, readerOf(wide)(fileName >>> 0, MAX_NAME));
+                const error = backup(object.log.records, readerOf(wide)(wholeAddress(fileName),
+                    MAX_NAME));
                 if (error !== ERROR_SUCCESS)
                 {
                     return fail(error);
@@ -694,7 +695,7 @@ export function createEventLogFunctions(host){
             {
                 return ERROR_BAD_LENGTH;
             }
-            const name = readerOf(wide)(nameAddress >>> 0, MAX_NAME);
+            const name = readerOf(wide)(wholeAddress(nameAddress), MAX_NAME);
             const nameAt = readDword(properties + TRACE.LOGGER_NAME);
             const fileAt = readDword(properties + TRACE.LOG_FILE_NAME);
             if (nameAt + (name.length + 1) * (wide ? 2 : 1) > size)
@@ -741,7 +742,7 @@ export function createEventLogFunctions(host){
                 return ERROR_INVALID_PARAMETER;
             }
             const named = (nameAddress >>> 0) === 0 ? null
-                : readerOf(wide)(nameAddress >>> 0, MAX_NAME).toUpperCase();
+                : readerOf(wide)(wholeAddress(nameAddress), MAX_NAME).toUpperCase();
             const key = named ?? [...sessions].find(([, handle])=>handle === (low >>> 0))?.[0];
             if (key === undefined || !sessions.has(key))
             {
@@ -843,7 +844,7 @@ export function createEventLogFunctions(host){
             const word = host.pointerSize === 8 ? 8 : 4;
             for (let at = 0; at < (count >>> 0); at++)
             {
-                const slot = (guids >>> 0) + at * 2 * word + word;
+                const slot = wholeAddress(guids) + at * 2 * word + word;
                 writeDword(slot, handle);
                 if (word === 8)
                 {

@@ -10,6 +10,7 @@ import { createWideFunctions, createMultiByteFunctions } from './mbstring.js';
 import { createMsvcrtFunctions } from './functions.js';
 import { fakeMemory } from './harness.test.js';
 import { guestWindow } from './guest-window.fixture.js';
+import { declaredTable, longCall } from '../common/long-call.fixture.js';
 
 const build = ()=>{
     const memory = fakeMemory();
@@ -832,4 +833,22 @@ test('at 64 bits past 4 GiB: the walks keep their addresses whole, *src a whole 
     assert.equal(view.getUint16(0x300, true), 0x63);
     assert.equal(view.getUint32(0x200, true) + view.getUint32(0x204, true) * 2 ** 32,
         base + 0x104, '*src moved past one, whole');
+});
+
+test('at 64 bits past 4 GiB: the functions answered on the host take and answer their'
+    + ' strings whole as the bridge hands them', async()=>{
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x1000);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    const multi = declaredTable(/** @type {Record<string, any>} */ (
+        createMultiByteFunctions({}, { guest })));
+    const text = base + 0x100;
+    guest.writeAnsi(text, 'abcd');
+    assert.equal(await longCall(multi._mbsninc, [text, 2]), BigInt(text + 2));
+    assert.equal(await longCall(multi._mbsnextc, [text]), 0x61n);
+    assert.equal(await longCall(multi._mbsbtype, [text, 1]), 0n, 'a single byte');
+    assert.equal(await longCall(multi._mbspbrk, [text, base + 0x103]), BigInt(text + 3));
+    assert.equal(await longCall(multi._mbsrev, [text]), BigInt(text));
+    assert.equal(guest.cstr(text, 8), 'dcba');
+    assert.equal(await longCall(multi._mbslwr_s, [text, 8]), 0n);
 });

@@ -616,7 +616,7 @@ export function createOleFunctions(host){
             return true;
         }
         const text = 'OleDropTargetInterface';
-        const name = host.heap.allocate(text.length + 1) >>> 0;
+        const name = wholeAddress(host.heap.allocate(text.length + 1));
         if (name === 0)
         {
             return false;
@@ -1813,7 +1813,7 @@ export function createOleFunctions(host){
         if (registered)
         {
             return callMethod(registered.object, SLOT_CREATE_INSTANCE,
-                [outer >>> 0, interfaceId >>> 0, out], thread);
+                [wholeAddress(outer), wholeAddress(interfaceId), out], thread);
         }
         if (host.registry.isRegistered(clsid))
         {
@@ -1871,7 +1871,7 @@ export function createOleFunctions(host){
                 return hr;
             }
             return callMethod(factory, SLOT_CREATE_INSTANCE,
-                [outer >>> 0, interfaceId >>> 0, out], thread)
+                [wholeAddress(outer), wholeAddress(interfaceId), out], thread)
                 .then(created=>callMethod(factory, SLOT_RELEASE, [], thread)
                     .then(()=>created));
         });
@@ -3645,7 +3645,7 @@ export function createOleFunctions(host){
                 if (registered)
                 {
                     return callMethod(registered.object, SLOT_QUERY_INTERFACE,
-                        [interfaceId >>> 0, out], thread);
+                        [wholeAddress(interfaceId), out], thread);
                 }
                 if (host.registry.isRegistered(clsid) && host.makeObject)
                 {
@@ -4528,7 +4528,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                return marshalInterface(wholeAddress(stream), riid >>> 0, iid,
+                return marshalInterface(wholeAddress(stream), wholeAddress(riid), iid,
                     wholeAddress(unknown),
                     [context >>> 0, wholeAddress(contextData), flags >>> 0], thread);
             },
@@ -4554,7 +4554,7 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 writePointer(out, 0);
-                return unmarshalInterface(wholeAddress(stream), riid >>> 0, out, thread);
+                return unmarshalInterface(wholeAddress(stream), wholeAddress(riid), out, thread);
             },
         },
 
@@ -4594,7 +4594,7 @@ export function createOleFunctions(host){
                     return made < 0 ? made : E_OUTOFMEMORY;
                 }
                 return (async()=>{
-                    const hr = await marshalInterface(stream, riid >>> 0, iid,
+                    const hr = await marshalInterface(stream, wholeAddress(riid), iid,
                         wholeAddress(unknown),
                         [MSHCTX_INPROC, 0, 0], thread);
                     if (hr < 0)
@@ -4628,7 +4628,8 @@ export function createOleFunctions(host){
                 }
                 writePointer(out, 0);
                 return (async()=>{
-                    const hr = await unmarshalInterface(wholeAddress(stream), riid >>> 0, out,
+                    const hr = await unmarshalInterface(wholeAddress(stream), wholeAddress(riid),
+                        out,
                         thread);
                     await callMethod(wholeAddress(stream), SLOT_RELEASE, [], thread);
                     return hr;
@@ -4667,7 +4668,7 @@ export function createOleFunctions(host){
                     {
                         return S_OK;
                     }
-                    const args = [riid >>> 0, wholeAddress(unknown), context >>> 0,
+                    const args = [wholeAddress(riid), wholeAddress(unknown), context >>> 0,
                         wholeAddress(contextData),
                         flags >>> 0];
                     const block = host.heap.allocate(GUID_SIZE + 4);
@@ -4887,7 +4888,7 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: async([unknown, clsid, flags, cookieOut])=>{
                 const thread = host.callerThread?.();
-                const moniker = await activeObjectMoniker(clsid >>> 0);
+                const moniker = await activeObjectMoniker(wholeAddress(clsid));
                 if (moniker === 0)
                 {
                     return E_OUTOFMEMORY;
@@ -4918,7 +4919,7 @@ export function createOleFunctions(host){
                 }
                 writeU32(wholeAddress(out), 0);
                 const thread = host.callerThread?.();
-                const moniker = await activeObjectMoniker(clsid >>> 0);
+                const moniker = await activeObjectMoniker(wholeAddress(clsid));
                 if (moniker === 0)
                 {
                     return E_OUTOFMEMORY;
@@ -4991,7 +4992,7 @@ export function createOleFunctions(host){
                             return parsed < 0 ? parsed : E_FAIL;
                         }
                         const bound = (await callMethod(moniker, SLOT_MONIKER_BIND_TO_OBJECT,
-                            [context.value, 0, iid >>> 0, wholeAddress(out)], thread)) | 0;
+                            [context.value, 0, wholeAddress(iid), wholeAddress(out)], thread)) | 0;
                         await callMethod(moniker, SLOT_RELEASE, [], thread);
                         return bound;
                     }

@@ -115,7 +115,7 @@ export function registerFileDialogClasses(registry, host){
      * @param {string} text
      */
     const taskString = text=>{
-        const at = host.allocate((text.length + 1) * 2) >>> 0;
+        const at = wholeAddress(host.allocate((text.length + 1) * 2));
         if (at === 0)
         {
             return 0;

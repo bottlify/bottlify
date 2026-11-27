@@ -95,11 +95,15 @@ dwords that carry one are the function's `addresses` (`CreateThread` is `{ argBy
 addresses: [2, 3] }`), which the bridge joins to their high half when a 64-bit program keeps the
 address past 4 GiB. A spec that does not declare them gets them from its signature comment:
 `common/pointer-arguments.js`, written by `tools/checks/check-pointer-arguments.mjs` from every
-comment the layers carry, is declared on each function when the layer is built
-(`declareAddresses`), a C++ member's `this` among them. So a handler keeps an address with
-`wholeAddress`, never `>>> 0`, and memory takes it whole. An answer typed an address is written
-into RAX whole as well, past 4 GiB too. The same check holds each declared dword to an address
-of the signature. An undeclared argument whose high half names an address past 4 GiB is watched
+comment the layers carry (a `P`, `LP` or `REF` typedef, a `*`, a `va_list`), is declared on each
+function when its library is made (`declareAddresses`) - win32's as the layer makes them, the
+graphics, sound, input and media layers' as the process reads them (`declaringOnRead`) - a C++
+member's `this` among them. So a handler keeps an address with `wholeAddress`, never `>>> 0`,
+and memory takes it whole. An answer typed an address is written into RAX whole as well, past
+4 GiB too. The same check holds each declared dword to an address of the signature, and fails a
+handler that cuts one back to a dword: under its signature comment (`checkTableCuts`), and by its
+own source in every win32 library as built, a helper's spec too (`check-wide-addresses.mjs`'s
+`cutHandlers`). An undeclared argument whose high half names an address past 4 GiB is watched
 while its handler runs: a high half the handler never read (`pointerArg` reads it) is a loss,
 said once a function - its bytes would be read or written 4 GiB below.
 
@@ -259,7 +263,8 @@ flowchart TD
   code, is not run from the library: the call reads as end of stream, said once as a loss.
   It is the 32-bit library alone - its names, layouts and throw data are 32-bit x86's - so a
   64-bit process finds it with no exports, its imports of it missing; MSVCP71, 80 and 90 give
-  a 64-bit process their members under its compiler's names, in its layout.
+  a 64-bit process their members under its compiler's names, in its layout. The old iostream
+  library, `MSVCIRT.dll`, is the same: 32-bit names and layouts, nothing for a 64-bit process.
 - **The C runtimes share msvcrt's functions** and differ where Windows' do: an argument a function
   of `MSVCR80.dll` or `ucrtbase.dll` refuses calls that runtime's invalid-parameter handler, or
   with none set ends the process with 0xC0000417 and an error naming the call; msvcrt.dll answers

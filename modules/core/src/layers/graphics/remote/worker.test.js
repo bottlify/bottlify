@@ -358,6 +358,43 @@ test('counting, the worker says every frame presented, without its picture', asy
     }
 });
 
+/**
+ * The run's cache on a keeper's thread (`KEEPER`) lending the worker behind
+ * `scope` its backend's names, as the run's thread does: a frame read back
+ * is held under them. `under` answers what is held there now.
+ *
+ * @param {any} scope
+ */
+async function lentKeeper(scope){
+    const { Worker } = await import('node:worker_threads');
+    const keeper = new Worker(KEEPER, { eval: true, workerData: {
+        runCache: new URL('../../../process/run-cache.js', import.meta.url).href,
+        connect: new URL('./connect.js', import.meta.url).href } });
+    /** @type {((data: any) => void) | null} */
+    let answered = null;
+    await new Promise(resolve=>{
+        keeper.on('message', data=>{
+            if (data.type === 'under')
+            {
+                answered?.(data.under);
+                return;
+            }
+            scope.onmessage({ data });
+            if (data.type === 'backend')
+            {
+                resolve(undefined);
+            }
+        });
+    });
+    return {
+        under: ()=>/** @type {Promise<{ bodies: number }>} */ (new Promise(resolve=>{
+            answered = resolve;
+            keeper.postMessage('under');
+        })),
+        close: ()=>keeper.terminate(),
+    };
+}
+
 test('on SwiftShader the worker sends its frames as bytes, asked for pictures or not',
     async()=>{
         const gpu = createFakeDevice();
@@ -381,6 +418,7 @@ test('on SwiftShader the worker sends its frames as bytes, asked for pictures or
         });
         scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
         await settle();
+        const keeper = await lentKeeper(scope);
         const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
         const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
         /** @type {{ device?: any }} */
@@ -398,11 +436,14 @@ test('on SwiftShader the worker sends its frames as bytes, asked for pictures or
             const frame = posted.find(message=>message.type === 'frame');
             assert.equal(frame?.bitmap, undefined);
             assert.ok(frame?.pixels instanceof Uint8Array, 'bytes');
+            assert.ok(frame.pixels.buffer instanceof SharedArrayBuffer,
+                'held in the run\'s cache, read there in place');
             assert.equal(canvases, 0, 'no WebGPU canvas made in the worker');
         }
         finally
         {
             sender.close();
+            await keeper.close();
         }
     });
 
@@ -422,6 +463,7 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
     });
     scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
     await settle();
+    const keeper = await lentKeeper(scope);
     const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
     const d3d = recordedDirect3D(createDirect3D9, deviceRooms(), sender);
     /** @type {{ device?: any }} */
@@ -448,11 +490,15 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
         assert.equal(frames()[1].bitmap, undefined);
         assert.ok(frames()[1].pixels instanceof Uint8Array, 'then bytes');
         assert.equal(frames()[1].width, 8);
+        // Read before its answer: shown, its memory is the next frame's.
+        const second = frames()[1].pixels[0];
         scope.onmessage({ data: { type: 'shown' } });
         await draw(0xff000003);
         assert.equal(frames().length, 3);
-        assert.deepEqual([frames()[1].pixels[0], frames()[2].pixels[0]], [2, 3],
-            'each frame its own picture, the one sent before left as it was');
+        assert.deepEqual([second, frames()[2].pixels[0]], [2, 3], 'each frame its own picture');
+        assert.equal((await keeper.under()).bodies, 1, 'the frame in flight held');
+        scope.onmessage({ data: { type: 'shown', serial: frames()[2].serial } });
+        assert.equal((await keeper.under()).bodies, 0, 'answered, their memory let go of');
         const readBacks = gpu.of('createBuffer').filter((/** @type {any} */ call)=>
             (call.descriptor.usage & 1) !== 0);
         assert.equal(readBacks.length, 1, 'frames of one size read back through one buffer');
@@ -460,6 +506,7 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
     finally
     {
         sender.close();
+        await keeper.close();
     }
 });
 

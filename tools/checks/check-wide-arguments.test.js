@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     checkAddresses, checkReturns, checkText, layoutOf, namesOf, pointersOf, resultOf,
-    returnsPointer, cutAddresses,
+    returnsPointer, cutAddresses, cutsIn, checkTableCuts,
 } from './check-wide-arguments.mjs';
 
 test('a signature is laid out as the 32-bit stack has it', ()=>{
@@ -56,6 +56,25 @@ test('the dwords that hold an address, as the 32-bit layout counts them', ()=>{
         [3, 4]);
     assert.deepEqual(pointersOf('GUID g, void *p'), [4]);
     assert.deepEqual(pointersOf('void'), []);
+});
+
+test('a REF... typedef is a const pointer: REFIID, REFCLSID, REFGUID are addresses', ()=>{
+    assert.deepEqual(pointersOf('REFCLSID rclsid, LPUNKNOWN outer, DWORD context, REFIID riid,'
+        + ' LPVOID *out', { addresses: true }), [0, 1, 3, 4]);
+    assert.deepEqual(pointersOf('REFGUID g, REFPROPVARIANT v, REFPROPERTYKEY k, REFFMTID f,'
+        + ' REFKNOWNFOLDERID id'), [0, 1, 2, 3, 4]);
+    // Not a REF typedef of a pointer: a 100 ns count and a double of seconds by value.
+    assert.deepEqual(pointersOf('REFERENCE_TIME start, REFTIME seconds, void *p'), [4]);
+});
+
+test('a bare name is of the type before it, as C declares it; a lone type is unnamed', ()=>{
+    // gluUnProject: three doubles before the pointers, not three dwords.
+    assert.deepEqual(pointersOf('GLdouble winX, winY, winZ, const GLdouble *model,'
+        + ' const GLdouble *proj, const GLint *viewport, GLdouble *objX, *objY, *objZ'),
+    [6, 7, 8, 9, 10, 11]);
+    assert.deepEqual(pointersOf('HWND, int, LPCSTR, UINT'), [2]);
+    // A va_list is the address of the arguments.
+    assert.deepEqual(pointersOf('char *buffer, const char *format, va_list'), [0, 1, 2]);
 });
 
 test('a spec answering an address says so, and one answering none does not', ()=>{
@@ -201,6 +220,45 @@ test('a handler that cuts an address it takes whole back to a dword is found', (
     ['args[2] | 0']);
     assert.deepEqual(cutAddresses(
         '{ addresses: [0], handler: ([start])=>run(wholeAddress(start)) }', [0]), []);
+});
+
+test('a handler\'s own source cut back to a dword, in every form it takes its arguments', ()=>{
+    // As `toString` gives it: a type comment first, a method, an async body.
+    assert.deepEqual(cutsIn('/** @type {number[]} */ ([path, out])=>{\n'
+        + '    if ((out >>> 0) === 0 || !(path >>> 0)) { return 0; }\n'
+        + '    // out >>> 0 in a comment is no cut\n'
+        + '    return write(out >>> 0, read(path | 0));\n}', [0, 1]), ['path | 0', 'out >>> 0']);
+    assert.deepEqual(cutsIn('handler(args){ return read(args[1] >>> 0, args[0] >>> 0); }', [1]),
+        ['args[1] >>> 0']);
+    assert.deepEqual(cutsIn('async args=>body(args.map(a=>a >>> 0))', [2]),
+        ['args.map(a=>a >>> 0)'], 'every argument cut at once');
+    assert.deepEqual(cutsIn('([folder, ...rest])=>call(folder, rest.map(value=>value >>> 0))',
+        [3]), ['rest.map(value=>value >>> 0)']);
+    assert.deepEqual(cutsIn('([folder, ...rest])=>call(folder, rest.map(value=>value >>> 0))',
+        [0]), [], 'the declared one is before the rest');
+    // A null test, a truth test and a ternary keep the answer.
+    assert.deepEqual(cutsIn('([p])=>(p >>> 0 === 0 ? 0 : (p >>> 0) ? read(wholeAddress(p)) : 1)',
+        [0]), []);
+});
+
+test('a handler cutting an address the table declares is found, its spec read alone', ()=>{
+    const text = `
+        /** BOOL GetDiskFreeSpaceA(LPCSTR root, LPDWORD sectors) */
+        GetDiskFreeSpaceA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([root, sectors])=>write(sectors >>> 0, read(wholeAddress(root))),
+        },
+        /** BOOL Planted(LPVOID at) */
+        Planted: { argBytes: 4, addresses: [0], handler: ([at])=>at >>> 0 },
+        /** IUnknown method, not a table function */
+        Other: { argBytes: 4, handler: ([sectors])=>sectors >>> 0 },
+    `;
+    const found = checkTableCuts(text, { GetDiskFreeSpaceA: [0, 1], Planted: [0] });
+    assert.deepEqual(found.map(one=>[one.name, one.line]), [['GetDiskFreeSpaceA', 2]]);
+    assert.match(found[0].problem, /sectors >>> 0/);
+    assert.deepEqual(checkTableCuts(text.replace('sectors >>> 0', 'wholeAddress(sectors)'),
+        { GetDiskFreeSpaceA: [0, 1] }), []);
 });
 
 test('a dword declared a size is one the signature has a size in', ()=>{

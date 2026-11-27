@@ -12,6 +12,7 @@ import { INVALID_PARAMETERS, createInvalidParameterRuntime, watchedExports }
 import { doubleSlots, fakeMemory, fakeVolume } from './harness.test.js';
 import { guestThrough, guestWindow } from './guest-window.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { declaredTable, longCall } from '../common/long-call.fixture.js';
 import { COMPILED } from './inguest.x86.js';
 
 /**
@@ -1223,3 +1224,34 @@ test('at 64 bits past 4 GiB: _controlfp_s\'s handler is the SSE one, its word wr
         assert.deepEqual(asked, ['mxcsr', 'setMxcsr']);
         assert.notEqual(guest.u32(base), 0xcccccccc, 'the word at the block\'s start');
     });
+
+test('at 64 bits past 4 GiB: what a helper makes or an alias names takes its pointers whole as'
+    + ' the bridge hands them', async()=>{
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x1000);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    let next = base + 0x800;
+    const fns = declaredTable(/** @type {any} */ (createMsvcrtFunctions({ ...fakeMemory(), guest,
+        pointerSize: 8, write: ()=>{}, callGuest: async()=>0, currentThread: ()=>({ id: 1 }),
+        imagePath: ()=>'C:\\game.exe', commandLine: ()=>'game.exe', exitProcess: ()=>0,
+        allocate: (/** @type {number} */ size)=>{
+            const at = next;
+            next += size + 15 & ~15;
+            return at;
+        },
+        free: ()=>true })));
+    assert.equal(await longCall(fns.itoa, [42, base + 0x10, 10]), BigInt(base + 0x10));
+    assert.equal(guest.cstr(base + 0x10, 8), '42');
+    assert.equal(await longCall(fns._get_doserrno, [base + 0x20]), 0n);
+    assert.equal(await longCall(fns._get_pgmptr, [base + 0x30]), 0n);
+    assert.equal(guest.cstr(guest.ptr(base + 0x30), 32), 'C:\\game.exe', 'the pointer whole');
+    // 1.5 to one place: the digits, the point and the sign each where they were asked.
+    assert.equal(await longCall(fns._fcvt_s, [base + 0x40, 16, 0, 0x3ff80000, 1, base + 0x60,
+        base + 0x64]), 0n);
+    assert.deepEqual([guest.cstr(base + 0x40, 16), guest.i32(base + 0x60),
+        guest.i32(base + 0x64)], ['15', 1, 0]);
+    // An extended 1.0 by value, its digits into the record past 4 GiB.
+    assert.equal(await longCall(fns.$I10_OUTPUT, [0, 0x80000000, 0x3fff, 4, 0, base + 0x80]),
+        1n);
+    assert.equal(guest.cstr(base + 0x84, 16), '1', 'its digits, where the record is');
+});

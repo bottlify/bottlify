@@ -157,3 +157,16 @@ test('an executor reads the functions the run kept in place, and sends each it k
     assert.equal(client.take({ type: 'cache', message }), true);
     assert.deepEqual(told, [message]);
 });
+
+test('a record whose place the store named and that does not read is a miss, counted with why',
+    async()=>{
+        const [first] = wired({ get: async()=>null, put: async()=>{} }, 1, null);
+        first.client.holdRecords({ read: ()=>{
+            throw new DOMException('the file is gone', 'NotReadableError');
+        } });
+        const asked = first.client.store.get('r/1');
+        first.client.take({ type: 'store', id: 1, pieces: [[0, 8]] });
+        assert.equal(await asked, null);
+        assert.equal(first.client.counts.unreadable, 1);
+        assert.match(String(first.client.counts.unreadableWhy), /r\/1: the file is gone/);
+    });

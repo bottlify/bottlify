@@ -1797,7 +1797,9 @@ export function createIoFunctions(host, descriptors){
         _utime64: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 8)),
         /** int _utime32(const char *filename, struct __utimbuf32 *times) */
         _utime32: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 4)),
+        /** int _utime(const char *filename, struct _utimbuf *times) */
         _utime: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, timeBytes)),
+        /** int _wutime64/_wutime32/_wutime(const wchar_t *filename, struct _utimbuf *times) */
         _wutime64: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 8)),
         _wutime32: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 4)),
         _wutime: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, timeBytes)),

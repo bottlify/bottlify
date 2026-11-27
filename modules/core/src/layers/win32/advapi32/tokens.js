@@ -26,9 +26,9 @@
  */
 
 import { COMPUTER_NAME } from '../kernel32/drives.js';
-import { createDescriptorCodec } from './descriptors.js';
+import { EXPLICIT_ACCESS, TRUSTEE, createDescriptorCodec } from './descriptors.js';
 import { probedNatives } from '../ntdll/probe.js';
-import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /**
  * Who the program is running as. There is one account and no way to become
@@ -126,13 +126,6 @@ const INHERITED_ACE = 0x10;
 const SUCCESSFUL_ACCESS_ACE_FLAG = 0x40;
 const FAILED_ACCESS_ACE_FLAG = 0x80;
 
-/**
- * EXPLICIT_ACCESS, the same in either form: the rights, the ACCESS_MODE, the
- * inheritance, then a TRUSTEE -- the multiple trustee and its operation, the
- * form, the type, and the name or SID the form says.
- */
-const EXPLICIT_ACCESS = Object.freeze({ PERMISSIONS: 0, MODE: 4, INHERITANCE: 8,
-    MULTIPLE_OPERATION: 16, FORM: 20, NAME: 28, SIZE: 32 });
 const NOT_USED_ACCESS = 0;
 const GRANT_ACCESS = 1;
 const SET_ACCESS = 2;
@@ -843,6 +836,11 @@ export const accountNamed = written=>{
  */
 export function createTokenFunctions(host){
     const width = pointerWidth(host.pointerSize === 8 ? 8 : 4);
+    // EXPLICIT_ACCESS, the same in either form, and its TRUSTEE at the width:
+    // the name or SID the form says is a pointer, read whole.
+    const ENTRY = EXPLICIT_ACCESS.at(width.size);
+    const ONE = TRUSTEE.at(width.size);
+    const pointers = pointerIo(host, width.size);
     // SID_AND_ATTRIBUTES: a pointer and a DWORD, aligned to the pointer - 8
     // bytes in a 32-bit process, 16 in a 64-bit one, its attributes at 8.
     const SID_AND_ATTRIBUTES_SIZE = 2 * width.size;
@@ -1244,7 +1242,7 @@ export function createTokenFunctions(host){
             {
                 return fail(ERROR_INVALID_SECURITY_DESCR);
             }
-            writeDword(at + slot, sid >>> 0);
+            writeDword(at + slot, wholeAddress(sid));
             const control = readWord(at + SD.CONTROL);
             writeWord(at + SD.CONTROL, defaulted ? control | bit : control & ~bit);
             return 1;
@@ -1572,14 +1570,14 @@ export function createTokenFunctions(host){
      * @returns {Uint8Array | number}
      */
     const trusteeSid = (entry, wide)=>{
-        const form = readDword(entry + EXPLICIT_ACCESS.FORM);
-        const pointer = readDword(entry + EXPLICIT_ACCESS.NAME);
+        const form = readDword(entry + ENTRY.TRUSTEE + ONE.FORM);
+        const pointer = pointers.read(entry + ENTRY.TRUSTEE + ONE.NAME);
         if (form === TRUSTEE_IS_SID)
         {
             return sidAt(pointer) ?? ERROR_INVALID_SID;
         }
         if (form !== TRUSTEE_IS_NAME
-            || readDword(entry + EXPLICIT_ACCESS.MULTIPLE_OPERATION) !== NO_MULTIPLE_TRUSTEE)
+            || readDword(entry + ENTRY.TRUSTEE + ONE.OPERATION) !== NO_MULTIPLE_TRUSTEE)
         {
             return ERROR_INVALID_PARAMETER;
         }
@@ -1673,8 +1671,8 @@ export function createTokenFunctions(host){
             }
             for (let index = 0; index < total; index++)
             {
-                const entry = (entries >>> 0) + index * EXPLICIT_ACCESS.SIZE;
-                const mode = readDword(entry + EXPLICIT_ACCESS.MODE);
+                const entry = wholeAddress(entries) + index * ENTRY.SIZE;
+                const mode = readDword(entry + ENTRY.MODE);
                 if (mode === NOT_USED_ACCESS)
                 {
                     continue;
@@ -1688,8 +1686,8 @@ export function createTokenFunctions(host){
                 {
                     return trustee;
                 }
-                const mask = readDword(entry + EXPLICIT_ACCESS.PERMISSIONS);
-                const flags = readDword(entry + EXPLICIT_ACCESS.INHERITANCE) & INHERITANCE_FLAGS;
+                const mask = readDword(entry + ENTRY.PERMISSIONS);
+                const flags = readDword(entry + ENTRY.INHERITANCE) & INHERITANCE_FLAGS;
                 /** @param {MergedAce} ace */
                 const names = ace=>ace.sid !== null && sameBytes(ace.sid, trustee);
                 /** @param {number} type @param {number} aceFlags */
@@ -3461,7 +3459,7 @@ export function createTokenFunctions(host){
             /** @param {number[]} args */
             handler: ([sid])=>{
                 host.setLastError(ERROR_SUCCESS);
-                return (wholeAddress(sid) + 2) >>> 0;
+                return wholeAddress(sid) + 2;
             },
         },
         GetSidSubAuthority: {
@@ -3470,7 +3468,7 @@ export function createTokenFunctions(host){
             /** @param {number[]} args */
             handler: ([sid, index])=>{
                 host.setLastError(ERROR_SUCCESS);
-                return (wholeAddress(sid) + 8 + 4 * (index >>> 0)) >>> 0;
+                return wholeAddress(sid) + 8 + 4 * (index >>> 0);
             },
         },
         GetSidSubAuthorityCount: {
@@ -3479,7 +3477,7 @@ export function createTokenFunctions(host){
             /** @param {number[]} args */
             handler: ([sid])=>{
                 host.setLastError(ERROR_SUCCESS);
-                return (wholeAddress(sid) + 1) >>> 0;
+                return wholeAddress(sid) + 1;
             },
         },
 

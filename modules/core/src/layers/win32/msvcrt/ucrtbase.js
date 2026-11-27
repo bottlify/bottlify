@@ -157,16 +157,6 @@ export function createUcrtbaseFunctions(crt, host){
     };
 
     /**
-     * The arguments of a printer in the guest whose options quadword comes
-     * first, as 32 bits lay them out: its code reads them as one register at
-     * 64 bits and takes no quadwords, so the slots after it come a slot
-     * nearer there.
-     *
-     * @param {number[]} args
-     */
-    const optionsFirst = args=>(pointer === 8 ? [args[0], 0, ...args.slice(1)] : args);
-
-    /**
      * A narrow `_vsnprintf`-family answer under either behaviour the options
      * word picks.
      *
@@ -297,14 +287,14 @@ export function createUcrtbaseFunctions(crt, host){
         convention: 'cdecl',
         argBytes: 0,
         handler: ()=>{
-            const text = narrow.handler([]) >>> 0;
+            const text = wholeAddress(narrow.handler([]));
             if (text === 0)
             {
                 return text;
             }
             const read = guest.cstr(text, 4096);
             crt.free.handler([text]);
-            const wide = crt.malloc.handler([(read.length + 1) * 2]) >>> 0;
+            const wide = wholeAddress(crt.malloc.handler([(read.length + 1) * 2]));
             if (wide !== 0)
             {
                 guest.writeWide(wide, read);
@@ -331,8 +321,8 @@ export function createUcrtbaseFunctions(crt, host){
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([index])=>((crt.__iob_func.handler([]) >>> 0)
-                + (index >>> 0) * fileLayout(pointer).size) >>> 0,
+            handler: ([index])=>wholeAddress(crt.__iob_func.handler([]))
+                + (index >>> 0) * fileLayout(pointer).size,
         },
 
         /**
@@ -369,11 +359,8 @@ export function createUcrtbaseFunctions(crt, host){
             PRINT_CODE.__stdio_common_vsprintf, host, {
                 argBytes: 28,
                 /** @param {number[]} args */
-                handler: args=>{
-                    const [options, , buffer, count, format, , list] = optionsFirst(args);
-                    return styled(options,
-                        ()=>narrowCounted(options, buffer, count, format, list));
-                },
+                handler: ([options, , buffer, count, format, , list])=>styled(options,
+                    ()=>narrowCounted(options, buffer, count, format, list)),
             }),
 
         /** The same in wide characters. */
@@ -381,10 +368,8 @@ export function createUcrtbaseFunctions(crt, host){
             PRINT_CODE.__stdio_common_vswprintf, host, {
                 argBytes: 28,
                 /** @param {number[]} args */
-                handler: args=>{
-                    const [options, , buffer, count, format, , list] = optionsFirst(args);
-                    return styled(options, ()=>wideCounted(options, buffer, count, format, list));
-                },
+                handler: ([options, , buffer, count, format, , list])=>styled(options,
+                    ()=>wideCounted(options, buffer, count, format, list)),
             }),
 
 
@@ -396,11 +381,8 @@ export function createUcrtbaseFunctions(crt, host){
             PRINT_CODE.__stdio_common_vsprintf_s, host, {
                 argBytes: 28,
                 /** @param {number[]} args */
-                handler: args=>{
-                    const [options, , buffer, size, format, , list] = optionsFirst(args);
-                    return styled(options,
-                        ()=>crt.vsprintf_s.handler([buffer, size, format, list]));
-                },
+                handler: ([options, , buffer, size, format, , list])=>styled(options,
+                    ()=>crt.vsprintf_s.handler([buffer, size, format, list])),
             }),
 
         /**
@@ -582,7 +564,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     const used = first === 0 ? 0 : (last - first) / pointer;
                     const room = Math.max(8, used * 2);
-                    const grown = crt.realloc.handler([first, room * pointer]) >>> 0;
+                    const grown = wholeAddress(crt.realloc.handler([first, room * pointer]));
                     if (grown === 0)
                     {
                         return -1;
@@ -670,6 +652,7 @@ export function createUcrtbaseFunctions(crt, host){
             handler: ([handler])=>invalid.setThread?.(handler) ?? 0,
         },
         _get_thread_local_invalid_parameter_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>invalid.getThread?.() ?? 0,
@@ -812,7 +795,7 @@ export function createUcrtbaseFunctions(crt, host){
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
-                localeNames ||= crt.calloc.handler([6, pointer]) >>> 0;
+                localeNames ||= wholeAddress(crt.calloc.handler([6, pointer]));
                 return localeNames;
             },
         },
@@ -825,7 +808,7 @@ export function createUcrtbaseFunctions(crt, host){
             handler: ()=>{
                 if (errorCount === 0)
                 {
-                    errorCount = crt.malloc.handler([4]) >>> 0;
+                    errorCount = wholeAddress(crt.malloc.handler([4]));
                     if (errorCount !== 0)
                     {
                         guest.set32(errorCount, SYSTEM_ERRORS);
@@ -912,11 +895,8 @@ export function createUcrtbaseFunctions(crt, host){
             PRINT_CODE.__stdio_common_vswprintf_s, host, {
                 argBytes: 28,
                 /** @param {number[]} args */
-                handler: args=>{
-                    const [options, , buffer, size, format, , list] = optionsFirst(args);
-                    return styled(options,
-                        ()=>crt.vswprintf_s.handler([buffer, size, format, list]));
-                },
+                handler: ([options, , buffer, size, format, , list])=>styled(options,
+                    ()=>crt.vswprintf_s.handler([buffer, size, format, list])),
             }),
 
 
@@ -1002,7 +982,7 @@ export function createUcrtbaseFunctions(crt, host){
          * month names `_Getdays` and `_Getmonths` list, wide.
          */
         _W_Getdays: { ...widened(crt._Getdays), returns: 'pointer' },
-        _W_Getmonths: widened(crt._Getmonths),
+        _W_Getmonths: { ...widened(crt._Getmonths), returns: 'pointer' },
 
         /** void *_W_Gettnames(void): `_Gettnames`'s table, handed back to `_Wcsftime`. */
         _W_Gettnames: crt._Gettnames,

@@ -43,6 +43,7 @@ import { commandCode } from './routines/command.js';
 import { createShaderValidator } from './shader-validator.js';
 import { createFocusWindows } from './focus.js';
 import { DEVICE_STATE } from '../d3d9/device.js';
+import { wholeAddress } from '../../../system/address.js';
 
 const DD_OK = 0;
 /** DDERR_INVALIDPARAMS. */
@@ -527,11 +528,11 @@ export function createGraphicsLibraries(
                 (guid >>> 0) === DDCREATE_HARDWAREONLY));
         if (!object)
         {
-            fields.writeU32(out >>> 0, 0);
+            fields.writeU32(wholeAddress(out), 0);
             return E_OUTOFMEMORY;
         }
         created.push('ddraw');
-        fields.writeU32(out >>> 0, ddraw().publishRoot(object, version));
+        fields.writeU32(wholeAddress(out), ddraw().publishRoot(object, version));
         return DD_OK;
     };
 
@@ -651,6 +652,7 @@ export function createGraphicsLibraries(
             callGuest,
             currentThread,
             divergence,
+            pointerSize,
         }),
 
         'D3D8.dll': ()=>({
@@ -938,12 +940,12 @@ export function createGraphicsLibraries(
                         return DDERR_INVALIDPARAMS;
                     }
                     const object = graphics.create('ddraw', ddraw().rootOptions(7));
-                    const made = object.createClipper(flags >>> 0, { outer: outer >>> 0 });
+                    const made = object.createClipper(flags >>> 0, { outer: wholeAddress(outer) });
                     if (made.hr !== DD_OK)
                     {
                         return made.hr;
                     }
-                    fields.writeU32(out >>> 0, publisher.publish(
+                    fields.writeU32(wholeAddress(out), publisher.publish(
                         made.clipper, ddraw().interfaces.clipper, IID_IDirectDrawClipper));
                     return DD_OK;
                 },

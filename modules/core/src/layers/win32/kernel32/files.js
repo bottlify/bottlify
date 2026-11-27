@@ -4930,7 +4930,7 @@ export function createFileFunctions(host){
             {
                 return name.length + 1;
             }
-            text.write(buffer >>> 0, room >>> 0, name);
+            text.write(wholeAddress(buffer), room >>> 0, name);
             return name.length;
         },
     });

@@ -495,8 +495,10 @@ export function createMsvcrtFunctions(host){
 
     /** char *_itoa(int value, char *buffer, int radix) */
     const itoa = {
+        returns: 'pointer',
         convention: 'cdecl',
         argBytes: 12,
+        addresses: [1],
         /** @param {number[]} args */
         handler: ([value, buffer, radix])=>{
             if (radix < 2)

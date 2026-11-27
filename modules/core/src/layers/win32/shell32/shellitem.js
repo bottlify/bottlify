@@ -136,7 +136,7 @@ export function createShellItems(host, namespace){
      * @param {Uint8Array} bytes
      */
     const placed = bytes=>{
-        const at = host.allocate(bytes.length) >>> 0;
+        const at = wholeAddress(host.allocate(bytes.length));
         if (at)
         {
             host.writeMemory(at, bytes);

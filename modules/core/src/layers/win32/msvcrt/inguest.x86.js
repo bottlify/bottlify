@@ -79,7 +79,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     qsort: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'ptr'],
         returns: 'void',
         uses: ['u8', 'setU8', 'call'],
         code: Uint8Array.of(
@@ -1545,7 +1545,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     atoi: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'i32',
         uses: ['u8'],
         code: Uint8Array.of(
@@ -1563,7 +1563,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     bsearch: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'u32', 'u32', 'ptr'],
         returns: 'ptr',
         uses: ['call'],
         code: Uint8Array.of(
@@ -1671,9 +1671,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     strtol: {
         convention: 'cdecl',
-        params: ['u32', 'ptr', 'i32'],
+        params: ['ptr', 'ptr', 'i32'],
         returns: 'i32',
-        uses: ['u8', 'setU32', 'host', 'pointerBytes'],
+        uses: ['u8', 'host', 'setPtr'],
         host: 394,
         tables: { BELOW_CARRY: 400, DIGITS: 548 },
         code: Uint8Array.of(
@@ -1748,9 +1748,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     strtoul: {
         convention: 'cdecl',
-        params: ['u32', 'ptr', 'i32'],
+        params: ['ptr', 'ptr', 'i32'],
         returns: 'u32',
-        uses: ['u8', 'setU32', 'host', 'pointerBytes'],
+        uses: ['u8', 'host', 'setPtr'],
         host: 362,
         tables: { BELOW_CARRY: 368, DIGITS: 516 },
         code: Uint8Array.of(
@@ -1854,7 +1854,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strchr: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'ptr',
         uses: ['u8'],
         code: Uint8Array.of(
@@ -1866,7 +1866,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strrchr: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'ptr',
         uses: ['u8'],
         code: Uint8Array.of(
@@ -1878,7 +1878,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strstr: {
         convention: 'cdecl',
-        params: ['u32', 'ptr'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u8'],
         code: Uint8Array.of(
@@ -1938,7 +1938,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _strlwr: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'ptr',
         uses: ['u8', 'setU8'],
         code: Uint8Array.of(
@@ -1950,7 +1950,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _strupr: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'ptr',
         uses: ['u8', 'setU8'],
         code: Uint8Array.of(
@@ -2044,7 +2044,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _mbsdec: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u8', 'host'],
         host: 45,
@@ -2070,7 +2070,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _mbschr: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'ptr',
         uses: ['u8', 'host'],
         host: 52,
@@ -2084,7 +2084,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _mbsrchr: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'ptr',
         uses: ['u8', 'host'],
         host: 55,
@@ -2098,7 +2098,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _mbsstr: {
         convention: 'cdecl',
-        params: ['u32', 'ptr'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u8', 'host'],
         host: 80,
@@ -2265,7 +2265,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _mbslwr: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'ptr',
         uses: ['u8', 'setU8', 'host'],
         host: 73,
@@ -2281,7 +2281,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _mbsupr: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'ptr',
         uses: ['u8', 'setU8', 'host'],
         host: 73,
@@ -2297,7 +2297,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     encodePointer: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'ptr',
         uses: [],
         code: Uint8Array.of(
@@ -2315,7 +2315,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strspn: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'u32',
         uses: ['u8'],
         code: Uint8Array.of(
@@ -2329,7 +2329,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strcspn: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'u32',
         uses: ['u8'],
         code: Uint8Array.of(
@@ -2343,7 +2343,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strpbrk: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u8'],
         code: Uint8Array.of(
@@ -2632,7 +2632,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcschr: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'ptr',
         uses: ['u16'],
         code: Uint8Array.of(
@@ -2644,7 +2644,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcsrchr: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'ptr',
         uses: ['u16'],
         code: Uint8Array.of(
@@ -2718,7 +2718,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcsstr: {
         convention: 'cdecl',
-        params: ['u32', 'ptr'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u16'],
         code: Uint8Array.of(
@@ -2732,7 +2732,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcsspn: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'u32',
         uses: ['u16'],
         code: Uint8Array.of(
@@ -2747,7 +2747,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcscspn: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'u32',
         uses: ['u16'],
         code: Uint8Array.of(
@@ -2762,7 +2762,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcspbrk: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u16'],
         code: Uint8Array.of(
@@ -2921,7 +2921,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _wtoi: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'i32',
         uses: ['u16'],
         code: Uint8Array.of(
@@ -2939,9 +2939,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcstol: {
         convention: 'cdecl',
-        params: ['u32', 'ptr', 'i32'],
+        params: ['ptr', 'ptr', 'i32'],
         returns: 'i32',
-        uses: ['u16', 'setU32', 'host', 'pointerBytes'],
+        uses: ['u16', 'host', 'setPtr'],
         host: 470,
         tables: { BELOW_CARRY: 476, DIGITS: 624 },
         code: Uint8Array.of(
@@ -3023,9 +3023,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcstoul: {
         convention: 'cdecl',
-        params: ['u32', 'ptr', 'i32'],
+        params: ['ptr', 'ptr', 'i32'],
         returns: 'u32',
-        uses: ['u16', 'setU32', 'host', 'pointerBytes'],
+        uses: ['u16', 'host', 'setPtr'],
         host: 442,
         tables: { BELOW_CARRY: 448, DIGITS: 596 },
         code: Uint8Array.of(
@@ -3104,7 +3104,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     radixText: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'i32', 'i32', 'i32'],
+        params: ['u32', 'ptr', 'i32', 'i32', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16'],
         tables: { TENS: 488 },
@@ -3157,7 +3157,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _itoa: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'i32'],
+        params: ['u32', 'ptr', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16', 'host'],
         host: 99,
@@ -3219,7 +3219,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _ultoa: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'i32'],
+        params: ['u32', 'ptr', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16', 'host'],
         host: 96,
@@ -3281,7 +3281,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _itow: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'i32'],
+        params: ['u32', 'ptr', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16', 'host'],
         host: 102,
@@ -3343,7 +3343,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _ultow: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'i32'],
+        params: ['u32', 'ptr', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16', 'host'],
         host: 99,

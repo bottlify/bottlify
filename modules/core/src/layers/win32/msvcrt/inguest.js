@@ -229,8 +229,8 @@ export function _ftol(value){
  * not kept -- the standard promises none, and msvcrt's own sort keeps none.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} base @param {u32} num @param {u32} width
- * @param {u32} compare
+ * @param {Guest} guest @param {ptr} base @param {u32} num @param {u32} width
+ * @param {ptr} compare
  */
 export function qsort({ u8, setU8, call }, base, num, width, compare){
     if (width === 0)
@@ -664,7 +664,7 @@ export function towlower(c){
  * runtimes clamp, and set errno; this one does neither.)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {i32}
  */
 export function atoi({ u8 }, text){
@@ -702,8 +702,8 @@ export function atoi({ u8 }, text){
  * subtly wrong here.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} key @param {u32} base @param {u32} num @param {u32} width
- * @param {u32} compare
+ * @param {Guest} guest @param {ptr} key @param {ptr} base @param {u32} num @param {u32} width
+ * @param {ptr} compare
  * @returns {ptr}
  */
 export function bsearch({ call }, key, base, num, width, compare){
@@ -900,10 +900,10 @@ export const BELOW_CARRY = Uint32Array.from({ length: 37 },
  * it goes, so the host answers the call as it came.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
+ * @param {Guest} guest @param {ptr} text @param {ptr} end @param {i32} base
  * @returns {i32}
  */
-export function strtol({ u8, setU32, host, pointerBytes }, text, end, base){
+export function strtol({ u8, host, setPtr }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -957,11 +957,7 @@ export function strtol({ u8, setU32, host, pointerBytes }, text, end, base){
     {
         if (end !== 0)
         {
-            setU32(end, text);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, text);
         }
         return 0;
     }
@@ -971,11 +967,7 @@ export function strtol({ u8, setU32, host, pointerBytes }, text, end, base){
     }
     if (end !== 0)
     {
-        setU32(end, at);
-        if (pointerBytes === 8)
-        {
-            setU32(end + 4, 0);
-        }
+        setPtr(end, at);
     }
     return negative !== 0 ? (0 - magnitude) | 0 : magnitude | 0;
 }
@@ -987,10 +979,10 @@ export function strtol({ u8, setU32, host, pointerBytes }, text, end, base){
  * strtoul("-1") is ULONG_MAX. A magnitude past 32 bits is the host's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
+ * @param {Guest} guest @param {ptr} text @param {ptr} end @param {i32} base
  * @returns {u32}
  */
-export function strtoul({ u8, setU32, host, pointerBytes }, text, end, base){
+export function strtoul({ u8, host, setPtr }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -1044,21 +1036,13 @@ export function strtoul({ u8, setU32, host, pointerBytes }, text, end, base){
     {
         if (end !== 0)
         {
-            setU32(end, text);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, text);
         }
         return 0;
     }
     if (end !== 0)
     {
-        setU32(end, at);
-        if (pointerBytes === 8)
-        {
-            setU32(end + 4, 0);
-        }
+        setPtr(end, at);
     }
     return negative !== 0 ? (0 - magnitude) >>> 0 : magnitude;
 }
@@ -1105,12 +1089,12 @@ export function fabs(x){
  * for 0 finds the string's end.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} c
+ * @param {Guest} guest @param {ptr} text @param {u32} c
  * @returns {ptr}
  */
 export function strchr({ u8 }, text, c){
     const wanted = c & 0xff;
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const byte = u8(at);
         if (byte === wanted)
@@ -1130,14 +1114,14 @@ export function strchr({ u8 }, text, c){
  * The last byte that is `c`'s low byte, the terminator among them.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} c
+ * @param {Guest} guest @param {ptr} text @param {u32} c
  * @returns {ptr}
  */
 export function strrchr({ u8 }, text, c){
     const wanted = c & 0xff;
-    /** @type {u32} */
+    /** @type {ptr} */
     let found = 0;
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const byte = u8(at);
         if (byte === wanted)
@@ -1158,11 +1142,11 @@ export function strrchr({ u8 }, text, c){
  * itself for an empty needle, and null for none.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} haystack @param {ptr} needle
+ * @param {Guest} guest @param {ptr} haystack @param {ptr} needle
  * @returns {ptr}
  */
 export function strstr({ u8 }, haystack, needle){
-    for (/** @type {u32} */ let at = haystack; ; at++)
+    for (/** @type {ptr} */ let at = haystack; ; at++)
     {
         /** @type {u32} */
         let i = 0;
@@ -1250,11 +1234,11 @@ export function strncpy({ u8, copyUp, copyDown, fill }, destination, source, cou
  * In place, the ASCII capitals only, as the C locale has it.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {ptr}
  */
 export function _strlwr({ u8, setU8 }, text){
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const c = u8(at);
         if (c === 0)
@@ -1272,11 +1256,11 @@ export function _strlwr({ u8, setU8 }, text){
  * char *_strupr(char *text)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {ptr}
  */
 export function _strupr({ u8, setU8 }, text){
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const c = u8(at);
         if (c === 0)
@@ -1427,7 +1411,7 @@ export function _mbsinc({ u8, host }, at){
  * cannot lead, or is not in the string; null at the start.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} start @param {u32} at
+ * @param {Guest} guest @param {ptr} start @param {ptr} at
  * @returns {ptr}
  */
 export function _mbsdec({ u8, host }, start, at){
@@ -1435,7 +1419,7 @@ export function _mbsdec({ u8, host }, start, at){
     {
         return 0;
     }
-    const before = (at - 1) >>> 0;
+    const before = at - 1;
     if (before > start && u8(before - 1) >= 0x80)
     {
         return host();
@@ -1462,7 +1446,7 @@ export function _ismbblead({ host }, c){
  * unsigned char *_mbschr(const unsigned char *text, unsigned int c)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} c
+ * @param {Guest} guest @param {ptr} text @param {u32} c
  * @returns {ptr}
  */
 export function _mbschr({ u8, host }, text, c){
@@ -1470,7 +1454,7 @@ export function _mbschr({ u8, host }, text, c){
     {
         return host();
     }
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const byte = u8(at);
         if (byte >= 0x80)
@@ -1492,7 +1476,7 @@ export function _mbschr({ u8, host }, text, c){
  * unsigned char *_mbsrchr(const unsigned char *text, unsigned int c)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} c
+ * @param {Guest} guest @param {ptr} text @param {u32} c
  * @returns {ptr}
  */
 export function _mbsrchr({ u8, host }, text, c){
@@ -1500,9 +1484,9 @@ export function _mbsrchr({ u8, host }, text, c){
     {
         return host();
     }
-    /** @type {u32} */
+    /** @type {ptr} */
     let found = 0;
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const byte = u8(at);
         if (byte >= 0x80)
@@ -1527,11 +1511,11 @@ export function _mbsrchr({ u8, host }, text, c){
  * byte past 0x7f before the answer is the host's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} haystack @param {ptr} needle
+ * @param {Guest} guest @param {ptr} haystack @param {ptr} needle
  * @returns {ptr}
  */
 export function _mbsstr({ u8, host }, haystack, needle){
-    for (/** @type {u32} */ let at = haystack; ; at++)
+    for (/** @type {ptr} */ let at = haystack; ; at++)
     {
         if (u8(at) >= 0x80)
         {
@@ -1735,18 +1719,18 @@ export function _mbsncpy({ u8, copyUp, copyDown, fill, host }, destination, sour
  * In place, the ASCII capitals, once the whole string is known to be ASCII.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {ptr}
  */
 export function _mbslwr({ u8, setU8, host }, text){
-    for (/** @type {u32} */ let at = text; u8(at) !== 0; at++)
+    for (/** @type {ptr} */ let at = text; u8(at) !== 0; at++)
     {
         if (u8(at) >= 0x80)
         {
             return host();
         }
     }
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const c = u8(at);
         if (c === 0)
@@ -1764,18 +1748,18 @@ export function _mbslwr({ u8, setU8, host }, text){
  * unsigned char *_mbsupr(unsigned char *text)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {ptr}
  */
 export function _mbsupr({ u8, setU8, host }, text){
-    for (/** @type {u32} */ let at = text; u8(at) !== 0; at++)
+    for (/** @type {ptr} */ let at = text; u8(at) !== 0; at++)
     {
         if (u8(at) >= 0x80)
         {
             return host();
         }
     }
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const c = u8(at);
         if (c === 0)
@@ -1798,7 +1782,7 @@ export function _mbsupr({ u8, setU8, host }, text){
  * pointer, so it costs no crossing.
  *
  * @guestCode cdecl
- * @param {u32} pointer
+ * @param {ptr} pointer
  * @returns {ptr}
  */
 export function encodePointer(pointer){
@@ -1822,15 +1806,15 @@ export function encodedNull(){
  * is never one.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @param {Guest} guest @param {ptr} text @param {ptr} accept
  * @returns {u32}
  */
 export function strspn({ u8 }, text, accept){
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const byte = u8(at);
         let found = 0;
-        for (/** @type {u32} */ let set = accept; found === 0 && u8(set) !== 0; set++)
+        for (/** @type {ptr} */ let set = accept; found === 0 && u8(set) !== 0; set++)
         {
             if (u8(set) === byte)
             {
@@ -1850,15 +1834,15 @@ export function strspn({ u8 }, text, accept){
  * How many bytes from the start are none of `reject`'s, up to the terminator.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} reject
+ * @param {Guest} guest @param {ptr} text @param {ptr} reject
  * @returns {u32}
  */
 export function strcspn({ u8 }, text, reject){
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const byte = u8(at);
         let found = 0;
-        for (/** @type {u32} */ let set = reject; found === 0 && u8(set) !== 0; set++)
+        for (/** @type {ptr} */ let set = reject; found === 0 && u8(set) !== 0; set++)
         {
             if (u8(set) === byte)
             {
@@ -1878,18 +1862,18 @@ export function strcspn({ u8 }, text, reject){
  * The first byte that is one of `accept`'s, or null at the terminator.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @param {Guest} guest @param {ptr} text @param {ptr} accept
  * @returns {ptr}
  */
 export function strpbrk({ u8 }, text, accept){
-    for (/** @type {u32} */ let at = text; ; at++)
+    for (/** @type {ptr} */ let at = text; ; at++)
     {
         const byte = u8(at);
         if (byte === 0)
         {
             return 0;
         }
-        for (/** @type {u32} */ let set = accept; u8(set) !== 0; set++)
+        for (/** @type {ptr} */ let set = accept; u8(set) !== 0; set++)
         {
             if (u8(set) === byte)
             {
@@ -2213,12 +2197,12 @@ export function strncat({ u8, setU8, copyUp, copyDown }, destination, source, co
  * The first unit that is `c`, the terminator among them.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} c
+ * @param {Guest} guest @param {ptr} text @param {u32} c
  * @returns {ptr}
  */
 export function wcschr({ u16 }, text, c){
     const wanted = c & 0xffff;
-    for (/** @type {u32} */ let at = text; ; at += 2)
+    for (/** @type {ptr} */ let at = text; ; at += 2)
     {
         const unit = u16(at);
         if (unit === wanted)
@@ -2238,14 +2222,14 @@ export function wcschr({ u16 }, text, c){
  * The last unit that is `c`, the terminator among them, as strrchr's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} c
+ * @param {Guest} guest @param {ptr} text @param {u32} c
  * @returns {ptr}
  */
 export function wcsrchr({ u16 }, text, c){
     const wanted = c & 0xffff;
-    /** @type {u32} */
+    /** @type {ptr} */
     let found = 0;
-    for (/** @type {u32} */ let at = text; ; at += 2)
+    for (/** @type {ptr} */ let at = text; ; at += 2)
     {
         const unit = u16(at);
         if (unit === wanted)
@@ -2360,11 +2344,11 @@ export function wcsncat({ u16, setU16, copyUp, copyDown }, destination, source, 
  * The first place the needle's units are, the haystack itself for an empty one.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} haystack @param {ptr} needle
+ * @param {Guest} guest @param {ptr} haystack @param {ptr} needle
  * @returns {ptr}
  */
 export function wcsstr({ u16 }, haystack, needle){
-    for (/** @type {u32} */ let at = haystack; ; at += 2)
+    for (/** @type {ptr} */ let at = haystack; ; at += 2)
     {
         /** @type {u32} */
         let i = 0;
@@ -2389,15 +2373,15 @@ export function wcsstr({ u16 }, haystack, needle){
  * How many units from the start are each a unit of `accept`.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @param {Guest} guest @param {ptr} text @param {ptr} accept
  * @returns {u32}
  */
 export function wcsspn({ u16 }, text, accept){
-    for (/** @type {u32} */ let at = text; ; at += 2)
+    for (/** @type {ptr} */ let at = text; ; at += 2)
     {
         const unit = u16(at);
         let found = 0;
-        for (/** @type {u32} */ let set = accept; found === 0 && u16(set) !== 0; set += 2)
+        for (/** @type {ptr} */ let set = accept; found === 0 && u16(set) !== 0; set += 2)
         {
             if (u16(set) === unit)
             {
@@ -2417,15 +2401,15 @@ export function wcsspn({ u16 }, text, accept){
  * How many units from the start are none of `reject`'s.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} reject
+ * @param {Guest} guest @param {ptr} text @param {ptr} reject
  * @returns {u32}
  */
 export function wcscspn({ u16 }, text, reject){
-    for (/** @type {u32} */ let at = text; ; at += 2)
+    for (/** @type {ptr} */ let at = text; ; at += 2)
     {
         const unit = u16(at);
         let found = 0;
-        for (/** @type {u32} */ let set = reject; found === 0 && u16(set) !== 0; set += 2)
+        for (/** @type {ptr} */ let set = reject; found === 0 && u16(set) !== 0; set += 2)
         {
             if (u16(set) === unit)
             {
@@ -2445,18 +2429,18 @@ export function wcscspn({ u16 }, text, reject){
  * The first unit the set has, or null; the terminator is never one of it.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @param {Guest} guest @param {ptr} text @param {ptr} accept
  * @returns {ptr}
  */
 export function wcspbrk({ u16 }, text, accept){
-    for (/** @type {u32} */ let at = text; ; at += 2)
+    for (/** @type {ptr} */ let at = text; ; at += 2)
     {
         const unit = u16(at);
         if (unit === 0)
         {
             return 0;
         }
-        for (/** @type {u32} */ let set = accept; u16(set) !== 0; set += 2)
+        for (/** @type {ptr} */ let set = accept; u16(set) !== 0; set += 2)
         {
             if (u16(set) === unit)
             {
@@ -2592,7 +2576,7 @@ export function _memicmp({ u8, host }, left, right, count){
  * wraps in 32 bits.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {i32}
  */
 export function _wtoi({ u16 }, text){
@@ -2634,10 +2618,10 @@ const wideDigit = (/** @type {number} */ unit)=>(unit < 0x80 ? DIGITS[unit] : 99
  * does not take.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
+ * @param {Guest} guest @param {ptr} text @param {ptr} end @param {i32} base
  * @returns {i32}
  */
-export function wcstol({ u16, setU32, host, pointerBytes }, text, end, base){
+export function wcstol({ u16, host, setPtr }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -2699,11 +2683,7 @@ export function wcstol({ u16, setU32, host, pointerBytes }, text, end, base){
     {
         if (end !== 0)
         {
-            setU32(end, text);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, text);
         }
         return 0;
     }
@@ -2713,11 +2693,7 @@ export function wcstol({ u16, setU32, host, pointerBytes }, text, end, base){
     }
     if (end !== 0)
     {
-        setU32(end, at);
-        if (pointerBytes === 8)
-        {
-            setU32(end + 4, 0);
-        }
+        setPtr(end, at);
     }
     return negative !== 0 ? (0 - magnitude) | 0 : magnitude | 0;
 }
@@ -2729,10 +2705,10 @@ export function wcstol({ u16, setU32, host, pointerBytes }, text, end, base){
  * as strtoul does.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
+ * @param {Guest} guest @param {ptr} text @param {ptr} end @param {i32} base
  * @returns {u32}
  */
-export function wcstoul({ u16, setU32, host, pointerBytes }, text, end, base){
+export function wcstoul({ u16, host, setPtr }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -2794,21 +2770,13 @@ export function wcstoul({ u16, setU32, host, pointerBytes }, text, end, base){
     {
         if (end !== 0)
         {
-            setU32(end, text);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, text);
         }
         return 0;
     }
     if (end !== 0)
     {
-        setU32(end, at);
-        if (pointerBytes === 8)
-        {
-            setU32(end + 4, 0);
-        }
+        setPtr(end, at);
     }
     return negative !== 0 ? (0 - magnitude) >>> 0 : magnitude;
 }
@@ -2832,7 +2800,7 @@ const rendersRadix = (/** @type {number} */ radix)=>(radix === 10 || radix === 2
  * `rendersRadix` takes. Answers the buffer.
  *
  * @guestCode cdecl
- * @param {Pick<Guest, 'setU8' | 'setU16'>} guest @param {u32} value @param {u32} buffer
+ * @param {Pick<Guest, 'setU8' | 'setU16'>} guest @param {u32} value @param {ptr} buffer
  * @param {i32} radix @param {i32} signed @param {i32} wide
  * @returns {ptr}
  */
@@ -2850,7 +2818,7 @@ export function radixText({ setU8, setU16 }, value, buffer, radix, signed, wide)
         {
             setU8(at, 0x2d);
         }
-        at = (at + step) >>> 0;
+        at += step;
         rest = (0 - value) >>> 0;
     }
     if (radix === 10)
@@ -2876,7 +2844,7 @@ export function radixText({ setU8, setU16 }, value, buffer, radix, signed, wide)
                 {
                     setU8(at, (0x30 + digit) | 0);
                 }
-                at = (at + step) >>> 0;
+                at += step;
             }
         }
     }
@@ -2902,7 +2870,7 @@ export function radixText({ setU8, setU16 }, value, buffer, radix, signed, wide)
             {
                 setU8(at, c);
             }
-            at = (at + step) >>> 0;
+            at += step;
         }
     }
     if (wide !== 0)
@@ -2923,7 +2891,7 @@ export function radixText({ setU8, setU16 }, value, buffer, radix, signed, wide)
  * answers null, past thirty-six msvcrt's _itoa goes on counting from 'a'.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @param {Guest} guest @param {u32} value @param {ptr} buffer @param {i32} radix
  * @returns {ptr}
  */
 export function _itoa({ setU8, setU16, host }, value, buffer, radix){
@@ -2939,7 +2907,7 @@ export function _itoa({ setU8, setU16, host }, value, buffer, radix){
  * every radix.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @param {Guest} guest @param {u32} value @param {ptr} buffer @param {i32} radix
  * @returns {ptr}
  */
 export function _ultoa({ setU8, setU16, host }, value, buffer, radix){
@@ -2955,7 +2923,7 @@ export function _ultoa({ setU8, setU16, host }, value, buffer, radix){
  * text in units.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @param {Guest} guest @param {u32} value @param {ptr} buffer @param {i32} radix
  * @returns {ptr}
  */
 export function _itow({ setU8, setU16, host }, value, buffer, radix){
@@ -2970,7 +2938,7 @@ export function _itow({ setU8, setU16, host }, value, buffer, radix){
  * wchar_t *_ultow(unsigned long value, wchar_t *buffer, int radix)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @param {Guest} guest @param {u32} value @param {ptr} buffer @param {i32} radix
  * @returns {ptr}
  */
 export function _ultow({ setU8, setU16, host }, value, buffer, radix){

@@ -534,7 +534,7 @@ export function createTextureLoader(host){
      * @returns {(args: number[]) => number | Promise<number>}
      */
     const volumeLoader = (api, parse)=>args=>{
-        const { device, given, found, ask } = parse(args.map(a=>a >>> 0));
+        const { device, given, found, ask } = parse(args.map(wholeAddress));
         if (ask.out !== 0)
         {
             putPointer(ask.out, 0);
@@ -568,7 +568,7 @@ export function createTextureLoader(host){
      * @returns {(args: number[]) => number | Promise<number>}
      */
     const loader = (api, cube, parse)=>args=>{
-        const { device, given, found, ask } = parse(args.map(a=>a >>> 0));
+        const { device, given, found, ask } = parse(args.map(wholeAddress));
         if (ask.out !== 0)
         {
             putPointer(ask.out, 0);
@@ -977,7 +977,7 @@ export function createTextureLoader(host){
      * @returns {number | Promise<number>}
      */
     const loadSurface = args=>{
-        const [dest, , destRect, source, , sourceRect, , colorKey] = args.map(a=>a >>> 0);
+        const [dest, , destRect, source, , sourceRect, , colorKey] = args.map(wholeAddress);
         if (dest === 0 || source === 0 || !host.callGuest || !host.heap)
         {
             return D3DERR_INVALIDCALL;
@@ -1018,7 +1018,7 @@ export function createTextureLoader(host){
      */
     const loadSurfaceFromMemory = args=>{
         const [dest, , destRect, bits, format, pitch, , sourceRect, , colorKey]
-            = args.map(a=>a >>> 0);
+            = args.map(wholeAddress);
         if (dest === 0 || bits === 0 || sourceRect === 0 || !host.callGuest || !host.heap)
         {
             return D3DERR_INVALIDCALL;
@@ -1093,8 +1093,8 @@ export function createTextureLoader(host){
      * @returns {(args: number[]) => number | Promise<number>}
      */
     const surfaceLoader = (api, parse)=>args=>{
-        const [dest, , destRect] = args.map(a=>a >>> 0);
-        const { given, found, sourceRect, colorKey, info } = parse(args.map(a=>a >>> 0));
+        const [dest, , destRect] = args.map(wholeAddress);
+        const { given, found, sourceRect, colorKey, info } = parse(args.map(wholeAddress));
         if (dest === 0 || !given || !host.callGuest || !host.heap)
         {
             return D3DERR_INVALIDCALL;

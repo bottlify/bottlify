@@ -34,7 +34,7 @@ import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
 import { handedFiles } from '../system/inherited-files.js';
 import { remoteCacheOwners, remoteCacheReader } from '../process/run-cache.js';
-import { relayedJoin } from '../layers/cache/module.js';
+import { ownedSpace, relayedJoin } from '../layers/cache/module.js';
 
 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
 {
@@ -65,18 +65,59 @@ const heapNow = ()=>{
 };
 
 /**
- * The pictures of this process's surfaces, sent on `port` as the graphics
- * worker sends its frames, for the thread with the GPU to show. What it says
- * back once one is shown is not waited on: this thread blocks while it idles,
- * and a picture painted just before would wait with it.
+ * The pictures of this process's surfaces, sent on `port` for the thread with
+ * the GPU to show: each written into memory held in the run's cache (`hold`),
+ * whose view the message carries for that thread to read in place, and let go
+ * of at its answer, which is not waited on - this thread blocks while it idles.
+ * A frame in flight is held under the lowest free `frame/<n>`, so a run of
+ * frames names as many as are in flight at once, not one each; the room a
+ * shown one let go of is the keeper's again at the next hold. One with no
+ * room is not sent, and said once (`lost`).
  *
  * @param {MessagePort} port
+ * @param {import('../layers/cache/scratch.js').Hold | null} hold  the process's frame names
+ * @param {(detail: string) => void} lost
  */
-const sendFrames = port=>{
-    port.onmessage = ()=>{};
+export const sendFrames = (port, hold, lost)=>{
+    /** The frames sent and not yet shown, the oldest first. @type {{ slot: number, release: () => void }[]} */
+    const shown = [];
+    /** @type {{ slot: number, release: () => void, bytes: Uint8Array } | null} */
+    let writing = null;
     let frameIndex = 0;
-    return (/** @type {{ pixels: Uint8Array }} */ frame)=>port.postMessage(
-        { type: 'frame', ...frame, frameIndex: ++frameIndex }, [frame.pixels.buffer]);
+    let refused = 0;
+    port.onmessage = ({ data })=>{
+        if (data?.type === 'shown')
+        {
+            shown.shift()?.release();
+        }
+    };
+    return {
+        /** @param {number} length @returns {Uint8Array | null} */
+        bytes: length=>{
+            writing?.release();
+            let slot = 0;
+            while (shown.some(frame=>frame.slot === slot))
+            {
+                slot++;
+            }
+            const held = hold?.(`frame/${slot}`, length) ?? null;
+            writing = held && { slot, ...held };
+            if (held === null && refused++ === 0)
+            {
+                lost(`a picture of ${length} bytes found no room in the run's cache, and is`
+                    + ' not shown');
+            }
+            return held?.bytes ?? null;
+        },
+        /** @param {{ pixels: Uint8Array, width: number, height: number, bytesPerRow: number,
+         *     format: string }} frame */
+        send: frame=>{
+            shown.push(/** @type {NonNullable<typeof writing>} */ (writing));
+            writing = null;
+            port.postMessage({ type: 'frame', ...frame, frameIndex: ++frameIndex });
+        },
+        figures: ()=>({ held: shown.length, refused }),
+    };
 };
 
 /**
@@ -169,6 +210,11 @@ export async function serveProcess(start){
     {
         cacheReaders.add(cacheRelay);
     }
+    // The names its pictures are held under while the run's thread shows them.
+    const framesOwned = display && cacheReader !== null ? cacheOwners?.own('frames') ?? null
+        : null;
+    const frames = framesOwned ? ownedSpace(/** @type {any} */ (cacheReader), framesOwned)
+        : null;
     const system = remoteSystem(ask, handlers, (target, method, args)=>
         link.call(target, method, args), volume, windowCells);
     // A wait on another process's object ended there: its word comes in
@@ -268,7 +314,9 @@ export async function serveProcess(start){
                 handle=>ask('inherited', 'position', [handle]),
                 (handle, at)=>ask('inherited', 'setPosition', [handle, at])),
             graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
-                display: display ? sendFrames(display) : undefined },
+                display: display ? sendFrames(display, frames?.space.hold ?? null,
+                    detail=>link.call('events', 'emit', ['loss', { api: 'graphics', detail }])
+                        .catch(()=>{})) : undefined },
             system,
             // Its output is written in order with its calls, below; the rest is
             // told as it happens, and not waited on.
@@ -299,6 +347,7 @@ export async function serveProcess(start){
     }
     catch (e){
         madeNow();
+        await frames?.close();
         if (cacheRelay !== null)
         {
             cacheReaders.delete(cacheRelay);
@@ -356,6 +405,7 @@ export async function serveProcess(start){
     finally
     {
         await app.dispose();
+        await frames?.close();
         if (cacheRelay !== null)
         {
             cacheReaders.delete(cacheRelay);

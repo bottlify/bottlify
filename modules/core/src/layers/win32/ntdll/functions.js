@@ -391,7 +391,7 @@ export function createNtdllFunctions(host){
     // The process heap, reached the way a program reaches it. What this library
     // hands a caller has to be what RtlFreeHeap and HeapFree both take back, and
     // a block allocated outside that heap belongs to neither.
-    const processHeap = kernel32.GetProcessHeap.handler([]) >>> 0;
+    const processHeap = wholeAddress(kernel32.GetProcessHeap.handler([]));
     const lastStatusOffset = LAST_STATUS[host.pointerSize === 8 ? 8 : 4];
 
     /** @param {number} bytes */

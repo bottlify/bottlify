@@ -21,6 +21,7 @@
  */
 
 import { Status, fn } from './kit.js';
+import { wholeAddress } from '../common/pointers.js';
 import { IDENTITY, MatrixOrderAppend, apply, combine, invert, multiply, rotation } from
     './matrix.js';
 import {
@@ -955,7 +956,7 @@ export function createGraphicsFunctions(kit, deps){
             {
                 return OutOfMemory;
             }
-            return create(imageTarget(at >>> 0), out, image.dpiX, image.dpiY);
+            return create(imageTarget(wholeAddress(at)), out, image.dpiX, image.dpiY);
         }),
         /**
          * Status GdipCreateBitmapFromGraphics(INT width, INT height, GpGraphics *graphics,
@@ -1738,7 +1739,7 @@ export function createGraphicsFunctions(kit, deps){
             const [x, y, w, h, ...source] = rest.slice(0, 8).map(kit.real);
             return drawImage(g, at, [[x, y], [x + w, y], [x, y + h]], source, rest[8] >>> 0,
                 rest[9]);
-        }), { floats: { 2: 'f32' } }),
+        }), { floats: { 2: 'f32', 3: 'f32' } }),
         /** Status GdipDrawImageRectRectI(GpGraphics *, GpImage *, INT dst.., INT src.., ...) */
         GdipDrawImageRectRectI: fn(56, onGraphics((g, [at, ...rest])=>{
             const [x, y, w, h, ...source] = rest.slice(0, 8).map(v=>v | 0);

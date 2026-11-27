@@ -28,6 +28,7 @@ import {
 import { withPointers } from '../memory/pointers.fixture.js';
 import { testCache } from '../cache/testing.fixture.js';
 import { noCache } from '../cache/module.js';
+import { createStubApi } from '../../system/stub.js';
 
 /**
  * A view of the sound output's table at `offset`, as the device makes one:
@@ -830,3 +831,26 @@ test('a program that writes the primary buffer itself is heard from it', async()
         assert.equal(playingVoices(f).includes(held.bytes), heard, `level ${level}`);
     }
 });
+
+test('a stubbed win32 leaves DirectMusic and the MP3 codec out; a real one refusing is a failure',
+    async()=>{
+        /** @param {any} win32 */
+        const create = win32=>{
+            const f = fixture();
+            return audioModule.create({ ...f.config, drained: true }, {
+                requireApi: (/** @type {string} */ name)=>({
+                    bridge: { callGuest: async()=>0 }, win32,
+                    cache: { space: ()=>({ hold: ()=>null }) }, memory: f.memory,
+                })[name],
+                provide: ()=>{},
+            });
+        };
+        const api = await create(createStubApi('win32'));
+        assert.ok(api.libraries()['DSOUND.dll'], 'DirectSound is there without win32');
+        await assert.rejects(create({ com: ()=>{
+            throw new Error('the class registry is not made yet');
+        } }), /the class registry is not made yet/);
+        await assert.rejects(create({ installAcmCodec: ()=>{
+            throw new Error('the codec manager refused it');
+        } }), /the codec manager refused it/);
+    });

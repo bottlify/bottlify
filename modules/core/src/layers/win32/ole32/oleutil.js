@@ -17,9 +17,10 @@
  */
 
 import { GUID_SIZE, parseGuid } from '../../../system/guid.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
 import { utf16z } from '../common/utf16.js';
+import { struct } from '../../../system/layout.js';
 
 const S_OK = 0;
 
@@ -50,9 +51,9 @@ export const CF = Object.freeze({
     DSPBITMAP: 0x82, DSPMETAFILEPICT: 0x83, DSPENHMETAFILE: 0x8e,
 });
 
-/** METAFILEPICT: mm, xExt, yExt, hMF. */
-const METAFILEPICT_SIZE = 16;
-const METAFILEPICT_HANDLE = 12;
+/** METAFILEPICT as wingdi.h declares it: hMF a handle, 8 bytes on 8 at 64 bits. */
+export const METAFILEPICT = struct([['mm', 'i32'], ['xExt', 'i32'], ['yExt', 'i32'],
+    ['hMF', 'handle']]);
 
 /** How many formats a data object's enumerator is read for, at most. */
 const MAX_FORMATS = 256;
@@ -110,6 +111,9 @@ const READ_MAX = 1 << 20;
 /** @param {OleEnv} env */
 export function createOleUtil(env){
     const STATSTG = statstgLayout(env.pointerSize);
+    const PICTURE = METAFILEPICT.at(env.pointerSize);
+    /** A pointer-sized field, whole. */
+    const { write: writePointer } = pointerIo(env, env.pointerSize);
     /** @param {number} address */
     const readU32 = address=>{
         const bytes = env.readMemory(wholeAddress(address), 4);
@@ -159,7 +163,7 @@ export function createOleUtil(env){
      * @param {Uint8Array} bytes
      */
     const lend = bytes=>{
-        const block = env.heap.allocate(Math.max(bytes.length, 4)) >>> 0;
+        const block = wholeAddress(env.heap.allocate(Math.max(bytes.length, 4)));
         if (block !== 0)
         {
             env.writeMemory(block, bytes);
@@ -181,7 +185,13 @@ export function createOleUtil(env){
      */
     const system = async(library, name, args, thread)=>{
         const answer = env.system?.(library, name, args, thread);
-        return answer === null || answer === undefined ? null : (await answer) | 0;
+        if (answer === null || answer === undefined)
+        {
+            return null;
+        }
+        // An address past 4 GiB (GlobalLock's) whole, a dword as the signed one it is.
+        const value = await answer;
+        return value >= 2 ** 32 ? value : value | 0;
     };
 
     /** The formats said once to be beyond copying. @type {Set<string>} */
@@ -224,7 +234,7 @@ export function createOleUtil(env){
             return null;
         }
         const room = 256;
-        const block = env.heap.allocate(room * 2) >>> 0;
+        const block = wholeAddress(env.heap.allocate(room * 2));
         if (block === 0)
         {
             return null;
@@ -245,7 +255,7 @@ export function createOleUtil(env){
      * @returns {Promise<T | null>} null when there was no memory for it
      */
     const withScratch = async(bytes, use)=>{
-        const block = env.heap.allocate(bytes) >>> 0;
+        const block = wholeAddress(env.heap.allocate(bytes));
         if (block === 0)
         {
             return null;
@@ -285,7 +295,7 @@ export function createOleUtil(env){
      */
     const openStream = async(storage, name, mode, create, thread)=>{
         const text = lendWide(name);
-        const out = env.heap.allocate(4) >>> 0;
+        const out = wholeAddress(env.heap.allocate(4));
         if (text === 0 || out === 0)
         {
             for (const block of [text, out].filter(address=>address !== 0))
@@ -311,7 +321,7 @@ export function createOleUtil(env){
      * @returns {Promise<{ hr: number, bytes: Uint8Array }>}
      */
     const readStream = async(stream, thread)=>{
-        const block = env.heap.allocate(READ_PIECE + 4) >>> 0;
+        const block = wholeAddress(env.heap.allocate(READ_PIECE + 4));
         if (block === 0)
         {
             return { hr: 0x8007000e | 0, bytes: new Uint8Array(0) };
@@ -463,7 +473,7 @@ export function createOleUtil(env){
         {
             return 0;
         }
-        const copy = env.heap.allocate(Math.max(bytes.size, 1)) >>> 0;
+        const copy = wholeAddress(env.heap.allocate(Math.max(bytes.size, 1)));
         if (copy !== 0 && bytes.size !== 0)
         {
             env.writeMemory(copy, env.readMemory(bytes.at, bytes.size).slice());
@@ -501,12 +511,12 @@ export function createOleUtil(env){
             case TYMED.MFPICT:
             {
                 const picture = globalBytes(handle);
-                if (!picture || picture.size < METAFILEPICT_SIZE)
+                if (!picture || picture.size < PICTURE.SIZE)
                 {
                     return 0;
                 }
                 const metafile = await system('GDI32.dll', 'CopyMetaFileW',
-                    [readU32(picture.at + METAFILEPICT_HANDLE), 0], thread);
+                    [readU32(picture.at + PICTURE.hMF), 0], thread);
                 if (!metafile)
                 {
                     if (metafile === null)
@@ -518,7 +528,7 @@ export function createOleUtil(env){
                 const copy = copyGlobal(handle);
                 if (copy !== 0)
                 {
-                    writeU32(copy + METAFILEPICT_HANDLE, metafile);
+                    writePointer(copy + PICTURE.hMF, metafile >>> 0);
                 }
                 return copy;
             }
@@ -528,9 +538,9 @@ export function createOleUtil(env){
     };
 
     return {
-        readU32, readU16, writeU32, writeU16, writeWords, utf16z, readWide, lend, lendWide,
-        lendGuid, system, sayOnce, registerFormat, formatName, withScratch, release, globalBytes,
-        storageClass, openStream, readStream, writeStream, readFormat, writeFormat, formatsOf,
-        tymedOf, copyGlobal, duplicate,
+        readU32, readU16, writeU32, writeU16, writeWords, writePointer, utf16z, readWide, lend,
+        lendWide, lendGuid, system, sayOnce, registerFormat, formatName, withScratch, release,
+        globalBytes, storageClass, openStream, readStream, writeStream, readFormat, writeFormat,
+        formatsOf, tymedOf, copyGlobal, duplicate,
     };
 }

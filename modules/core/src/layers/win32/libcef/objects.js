@@ -14,6 +14,8 @@
  * program releases to zero frees the structure.
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /** cef_base_ref_counted_t: size_t size and four calls. */
 export const BASE_SIZE = 20;
 
@@ -130,7 +132,7 @@ export function createCefObjects(host){
         make(type, state){
             const methods = addressesOf(type);
             const size = BASE_SIZE + methods.length * 4;
-            const at = host.allocate(size) >>> 0;
+            const at = wholeAddress(host.allocate(size));
             writeWords(at, [size, ...baseCalls(), ...methods]);
             live.set(at, { state, refs: 1, type });
             return at;

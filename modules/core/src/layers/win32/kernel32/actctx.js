@@ -1440,8 +1440,9 @@ export function createActivationContexts(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            const status = findString(flags >>> 0, guid >>> 0, id >>> 0, readKey(key >>> 0),
-                data >>> 0);
+            const status = findString(flags >>> 0, wholeAddress(guid), id >>> 0,
+                readKey(wholeAddress(key)),
+                wholeAddress(data));
             if (status !== STATUS_SUCCESS)
             {
                 return fail(errorOf(status));

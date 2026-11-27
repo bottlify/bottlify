@@ -318,10 +318,10 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                kernel32.QueryPerformanceCounter.handler([counter >>> 0]);
+                kernel32.QueryPerformanceCounter.handler([wholeAddress(counter)]);
                 if ((frequency >>> 0) !== 0)
                 {
-                    kernel32.QueryPerformanceFrequency.handler([frequency >>> 0]);
+                    kernel32.QueryPerformanceFrequency.handler([wholeAddress(frequency)]);
                 }
                 return STATUS.SUCCESS;
             },
@@ -330,15 +330,15 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
         table.RtlQueryPerformanceCounter = {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([counter])=>(kernel32.QueryPerformanceCounter.handler([counter >>> 0]) !== 0
-                ? 1 : 0),
+            handler: ([counter])=>(kernel32.QueryPerformanceCounter.handler(
+                [wholeAddress(counter)]) !== 0 ? 1 : 0),
         };
         /** BOOLEAN RtlQueryPerformanceFrequency(PLARGE_INTEGER) */
         table.RtlQueryPerformanceFrequency = {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([frequency])=>(kernel32.QueryPerformanceFrequency.handler(
-                [frequency >>> 0]) !== 0 ? 1 : 0),
+                [wholeAddress(frequency)]) !== 0 ? 1 : 0),
         };
     }
     if (kernel32.QueryUnbiasedInterruptTime)
@@ -347,7 +347,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
         table.RtlQueryUnbiasedInterruptTime = {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([out])=>kernel32.QueryUnbiasedInterruptTime.handler([out >>> 0]),
+            handler: ([out])=>kernel32.QueryUnbiasedInterruptTime.handler([wholeAddress(out)]),
         };
     }
     if (kernel32.GetTimeZoneInformation)
@@ -365,7 +365,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                kernel32.GetTimeZoneInformation.handler([information >>> 0]);
+                kernel32.GetTimeZoneInformation.handler([wholeAddress(information)]);
                 return STATUS.SUCCESS;
             },
         };
@@ -381,7 +381,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                kernel32.GetDynamicTimeZoneInformation.handler([information >>> 0]);
+                kernel32.GetDynamicTimeZoneInformation.handler([wholeAddress(information)]);
                 return STATUS.SUCCESS;
             },
         };
@@ -450,7 +450,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [seconds, time])=>{
-                writeTime(time >>> 0, epoch + BigInt(seconds >>> 0) * SECOND);
+                writeTime(wholeAddress(time), epoch + BigInt(seconds >>> 0) * SECOND);
                 return 0;
             },
         };

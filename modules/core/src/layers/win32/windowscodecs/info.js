@@ -257,7 +257,7 @@ export function createInfos(kit, host, makers){
                         }
                         const caller = host.currentThread();
                         await kit.method(caller, stream, 5, [0, 0, 0, 0]);
-                        const at = host.heap.allocate(16) >>> 0;
+                        const at = wholeAddress(host.heap.allocate(16));
                         let head;
                         try
                         {

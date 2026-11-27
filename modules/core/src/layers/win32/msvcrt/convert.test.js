@@ -302,7 +302,7 @@ test('strtod and atof hand over a long number, which the handler reads through a
         ...memory, fpu,
         // The guest view fenced where the mapping ends, its whole reads counted.
         guest: { ...fenced, cstr: (address, max)=>{
-            whole++;
+            whole += Number((max ?? 0) > 64);
             return fenced.cstr(address, max);
         } },
     }));
@@ -328,14 +328,15 @@ test('strtod and atof hand over a long number, which the handler reads through a
         assert.equal(memory.u32(end) - at, stop, 'strtod\'s end');
         assert.equal(whole, 2 * reads, `${JSON.stringify(text)}: read whole ${reads} times`);
     }
-    // At the end of what is mapped, the window refused: read whole.
+    // Near the end of what is mapped: the window stops at the region's end,
+    // and the number is read in it all the same.
     const tail = `${seventeen}5`;
     const last = mapped - tail.length - 1 - 40;
     memory.writeMemory(last, new Uint8Array([...tail].map(c=>c.charCodeAt(0)).concat(0)));
     whole = 0;
     table.atof.handler([last]);
     assert.ok(Object.is(fpu.result, Number(tail)));
-    assert.equal(whole, 1);
+    assert.equal(whole, 0);
 });
 
 test('a float literal ending in a bare exponent gives back the exponent', ()=>{

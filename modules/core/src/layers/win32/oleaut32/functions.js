@@ -1490,7 +1490,7 @@ export function createAutomationFunctions(host){
         {
             return E_INVALIDARG;
         }
-        guest.set32(out, 0);
+        guest.setPtr(out, 0);
         const named = guest.wstr(pathAddress, WHOLE);
         // A library inside an image is named by the image's path, and one past
         // the first by the image's path and \N, its TYPELIB resource number.
@@ -1502,7 +1502,7 @@ export function createAutomationFunctions(host){
         if (bytes === null && typeLibraries && isStdole(path))
         {
             const pointer = typeLibraries.open(STDOLE2, path);
-            guest.set32(out, pointer);
+            guest.setPtr(out, pointer);
             return pointer === 0 ? E_OUTOFMEMORY : S_OK;
         }
         if (bytes === null || !typeLibraries)
@@ -1525,7 +1525,7 @@ export function createAutomationFunctions(host){
                 return TYPE_E_CANTLOADLIBRARY;
             }
             const pointer = typeLibraries.open(library, path);
-            guest.set32(out, pointer);
+            guest.setPtr(out, pointer);
             return pointer === 0 ? E_OUTOFMEMORY : S_OK;
         };
         return bytes instanceof Promise
@@ -2114,15 +2114,16 @@ export function createAutomationFunctions(host){
      * required, E_POINTER without it.
      *
      * @param {number} argBytes @param {(args: number[]) => string | number} spell
-     * @param {{ quadwords?: number[], floats?: Record<number, 'f32' | 'f64'> }} [marshal]
-     *     How a 64-bit caller passes the value (`wideOf`).
+     * @param {{ quadwords?: number[], floats?: Record<number, 'f32' | 'f64'>,
+     *     addresses?: number[] }} [marshal]  How a 64-bit caller passes the value (`wideOf`).
      */
     const toBstr = (argBytes, spell, marshal = {})=>({
         argBytes,
         ...marshal,
+        addresses: [...marshal.addresses ?? [], argBytes / 4 - 1],
         /** @param {number[]} args */
         handler: args=>{
-            const out = args[argBytes / 4 - 1] >>> 0;
+            const out = wholeAddress(args[argBytes / 4 - 1]);
             if (out === 0)
             {
                 return E_POINTER;
@@ -2133,7 +2134,7 @@ export function createAutomationFunctions(host){
                 return text;
             }
             const bstr = allocateBstr(utf16(text));
-            guest.set32(out, bstr);
+            guest.setPtr(out, bstr);
             return bstr === 0 ? E_OUTOFMEMORY : S_OK;
         },
     });
@@ -2306,9 +2307,9 @@ export function createAutomationFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            const left = readOperand(pleft >>> 0);
-            const right = readOperand(pright >>> 0);
-            return writeOutcome(presult >>> 0, typeof left === 'number' ? left
+            const left = readOperand(wholeAddress(pleft));
+            const right = readOperand(wholeAddress(pright));
+            return writeOutcome(wholeAddress(presult), typeof left === 'number' ? left
                 : typeof right === 'number' ? right : operation(left, right));
         },
     });
@@ -2327,8 +2328,8 @@ export function createAutomationFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            const value = readOperand(pin >>> 0);
-            return writeOutcome(presult >>> 0,
+            const value = readOperand(wholeAddress(pin));
+            return writeOutcome(wholeAddress(presult),
                 typeof value === 'number' ? value : operation(value));
         },
     });
@@ -2374,14 +2375,18 @@ export function createAutomationFunctions(host){
      * How a 64-bit caller passes arguments of these types and stack widths, in
      * order from the first dword: an eight-byte integer (CY, I8, UI8) in one
      * slot, a double (R8, DATE) and a float (R4) in an XMM register among the
-     * first four -- the bridge's `quadwords` and `floats`.
+     * first four -- the bridge's `quadwords` and `floats` -- and an address (a
+     * DECIMAL's, a string's, an out pointer's: `OUT`) whole, the `addresses`.
      *
      * @param {[number, number][]} widths  each argument's VARTYPE and stack bytes
-     * @returns {{ quadwords?: number[], floats?: Record<number, 'f32' | 'f64'> }}
+     * @returns {{ quadwords?: number[], floats?: Record<number, 'f32' | 'f64'>,
+     *     addresses?: number[] }}
      */
     const wideOf = widths=>{
         /** @type {number[]} */
         const quadwords = [];
+        /** @type {number[]} */
+        const addresses = [];
         /** @type {Record<number, 'f32' | 'f64'>} */
         const floats = {};
         let word = 0;
@@ -2399,11 +2404,18 @@ export function createAutomationFunctions(host){
             {
                 quadwords.push(word);
             }
+            else if (type === VT_DECIMAL || type === VT_BSTR || type === VT_BYREF)
+            {
+                addresses.push(word);
+            }
             word += bytes / 4;
         }
         return { ...quadwords.length > 0 ? { quadwords } : {},
-            ...Object.keys(floats).length > 0 ? { floats } : {} };
+            ...Object.keys(floats).length > 0 ? { floats } : {},
+            ...addresses.length > 0 ? { addresses } : {} };
     };
+    /** @type {[number, number]} an out pointer, as `wideOf` reads it */
+    const OUT = [VT_BYREF, 4];
 
     /**
      * A Var<to>From<from>'s argument as a value, read by its type's width
@@ -2435,13 +2447,13 @@ export function createAutomationFunctions(host){
                 return variantValue(type,
                     { exact: { value: view.getBigInt64(0, true), scale: 4 } });
             case VT_DECIMAL: {
-                const bytes = guest.bytes(args[0] >>> 0, 16);
+                const bytes = guest.bytes(wholeAddress(args[0]), 16);
                 return bytes[2] > 28 || (bytes[3] & 0x7f) !== 0 ? E_INVALIDARG
                     : variantValue(type, { exact: readDecimal(bytes) });
             }
             case VT_BSTR:
-                return (args[0] >>> 0) === 0 ? DISP_E_TYPEMISMATCH
-                    : variantValue(type, { text: guest.wstr(args[0] >>> 0, WHOLE) });
+                return wholeAddress(args[0]) === 0 ? DISP_E_TYPEMISMATCH
+                    : variantValue(type, { text: guest.wstr(wholeAddress(args[0]), WHOLE) });
             default: return variantValue(type, { real: view.getFloat64(0, true) });
         }
     };
@@ -2473,7 +2485,7 @@ export function createAutomationFunctions(host){
      * one VariantChangeType makes. A date from a string is read as a date,
      * by VarDateFromStr below.
      *
-     * @type {Record<string, { argBytes: number,
+     * @type {Record<string, { argBytes: number, addresses?: number[],
      *     handler: (args: number[]) => number | Promise<number> }>}
      */
     const conversions = {};
@@ -2488,9 +2500,9 @@ export function createAutomationFunctions(host){
             const api = `Var${to}From${from}`;
             conversions[api] = {
                 argBytes: width + 4,
-                ...wideOf([[source, width]]),
+                ...wideOf([[source, width], OUT]),
                 handler: args=>{
-                    const out = args[width / 4] >>> 0;
+                    const out = wholeAddress(args[width / 4]);
                     const value = argumentValue(source, args);
                     if (typeof value === 'number')
                     {
@@ -2577,12 +2589,13 @@ export function createAutomationFunctions(host){
         /** HRESULT Var<to>FromDisp(IDispatch *pdispIn, LCID lcid, <to> *pOut) */
         conversions[`Var${to}FromDisp`] = {
             argBytes: 12,
+            addresses: [0, 2],
             handler: ([dispatch, lcid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                return defaultValue(dispatch >>> 0, lcid, host.callerThread?.(), value=>{
+                return defaultValue(wholeAddress(dispatch), lcid, host.callerThread?.(), value=>{
                     const outcome = coerce(value, target);
                     if (typeof outcome === 'number')
                     {
@@ -2610,10 +2623,10 @@ export function createAutomationFunctions(host){
         const argBytes = widths.reduce((sum, [, bytes])=>sum + bytes, 4);
         return {
             argBytes,
-            ...wideOf(widths),
+            ...wideOf([...widths, OUT]),
             /** @param {number[]} args */
             handler: args=>{
-                const out = args[argBytes / 4 - 1] >>> 0;
+                const out = wholeAddress(args[argBytes / 4 - 1]);
                 /** @type {import('./arithmetic.js').Value[]} */
                 const operands = [];
                 let at = 0;
@@ -2711,6 +2724,7 @@ export function createAutomationFunctions(host){
      */
     const decimalSign = change=>({
         argBytes: 8,
+        addresses: [0, 1],
         /** @param {number[]} args */
         handler: ([pin, pout])=>{
             if ((pin >>> 0) === 0 || (pout >>> 0) === 0)
@@ -2725,18 +2739,20 @@ export function createAutomationFunctions(host){
     });
 
     /**
-     * VarDecFix, VarDecInt and VarDecRound: worked on the magnitude, the sign
-     * kept as it was even where the answer is zero -- -0.1 rounds to -0.
+     * VarDecFix, VarDecInt and VarDecRound: worked on the magnitude (Round's
+     * places read from its `args`), the sign kept as it was even where the
+     * answer is zero -- -0.1 rounds to -0.
      *
      * @param {number} argCount
-     * @param {(magnitude: bigint, scale: number, negative: boolean, places: number) =>
+     * @param {(magnitude: bigint, scale: number, negative: boolean, args: number[]) =>
      *     import('./varmath.js').Exact | number} operation
      */
     const decimalMagnitude = (argCount, operation)=>({
         argBytes: argCount * 4,
+        addresses: [0, argCount - 1],
         /** @param {number[]} args */
         handler: args=>{
-            const out = args[argCount - 1] >>> 0;
+            const out = wholeAddress(args[argCount - 1]);
             const value = argumentValue(VT_DECIMAL, args);
             if (typeof value === 'number')
             {
@@ -2746,10 +2762,10 @@ export function createAutomationFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            const sign = guest.bytes(args[0] >>> 0, 4)[3];
+            const sign = guest.u8(wholeAddress(args[0]) + 3);
             const exact = /** @type {import('./varmath.js').Exact} */ (value.exact);
             const magnitude = exact.value < 0n ? -exact.value : exact.value;
-            const answer = operation(magnitude, exact.scale, sign !== 0, args[1] | 0);
+            const answer = operation(magnitude, exact.scale, sign !== 0, args);
             if (typeof answer === 'number')
             {
                 return answer;
@@ -2802,8 +2818,8 @@ export function createAutomationFunctions(host){
             return { value: magnitude / unit + (negative && magnitude % unit !== 0n ? 1n : 0n),
                 scale: 0 };
         }),
-        VarDecRound: decimalMagnitude(3, (magnitude, scale, negative, places)=>(
-            places < 0 ? E_INVALIDARG : round({ value: magnitude, scale }, places))),
+        VarDecRound: decimalMagnitude(3, (magnitude, scale, negative, [, places])=>(
+            (places | 0) < 0 ? E_INVALIDARG : round({ value: magnitude, scale }, places | 0))),
         VarDecCmp: exactComparison(VT_DECIMAL, [DEC, DEC]),
         VarDecCmpR8: exactComparison(VT_DECIMAL, [DEC, R8]),
 
@@ -3267,11 +3283,11 @@ export function createAutomationFunctions(host){
     const answerText = (out, text)=>{
         if (text === null)
         {
-            guest.set32(out, 0);
+            guest.setPtr(out, 0);
             return S_OK;
         }
         const bstr = allocateBstr(utf16(text));
-        guest.set32(out, bstr);
+        guest.setPtr(out, bstr);
         return bstr === 0 ? E_OUTOFMEMORY : S_OK;
     };
 
@@ -3282,14 +3298,15 @@ export function createAutomationFunctions(host){
      */
     const fixedFormat = (api, spell)=>({
         argBytes: 28,
+        addresses: [0, 6],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
-            const out = args[6] >>> 0;
-            if ((args[0] >>> 0) === 0 || out === 0)
+            const out = wholeAddress(args[6]);
+            if (wholeAddress(args[0]) === 0 || out === 0)
             {
                 return E_INVALIDARG;
             }
-            const number = formatNumberOf(args[0] >>> 0);
+            const number = formatNumberOf(wholeAddress(args[0]));
             if (typeof number === 'number')
             {
                 return number;
@@ -3421,7 +3438,7 @@ export function createAutomationFunctions(host){
                 const names = ALTERNATE_MONTHS.get(lcid & 0x3ff);
                 if (!names)
                 {
-                    guest.set32(wholeAddress(out), 0);
+                    guest.setPtr(wholeAddress(out), 0);
                     return S_OK;
                 }
                 // One table per language for the life of the process, as
@@ -3434,12 +3451,12 @@ export function createAutomationFunctions(host){
                         guest.setBytes(at, utf16z(name));
                         return at;
                     });
-                    table = host.heap.allocate(strings.length * 4);
-                    strings.forEach((at, index)=>guest.set32(/** @type {number} */ (table)
-                        + index * 4, at));
+                    table = host.heap.allocate(strings.length * POINTER);
+                    strings.forEach((at, index)=>guest.setPtr(/** @type {number} */ (table)
+                        + index * POINTER, at));
                     alternateTables.set(lcid & 0x3ff, table);
                 }
-                guest.set32(wholeAddress(out), table);
+                guest.setPtr(wholeAddress(out), table);
                 return S_OK;
             },
         },
@@ -3577,8 +3594,8 @@ export function createAutomationFunctions(host){
                 {
                     return 0;
                 }
-                freeBstr(guest.u32(slot));
-                guest.set32(slot, replacement);
+                freeBstr(guest.ptr(slot));
+                guest.setPtr(slot, replacement);
                 return 1;
             },
         },
@@ -3596,7 +3613,7 @@ export function createAutomationFunctions(host){
                 // A reallocation: without a source the characters already
                 // there stay, and a string that is not growing keeps its
                 // block, as the heap's realloc keeps one it can shrink in.
-                const old = guest.u32(slot);
+                const old = guest.ptr(slot);
                 const oldBytes = old === 0 ? 0 : guest.u32(old - PREFIX_BYTES);
                 const bytes = (len >>> 0) * 2;
                 const data = new Uint8Array(bytes);
@@ -3622,7 +3639,7 @@ export function createAutomationFunctions(host){
                     return 0;
                 }
                 freeBstr(old);
-                guest.set32(slot, replacement);
+                guest.setPtr(slot, replacement);
                 return 1;
             },
         },
@@ -3682,7 +3699,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                guest.set32(wholeAddress(result), bstr);
+                guest.setPtr(wholeAddress(result), bstr);
                 return S_OK;
             },
         },
@@ -3743,7 +3760,7 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, start, pbstr])=>{
-                const units = (byteLengthOf(guest.u32(wholeAddress(pbstr))) + 1) >>> 1;
+                const units = (byteLengthOf(guest.ptr(wholeAddress(pbstr))) + 1) >>> 1;
                 return ((((start >>> 0) + 3) & ~3) + WIRE_BSTR_HEADER + units * 2) >>> 0;
             },
         },
@@ -3762,7 +3779,7 @@ export function createAutomationFunctions(host){
             handler: ([, buffer, pbstr])=>{
                 const from = wholeAddress(buffer);
                 const pad = (4 - (from & 3)) & 3;
-                const bstr = guest.u32(wholeAddress(pbstr));
+                const bstr = guest.ptr(wholeAddress(pbstr));
                 const bytes = byteLengthOf(bstr);
                 const units = (bytes + 1) >>> 1;
                 const wire = new Uint8Array(pad + WIRE_BSTR_HEADER + units * 2);
@@ -3790,12 +3807,12 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, buffer, pbstr])=>{
-                const at = ((wholeAddress(buffer) + 3) & ~3) >>> 0;
+                const at = Math.ceil(wholeAddress(buffer) / 4) * 4;
                 const bytes = guest.u32(at + 4);
                 const units = guest.u32(at + 8);
                 const slot = wholeAddress(pbstr);
-                freeBstr(guest.u32(slot));
-                guest.set32(slot, bytes === 0xffffffff ? 0 : allocateBstr(guest.bytes(
+                freeBstr(guest.ptr(slot));
+                guest.setPtr(slot, bytes === 0xffffffff ? 0 : allocateBstr(guest.bytes(
                     at + WIRE_BSTR_HEADER, Math.min(bytes, units * 2))));
                 return wholeAddress(at + WIRE_BSTR_HEADER + units * 2);
             },
@@ -3807,8 +3824,8 @@ export function createAutomationFunctions(host){
             /** @param {number[]} args */
             handler: ([, pbstr])=>{
                 const slot = wholeAddress(pbstr);
-                freeBstr(guest.u32(slot));
-                guest.set32(slot, 0);
+                freeBstr(guest.ptr(slot));
+                guest.setPtr(slot, 0);
                 return 0;
             },
         },
@@ -3818,14 +3835,15 @@ export function createAutomationFunctions(host){
 
         /** unsigned char *VARIANT_UserMarshal(ULONG *pFlags, unsigned char *pBuffer, VARIANT *pVar) */
         VARIANT_UserMarshal: {
-            ...noWireForm('VARIANT_UserMarshal', ([, buffer])=>buffer >>> 0), returns: 'pointer',
+            ...noWireForm('VARIANT_UserMarshal', ([, buffer])=>wholeAddress(buffer)),
+            returns: 'pointer',
         },
 
         /** unsigned char *VARIANT_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, VARIANT *pVar) */
         VARIANT_UserUnmarshal: { ...noWireForm('VARIANT_UserUnmarshal', ([, buffer, pvar])=>{
             const owed = nothingOwed();
-            clear(pvar >>> 0, owed);
-            return settle(owed, host.callerThread?.(), buffer >>> 0);
+            clear(wholeAddress(pvar), owed);
+            return settle(owed, host.callerThread?.(), wholeAddress(buffer));
         }), returns: 'pointer' },
 
         /** void VARIANT_UserFree(ULONG *pFlags, VARIANT *pVar) -- its contents, as VariantClear */
@@ -3844,14 +3862,14 @@ export function createAutomationFunctions(host){
 
         /** unsigned char *LPSAFEARRAY_UserMarshal(ULONG *pFlags, unsigned char *pBuffer, LPSAFEARRAY *ppsa) */
         LPSAFEARRAY_UserMarshal: {
-            ...noWireForm('LPSAFEARRAY_UserMarshal', ([, buffer])=>buffer >>> 0),
+            ...noWireForm('LPSAFEARRAY_UserMarshal', ([, buffer])=>wholeAddress(buffer)),
             returns: 'pointer',
         },
 
         /** unsigned char *LPSAFEARRAY_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, LPSAFEARRAY *ppsa) */
         LPSAFEARRAY_UserUnmarshal: {
             ...noWireForm('LPSAFEARRAY_UserUnmarshal', ([, buffer, ppsa])=>{
-                guest.set32(wholeAddress(ppsa), 0);
+                guest.setPtr(wholeAddress(ppsa), 0);
                 return wholeAddress(buffer);
             }),
             returns: 'pointer',
@@ -3864,7 +3882,7 @@ export function createAutomationFunctions(host){
              * @param {number[]} args
              * @returns {number | Promise<number>}
              */
-            handler: ([, ppsa])=>table.SafeArrayDestroy.handler([guest.u32(wholeAddress(ppsa))]),
+            handler: ([, ppsa])=>table.SafeArrayDestroy.handler([guest.ptr(wholeAddress(ppsa))]),
         },
 
         /** void VariantInit(VARIANTARG *pvarg) */
@@ -4514,7 +4532,7 @@ export function createAutomationFunctions(host){
                 heldErrorInfo.delete(thread);
                 if (wholeAddress(out) !== 0)
                 {
-                    guest.set32(wholeAddress(out), held);
+                    guest.setPtr(wholeAddress(out), held);
                 }
                 return held === 0 ? S_FALSE : S_OK;
             },
@@ -4538,7 +4556,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                guest.set32(wholeAddress(out), 0);
+                guest.setPtr(wholeAddress(out), 0);
                 return MK_E_UNAVAILABLE;
             },
         },
@@ -4591,9 +4609,9 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                guest.set32(wholeAddress(out), 0);
+                guest.setPtr(wholeAddress(out), 0);
                 const key = registrationKey(
-                    guest.guid(guid >>> 0), major & 0xffff, minor & 0xffff, false);
+                    guest.guid(wholeAddress(guid)), major & 0xffff, minor & 0xffff, false);
                 const win32 = key && host.hive ? host.hive.open(key, '0\\win32') : null;
                 const value = win32 && host.hive ? host.hive.getValue(win32, '') : null;
                 if (!value)
@@ -4643,7 +4661,7 @@ export function createAutomationFunctions(host){
                 {
                     return TYPE_E_REGISTRYACCESS;
                 }
-                const id = guest.guid(guid >>> 0);
+                const id = guest.guid(wholeAddress(guid));
                 const version = `TypeLib\\${id}\\${versionKey(major & 0xffff, minor & 0xffff)}`;
                 if (!hive.open(root, version))
                 {
@@ -5238,7 +5256,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_POINTER;
                 }
-                return pictures.create(wholeAddress(desc), guest.guid(riid >>> 0),
+                return pictures.create(wholeAddress(desc), guest.guid(wholeAddress(riid)),
                     (own >>> 0) !== 0,
                     wholeAddress(out));
             },
@@ -5264,7 +5282,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_POINTER;
                 }
-                return pictures.load(wholeAddress(stream), size | 0, guest.guid(riid >>> 0),
+                return pictures.load(wholeAddress(stream), size | 0, guest.guid(wholeAddress(riid)),
                     wholeAddress(out));
             },
         },
@@ -5289,7 +5307,8 @@ export function createAutomationFunctions(host){
                 }
                 guest.fill(wholeAddress(out), 0, 4);
                 return pictureAtPath(guest.wstr(wholeAddress(path), WHOLE),
-                    (riid >>> 0) === 0 ? IID_IPICTURE : guest.guid(riid >>> 0), wholeAddress(out));
+                    (riid >>> 0) === 0 ? IID_IPICTURE : guest.guid(wholeAddress(riid)),
+                    wholeAddress(out));
             },
         },
 
@@ -5406,7 +5425,7 @@ export function createAutomationFunctions(host){
                 report('OLE Automation', 'OleCreateFontIndirect: no IFont object is implemented');
                 if (wholeAddress(out) !== 0)
                 {
-                    guest.set32(wholeAddress(out), 0);
+                    guest.setPtr(wholeAddress(out), 0);
                 }
                 return E_NOTIMPL;
             },
@@ -5432,7 +5451,7 @@ export function createAutomationFunctions(host){
                 {
                     if (wholeAddress(out) !== 0)
                     {
-                        guest.set32(wholeAddress(out), 0);
+                        guest.setPtr(wholeAddress(out), 0);
                     }
                     return E_INVALIDARG;
                 }
@@ -5444,7 +5463,7 @@ export function createAutomationFunctions(host){
                 return stdDispatches.create(wholeAddress(outer), wholeAddress(self),
                     wholeAddress(typeInfo))
                     .then(pointer=>{
-                        guest.set32(wholeAddress(out), pointer);
+                        guest.setPtr(wholeAddress(out), pointer);
                         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
                     });
             },
@@ -5464,7 +5483,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                guest.set32(wholeAddress(out), 0);
+                guest.setPtr(wholeAddress(out), 0);
                 const loaded = typeLibraries?.typeInfoAt(wholeAddress(typeInfo)) ?? null;
                 if (!loaded || !recordInfos)
                 {
@@ -5479,7 +5498,7 @@ export function createAutomationFunctions(host){
                 return recordInfos.create(loaded.library, loaded.description,
                     wholeAddress(typeInfo))
                     .then(pointer=>{
-                        guest.set32(wholeAddress(out), pointer);
+                        guest.setPtr(wholeAddress(out), pointer);
                         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
                     });
             },
@@ -5526,7 +5545,7 @@ export function createAutomationFunctions(host){
                     return E_INVALIDARG;
                 }
                 const pointer = errorInfos?.create() ?? 0;
-                guest.set32(wholeAddress(out), pointer);
+                guest.setPtr(wholeAddress(out), pointer);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },

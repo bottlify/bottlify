@@ -40,7 +40,7 @@ function mp3Stream(count){
  * samples carrying the frame's index -- when the test lets it.
  *
  * @param {{ file?: Uint8Array, chunk?: number, open?: import('./mp3.js').Decoder['open'],
- *     held?: boolean, slowFetch?: boolean }} [options]
+ *     held?: boolean, slowFetch?: boolean, high?: number }} [options]
  */
 function fixture(options = {}){
     const bytes = new Uint8Array(0x100000);
@@ -97,9 +97,12 @@ function fixture(options = {}){
         }
     };
 
+    // A 64-bit program's data past 4 GiB (`options.high`) is these same bytes.
+    const below = (/** @type {number} */ address)=>(options.high !== undefined
+        && address >= options.high ? address - options.high : address);
     const provider = createMp3Provider({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        readMemory: (address, length)=>bytes.subarray(below(address), below(address) + length),
+        writeMemory: (address, data)=>bytes.set(data, below(address)),
         allocate: size=>{
             const address = nextAddress;
             nextAddress += (size + 0xf) & ~0xf;
@@ -442,6 +445,17 @@ test('a preference passed by value, as an older Miles passes it, is taken as the
     const handle = await f.call('ASI_stream_open', [1, FETCH, f.file.length]);
     const rate = ATTRIB.REQUESTED_SAMPLE_RATE;
     assert.equal(f.call('ASI_stream_set_preference', [handle, rate, 0x5622]), 0);
+    assert.equal(f.call('ASI_stream_attribute', [handle, rate]), 22050);
+});
+
+test('a 64-bit program\'s preference past 4 GiB is read where it is', async()=>{
+    // Cut to its low dword, 0x40090000 named nothing of the program's.
+    const high = 0x1_4000_0000;
+    const f = fixture({ high });
+    const handle = await f.call('ASI_stream_open', [1, FETCH, f.file.length]);
+    f.view.setInt32(0x90000, 22050, true);
+    const rate = ATTRIB.REQUESTED_SAMPLE_RATE;
+    assert.equal(f.call('ASI_stream_set_preference', [handle, rate, high + 0x90000]), 0);
     assert.equal(f.call('ASI_stream_attribute', [handle, rate]), 22050);
 });
 

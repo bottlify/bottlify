@@ -53,11 +53,12 @@ export const SETTINGS = {
     translators: { kind: 'host', value: 1,
         doc: 'Workers the runtime opens itself; 0 when a host\'s pool lends them.' },
     // The run's cache the functions emitted are kept in (`kept.js`): every
-    // thread of the run reads them in place; absent, each thread keeps its own.
+    // thread of the run reads them in place; absent, nothing is kept and a relink
+    // emits every function again (`diagnostics().kept` says so).
     kept: { kind: 'host',
         value: /** @type {import('./kept.js').KeptStore | undefined} */ (undefined), shown: 'none',
         doc: 'The run\'s cache the functions emitted are kept in (`KeptStore`), read in place by'
-            + ' every thread of the run; absent, each thread keeps its own.' },
+            + ' every thread of the run; absent, none is kept and a relink emits each again.' },
     // Null for a process on one executor (`shared-code.js`).
     sharedCode: { kind: 'host',
         value: /** @type {{ at: number, index: number } | null} */ (null), shown: 'none',

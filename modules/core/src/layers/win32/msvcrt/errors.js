@@ -71,9 +71,10 @@ export function createErrorFunctions(host){
     const getter = read=>({
         convention: /** @type {'cdecl'} */ ('cdecl'),
         argBytes: 4,
+        addresses: [0],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [pointer])=>{
-            if ((pointer >>> 0) === 0)
+            if (wholeAddress(pointer) === 0)
             {
                 return EINVAL;
             }

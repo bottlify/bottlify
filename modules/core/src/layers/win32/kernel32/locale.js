@@ -1739,7 +1739,7 @@ export function createLocaleFunctions(host){
             }
             if (((type >>> 0) & CAL_RETURN_NUMBER) === 0)
             {
-                return writeAnswer(text, buffer >>> 0, count | 0, wide);
+                return writeAnswer(text, wholeAddress(buffer), count | 0, wide);
             }
             if (!CALENDAR_NUMBERS.includes(kind))
             {
@@ -1851,11 +1851,11 @@ export function createLocaleFunctions(host){
                 return refuse(ERROR_INVALID_FLAGS);
             }
             if ((source >>> 0) === 0 || (sourceChars | 0) === 0 || (room | 0) < 0
-                || (source >>> 0) === (destination >>> 0))
+                || wholeAddress(source) === wholeAddress(destination))
             {
                 return refuse(ERROR_INVALID_PARAMETER);
             }
-            const span = sourceSpan(source >>> 0, sourceChars, wide ? 2 : 1);
+            const span = sourceSpan(wholeAddress(source), sourceChars, wide ? 2 : 1);
             const folded = fold(wide ? readWide(wholeAddress(source), span.length)
                 : decodeSingleByte(host.readMemory(wholeAddress(source), span.length),
                     ANSI_CODE_PAGE),
@@ -1956,7 +1956,8 @@ export function createLocaleFunctions(host){
         handler: (/** @type {number[]} */ [locale, flags, time, format, buffer, count])=>{
             const record = localeOf(locale >>> 0);
             return record === null ? refuse(ERROR_INVALID_PARAMETER)
-                : formatWhen(record, flags >>> 0, time >>> 0, format >>> 0, buffer >>> 0,
+                : formatWhen(record, flags >>> 0, wholeAddress(time), wholeAddress(format),
+                    wholeAddress(buffer),
                     count | 0, wide, date);
         },
     });
@@ -2067,11 +2068,13 @@ export function createLocaleFunctions(host){
             {
                 return refuse(ERROR_INVALID_FLAGS);
             }
-            const picture = numberPicture(format >>> 0, wide, currency, record, flags >>> 0);
+            const picture = numberPicture(wholeAddress(format), wide, currency, record,
+                flags >>> 0);
             const text = picture && formatNumber(
-                (wide ? readWideSpan : readAnsiSpan)(value >>> 0, -1), picture, currency);
+                (wide ? readWideSpan : readAnsiSpan)(wholeAddress(value), -1), picture, currency);
             return text === null ? refuse(ERROR_INVALID_PARAMETER)
-                : writeAnswer(text, buffer >>> 0, count | 0, wide, record.ansi || ANSI_CODE_PAGE);
+                : writeAnswer(text, wholeAddress(buffer), count | 0, wide,
+                    record.ansi || ANSI_CODE_PAGE);
         },
     });
 

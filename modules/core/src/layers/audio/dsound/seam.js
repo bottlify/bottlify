@@ -40,6 +40,7 @@ import {
 } from '../../win32/devices.js';
 import { parseGuid } from '../../../system/guid.js';
 import { GUID, struct } from '../../../system/layout.js';
+import { wholeAddress } from '../../../system/address.js';
 import {
     FORMAT_WaveFormatEx, IID_IMediaObject, IID_IMediaObjectInPlace, MEDIASUBTYPE_IEEE_FLOAT,
     MEDIASUBTYPE_PCM, MEDIATYPE_Audio,
@@ -1824,7 +1825,7 @@ export function createDirectSound({
             {
                 return DSERR_NOAGGREGATION;
             }
-            const wanted = (iid >>> 0) === 0 ? '' : readGuid(memory, iid >>> 0);
+            const wanted = (iid >>> 0) === 0 ? '' : readGuid(memory, wholeAddress(iid));
             if (Object.hasOwn(plainInterfaces, factory.kind))
             {
                 return createPlain(factory.kind, wanted, out);
@@ -2311,7 +2312,7 @@ export function createDirectSound({
                         {
                             return DSERR_INVALIDPARAM;
                         }
-                        const asked = memory.readMemory(source >>> 0, 16);
+                        const asked = memory.readMemory(wholeAddress(source), 16);
                         const names = (/** @type {readonly number[]} */ guid)=>
                             guid.every((byte, at)=>asked[at] === byte);
                         if (DEFAULT_CAPTURE_IDS.some(names))
@@ -2322,7 +2323,7 @@ export function createDirectSound({
                         {
                             return DSERR_INVALIDPARAM;
                         }
-                        memory.writeMemory(dest >>> 0, new Uint8Array(DEVICE_GUID));
+                        memory.writeMemory(wholeAddress(dest), new Uint8Array(DEVICE_GUID));
                         return DS_OK;
                     },
                 },
@@ -2385,13 +2386,14 @@ export function createDirectSound({
                             return DSERR_INVALIDPARAM;
                         }
                         writePointer(out, 0);
-                        const asked = (clsid >>> 0) === 0 ? '' : readGuid(memory, clsid >>> 0);
+                        const asked = (clsid >>> 0) === 0 ? '' : readGuid(memory,
+                            wholeAddress(clsid));
                         const kind = CLASS_KINDS.get(asked);
                         if (!kind)
                         {
                             return CLASS_E_CLASSNOTAVAILABLE;
                         }
-                        const wanted = (iid >>> 0) === 0 ? '' : readGuid(memory, iid >>> 0);
+                        const wanted = (iid >>> 0) === 0 ? '' : readGuid(memory, wholeAddress(iid));
                         if (wanted !== IID_IClassFactory && wanted !== IID_IUNKNOWN)
                         {
                             return E_NOINTERFACE;

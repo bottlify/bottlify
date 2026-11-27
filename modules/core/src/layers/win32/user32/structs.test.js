@@ -315,3 +315,16 @@ test('every structure has the SDK\'s size and offsets at both widths', ()=>{
     assert.equal(DEVMODEW.dmBitsPerPel, 168);
     assert.equal(DEVMODEW.SIZE, 220);
 });
+
+test('a structure past 4 GiB is written where it lies, not at its address cut to a dword', ()=>{
+    /** @type {[number, number[]][]} */
+    const writes = [];
+    const memory = { readMemory: ()=>new Uint8Array(0),
+        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+            writes.push([address, [...bytes]]) };
+    const L = userLayouts(8);
+    const base = 0x1_4000_6000;
+    writeFields(memory, base, L.WINDOWPOS, { hwndInsertAfter: -1, flags: 4 });
+    assert.deepEqual(writes.map(([address])=>address),
+        [base + L.WINDOWPOS.hwndInsertAfter, base + L.WINDOWPOS.flags]);
+});

@@ -59,6 +59,8 @@ import { createMemoryBudget, openMemoryBudget, RUN_HOLDER }
     from './layers/cpu/internal/memory-budget.js';
 import { PROGRAMS_LIBRARY, WINDOWS_DIRECTORY } from './layers/win32/programs/table.js';
 import { RUN_ONCE_ROUTINE } from './layers/win32/programs/functions.js';
+import { declaringOnRead } from './layers/win32/common/pointers.js';
+import { POINTER_ARGUMENTS } from './layers/win32/common/pointer-arguments.js';
 import { frameworkNeeded } from './layers/win32/mscoree/need.js';
 import { shareTransport } from './layers/win32/wsock32/transport.js';
 import { createSharedViews } from './layers/win32/kernel32/shared-views.js';
@@ -1294,12 +1296,15 @@ export function areaOf(call, cache){
  * keeps what it lets go of from memory and no later run reads, or null to
  * keep it all in memory.
  *
- * @param {AppOptions} options
+ * @param {AppOptions} options @param {any} events  where its failure is said
  */
-async function openRunFolderOf(options){
+async function openRunFolderOf(options, events){
     const spec = options.pageFile ?? 'local';
     return spec === false ? null
-        : openRunFolder({ root: spec === 'local' ? undefined : spec.root });
+        : openRunFolder({ root: spec === 'local' ? undefined : spec.root,
+            onFailure: error=>events.emit('loss', { api: 'filesystem', detail: 'the run\'s folder'
+                + ` did not open (${error?.message ?? error}): its page file and cache have no`
+                + ' disk, and keep all they hold in memory, within the cache\'s budget' }) });
 }
 
 /**
@@ -2446,14 +2451,17 @@ async function buildApp(options){
     // concerned: it imports Direct3DCreate8 exactly as it imports CreateFileA,
     // and nothing about how they are reached should differ.
     // Merged name by name as each layer keeps it: win32's are made when first
-    // read, and a spread would make them all.
+    // read, and a spread would make them all. The other layers' are declared
+    // their address arguments by the signature table as they are made, as
+    // win32 declares its own: a 64-bit caller's past 4 GiB reaches them whole.
     /** @type {Record<string, Record<string, any>>} */
     const allLibraries = {};
-    for (const tables of [win32.libraries(), graphics.libraries?.() ?? {},
+    Object.defineProperties(allLibraries, Object.getOwnPropertyDescriptors(win32.libraries()));
+    for (const tables of [graphics.libraries?.() ?? {},
         audio.libraries?.() ?? {}, input.libraries?.() ?? {},
         core.api('media').libraries?.() ?? {}])
     {
-        Object.defineProperties(allLibraries, Object.getOwnPropertyDescriptors(tables));
+        Object.defineProperties(allLibraries, declaringOnRead(tables, POINTER_ARGUMENTS));
     }
     /**
      * The names answered from this engine's table even beside a file the
@@ -3985,8 +3993,9 @@ export async function createApp(options){
     // through a reader there (`processesBeside`). A process joined to a run
     // across a link is handed the run's reader (`options.cache`).
     // Both keep what they let go of from memory in the run's own folder.
-    const runFolder = options.system ? null : await openRunFolderOf(options);
+    const runFolder = options.system ? null : await openRunFolderOf(options, events);
     const runCache = options.system ? null : await openRunCache({ ...options.cache, runFolder,
+        onLoss: detail=>events.emit('loss', { api: 'cache', detail }),
         // An owner that went (a graphics root) leaving bodies under its names
         // past what it held: let go of now, said as what it is.
         onTail: tail=>events.emit('loss', { api: 'cache', detail: `${tail.prefix}: ${tail.bodies} `
@@ -4052,7 +4061,7 @@ export async function createApp(options){
         })
         // A process in a worker of its own has no GPU: its surfaces' pictures
         // go to the thread that has one, as bytes, each burst as it flushes.
-        : options.graphics?.display ? createPresenter({ sendFrame: options.graphics.display })
+        : options.graphics?.display ? createPresenter({ display: options.graphics.display })
             : null);
 
     // The translation store is the run's as well: a child's machine is built

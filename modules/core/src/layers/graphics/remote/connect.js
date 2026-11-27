@@ -260,6 +260,7 @@ export function lendBackend(worker, cache){
  *     the device gone, with the last things it was asked to make
  * @property {(message: string, seen: number) => void} refused  the worker's GPU
  *     refused a command buffer, and with it a frame
+ * @property {(message: string) => void} unshown  a frame the worker made is not shown
  */
 
 /**
@@ -340,7 +341,8 @@ function join(worker, connection){
                     {
                         Atomics.store(word, 0, data.serial);
                     }
-                    // The worker sends the next once this one is on this thread's queue.
+                    // The worker sends the next once this one is on this thread's queue,
+                    // and lets go of the memory a frame sent as bytes was held in.
                     worker.postMessage({ type: 'shown', at: sharedNow(), serial: data.serial });
                     break;
                 case 'lost':
@@ -348,6 +350,9 @@ function join(worker, connection){
                     {
                         each.lost(data.reason, data.message, data.recent);
                     }
+                    break;
+                case 'unshown':
+                    showing(connections)?.unshown(data.message);
                     break;
                 case 'refused':
                     // One GPU, told once, by whichever connection shows it.
@@ -548,6 +553,7 @@ export function connectGraphicsWorker(options){
                 + (recent?.length ? `; last made: ${recent.join('; ')}` : ''), 'loss');
             lost?.();
         },
+        unshown: message=>divergence?.('graphics', message, 'loss'),
         refused: (message, seen)=>divergence?.('graphics', `the GPU refused a frame: ${message}`
             + (seen > 1 ? ` (x${seen})` : ''), 'loss'),
     };

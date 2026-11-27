@@ -67,10 +67,10 @@ export const TENS_HIGH = Uint32Array.from({ length: 20 },
  * clamps and sets errno; so is a base outside 2..36 other than 0.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
+ * @param {Guest} guest @param {ptr} text @param {ptr} end @param {i32} base
  * @returns {i64}
  */
-export function _strtoi64({ u8, setU32, host, pointerBytes, int64 }, text, end, base){
+export function _strtoi64({ u8, host, int64, setPtr }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -130,11 +130,7 @@ export function _strtoi64({ u8, setU32, host, pointerBytes, int64 }, text, end, 
     {
         if (end !== 0)
         {
-            setU32(end, text);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, text);
         }
         return int64(0, 0);
     }
@@ -145,11 +141,7 @@ export function _strtoi64({ u8, setU32, host, pointerBytes, int64 }, text, end, 
     }
     if (end !== 0)
     {
-        setU32(end, at);
-        if (pointerBytes === 8)
-        {
-            setU32(end + 4, 0);
-        }
+        setPtr(end, at);
     }
     if (negative !== 0)
     {
@@ -164,10 +156,10 @@ export function _strtoi64({ u8, setU32, host, pointerBytes, int64 }, text, end, 
  * 64 bits. A magnitude past 64 bits is the host's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
+ * @param {Guest} guest @param {ptr} text @param {ptr} end @param {i32} base
  * @returns {i64}
  */
-export function _strtoui64({ u8, setU32, host, pointerBytes, int64 }, text, end, base){
+export function _strtoui64({ u8, host, int64, setPtr }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -226,21 +218,13 @@ export function _strtoui64({ u8, setU32, host, pointerBytes, int64 }, text, end,
     {
         if (end !== 0)
         {
-            setU32(end, text);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, text);
         }
         return int64(0, 0);
     }
     if (end !== 0)
     {
-        setU32(end, at);
-        if (pointerBytes === 8)
-        {
-            setU32(end + 4, 0);
-        }
+        setPtr(end, at);
     }
     if (negative !== 0)
     {
@@ -254,7 +238,7 @@ export function _strtoui64({ u8, setU32, host, pointerBytes, int64 }, text, end,
  * A value past 64 bits is the host's, which clamps it as `_strtoi64` does.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {i64}
  */
 export function _atoi64({ u8, host, int64 }, text){
@@ -322,7 +306,7 @@ const renders64 = (/** @type {number} */ radix)=>(radix === 10 || radix === 2 ||
  *
  * @guestCode cdecl
  * @param {Pick<Guest, 'setU8' | 'setU16'>} guest @param {u32} low @param {u32} high
- * @param {u32} buffer @param {i32} radix @param {i32} signed @param {i32} wide
+ * @param {ptr} buffer @param {i32} radix @param {i32} signed @param {i32} wide
  * @returns {ptr}
  */
 export function text64({ setU8, setU16 }, low, high, buffer, radix, signed, wide){
@@ -340,7 +324,7 @@ export function text64({ setU8, setU16 }, low, high, buffer, radix, signed, wide
         {
             setU8(at, 0x2d);
         }
-        at = (at + step) >>> 0;
+        at += step;
         hi = (~high + (low === 0 ? 1 : 0)) >>> 0;
         lo = (0 - low) >>> 0;
     }
@@ -370,7 +354,7 @@ export function text64({ setU8, setU16 }, low, high, buffer, radix, signed, wide
                 {
                     setU8(at, (0x30 + digit) | 0);
                 }
-                at = (at + step) >>> 0;
+                at += step;
             }
         }
     }
@@ -405,7 +389,7 @@ export function text64({ setU8, setU16 }, low, high, buffer, radix, signed, wide
             {
                 setU8(at, c);
             }
-            at = (at + step) >>> 0;
+            at += step;
         }
     }
     if (wide !== 0)
@@ -424,7 +408,7 @@ export function text64({ setU8, setU16 }, low, high, buffer, radix, signed, wide
  * alone. A radix other than ten or a power of two is the handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {i64} value @param {u32} buffer @param {i32} radix
+ * @param {Guest} guest @param {i64} value @param {ptr} buffer @param {i32} radix
  * @returns {ptr}
  */
 export function _i64toa({ setU8, setU16, host, low64, high64 }, value, buffer, radix){
@@ -440,7 +424,7 @@ export function _i64toa({ setU8, setU16, host, low64, high64 }, value, buffer, r
  * every radix.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {i64} value @param {u32} buffer @param {i32} radix
+ * @param {Guest} guest @param {i64} value @param {ptr} buffer @param {i32} radix
  * @returns {ptr}
  */
 export function _ui64toa({ setU8, setU16, host, low64, high64 }, value, buffer, radix){
@@ -456,7 +440,7 @@ export function _ui64toa({ setU8, setU16, host, low64, high64 }, value, buffer, 
  * text in units.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {i64} value @param {u32} buffer @param {i32} radix
+ * @param {Guest} guest @param {i64} value @param {ptr} buffer @param {i32} radix
  * @returns {ptr}
  */
 export function _i64tow({ setU8, setU16, host, low64, high64 }, value, buffer, radix){
@@ -472,7 +456,7 @@ export function _i64tow({ setU8, setU16, host, low64, high64 }, value, buffer, r
  * `_ui64toa`'s text in units.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {i64} value @param {u32} buffer @param {i32} radix
+ * @param {Guest} guest @param {i64} value @param {ptr} buffer @param {i32} radix
  * @returns {ptr}
  */
 export function _ui64tow({ setU8, setU16, host, low64, high64 }, value, buffer, radix){

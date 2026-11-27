@@ -43,6 +43,7 @@ import { GLU, cylinder, newQuadric, partialDisk, sphere } from './quadric.js';
 import { TESS, tessellate } from './tess.js';
 import { createImages } from './images.js';
 import { utf16z } from '../../win32/common/utf16.js';
+import { wholeAddress } from '../../../system/address.js';
 
 // The x86-64 of the functions that answer in the guest: gluProject and
 // gluCheckExtension take it as their exports' `long`. The matrix helpers'
@@ -145,6 +146,7 @@ const LOCAL = 0xffff0000;
  *     } [callGuest]  How a program's callback is called.
  * @property {() => any} [currentThread]
  * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process
  */
 
 /**
@@ -154,13 +156,16 @@ const LOCAL = 0xffff0000;
 export function createGlu(deps){
     const { memory, withContext } = deps;
     const local = new Uint8Array(0x400);
+    /** Whether an address is the handlers' scratch: a 64-bit program's past 4 GiB is not. */
+    const inLocal = (/** @type {number} */ address)=>address >= LOCAL
+        && address < LOCAL + local.length;
     /** The guest's memory, with the handlers' scratch at LOCAL. */
     const routed = guestMemory({
-        readMemory: (address, length)=>(address >= LOCAL
+        readMemory: (address, length)=>(inLocal(address)
             ? local.subarray(address - LOCAL, address - LOCAL + length)
             : memory.readMemory(address, length)),
         writeMemory: (address, bytes)=>{
-            if (address >= LOCAL)
+            if (inLocal(address))
             {
                 local.set(bytes, address - LOCAL);
             }
@@ -169,6 +174,8 @@ export function createGlu(deps){
                 memory.writeMemory(address, bytes);
             }
         },
+        // A 64-bit process's addresses past 4 GiB are whole, not cut as the i386 cuts.
+        pointerSize: deps.pointerSize,
     });
     const view = new DataView(local.buffer);
     /** @param {number} at @param {number} count */
@@ -536,7 +543,7 @@ export function createGlu(deps){
 
         gluPickMatrix: calling(36, args=>{
             if (inGuest.gluPickMatrixArgs(routed, LOCAL, double(args, 0), double(args, 2),
-                double(args, 4), double(args, 6), args[8] >>> 0) !== 0)
+                double(args, 4), double(args, 6), wholeAddress(args[8])) !== 0)
             {
                 const m = localDoubles(LOCAL, 6);
                 withContext(context=>{
@@ -558,12 +565,12 @@ export function createGlu(deps){
             argBytes: 48,
             lastError: false,
             /** @param {number[]} args */
-            handler: args=>(inGuest.gluUnProjectPoint(routed, LOCAL, args[6] >>> 0,
-                args[7] >>> 0, args[8] >>> 0, double(args, 0), double(args, 2), double(args, 4),
-                1, 0, 1) === 0
-                ? 0
-                : inGuest.gluUnProjectDivide(routed, LOCAL, args[9] >>> 0, args[10] >>> 0,
-                    args[11] >>> 0)),
+            handler: args=>{
+                const [model, proj, viewport, x, y, z] = args.slice(6, 12).map(wholeAddress);
+                return inGuest.gluUnProjectPoint(routed, LOCAL, model, proj, viewport,
+                    double(args, 0), double(args, 2), double(args, 4), 1, 0, 1) === 0
+                    ? 0 : inGuest.gluUnProjectDivide(routed, LOCAL, x, y, z);
+            },
             code: unProjectCode,
         },
 
@@ -571,12 +578,14 @@ export function createGlu(deps){
             argBytes: 76,
             lastError: false,
             /** @param {number[]} args */
-            handler: args=>(inGuest.gluUnProjectPoint(routed, LOCAL, args[8] >>> 0,
-                args[9] >>> 0, args[10] >>> 0, double(args, 0), double(args, 2), double(args, 4),
-                double(args, 6), double(args, 11), double(args, 13)) === 0
-                ? 0
-                : inGuest.gluUnProjectStore(routed, LOCAL, args[15] >>> 0, args[16] >>> 0,
-                    args[17] >>> 0, args[18] >>> 0)),
+            handler: args=>{
+                const [model, proj, viewport] = args.slice(8, 11).map(wholeAddress);
+                const [x, y, z, w] = args.slice(15, 19).map(wholeAddress);
+                return inGuest.gluUnProjectPoint(routed, LOCAL, model, proj, viewport,
+                    double(args, 0), double(args, 2), double(args, 4), double(args, 6),
+                    double(args, 11), double(args, 13)) === 0
+                    ? 0 : inGuest.gluUnProjectStore(routed, LOCAL, x, y, z, w);
+            },
             code: unProject4Code,
         },
 
