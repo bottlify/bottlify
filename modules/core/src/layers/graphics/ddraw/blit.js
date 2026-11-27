@@ -31,6 +31,7 @@ import {
     DDERR_NORASTEROPHW, DDERR_UNSUPPORTED, DD_OK, ROP,
 } from './constants.js';
 import { compressedBytes, decodeS3tc, encodeS3tc } from '../../media/internal/s3tc.js';
+import { plainScratches } from '../../cache/scratch.js';
 
 /**
  * @typedef {Object} BlitSurface
@@ -148,28 +149,31 @@ const pixelAt = (bytes, at, bpp)=>{
 };
 
 /**
- * Where a blit keeps the source rectangle and builds each destination row:
- * grown when a blit needs more, and kept, so a blit costs no allocation for
- * its rows -- a sprite is dozens of them and a screen hundreds.
+ * Where a blit works between reading and writing, kept from call to call in
+ * the run's cache (`cache/scratch.js`), so a blit costs no allocation - a
+ * program blits its whole screen every frame, a sprite is dozens of rows and
+ * a screen hundreds: the source rectangle (`snapshot`), it re-encoded into the
+ * destination's format (`converted`), a DXTn source's texels (`decoded`) and
+ * the destination row being built (`row`). Four scratches, since one call
+ * holds all four at once.
+ *
+ * @typedef {{ snapshot: Scratch, converted: Scratch, decoded: Scratch, row: Scratch }} BlitRooms
+ * @typedef {import('../../cache/scratch.js').Scratch} Scratch
  */
-let snapshotBytes = new Uint8Array(1 << 16);
-let rowBytes = new Uint8Array(1 << 12);
-/** A view of `rowBytes`' first bytes, kept while blits write rows of that length. */
-let rowView = rowBytes.subarray(0, 0);
 
-/** @param {number} length */
-const rowOf = length=>{
-    if (length > rowBytes.length)
-    {
-        rowBytes = new Uint8Array(Math.max(length, rowBytes.length * 2));
-        rowView = rowBytes.subarray(0, 0);
-    }
-    if (rowView.length !== length)
-    {
-        rowView = rowBytes.subarray(0, length);
-    }
-    return rowView;
-};
+/**
+ * A blitter's rooms, its scratches taken from `scratch`: one set a DirectDraw
+ * seam, which blits one call at a time.
+ *
+ * @param {(name: string) => Scratch} scratch
+ * @returns {BlitRooms}
+ */
+export const blitRooms = scratch=>({ snapshot: scratch('blit/snapshot'),
+    converted: scratch('blit/converted'), decoded: scratch('blit/decoded'),
+    row: scratch('blit/row') });
+
+/** What a blit handed no rooms works in: plain memory, kept the same way. */
+const PLAIN_ROOMS = blitRooms(name=>plainScratches.scratch(name));
 
 /**
  * @param {BlitMemory} memory
@@ -245,6 +249,8 @@ export function writePixel(memory, surface, x, y, value){
  * @param {ColorKey} [job.destColorKey]
  * @param {Rect[]} [job.clipList]
  * @param {number} [job.mirror]  DDBLTFX_MIRRORLEFTRIGHT and DDBLTFX_MIRRORUPDOWN, of the source
+ * @param {Uint8Array} [job.held]  The source rectangle's pixels, row after row (`snapshot`).
+ * @param {BlitRooms} job.rooms
  */
 function transfer(job){
     const { memory, dest, destRect, src, srcColorKey, destColorKey, clipList } = job;
@@ -259,11 +265,11 @@ function transfer(job){
     const height = destRect.bottom - destRect.top;
     const mask = pixelMask(dest);
     const current = spanOf(memory, dest, destRect);
-    const row = rowOf(width * bpp);
+    const row = job.rooms.row.bytes(width * bpp);
     const srcRect = job.srcRect;
     const srcWidth = srcRect ? srcRect.right - srcRect.left : width;
     const srcHeight = srcRect ? srcRect.bottom - srcRect.top : height;
-    const held = snapshotBytes;
+    const held = /** @type {Uint8Array} */ (job.held);
     for (let r = 0; r < height; r++)
     {
         const y = destRect.top + r;
@@ -326,7 +332,7 @@ function transferWhole(job){
     }
     const rowLength = width * bpp;
     const at = (/** @type {number} */ y)=>dest.buffer + y * dest.pitch + destRect.left * bpp;
-    const row = rowOf(rowLength);
+    const row = job.rooms.row.bytes(rowLength);
     if (!src)
     {
         const fill = (job.fill & pixelMask(dest)) >>> 0;
@@ -343,7 +349,12 @@ function transferWhole(job){
         }
         return true;
     }
-    const held = snapshotBytes;
+    const held = /** @type {Uint8Array} */ (job.held);
+    if (srcColorKey === undefined && dest.pitch === rowLength)
+    {
+        memory.writeMemory(at(destRect.top), held);
+        return true;
+    }
     if (srcColorKey === undefined)
     {
         for (let r = 0; r < height; r++)
@@ -359,8 +370,8 @@ function transferWhole(job){
     const low = (srcColorKey.low & keyMask) >>> 0;
     const high = (srcColorKey.high & keyMask) >>> 0;
     const current = spanOf(memory, dest, destRect);
-    const words = bpp === 4 ? new Uint32Array(held.buffer, 0, held.length >>> 2)
-        : bpp === 2 ? new Uint16Array(held.buffer, 0, held.length >>> 1) : held;
+    const words = bpp === 4 ? new Uint32Array(held.buffer, held.byteOffset, held.length >>> 2)
+        : bpp === 2 ? new Uint16Array(held.buffer, held.byteOffset, held.length >>> 1) : held;
     const into = bpp === 4 ? new Uint32Array(row.buffer, row.byteOffset, width)
         : bpp === 2 ? new Uint16Array(row.buffer, row.byteOffset, width) : row;
     for (let r = 0; r < height; r++)
@@ -383,27 +394,32 @@ function transferWhole(job){
 }
 
 /**
- * The source rectangle, read into `snapshotBytes` before anything is
- * written, row after row with no pitch between them. The snapshot is what
- * makes a self-overlapping blit and a stretched one the same loop.
+ * The source rectangle, read into the snapshot before anything is written,
+ * row after row with no pitch between them. The snapshot is what makes a
+ * self-overlapping blit and a stretched one the same loop.
  *
  * @param {BlitMemory} memory @param {BlitSurface} src @param {Rect} rect
+ * @param {BlitRooms} rooms
+ * @returns {Uint8Array} the snapshot
  */
-function snapshot(memory, src, rect){
+function snapshot(memory, src, rect, rooms){
     const bpp = src.bytesPerPixel;
     const rowLength = (rect.right - rect.left) * bpp;
     const rows = rect.bottom - rect.top;
-    if (rowLength * rows > snapshotBytes.length)
-    {
-        snapshotBytes = new Uint8Array(Math.max(rowLength * rows, snapshotBytes.length * 2));
-    }
+    const into = rooms.snapshot.bytes(rowLength * rows);
     const span = spanOf(memory, src, rect);
-    const into = snapshotBytes;
+    if (src.pitch === rowLength)
+    {
+        // Rows with nothing between them: one copy, not a view a row.
+        into.set(span);
+        return into;
+    }
     for (let row = 0; row < rows; row++)
     {
         const from = row * src.pitch;
         into.set(span.subarray(from, from + rowLength), row * rowLength);
     }
+    return into;
 }
 
 /**
@@ -446,9 +462,12 @@ const fieldOf = mask=>{
  * texture loaders of the era copy a picture of one format into a surface of
  * the format the device enumerated.
  *
+ * @param {Uint8Array} held  the snapshot
  * @param {BlitSurface} src @param {BlitSurface} dest @param {number} pixels
+ * @param {BlitRooms} rooms
+ * @returns {Uint8Array} the snapshot in the destination's format
  */
-function convertSnapshot(src, dest, pixels){
+function convertSnapshot(held, src, dest, pixels, rooms){
     const from = /** @type {NonNullable<BlitSurface['channels']>} */ (src.channels);
     const to = /** @type {NonNullable<BlitSurface['channels']>} */ (dest.channels);
     const inBpp = src.bytesPerPixel;
@@ -456,8 +475,7 @@ function convertSnapshot(src, dest, pixels){
     const pairs = /** @type {const} */ (['red', 'green', 'blue', 'alpha']).map(name=>({
         in: fieldOf(from[name]), out: fieldOf(to[name]),
     })).filter(pair=>pair.out.bits > 0);
-    const out = new Uint8Array(Math.max(pixels * outBpp, snapshotBytes.length));
-    const held = snapshotBytes;
+    const out = rooms.converted.bytes(pixels * outBpp);
     for (let pixel = 0; pixel < pixels; pixel++)
     {
         const at = pixel * inBpp;
@@ -480,7 +498,7 @@ function convertSnapshot(src, dest, pixels){
             out[pixel * outBpp + byte] = Math.floor(encoded / 2 ** (byte * 8)) & 0xff;
         }
     }
-    snapshotBytes = out;
+    return out;
 }
 
 /** The byte order `decodeS3tc` writes, red first, as one 32-bit pixel. */
@@ -494,28 +512,29 @@ const DECODED = Object.freeze({
  * the blocks decoded whole, the rectangle cut from them and re-encoded.
  *
  * @param {BlitMemory} memory @param {BlitSurface} src @param {Rect} rect
- * @param {BlitSurface} dest
- * @returns {boolean} false when the surface's bytes are too few for its blocks
+ * @param {BlitSurface} dest @param {BlitRooms} rooms
+ * @returns {Uint8Array | null} the snapshot, or null when the surface's bytes are too few
+ *     for its blocks
  */
-function snapshotCompressed(memory, src, rect, dest){
+function snapshotCompressed(memory, src, rect, dest, rooms){
     const kind = /** @type {import('../../media/internal/s3tc.js').S3tcKind} */ (src.compressed);
     const blocks = Math.ceil(src.width / 4) * Math.ceil(src.height / 4)
         * (kind === 'dxt1' ? 8 : 16);
-    const texels = decodeS3tc(memory.readMemory(src.buffer, blocks), kind, src.width, src.height);
+    const bytes = memory.windowMemory
+        ? memory.windowMemory(src.buffer, blocks) : memory.readMemory(src.buffer, blocks);
+    const texels = decodeS3tc(bytes, kind, src.width, src.height,
+        rooms.decoded.bytes(src.width * src.height * 4));
     if (!texels)
     {
-        return false;
+        return null;
     }
     const width = rect.right - rect.left;
     const rows = rect.bottom - rect.top;
-    if (width * rows * 4 > snapshotBytes.length)
-    {
-        snapshotBytes = new Uint8Array(Math.max(width * rows * 4, snapshotBytes.length * 2));
-    }
+    const held = rooms.snapshot.bytes(width * rows * 4);
     for (let row = 0; row < rows; row++)
     {
         const from = ((rect.top + row) * src.width + rect.left) * 4;
-        snapshotBytes.set(texels.subarray(from, from + width * 4), row * width * 4);
+        held.set(texels.subarray(from, from + width * 4), row * width * 4);
     }
     // Bits a destination without alpha leaves unused take the texels'
     // alpha, opaque for most: X8R8G8B8 decoded has 0xff above its colours
@@ -525,9 +544,8 @@ function snapshotCompressed(memory, src, rect, dest){
     const unused = (whole & ~(to.red | to.green | to.blue)) >>> 0;
     const run = unused >>> ctz(unused);
     const contiguous = unused !== 0 && (run & (run + 1)) === 0;
-    convertSnapshot(DECODED, to.alpha === 0 && contiguous
-        ? { ...dest, channels: { ...to, alpha: unused } } : dest, width * rows);
-    return true;
+    return convertSnapshot(held, DECODED, to.alpha === 0 && contiguous
+        ? { ...dest, channels: { ...to, alpha: unused } } : dest, width * rows, rooms);
 }
 
 /** @param {number} mask a non-zero mask @returns {number} its lowest set bit's index */
@@ -538,15 +556,15 @@ const ctz = mask=>31 - Math.clz32(mask & -mask);
  * bits beside them keep what they held.
  *
  * @param {BlitMemory} memory @param {BlitSurface} dest @param {Rect} rect
- * @param {number} value @param {Rect[] | undefined} clipList
+ * @param {number} value @param {Rect[] | undefined} clipList @param {BlitRooms} rooms
  * @returns {number} HRESULT
  */
-function depthFill(memory, dest, rect, value, clipList){
+function depthFill(memory, dest, rect, value, clipList, rooms){
     const mask = (dest.depthMask ?? pixelMask(dest)) >>> 0;
     const bpp = dest.bytesPerPixel;
     const width = rect.right - rect.left;
     const current = spanOf(memory, dest, rect);
-    const row = rowOf(width * bpp);
+    const row = rooms.row.bytes(width * bpp);
     for (let y = rect.top; y < rect.bottom; y++)
     {
         const from = (y - rect.top) * dest.pitch;
@@ -631,10 +649,12 @@ function bltIntoBlocks(request){
  *            destColorKey?: ColorKey, rop?: number, ddfx?: number }} [request.fx]
  * @param {Rect[]} [request.clipList]
  * @param {boolean} [request.fxGiven]  Whether the program passed a DDBLTFX at all.
+ * @param {BlitRooms} [request.rooms]  Where it works (`blitRooms`); plain memory if absent.
  * @returns {number} HRESULT
  */
 export function blt(request){
     const { memory, dest } = request;
+    const rooms = request.rooms ?? PLAIN_ROOMS;
     if (dest.bytesPerPixel === 3)
     {
         return DDERR_UNSUPPORTED;
@@ -701,7 +721,7 @@ export function blt(request){
     const destColorKey = (flags & (DDBLT_KEYDEST | DDBLT_KEYDESTOVERRIDE)) !== 0
         ? fx.destColorKey
         : undefined;
-    const common = { memory, dest, destRect, destColorKey, clipList: request.clipList };
+    const common = { memory, dest, destRect, destColorKey, clipList: request.clipList, rooms };
 
     // A raster operation: the two fills it names need no source, a copy is
     // the copy below, and any other is one this device does not make.
@@ -744,7 +764,7 @@ export function blt(request){
     if ((flags & DDBLT_DEPTHFILL) !== 0)
     {
         return dest.depth
-            ? depthFill(memory, dest, destRect, fx.fillDepth ?? 0, request.clipList)
+            ? depthFill(memory, dest, destRect, fx.fillDepth ?? 0, request.clipList, rooms)
             : DDERR_INVALIDPARAMS;
     }
 
@@ -764,11 +784,12 @@ export function blt(request){
         {
             return DDERR_INVALIDRECT;
         }
-        if (!snapshotCompressed(memory, src, whole, dest))
+        const held = snapshotCompressed(memory, src, whole, dest, rooms);
+        if (!held)
         {
             return DDERR_INVALIDPARAMS;
         }
-        transfer({ ...common, fill: 0, src, srcRect: whole, mirror: ddfx });
+        transfer({ ...common, fill: 0, src, srcRect: whole, mirror: ddfx, held });
         return DD_OK;
     }
     const conversion = converts(src, dest);
@@ -785,13 +806,10 @@ export function blt(request){
     {
         return DDERR_INVALIDRECT;
     }
-    snapshot(memory, src, srcRect);
-    if (conversion)
-    {
-        convertSnapshot(src, dest,
-            (srcRect.right - srcRect.left) * (srcRect.bottom - srcRect.top));
-    }
-    transfer({ ...common, fill: 0, src, srcRect, srcColorKey, mirror: ddfx });
+    const taken = snapshot(memory, src, srcRect, rooms);
+    const held = conversion ? convertSnapshot(taken, src, dest,
+        (srcRect.right - srcRect.left) * (srcRect.bottom - srcRect.top), rooms) : taken;
+    transfer({ ...common, fill: 0, src, srcRect, srcColorKey, mirror: ddfx, held });
     return DD_OK;
 }
 
@@ -808,10 +826,12 @@ export function blt(request){
  * @param {number} request.flags   DDBLTFAST
  * @param {ColorKey} [request.srcColorKey]
  * @param {ColorKey} [request.destColorKey]
+ * @param {BlitRooms} [request.rooms]  Where it works (`blitRooms`); plain memory if absent.
  * @returns {number} HRESULT
  */
 export function bltFast(request){
     const { memory, dest } = request;
+    const rooms = request.rooms ?? PLAIN_ROOMS;
     const src = request.src ?? null;
     if (!src)
     {
@@ -836,14 +856,13 @@ export function bltFast(request){
     {
         return DDERR_INVALIDRECT;
     }
-    snapshot(memory, src, srcRect);
-    if (conversion)
-    {
-        convertSnapshot(src, dest,
-            (srcRect.right - srcRect.left) * (srcRect.bottom - srcRect.top));
-    }
+    const taken = snapshot(memory, src, srcRect, rooms);
+    const held = conversion ? convertSnapshot(taken, src, dest,
+        (srcRect.right - srcRect.left) * (srcRect.bottom - srcRect.top), rooms) : taken;
     transfer({
         memory,
+        rooms,
+        held,
         dest,
         destRect,
         fill: 0,

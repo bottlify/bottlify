@@ -26,6 +26,7 @@ import {
 import { textExtent } from './gdi/text.js';
 import { createScreen } from './gdi/screen.js';
 import { DEFAULT_VIDEO_MEMORY, GRAPHICS_CHOICES, graphicsChoice } from './choice.js';
+import { plainScratches } from '../cache/scratch.js';
 
 /**
  * A window as the window manager lists it: enough to know where it is on
@@ -497,6 +498,24 @@ export function createGraphicsModule(){
             // draw needs them: the run's cache, which lets idle bodies go to the
             // disk, rather than the worker's own heap.
             const cache = /** @type {any} */ (host.requireApi('cache'));
+            /**
+             * Host memory this machine's graphics keep between calls - a
+             * blit's rooms, a level decoded on its way up, a staging mirror -
+             * held in the run's cache (`cache/scratch.js`); plain memory under
+             * the same contract where the cache layer is switched off, whose
+             * stub refuses the call.
+             *
+             * @param {string} name @returns {import('../cache/scratch.js').Scratch}
+             */
+            const scratches = name=>{
+                try
+                {
+                    return cache.scratch(name);
+                }
+                catch {
+                    return plainScratches.scratch(name);
+                }
+            };
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -1463,6 +1482,7 @@ export function createGraphicsModule(){
                 processHeapAllocate: (/** @type {number} */ bytes)=>
                     win32.processHeapAllocate?.(bytes) ?? 0,
                 divergence: config?.divergence,
+                scratches,
                 // Where the work a device call does before its method -- the
                 // guest's state brought to the device -- is timed, inside the
                 // host call it is part of.
