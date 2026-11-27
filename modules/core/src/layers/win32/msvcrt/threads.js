@@ -20,6 +20,8 @@
  * handle open, as on Windows, where the caller may wait on it and close it.
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * @typedef {Object} ThreadSeam
  * @property {(request: { entry: number, stackSize: number, parameter: number,
@@ -47,12 +49,12 @@
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => void} free
  * @property {(bytes: number) => number} allocateCode
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  The process's memory: in
+ *           an x86-64 one the start routine is in its convention
+ *           (`longStartRoutine`) and the block's routine and argument are
+ *           pointers of its width.
  * @property {(handle: number) => void} closeHandle
  * @property {() => number} currentThreadId
- * @property {boolean} [long]  The process is an x86-64 one: the start routine in its
- *           convention (`longStartRoutine`).
  */
 
 /**
@@ -72,27 +74,40 @@ const startRoutine = endthread=>Uint8Array.of(
 
 /**
  * The same for an x86-64 process: the block in RCX, the stack eight past a
- * multiple of 16 as a function is entered; the routine and its argument are
- * the block's dwords, every address below 4 GiB.
+ * multiple of 16 as a function is entered; the routine, its argument and
+ * `_endthread` are whole quadwords, where an image past 4 GiB - a 64-bit
+ * program's at its own base - puts them.
  *
- *   sub rsp, 40; mov rax, rcx; mov ecx, [rax+4]; mov eax, [rax]; call rax
- *   mov eax, _endthread; call rax; int3
+ *   sub rsp, 40; mov rax, rcx; mov rcx, [rax+8]; mov rax, [rax]; call rax
+ *   mov rax, _endthread; call rax; int3
  *
  * @param {number} endthread
  */
-const longStartRoutine = endthread=>Uint8Array.of(
-    0x48, 0x83, 0xec, 0x28, 0x48, 0x89, 0xc8, 0x8b, 0x48, 0x04, 0x8b, 0x00, 0xff, 0xd0,
-    0xb8, endthread & 0xff, endthread >>> 8 & 0xff, endthread >>> 16 & 0xff, endthread >>> 24,
-    0xff, 0xd0, 0xcc);
+const longStartRoutine = endthread=>{
+    const code = Uint8Array.of(
+        0x48, 0x83, 0xec, 0x28, 0x48, 0x89, 0xc8, 0x48, 0x8b, 0x48, 0x08, 0x48, 0x8b, 0x00,
+        0xff, 0xd0, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0, 0xcc);
+    const view = new DataView(code.buffer);
+    view.setUint32(18, endthread % 2 ** 32, true);
+    view.setUint32(22, Math.floor(endthread / 2 ** 32), true);
+    return code;
+};
 
-/** The block: routine, argument, handle, thread id. */
-const BLOCK = Object.freeze({ ROUTINE: 0, ARGUMENT: 4, HANDLE: 8, ID: 12, BYTES: 16 });
+/**
+ * The block, at a pointer's width: routine, argument, then the handle and the
+ * thread id as dwords.
+ *
+ * @param {4 | 8} pointer
+ */
+const blockOf = pointer=>Object.freeze({ ROUTINE: 0, ARGUMENT: pointer, HANDLE: pointer * 2,
+    ID: pointer * 2 + 4, BYTES: pointer * 2 + 8 });
 
 /**
  * @param {ThreadSeam} seam
  */
 export function createThreadFunctions(seam){
     const { runtime } = seam;
+    const BLOCK = blockOf(runtime?.guest.pointerSize ?? 4);
 
     /** `_beginthread`'s threads by id: the handle the runtime closes and the block. */
     const owned = /** @type {Map<number, { handle: number, block: number }>} */ (new Map());
@@ -103,21 +118,15 @@ export function createThreadFunctions(seam){
         const endthread = runtime?.endthread() ?? 0;
         if (start === 0 && runtime && endthread !== 0)
         {
-            const code = (runtime.long ? longStartRoutine : startRoutine)(endthread);
+            const code = (runtime.guest.pointerSize === 8 ? longStartRoutine : startRoutine)(
+                endthread);
             start = runtime.allocateCode(code.length);
             if (start !== 0)
             {
-                runtime.writeMemory(start, code);
+                runtime.guest.setBytes(start, code);
             }
         }
         return start;
-    };
-
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        runtime?.writeMemory(address, bytes);
     };
 
     /**
@@ -164,13 +173,13 @@ export function createThreadFunctions(seam){
             if (block === 0 || !runtime)
             {
                 const handle = seam.start({
-                    entry: routine >>> 0, stackSize: stackSize >>> 0,
-                    parameter: argument >>> 0, threadIdOut: 0, flags: 0,
+                    entry: wholeAddress(routine), stackSize: stackSize >>> 0,
+                    parameter: wholeAddress(argument), threadIdOut: 0, flags: 0,
                 });
                 return handle === 0 ? -1 : handle;
             }
-            writeU32(block + BLOCK.ROUTINE, routine);
-            writeU32(block + BLOCK.ARGUMENT, argument);
+            runtime.guest.setPtr(block + BLOCK.ROUTINE, routine);
+            runtime.guest.setPtr(block + BLOCK.ARGUMENT, argument);
             const handle = seam.start({
                 entry, stackSize: stackSize >>> 0, parameter: block,
                 threadIdOut: block + BLOCK.ID, flags: 0,
@@ -181,9 +190,8 @@ export function createThreadFunctions(seam){
                 return -1;
             }
             // Before the thread runs: CreateThread does not switch to it.
-            writeU32(block + BLOCK.HANDLE, handle);
-            const id = new DataView(runtime.readMemory(block + BLOCK.ID, 4).buffer)
-                .getUint32(0, true);
+            runtime.guest.set32(block + BLOCK.HANDLE, handle);
+            const id = runtime.guest.u32(block + BLOCK.ID);
             owned.set(id, { handle, block });
             return handle;
         }), returns: 'pointer' },
@@ -198,8 +206,9 @@ export function createThreadFunctions(seam){
          */
         _beginthreadex: { ...cdecl(24, ([, stackSize, routine, argument, flags, threadIdOut])=>
             seam.start({
-                entry: routine >>> 0, stackSize: stackSize >>> 0,
-                parameter: argument >>> 0, threadIdOut: threadIdOut >>> 0, flags: flags >>> 0,
+                entry: wholeAddress(routine), stackSize: stackSize >>> 0,
+                parameter: wholeAddress(argument), threadIdOut: wholeAddress(threadIdOut),
+                flags: flags >>> 0,
             })), returns: 'pointer' },
 
         /**

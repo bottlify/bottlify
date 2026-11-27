@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createThreadFunctions } from './threads.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 function build(){
     /** @type {any[]} */
@@ -109,8 +110,7 @@ test('_beginthread starts in the runtime\'s start routine, and _endthread closes
             allocate: bytes=>memory.allocate(bytes),
             free: address=>void freed.push(address),
             allocateCode: bytes=>memory.allocate(bytes),
-            readMemory: memory.readMemory,
-            writeMemory: memory.writeMemory,
+            guest: memory.guest,
             closeHandle: handle=>void closed.push(handle),
             currentThreadId: ()=>current,
         },
@@ -141,44 +141,55 @@ test('_beginthread starts in the runtime\'s start routine, and _endthread closes
 });
 
 test('an x86-64 process\'s _beginthread starts in a routine of its own convention: the block'
-    + ' in RCX, the stack aligned for the call', ()=>{
+    + ' in RCX, the stack aligned for the call, every address whole past 4 GiB', ()=>{
     // The 32-bit routine's bytes, run as x86-64 code, call through a quadword
     // read off the block's dwords: a 64-bit program's first runtime thread
-    // jumped to address zero.
-    const memory = fakeMemory();
+    // jumped to address zero. A routine, an argument or an _endthread past
+    // 4 GiB held as dwords is another address.
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    let next = base + 0x100;
+    const allocate = ()=>(next += 0x40) - 0x40;
     /** @type {any[]} */
     const started = [];
     const fns = /** @type {Record<string, any>} */ (createThreadFunctions({
         start: request=>{
             started.push(request);
-            memory.writeMemory(request.threadIdOut, Uint8Array.of(0x41, 0, 0, 0));
+            view.setUint32(request.threadIdOut - base, 0x41, true);
             return 0x204;
         },
         exit: ()=>0,
         runtime: {
-            endthread: ()=>0x7f001234,
-            allocate: bytes=>memory.allocate(bytes),
+            endthread: ()=>0x180001234,
+            allocate,
             free: ()=>{},
-            allocateCode: bytes=>memory.allocate(bytes),
-            readMemory: memory.readMemory,
-            writeMemory: memory.writeMemory,
+            allocateCode: allocate,
+            guest: guestWindow(bytes, { base, pointerSize: 8 }),
             closeHandle: ()=>{},
             currentThreadId: ()=>0,
-            long: true,
         },
     }));
-    fns._beginthread.handler([0x401000, 0, 0x1234]);
+    fns._beginthread.handler([0x140001000, 0, base + 0x800]);
     const [request] = started;
-    assert.deepEqual([...memory.bytes.subarray(request.entry, request.entry + 22)], [
+    assert.deepEqual([...bytes.subarray(request.entry - base, request.entry - base + 29)], [
         0x48, 0x83, 0xec, 0x28,         // sub rsp, 40
         0x48, 0x89, 0xc8,               // mov rax, rcx
-        0x8b, 0x48, 0x04,               // mov ecx, [rax+4]
-        0x8b, 0x00,                     // mov eax, [rax]
+        0x48, 0x8b, 0x48, 0x08,         // mov rcx, [rax+8]
+        0x48, 0x8b, 0x00,               // mov rax, [rax]
         0xff, 0xd0,                     // call rax
-        0xb8, 0x34, 0x12, 0x00, 0x7f,   // mov eax, _endthread
+        0x48, 0xb8, 0x34, 0x12, 0x00, 0x80, 0x01, 0, 0, 0,   // mov rax, _endthread
         0xff, 0xd0,                     // call rax
         0xcc,
     ]);
-    assert.equal(memory.u32(request.parameter), 0x401000);
-    assert.equal(memory.u32(request.parameter + 4), 0x1234);
+    /** @param {number} at */
+    const quad = at=>view.getUint32(at - base, true)
+        + view.getUint32(at - base + 4, true) * 2 ** 32;
+    assert.equal(quad(request.parameter), 0x140001000, 'the routine, whole');
+    assert.equal(quad(request.parameter + 8), base + 0x800, 'its argument, whole');
+    assert.equal(view.getUint32(request.parameter + 16 - base, true), 0x204, 'the handle');
+    assert.equal(request.threadIdOut, request.parameter + 20);
+    fns._beginthreadex.handler([0, 0, 0x140001000, base + 0x800, 0, base + 0x900]);
+    assert.deepEqual([started[1].entry, started[1].parameter, started[1].threadIdOut],
+        [0x140001000, base + 0x800, base + 0x900]);
 });

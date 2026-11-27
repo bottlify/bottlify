@@ -1730,11 +1730,9 @@ export function createMsvcrtFunctions(host){
                         allocate: host.allocate,
                         free: host.free,
                         allocateCode: host.allocateCode,
-                        readMemory: host.readMemory,
-                        writeMemory: host.writeMemory,
+                        guest: host.guest,
                         closeHandle: host.closeHandle,
                         currentThreadId: ()=>host.currentThread?.()?.id ?? 0,
-                        long: host.pointerSize === 8,
                     },
                 }
                 : {},
