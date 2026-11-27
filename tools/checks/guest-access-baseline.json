@@ -695,14 +695,6 @@
   "msvcrt/io.js": {
    "string wide": 1
   },
-  "msvcrt/mbcs.js": {
-   "accessor setU8": 1,
-   "accessor u8": 1
-  },
-  "msvcrt/mbstring.js": {
-   "string readWide": 1,
-   "string writeWide": 1
-  },
   "msvcrt/paths.js": {
    "string readString": 1,
    "string readWide": 1,

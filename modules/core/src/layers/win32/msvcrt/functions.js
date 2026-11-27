@@ -1248,10 +1248,10 @@ export function createMsvcrtFunctions(host){
     const secure = createSecureFunctions({ readMemory: host.readMemory,
         writeMemory: host.writeMemory, errno });
     const wideStrings = createWideFunctions({
+        guest: host.guest,
         pointerSize: host.pointerSize,
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
-        readCString: host.readCString,
         errno,
         ...host.allocate ? { allocate: host.allocate } : {},
     });
@@ -1293,6 +1293,7 @@ export function createMsvcrtFunctions(host){
         ...narrow,
         // Bound to the byte functions above, so the two families cannot drift.
         ...createMultiByteFunctions(narrow, {
+            guest: host.guest,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             fillMemory: host.fillMemory,

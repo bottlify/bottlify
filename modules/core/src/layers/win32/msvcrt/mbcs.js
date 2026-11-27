@@ -245,8 +245,7 @@ export function createMultiBytePage(){
 
 /**
  * @typedef {Object} MultiByteHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} [errno]
  */
 
@@ -264,11 +263,8 @@ export function createMultiBytePage(){
  * @param {MultiByteHost} host @param {MultiBytePage} page
  */
 export function createMultiByteHandlers(host, page){
-    /** @param {number} address */
-    const u8 = address=>host.readMemory(wholeAddress(address), 1)[0];
-
-    /** @param {number} address @param {number} value */
-    const setU8 = (address, value)=>host.writeMemory(wholeAddress(address), Uint8Array.of(value));
+    const { guest } = host;
+    const { u8, set8 } = guest;
 
     /** How many bytes the character at `at` takes. @param {number} at */
     const width = at=>(page.isLead(u8(at)) && u8(at + 1) !== 0 ? 2 : 1);
@@ -411,13 +407,13 @@ export function createMultiByteHandlers(host, page){
      */
     const secureAppend = (destination, size, source, append)=>{
         const room = size >>> 0;
-        if ((destination >>> 0) === 0 || room === 0)
+        if (wholeAddress(destination) === 0 || room === 0)
         {
             return invalid(EINVAL);
         }
-        if ((source >>> 0) === 0)
+        if (wholeAddress(source) === 0)
         {
-            setU8(destination, 0);
+            set8(destination, 0);
             return invalid(EINVAL);
         }
         let end = 0;
@@ -430,7 +426,7 @@ export function createMultiByteHandlers(host, page){
             }
             if (end === room)
             {
-                setU8(destination, 0);
+                set8(destination, 0);
                 return invalid(EINVAL);
             }
             // A lead byte that ends the destination is no character.
@@ -461,12 +457,12 @@ export function createMultiByteHandlers(host, page){
         }
         if (end + bytes.length + 1 > room)
         {
-            host.writeMemory(destination + end, Uint8Array.from(bytes.slice(0, room - end)));
-            setU8(destination, 0);
+            guest.setBytes(destination + end, Uint8Array.from(bytes.slice(0, room - end)));
+            set8(destination, 0);
             host.errno?.(ERANGE);
             return ERANGE;
         }
-        host.writeMemory(destination + end, Uint8Array.from([...bytes, 0]));
+        guest.setBytes(destination + end, Uint8Array.from([...bytes, 0]));
         if (ended)
         {
             host.errno?.(EILSEQ);
@@ -482,11 +478,11 @@ export function createMultiByteHandlers(host, page){
      */
     const secureCase = (string, size, fold)=>{
         const room = size >>> 0;
-        if ((string >>> 0) === 0 && room === 0)
+        if (wholeAddress(string) === 0 && room === 0)
         {
             return 0;
         }
-        if ((string >>> 0) === 0 || room === 0)
+        if (wholeAddress(string) === 0 || room === 0)
         {
             return invalid(EINVAL);
         }
@@ -497,7 +493,7 @@ export function createMultiByteHandlers(host, page){
         }
         if (length === room)
         {
-            setU8(string, 0);
+            set8(string, 0);
             return invalid(EINVAL);
         }
         caseMap(fold)([string]);
@@ -515,7 +511,7 @@ export function createMultiByteHandlers(host, page){
                 const mapped = fold === 0 ? lowerOf(c) : upperOf(c);
                 if (mapped !== c)
                 {
-                    setU8(at, mapped);
+                    set8(at, mapped);
                 }
             }
             else
@@ -524,8 +520,8 @@ export function createMultiByteHandlers(host, page){
                 const mapped = pairCase(page.page(), pair, fold !== 0);
                 if (mapped !== pair)
                 {
-                    setU8(at, mapped >> 8);
-                    setU8(at + 1, mapped & 0xff);
+                    set8(at, mapped >> 8);
+                    set8(at + 1, mapped & 0xff);
                 }
             }
             at += w;
@@ -557,7 +553,7 @@ export function createMultiByteHandlers(host, page){
 
         /** @param {number[]} args */
         _mbsdec: ([start, at])=>{
-            if (at >>> 0 <= start >>> 0)
+            if (wholeAddress(at) <= wholeAddress(start))
             {
                 return 0;
             }
@@ -571,7 +567,7 @@ export function createMultiByteHandlers(host, page){
 
         /** @param {number[]} args */
         _mbsninc: ([string, count])=>{
-            if ((string >>> 0) === 0)
+            if (wholeAddress(string) === 0)
             {
                 return 0;
             }
@@ -670,7 +666,7 @@ export function createMultiByteHandlers(host, page){
 
         /** @param {number[]} args */
         _mbsbtype: ([string, index])=>{
-            if ((string >>> 0) === 0)
+            if (wholeAddress(string) === 0)
             {
                 return MBC_ILLEGAL;
             }
@@ -707,10 +703,10 @@ export function createMultiByteHandlers(host, page){
         /** @param {number[]} args */
         _mbccpy: ([destination, source])=>{
             const c = u8(source);
-            setU8(destination, c);
+            set8(destination, c);
             if (page.isLead(c))
             {
-                setU8(destination + 1, u8(source + 1));
+                set8(destination + 1, u8(source + 1));
             }
             return 0;
         },
@@ -729,7 +725,7 @@ export function createMultiByteHandlers(host, page){
             {
                 return destination;
             }
-            if ((destination >>> 0) === 0 || (source >>> 0) === 0)
+            if (wholeAddress(destination) === 0 || wholeAddress(source) === 0)
             {
                 return invalid();
             }
@@ -743,22 +739,22 @@ export function createMultiByteHandlers(host, page){
                 {
                     if (u8(at + 1) === 0)
                     {
-                        setU8(out, 0);
-                        setU8(out + 1, 0);
+                        set8(out, 0);
+                        set8(out + 1, 0);
                         out += 2;
                         break;
                     }
-                    setU8(out++, c);
+                    set8(out++, c);
                     at++;
                 }
                 const next = u8(at++);
-                setU8(out++, next);
+                set8(out++, next);
                 if (next === 0)
                 {
                     break;
                 }
             }
-            host.writeMemory(out, new Uint8Array(left));
+            guest.fill(out, 0, left);
             return destination;
         },
 
@@ -775,7 +771,7 @@ export function createMultiByteHandlers(host, page){
             {
                 return destination;
             }
-            if ((destination >>> 0) === 0 || (source >>> 0) === 0)
+            if (wholeAddress(destination) === 0 || wholeAddress(source) === 0)
             {
                 return invalid();
             }
@@ -791,19 +787,19 @@ export function createMultiByteHandlers(host, page){
                 {
                     if (at + 1 >= limit || u8(source + at + 1) === 0)
                     {
-                        setU8(destination + at, 0);
+                        set8(destination + at, 0);
                         at++;
                         break;
                     }
-                    setU8(destination + at, c);
-                    setU8(destination + at + 1, u8(source + at + 1));
+                    set8(destination + at, c);
+                    set8(destination + at + 1, u8(source + at + 1));
                     at += 2;
                     continue;
                 }
-                setU8(destination + at, c);
+                set8(destination + at, c);
                 at++;
             }
-            host.writeMemory(destination + at, new Uint8Array(limit - at));
+            guest.fill(destination + at, 0, limit - at);
             return destination;
         },
 
@@ -857,10 +853,10 @@ export function createMultiByteHandlers(host, page){
         },
 
         /** @param {number[]} args */
-        _mbscmp: ([left, right])=>((left >>> 0) === 0 || (right >>> 0) === 0
+        _mbscmp: ([left, right])=>(wholeAddress(left) === 0 || wholeAddress(right) === 0
             ? invalid(NLS_COMPARE_ERROR) : compare(left, right, 0xffffffff, {})),
         /** @param {number[]} args */
-        _mbsicmp: ([left, right])=>((left >>> 0) === 0 || (right >>> 0) === 0
+        _mbsicmp: ([left, right])=>(wholeAddress(left) === 0 || wholeAddress(right) === 0
             ? invalid(NLS_COMPARE_ERROR) : compare(left, right, 0xffffffff, { fold: true })),
         /** @param {number[]} args */
         _mbsncmp: ([left, right, count])=>compare(left, right, count, {}),
@@ -917,8 +913,8 @@ export function createMultiByteHandlers(host, page){
                 at++;
             }
             const bytes = characters.reverse().flat();
-            host.writeMemory(string, Uint8Array.from([...bytes, ...new Array(at - string
-                - bytes.length + 1).fill(0)]));
+            guest.setBytes(string, Uint8Array.from(bytes));
+            guest.fill(string + bytes.length, 0, at - string - bytes.length + 1);
             return string;
         },
 
@@ -933,11 +929,11 @@ export function createMultiByteHandlers(host, page){
             for (let i = 0; i < count >>> 0 && u8(at) !== 0; i++)
             {
                 const w = width(at);
-                host.writeMemory(end, host.readMemory(at, w));
+                guest.copy(end, at, w);
                 end += w;
                 at += w;
             }
-            setU8(end, 0);
+            set8(end, 0);
             return destination;
         },
 
@@ -957,12 +953,12 @@ export function createMultiByteHandlers(host, page){
                 {
                     break;
                 }
-                host.writeMemory(end, host.readMemory(at, w));
+                guest.copy(end, at, w);
                 end += w;
                 at += w;
                 left -= w;
             }
-            setU8(end, 0);
+            set8(end, 0);
             return destination;
         },
 
@@ -973,9 +969,9 @@ export function createMultiByteHandlers(host, page){
          * @param {number[]} args
          */
         _mbstok: ([string, delimiters])=>{
-            if ((string >>> 0) !== 0)
+            if (wholeAddress(string) !== 0)
             {
-                tokenAt = string >>> 0;
+                tokenAt = wholeAddress(string);
             }
             if (tokenAt === 0)
             {
@@ -994,7 +990,7 @@ export function createMultiByteHandlers(host, page){
                 return start;
             }
             const w = width(end);
-            host.writeMemory(end, new Uint8Array(w));
+            guest.fill(end, 0, w);
             tokenAt = end + w;
             return start;
         },
@@ -1045,38 +1041,39 @@ export function createMultiByteHandlers(host, page){
          */
         _mbccpy_s: ([destination, size, copied, source])=>{
             const writeCopied = (/** @type {number} */ count)=>{
-                if ((copied >>> 0) !== 0)
+                if (wholeAddress(copied) !== 0)
                 {
-                    host.writeMemory(copied, Uint8Array.of(count, 0, 0, 0));
+                    guest.set32(copied, count);
                 }
             };
             writeCopied(0);
-            if ((destination >>> 0) === 0 || (source >>> 0) === 0 || (size >>> 0) === 0)
+            if (wholeAddress(destination) === 0 || wholeAddress(source) === 0
+                || (size >>> 0) === 0)
             {
                 return invalid(EINVAL);
             }
             const c = u8(source);
             if (!page.isLead(c))
             {
-                setU8(destination, c);
+                set8(destination, c);
                 writeCopied(1);
                 return 0;
             }
             if (u8(source + 1) === 0)
             {
-                setU8(destination, 0);
+                set8(destination, 0);
                 writeCopied(1);
                 host.errno?.(EILSEQ);
                 return EILSEQ;
             }
             if ((size >>> 0) < 2)
             {
-                setU8(destination, 0);
+                set8(destination, 0);
                 host.errno?.(ERANGE);
                 return ERANGE;
             }
-            setU8(destination, c);
-            setU8(destination + 1, u8(source + 1));
+            set8(destination, c);
+            set8(destination + 1, u8(source + 1));
             writeCopied(2);
             return 0;
         },
@@ -1106,13 +1103,13 @@ export function createMultiByteHandlers(host, page){
          */
         _mbsnbcpy_s: ([destination, size, source, count])=>{
             const room = size >>> 0;
-            if ((destination >>> 0) === 0 || room === 0)
+            if (wholeAddress(destination) === 0 || room === 0)
             {
                 return invalid(EINVAL);
             }
-            if ((source >>> 0) === 0)
+            if (wholeAddress(source) === 0)
             {
-                setU8(destination, 0);
+                set8(destination, 0);
                 return invalid(EINVAL);
             }
             let length = 0;
@@ -1121,14 +1118,14 @@ export function createMultiByteHandlers(host, page){
                 length++;
             }
             const kept = Math.min(length, room);
-            host.writeMemory(destination, host.readMemory(source, kept));
+            guest.copy(destination, source, kept);
             if (length + 1 > room)
             {
-                setU8(destination, 0);
+                set8(destination, 0);
                 host.errno?.(ERANGE);
                 return ERANGE;
             }
-            setU8(destination + length, 0);
+            set8(destination + length, 0);
             return 0;
         },
 
@@ -1144,17 +1141,17 @@ export function createMultiByteHandlers(host, page){
          */
         _mbsnbcat_s: ([destination, size, source, count])=>{
             const room = size >>> 0;
-            if ((destination >>> 0) === 0 && room === 0 && (count >>> 0) === 0)
+            if (wholeAddress(destination) === 0 && room === 0 && (count >>> 0) === 0)
             {
                 return 0;
             }
-            if ((destination >>> 0) === 0 || room === 0)
+            if (wholeAddress(destination) === 0 || room === 0)
             {
                 return invalid(EINVAL);
             }
-            if ((source >>> 0) === 0)
+            if (wholeAddress(source) === 0)
             {
-                setU8(destination, 0);
+                set8(destination, 0);
                 return invalid(EINVAL);
             }
             let end = 0;
@@ -1164,7 +1161,7 @@ export function createMultiByteHandlers(host, page){
             }
             if (end === room)
             {
-                setU8(destination, 0);
+                set8(destination, 0);
                 return invalid(EINVAL);
             }
             let length = 0;
@@ -1173,14 +1170,14 @@ export function createMultiByteHandlers(host, page){
                 length++;
             }
             const kept = Math.min(length, room - end);
-            host.writeMemory(destination + end, host.readMemory(source, kept));
+            guest.copy(destination + end, source, kept);
             if (end + length + 1 > room)
             {
-                setU8(destination, 0);
+                set8(destination, 0);
                 host.errno?.(ERANGE);
                 return ERANGE;
             }
-            setU8(destination + end + length, 0);
+            set8(destination + end + length, 0);
             return 0;
         },
 

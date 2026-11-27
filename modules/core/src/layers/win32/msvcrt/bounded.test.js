@@ -10,6 +10,7 @@ import { createWideFunctions } from './mbstring.js';
 import { createSecureFunctions } from './secure.js';
 import { createStringFunctions } from './strings.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /**
  * The n-bounded string calls read a string no further than their count, the
@@ -25,6 +26,8 @@ const build = ()=>{
     const memory = fakeMemory();
     const fenced = {
         ...memory,
+        // The region ends at the fence: a read past it faults there.
+        guest: guestWindow(memory.bytes.subarray(0, FENCE)),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>{
             if (address + length > FENCE)
