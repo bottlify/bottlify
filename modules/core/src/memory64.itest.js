@@ -23,27 +23,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { allowMemory64 } from '../../cork/src/testing/memory64.js';
 import { createApp } from './app.js';
+import { fixedPastFourGiB } from './fixed-base.fixture.js';
 
 const MiB = 2 ** 20;
 const GiB = 2 ** 30;
 /** What big64.c commits at a time. */
 const STEP = 64 * MiB;
-
-/**
- * The fixture as a game ships: no relocations, its base fixed past 4 GiB.
- *
- * @param {Uint8Array} bytes
- */
-function stripRelocations(bytes){
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
-    const pe = view.getUint32(0x3c, true);
-    const optional = pe + 24;
-    assert.ok(view.getBigUint64(optional + 24, true) >= 2n ** 32n, 'linked past 4 GiB');
-    view.setUint16(pe + 22, view.getUint16(pe + 22, true) | 1, true); // RELOCS_STRIPPED
-    view.setBigUint64(optional + 112 + 5 * 8, 0n, true); // no base relocation directory
-    view.setUint16(optional + 70, view.getUint16(optional + 70, true) & ~0x40, true);
-    return bytes;
-}
 
 /**
  * @param {Record<string, unknown>} options  createApp's, past the program
@@ -55,7 +40,7 @@ async function run(options, wide = false){
     allowMemory64();
     const bytes = new Uint8Array(await readFile(
         new URL('../test/fixtures/big64.exe', import.meta.url)));
-    const app = await createApp({ executable: wide ? stripRelocations(bytes) : bytes,
+    const app = await createApp({ executable: wide ? fixedPastFourGiB(bytes) : bytes,
         commandLine: '"C:\\big64.exe"', ...options });
     try
     {

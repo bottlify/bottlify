@@ -28,12 +28,10 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { EINVAL, ERANGE } from './globals.js';
-import { wideStringAt } from './widetext.js';
-import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
-/** A string's terminator, where a string ends: never itself written. */
-const NUL = new Uint8Array(1);
+/** A variable's int as its export's bytes, placed before the program runs. @param {number} value */
+const int32Bytes = value=>new Uint8Array(Int32Array.of(value).buffer);
 
 const MAX_STRING = 1 << 20;
 
@@ -102,11 +100,17 @@ export const C_TIME_NAMES = Object.freeze({
 
 /**
  * `__lc_time_data` as msvcrt.dll's callers compiled it: the 43 name
- * pointers in TimeNames' order, then the locale, the calendar and a
- * reference count.
+ * pointers in TimeNames' order, a pointer of the process's width each, then
+ * the locale, the calendar and a reference count, the whole padded to a
+ * pointer's alignment.
  */
-export const LC_TIME_DATA = Object.freeze({ POINTERS: 43, LCID: 172, CALTYPE: 176,
-    REFCOUNT: 180, SIZE: 184 });
+export const lcTimeData = (/** @type {4 | 8} */ pointerSize)=>Object.freeze({
+    POINTERS: 43, LCID: 43 * pointerSize, CALTYPE: 43 * pointerSize + 4,
+    REFCOUNT: 43 * pointerSize + 8,
+    SIZE: Math.ceil((43 * pointerSize + 12) / pointerSize) * pointerSize });
+
+/** A 32-bit process's. */
+export const LC_TIME_DATA = lcTimeData(4);
 
 /** @param {TimeNames} names @returns {string[]} the 43 strings, in the structure's order */
 const timeNameList = names=>[...names.shortDays, ...names.days, ...names.shortMonths,
@@ -554,9 +558,8 @@ function inDaylightTime(local){
 
 /**
  * @typedef {Object} TimeHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  The process's memory, read
+ *           and written in place at its pointer width (`host.guest`).
  * @property {(bytes: number) => number} allocate
  * @property {() => number} systemTimeMs  Guest wall clock, milliseconds since 1970.
  * @property {() => number} now           Guest running time, milliseconds.
@@ -579,33 +582,30 @@ function inDaylightTime(local){
  * @param {TimeHost} host
  */
 export function createTimeFunctions(host){
-    /** @param {number} pointer @param {number} value */
-    const writeInt = (pointer, value)=>{
-        if ((pointer >>> 0) === 0)
-        {
-            return;
-        }
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setInt32(0, value | 0, true);
-        host.writeMemory(pointer, bytes);
+    const { guest } = host;
+    const { pointerSize } = guest;
+
+    /**
+     * A time_t read through a pointer, each width's: a 32-bit one signed, a
+     * 64-bit one whole.
+     *
+     * @type {Record<'time32At' | 'time64At', (pointer: number) => number>}
+     */
+    const times = {
+        time32At: pointer=>guest.i32(wholeAddress(pointer)),
+        time64At: pointer=>Number(guest.i64(wholeAddress(pointer))),
     };
+    const { time32At, time64At } = times;
 
-    /** @param {number} pointer */
-    const readInt = pointer=>
-        new DataView(host.readMemory(pointer, 4).buffer).getInt32(0, true);
-
-    /** A 64-bit time_t. @param {number} pointer */
-    const readTime64 = pointer=>Number(new DataView(host.readMemory(pointer, 8).buffer)
-        .getBigInt64(0, true));
-
-    /** In the ANSI page a format is read in. @param {number} pointer @param {string} text */
-    const writeString = (pointer, text)=>{
-        host.writeMemory(pointer, encodeAnsi(`${text}\0`));
-    };
-
-    /** @param {number} pointer @param {string} text */
-    const writeWide = (pointer, text)=>{
-        host.writeMemory(pointer, utf16z(text));
+    /**
+     * Text where it lies, in the ANSI page a format is read in or in UTF-16,
+     * its terminator after it.
+     *
+     * @type {Record<'ansi' | 'utf16', (pointer: number, text: string) => void>}
+     */
+    const put = {
+        ansi: (pointer, text)=>void guest.writeAnsi(wholeAddress(pointer), text),
+        utf16: (pointer, text)=>void guest.writeWide(wholeAddress(pointer), text),
     };
 
     /** @param {number} code */
@@ -628,25 +628,21 @@ export function createTimeFunctions(host){
 
     /** @param {number} block @param {BrokenDown} tm */
     const writeTm = (block, tm)=>{
-        const bytes = new Uint8Array(TM.SIZE);
-        const view = new DataView(bytes.buffer);
-        [tm.sec, tm.min, tm.hour, tm.mday, tm.mon, tm.year, tm.wday, tm.yday, tm.isdst]
-            .forEach((value, index)=>view.setInt32(index * 4, value, true));
-        host.writeMemory(block, bytes);
+        guest.set32s(wholeAddress(block), [tm.sec, tm.min, tm.hour, tm.mday, tm.mon, tm.year,
+            tm.wday, tm.yday, tm.isdst]);
         return block;
     };
 
     /** @param {number} block @returns {BrokenDown} */
     const readTm = block=>{
-        const view = new DataView(host.readMemory(block, TM.SIZE).buffer);
-        const at = (/** @type {number} */ offset)=>view.getInt32(offset, true);
+        const at = (/** @type {number} */ offset)=>guest.i32(wholeAddress(block) + offset);
         return { sec: at(TM.SEC), min: at(TM.MIN), hour: at(TM.HOUR), mday: at(TM.MDAY),
             mon: at(TM.MON), year: at(TM.YEAR), wday: at(TM.WDAY), yday: at(TM.YDAY),
             isdst: at(TM.ISDST) };
     };
 
     /** The struct tm strftime reads, or null for none. @param {number} block */
-    const tmAt = block=>((block >>> 0) === 0 ? null : readTm(block));
+    const tmAt = block=>(wholeAddress(block) === 0 ? null : readTm(block));
 
     /** strftime of the wall clock's moment, for the fixed forms. @param {string} format */
     const stampOf = format=>strftime(format,
@@ -662,7 +658,7 @@ export function createTimeFunctions(host){
      * @param {(pointer: number, text: string) => void} write
      */
     const finishFormat = (destination, max, text, write)=>{
-        if ((destination >>> 0) === 0 || (max >>> 0) === 0)
+        if (wholeAddress(destination) === 0 || (max >>> 0) === 0)
         {
             fail(EINVAL);
             return 0;
@@ -678,18 +674,17 @@ export function createTimeFunctions(host){
     };
 
     /**
-     * The names an `__lc_time_data` in guest memory points at.
+     * The names an `__lc_time_data` in guest memory points at: its first
+     * fields, a pointer of the process's width each.
      *
      * @param {number} block
      * @returns {TimeNames}
      */
-    const readTimeNames = block=>{
-        const view = new DataView(host.readMemory(block, LC_TIME_DATA.POINTERS * 4).buffer);
-        return timeNamesOf(Array.from({ length: LC_TIME_DATA.POINTERS }, (_, at)=>{
-            const pointer = view.getUint32(at * 4, true);
-            return pointer === 0 ? '' : host.readCString(pointer, 256);
+    const readTimeNames = block=>timeNamesOf(Array.from({ length: LC_TIME_DATA.POINTERS },
+        (_, at)=>{
+            const pointer = guest.ptr(wholeAddress(block) + at * pointerSize);
+            return pointer === 0 ? '' : guest.cstr(pointer, 256);
         }));
-    };
 
     /** strftime, msvcrt's or with C99's conversions. @param {boolean} standard */
     const strftimeEntry = standard=>({
@@ -697,10 +692,10 @@ export function createTimeFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([destination, max, format, block])=>{
-            const text = (format >>> 0) === 0 ? null
-                : strftime(host.readCString(format, MAX_STRING), tmAt(block), C_TIME_NAMES,
-                    standard);
-            return finishFormat(destination, max, text, writeString);
+            const text = wholeAddress(format) === 0 ? null
+                : strftime(guest.cstr(wholeAddress(format), MAX_STRING), tmAt(block),
+                    C_TIME_NAMES, standard);
+            return finishFormat(destination, max, text, put.ansi);
         },
     });
 
@@ -710,10 +705,10 @@ export function createTimeFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([destination, max, format, block])=>{
-            const text = (format >>> 0) === 0 ? null
-                : strftime(wideStringAt(host.readMemory, format), tmAt(block), C_TIME_NAMES,
-                    standard);
-            return finishFormat(destination, max, text, writeWide);
+            const text = wholeAddress(format) === 0 ? null
+                : strftime(guest.wstr(wholeAddress(format), MAX_STRING * 2), tmAt(block),
+                    C_TIME_NAMES, standard);
+            return finishFormat(destination, max, text, put.utf16);
         },
     });
 
@@ -723,11 +718,11 @@ export function createTimeFunctions(host){
         argBytes: 20,
         /** @param {number[]} args */
         handler: ([destination, max, format, block, timeNames])=>{
-            const text = (format >>> 0) === 0 ? null
-                : strftime(host.readCString(format, MAX_STRING), tmAt(block),
-                    (timeNames >>> 0) === 0 ? C_TIME_NAMES : readTimeNames(timeNames >>> 0),
+            const text = wholeAddress(format) === 0 ? null
+                : strftime(guest.cstr(wholeAddress(format), MAX_STRING), tmAt(block),
+                    wholeAddress(timeNames) === 0 ? C_TIME_NAMES : readTimeNames(timeNames),
                     standard);
-            return finishFormat(destination, max, text, writeString);
+            return finishFormat(destination, max, text, put.ansi);
         },
     });
 
@@ -738,11 +733,10 @@ export function createTimeFunctions(host){
      * @param {string} text
      */
     const publishText = text=>{
-        const bytes = encodeAnsi(`${text}\0`);
-        const address = host.allocate(bytes.length);
+        const address = host.allocate(encodeAnsi(text).length + 1);
         if (address !== 0)
         {
-            host.writeMemory(address, bytes);
+            put.ansi(address, text);
         }
         return address;
     };
@@ -777,20 +771,23 @@ export function createTimeFunctions(host){
     const home = name=>(host.addressOf?.(name) ?? 0)
         || (name === '_tzname' ? names() : cellOf(name));
 
-    /** The two names' buffers, 64 bytes each as msvcrt keeps them, and the array of the two. */
+    /**
+     * The array of the two names, a pointer of the process's width each, and
+     * the two names' buffers after it, 64 bytes each as msvcrt keeps them.
+     */
     let nameBuffers = 0;
+    /** Where each of the two names' buffers is, past the array. @param {0 | 1} which */
+    const nameAt = which=>nameBuffers + 2 * pointerSize + which * 64;
     const names = ()=>{
         if (nameBuffers === 0)
         {
-            nameBuffers = host.allocate(136);
+            nameBuffers = host.allocate(2 * pointerSize + 128);
             if (nameBuffers !== 0)
             {
-                const pointers = new Uint8Array(8);
-                new DataView(pointers.buffer).setUint32(0, nameBuffers + 8, true);
-                new DataView(pointers.buffer).setUint32(4, nameBuffers + 72, true);
-                host.writeMemory(nameBuffers, pointers);
-                writeString(nameBuffers + 8, COMPILED_ZONE.names[0]);
-                writeString(nameBuffers + 72, COMPILED_ZONE.names[1]);
+                guest.setPtr(nameBuffers, nameAt(0));
+                guest.setPtr(nameBuffers + pointerSize, nameAt(1));
+                put.ansi(nameAt(0), COMPILED_ZONE.names[0]);
+                put.ansi(nameAt(1), COMPILED_ZONE.names[1]);
             }
         }
         return nameBuffers;
@@ -809,7 +806,7 @@ export function createTimeFunctions(host){
             ['_timezone', COMPILED_ZONE.timezone], ['_daylight', COMPILED_ZONE.daylight],
             ['_dstbias', COMPILED_ZONE.dstbias]]))
         {
-            writeInt(cellOf(name), value);
+            guest.set32(cellOf(name), value);
         }
     };
 
@@ -820,7 +817,7 @@ export function createTimeFunctions(host){
         {
             if (at !== 0)
             {
-                writeInt(at, value);
+                guest.set32(at, value);
             }
         }
     };
@@ -828,7 +825,7 @@ export function createTimeFunctions(host){
     /** @param {string} name */
     const variable = name=>{
         startZone();
-        return readInt(home(name));
+        return guest.i32(home(name));
     };
 
     /** _tzset: TZ read again, or the machine's zone -- UTC, no daylight time. */
@@ -838,11 +835,10 @@ export function createTimeFunctions(host){
             : parseTz(tz);
         setVariable('_timezone', zone.timezone);
         setVariable('_daylight', zone.daylight);
-        const buffers = names();
-        if (buffers !== 0)
+        if (names() !== 0)
         {
-            writeString(buffers + 8, zone.names[0].slice(0, 63));
-            writeString(buffers + 72, zone.names[1].slice(0, 63));
+            guest.writeAnsi(nameAt(0), zone.names[0], 64);
+            guest.writeAnsi(nameAt(1), zone.names[1], 64);
         }
     };
 
@@ -929,7 +925,7 @@ export function createTimeFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [pointer])=>{
-            const tm = (pointer >>> 0) === 0 ? null : convert(read(pointer));
+            const tm = wholeAddress(pointer) === 0 ? null : convert(read(pointer));
             if (!tm)
             {
                 fail(EINVAL);
@@ -951,11 +947,11 @@ export function createTimeFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [block, pointer])=>{
-            if ((block >>> 0) === 0)
+            if (wholeAddress(block) === 0)
             {
                 return fail(EINVAL);
             }
-            const tm = (pointer >>> 0) === 0 ? null : convert(read(pointer));
+            const tm = wholeAddress(pointer) === 0 ? null : convert(read(pointer));
             writeTm(block, tm ?? INVALID_TM);
             return tm ? 0 : fail(EINVAL);
         },
@@ -1016,7 +1012,7 @@ export function createTimeFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [pointer])=>{
-            const tm = (pointer >>> 0) === 0 ? null : localtimeOf(read(pointer));
+            const tm = wholeAddress(pointer) === 0 ? null : localtimeOf(read(pointer));
             const text = tm ? asctime(tm) : null;
             if (text === null)
             {
@@ -1024,7 +1020,7 @@ export function createTimeFunctions(host){
                 return 0;
             }
             const buffer = wide ? staticWide() : staticText();
-            (wide ? writeWide : writeString)(buffer, text);
+            (wide ? put.utf16 : put.ansi)(buffer, text);
             return buffer;
         },
     });
@@ -1039,12 +1035,12 @@ export function createTimeFunctions(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [buffer, size, pointer])=>{
-            if ((buffer >>> 0) === 0 || (size >>> 0) === 0)
+            if (wholeAddress(buffer) === 0 || (size >>> 0) === 0)
             {
                 return fail(EINVAL);
             }
-            host.writeMemory(buffer, NUL);
-            if ((pointer >>> 0) === 0)
+            guest.set8(wholeAddress(buffer), 0);
+            if (wholeAddress(pointer) === 0)
             {
                 return fail(EINVAL);
             }
@@ -1058,7 +1054,7 @@ export function createTimeFunctions(host){
             {
                 return fail(ERANGE);
             }
-            writeString(buffer, text);
+            put.ansi(buffer, text);
             return 0;
         },
     });
@@ -1074,16 +1070,16 @@ export function createTimeFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [buffer, size])=>{
-            if ((buffer >>> 0) === 0 || (size >>> 0) === 0)
+            if (wholeAddress(buffer) === 0 || (size >>> 0) === 0)
             {
                 return fail(EINVAL);
             }
             if ((size >>> 0) < 9)
             {
-                host.writeMemory(buffer, NUL);
+                guest.set8(wholeAddress(buffer), 0);
                 return fail(ERANGE);
             }
-            writeString(buffer, stampOf(format));
+            put.ansi(buffer, stampOf(format));
             return 0;
         },
     });
@@ -1112,21 +1108,15 @@ export function createTimeFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [out])=>{
-            if ((out >>> 0) === 0)
+            if (wholeAddress(out) === 0)
             {
                 return fail(EINVAL);
             }
-            writeInt(out, variable(name));
+            guest.set32(wholeAddress(out), variable(name));
             return 0;
         },
     });
 
-    /** @param {number} value */
-    const dword = value=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setInt32(0, value, true);
-        return bytes;
-    };
 
     /** The wall clock in whole seconds. */
     const seconds = ()=>Math.floor(host.systemTimeMs() / 1000);
@@ -1138,7 +1128,10 @@ export function createTimeFunctions(host){
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [destination])=>{
             const now = seconds();
-            writeInt(destination, now);
+            if (wholeAddress(destination) !== 0)
+            {
+                guest.set32(wholeAddress(destination), now);
+            }
             return now | 0;
         },
     };
@@ -1188,21 +1181,21 @@ export function createTimeFunctions(host){
                 const milliseconds = host.systemTimeMs();
                 const now = Math.floor(milliseconds / 1000);
                 const local = toLocal(now);
+                const block = wholeAddress(result);
                 const at = wide ? 8 : 4;
-                const bytes = new Uint8Array(wide ? 16 : 12);
-                const view = new DataView(bytes.buffer);
                 if (wide)
                 {
-                    view.setBigInt64(0, BigInt(now), true);
+                    guest.set64(block, BigInt(now));
                 }
                 else
                 {
-                    view.setUint32(0, now, true);
+                    guest.set32(block, now);
                 }
-                view.setUint16(at, Math.floor(milliseconds) % 1000, true);
-                view.setInt16(at + 2, Math.trunc(zone().timezone / 60), true);
-                view.setInt16(at + 4, local.isdst, true);
-                host.writeMemory(result, bytes);
+                guest.set16(block + at, Math.floor(milliseconds) % 1000);
+                guest.set16(block + at + 2, Math.trunc(zone().timezone / 60) & 0xffff);
+                guest.set16(block + at + 4, local.isdst & 0xffff);
+                // The tail the compiler pads the struct with.
+                guest.set16(block + at + 6, 0);
                 return 0;
             },
         };
@@ -1218,9 +1211,7 @@ export function createTimeFunctions(host){
                 handler: (/** @type {number[]} */ [destination])=>{
                     if (wholeAddress(destination) !== 0)
                     {
-                        const bytes = new Uint8Array(8);
-                        new DataView(bytes.buffer).setBigInt64(0, BigInt(seconds()), true);
-                        host.writeMemory(destination, bytes);
+                        guest.set64(wholeAddress(destination), BigInt(seconds()));
                     }
                     return answer64(seconds());
                 },
@@ -1260,19 +1251,19 @@ export function createTimeFunctions(host){
         },
 
         /** struct tm *localtime(const time_t *), and the 32- and 64-bit spellings */
-        localtime: { ...intoStatic(readInt, localtimeOf), returns: 'pointer' },
-        _localtime32: intoStatic(readInt, localtimeOf),
-        _localtime64: intoStatic(readTime64, localtimeOf),
+        localtime: { ...intoStatic(time32At, localtimeOf), returns: 'pointer' },
+        _localtime32: intoStatic(time32At, localtimeOf),
+        _localtime64: intoStatic(time64At, localtimeOf),
         /** errno_t _localtime32_s(struct tm *, const __time32_t *), and the 64-bit one */
-        _localtime32_s: intoCaller(readInt, localtimeOf),
-        _localtime64_s: intoCaller(readTime64, localtimeOf),
+        _localtime32_s: intoCaller(time32At, localtimeOf),
+        _localtime64_s: intoCaller(time64At, localtimeOf),
 
         /** struct tm *gmtime(const time_t *), and the 32- and 64-bit spellings */
-        gmtime: { ...intoStatic(readInt, gmtime32), returns: 'pointer' },
-        _gmtime32: intoStatic(readInt, gmtime32),
-        _gmtime64: intoStatic(readTime64, gmtime64),
-        _gmtime32_s: intoCaller(readInt, gmtime32),
-        _gmtime64_s: intoCaller(readTime64, gmtime64),
+        gmtime: { ...intoStatic(time32At, gmtime32), returns: 'pointer' },
+        _gmtime32: intoStatic(time32At, gmtime32),
+        _gmtime64: intoStatic(time64At, gmtime64),
+        _gmtime32_s: intoCaller(time32At, gmtime32),
+        _gmtime64_s: intoCaller(time64At, gmtime64),
 
         /**
          * time_t mktime(struct tm *broken), and _mktime32
@@ -1308,16 +1299,16 @@ export function createTimeFunctions(host){
         },
 
         /** char *ctime(const time_t *), and the 32- and 64-bit spellings */
-        ctime: { ...ctime(readInt), returns: 'pointer' },
-        _ctime32: ctime(readInt),
-        _ctime64: ctime(readTime64),
+        ctime: { ...ctime(time32At), returns: 'pointer' },
+        _ctime32: ctime(time32At),
+        _ctime64: ctime(time64At),
         /** wchar_t *_wctime(const time_t *), and the 32- and 64-bit spellings */
-        _wctime: { ...ctime(readInt, true), returns: 'pointer' },
-        _wctime32: ctime(readInt, true),
-        _wctime64: ctime(readTime64, true),
+        _wctime: { ...ctime(time32At, true), returns: 'pointer' },
+        _wctime32: ctime(time32At, true),
+        _wctime64: ctime(time64At, true),
         /** errno_t _ctime32_s(char *, size_t, const __time32_t *), and the 64-bit one */
-        _ctime32_s: ctimeInto(readInt),
-        _ctime64_s: ctimeInto(readTime64),
+        _ctime32_s: ctimeInto(time32At),
+        _ctime64_s: ctimeInto(time64At),
 
         /** char *asctime(const struct tm *): null and EINVAL for a struct it refuses */
         asctime: {
@@ -1333,7 +1324,7 @@ export function createTimeFunctions(host){
                     return 0;
                 }
                 const buffer = staticText();
-                writeString(buffer, text);
+                put.ansi(buffer, text);
                 return buffer;
             },
         },
@@ -1408,27 +1399,23 @@ export function createTimeFunctions(host){
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
-                const strings = timeNameList(C_TIME_NAMES).map(name=>encodeAnsi(`${name}\0`));
-                const size = LC_TIME_DATA.SIZE
-                    + strings.reduce((total, bytes)=>total + bytes.length, 0);
+                const layout = lcTimeData(pointerSize);
+                const strings = timeNameList(C_TIME_NAMES);
+                const size = layout.SIZE
+                    + strings.reduce((total, name)=>total + encodeAnsi(name).length + 1, 0);
                 const block = host.allocate(size);
                 if (block === 0)
                 {
                     return 0;
                 }
-                const bytes = new Uint8Array(size);
-                const view = new DataView(bytes.buffer);
-                let at = LC_TIME_DATA.SIZE;
+                let at = block + layout.SIZE;
                 strings.forEach((text, index)=>{
-                    view.setUint32(index * 4, block + at, true);
-                    bytes.set(text, at);
-                    at += text.length;
+                    guest.setPtr(block + index * pointerSize, at);
+                    at += guest.writeAnsi(at, text) + 1;
                 });
                 // The C locale is LCID zero, its calendar the Gregorian (1).
-                view.setUint32(LC_TIME_DATA.LCID, 0, true);
-                view.setUint32(LC_TIME_DATA.CALTYPE, 1, true);
-                view.setUint32(LC_TIME_DATA.REFCOUNT, 0, true);
-                host.writeMemory(block, bytes);
+                guest.set32s(block + layout.LCID, [0, 1, 0]);
+                guest.fill(block + layout.REFCOUNT + 4, 0, layout.SIZE - layout.REFCOUNT - 4);
                 return block;
             },
         },
@@ -1440,7 +1427,7 @@ export function createTimeFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                writeString(buffer, stampOf('%m/%d/%y'));
+                put.ansi(buffer, stampOf('%m/%d/%y'));
                 return buffer;
             },
         },
@@ -1452,7 +1439,7 @@ export function createTimeFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                writeString(buffer, stampOf('%H:%M:%S'));
+                put.ansi(buffer, stampOf('%H:%M:%S'));
                 return buffer;
             },
         },
@@ -1464,7 +1451,7 @@ export function createTimeFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                writeWide(buffer, stampOf('%m/%d/%y'));
+                put.utf16(buffer, stampOf('%m/%d/%y'));
                 return buffer;
             },
         },
@@ -1476,7 +1463,7 @@ export function createTimeFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                writeWide(buffer, stampOf('%H:%M:%S'));
+                put.utf16(buffer, stampOf('%H:%M:%S'));
                 return buffer;
             },
         },
@@ -1536,17 +1523,31 @@ export function createTimeFunctions(host){
          *
          * Variables, as msvcrt compiles them in until the zone is read.
          */
-        _timezone: { data: ()=>dword(COMPILED_ZONE.timezone) },
-        _daylight: { data: ()=>dword(COMPILED_ZONE.daylight) },
-        _dstbias: { data: ()=>dword(COMPILED_ZONE.dstbias) },
+        _timezone: { data: ()=>int32Bytes(COMPILED_ZONE.timezone) },
+        _daylight: { data: ()=>int32Bytes(COMPILED_ZONE.daylight) },
+        _dstbias: { data: ()=>int32Bytes(COMPILED_ZONE.dstbias) },
+        // The two pointers at the process's width.
         _tzname: {
-            data: ()=>{
-                const buffers = names();
-                const bytes = new Uint8Array(8);
-                new DataView(bytes.buffer).setUint32(0, buffers === 0 ? 0 : buffers + 8, true);
-                new DataView(bytes.buffer).setUint32(4, buffers === 0 ? 0 : buffers + 72, true);
-                return bytes;
-            },
+            data: ()=>(names() === 0 ? new Uint8Array(2 * pointerSize)
+                : pointerWidth(pointerSize).array([nameAt(0), nameAt(1)])
+                    .subarray(0, 2 * pointerSize)),
         },
+
+        // A 64-bit process's time_t is an __int64: its plain names are the
+        // 64-bit forms, as its msvcrt exports them (Wine's msvcrt.spec, its
+        // win64 entries), and a 32-bit time read there was half of one.
+        ...pointerSize === 8 ? {
+            localtime: { ...intoStatic(time64At, localtimeOf), returns: 'pointer' },
+            gmtime: { ...intoStatic(time64At, gmtime64), returns: 'pointer' },
+            ctime: { ...ctime(time64At), returns: 'pointer' },
+            _wctime: { ...ctime(time64At, true), returns: 'pointer' },
+            _ftime: timeb(true),
+            ...difftime64 ? { difftime: difftime64 } : {},
+            ...host.setRegisters ? {
+                time: sixtyFour._time64,
+                mktime: sixtyFour._mktime64,
+                _mkgmtime: sixtyFour._mkgmtime64,
+            } : {},
+        } : {},
     };
 }

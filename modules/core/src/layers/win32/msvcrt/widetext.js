@@ -233,7 +233,7 @@ export function unitsOf(bytes){
 }
 
 /** How far a wide string is read, in units, before it is taken as ended. */
-const MAX_WIDE = 1 << 16;
+export const MAX_WIDE = 1 << 16;
 
 /** A wide string is read a stretch at a time, each within one 64-byte line. */
 const WIDE_STRETCH = 64;

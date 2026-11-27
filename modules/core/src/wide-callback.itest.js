@@ -21,32 +21,17 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { allowMemory64 } from '../../cork/src/testing/memory64.js';
 import { createApp } from './app.js';
+import { fixedPastFourGiB } from './fixed-base.fixture.js';
 
 const FIXTURE = new URL('../test/fixtures/window64.exe', import.meta.url);
 
 /** What fails today: the program's checks by name, or 'ran' for a run that did not end. */
 const FAILING = new Map();
 
-/**
- * The fixture as a game ships: no relocations, its base fixed past 4 GiB.
- *
- * @param {Uint8Array} bytes
- */
-function stripRelocations(bytes){
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
-    const pe = view.getUint32(0x3c, true);
-    const optional = pe + 24;
-    assert.ok(view.getBigUint64(optional + 24, true) >= 2n ** 32n, 'linked past 4 GiB');
-    view.setUint16(pe + 22, view.getUint16(pe + 22, true) | 1, true); // RELOCS_STRIPPED
-    view.setBigUint64(optional + 112 + 5 * 8, 0n, true); // no base relocation directory
-    view.setUint16(optional + 70, view.getUint16(optional + 70, true) & ~0x40, true);
-    return bytes;
-}
-
 test('a window procedure in an image past 4 GiB is called where it is', { timeout: 150000 },
     async t=>{
         allowMemory64();
-        const bytes = stripRelocations(new Uint8Array(await readFile(FIXTURE)));
+        const bytes = fixedPastFourGiB(new Uint8Array(await readFile(FIXTURE)));
         const app = await createApp({ executable: bytes });
         t.after(()=>app.dispose());
         /** @type {string[]} */

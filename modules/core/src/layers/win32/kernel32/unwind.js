@@ -79,11 +79,12 @@ export const copyContext = context=>({
 });
 
 /**
- * RSP as an address: its low dword, every address lying below 4 GiB.
+ * RSP as an address, whole: a stack is below 4 GiB as the kernel lays them
+ * out, and an unwind does not count on it.
  *
  * @param {UnwindContext} context
  */
-export const stackOf = context=>Number(BigInt.asUintN(32, context.gpr[RSP]));
+export const stackOf = context=>Number(BigInt.asUintN(64, context.gpr[RSP]));
 
 /**
  * The function entry found for an address.
@@ -190,7 +191,7 @@ export function createUnwinder(host){
         while (low <= high)
         {
             const middle = (low + high) >>> 1;
-            const at = table + middle * RUNTIME_FUNCTION_SIZE >>> 0;
+            const at = table + middle * RUNTIME_FUNCTION_SIZE;
             const entry = view(at, 8);
             if (rva < entry.getUint32(0, true))
             {
@@ -213,6 +214,8 @@ export function createUnwinder(host){
      * @returns {FunctionEntry}
      */
     const entryAt = (imageBase, entry)=>{
+        imageBase = wholeAddress(imageBase);
+        entry = wholeAddress(entry);
         let fields = view(entry, RUNTIME_FUNCTION_SIZE);
         // RUNTIME_FUNCTION_INDIRECT: a part of a function the linker moved
         // away (a cold block) is described by the function's own entry,
@@ -222,15 +225,15 @@ export function createUnwinder(host){
         const unwindData = fields.getUint32(8, true);
         if ((unwindData & 1) !== 0)
         {
-            entry = imageBase + (unwindData & ~1) >>> 0;
+            entry = imageBase + ((unwindData & ~1) >>> 0);
             fields = view(entry, RUNTIME_FUNCTION_SIZE);
         }
         return {
             imageBase,
             entry,
-            begin: imageBase + fields.getUint32(0, true) >>> 0,
-            end: imageBase + fields.getUint32(4, true) >>> 0,
-            unwindInfo: imageBase + fields.getUint32(8, true) >>> 0,
+            begin: imageBase + fields.getUint32(0, true),
+            end: imageBase + fields.getUint32(4, true),
+            unwindInfo: imageBase + fields.getUint32(8, true),
         };
     };
 
@@ -246,7 +249,7 @@ export function createUnwinder(host){
         const image = host.imageOf(at);
         if (image && image.table && image.table.size >= RUNTIME_FUNCTION_SIZE)
         {
-            const found = search(image.base + image.table.address >>> 0,
+            const found = search(image.base + image.table.address,
                 Math.floor(image.table.size / RUNTIME_FUNCTION_SIZE), at - image.base >>> 0);
             if (found !== 0)
             {
@@ -273,7 +276,8 @@ export function createUnwinder(host){
     };
 
     /** The callback range holding `pc`, or undefined. @param {number} pc */
-    const callbackFor = pc=>callbacks.find(range=>pc >>> 0 >= range.base && pc >>> 0 < range.end);
+    const callbackFor = pc=>callbacks.find(range=>wholeAddress(pc) >= range.base
+        && wholeAddress(pc) < range.end);
 
     /**
      * The lookup a dispatch makes: the tables, then the routine of the
@@ -290,9 +294,9 @@ export function createUnwinder(host){
         {
             return found;
         }
-        // RAX, which a 64-bit call answers as a BigInt.
-        const answered = await host.callGuest(range.callback, [pc >>> 0, range.context]);
-        const entry = Number(BigInt.asUintN(32, BigInt(answered)));
+        // RAX whole: the RUNTIME_FUNCTION may lie past 4 GiB with the code.
+        const answered = await host.callGuest(range.callback, [wholeAddress(pc), range.context]);
+        const entry = Number(BigInt.asUintN(64, BigInt(answered)));
         return entry === 0 ? null : entryAt(range.base, entry);
     };
 
@@ -303,11 +307,11 @@ export function createUnwinder(host){
      *
      * @param {number} pc
      */
-    const known = pc=>host.imageOf(pc >>> 0) !== null || lookup(pc) !== null
+    const known = pc=>host.imageOf(wholeAddress(pc)) !== null || lookup(pc) !== null
         || callbackFor(pc) !== undefined;
 
-    /** @param {UnwindContext} context @param {number} index */
-    const low = (context, index)=>Number(BigInt.asUintN(32, context.gpr[index]));
+    /** A register holding a stack address, whole. @param {UnwindContext} context @param {number} index */
+    const addressIn = (context, index)=>Number(BigInt.asUintN(64, context.gpr[index]));
 
     /**
      * The return a frame ends in: RIP from the stack, the stack past it.
@@ -316,8 +320,8 @@ export function createUnwinder(host){
      */
     const returnFrom = context=>{
         const rsp = stackOf(context);
-        context.rip = Number(BigInt.asUintN(32, readU64(rsp)));
-        context.gpr[RSP] = BigInt(rsp + 8 >>> 0);
+        context.rip = Number(readU64(rsp));
+        context.gpr[RSP] = BigInt(rsp + 8);
     };
 
     /**
@@ -343,12 +347,12 @@ export function createUnwinder(host){
         const wide = (code[at] & 0xf8) === 0x48;
         if (wide && code[at + 1] === 0x83 && code[at + 2] === 0xc4)
         {
-            after.gpr[RSP] = BigInt(stackOf(after) + s8(at + 3) >>> 0);
+            after.gpr[RSP] = BigInt(stackOf(after) + s8(at + 3));
             at += 4;
         }
         else if (wide && code[at + 1] === 0x81 && code[at + 2] === 0xc4)
         {
-            after.gpr[RSP] = BigInt(stackOf(after) + s32(at + 3) >>> 0);
+            after.gpr[RSP] = BigInt(stackOf(after) + s32(at + 3));
             at += 7;
         }
         else if (wide && (code[at] & 4) === 0 && code[at + 1] === 0x8d
@@ -363,7 +367,7 @@ export function createUnwinder(host){
                 return null;
             }
             const displacement = mod === 1 ? s8(at + 3) : mod === 2 ? s32(at + 3) : 0;
-            after.gpr[RSP] = BigInt(low(after, base) + displacement >>> 0);
+            after.gpr[RSP] = BigInt(addressIn(after, base) + displacement);
             at += 3 + (mod === 1 ? 1 : mod === 2 ? 4 : 0);
         }
         for (;;)
@@ -375,7 +379,7 @@ export function createUnwinder(host){
                 const register = (op - 0x58) | ((rex & 1) << 3);
                 const rsp = stackOf(after);
                 after.gpr[register] = readU64(rsp);
-                after.gpr[RSP] = BigInt(rsp + 8 >>> 0);
+                after.gpr[RSP] = BigInt(rsp + 8);
                 at += rex ? 2 : 1;
                 continue;
             }
@@ -384,7 +388,7 @@ export function createUnwinder(host){
         const op = code[at];
         const rexOp = (code[at] & 0xf0) === 0x40 ? code[at + 1] : -1;
         const target = (/** @type {number} */ length, /** @type {number} */ displacement)=>
-            pc + at + length + displacement >>> 0;
+            pc + at + length + displacement;
         const outside = (/** @type {number} */ address)=>address < fn.begin || address >= fn.end;
         const ends = op === 0xc3
             || op === 0xc2
@@ -414,7 +418,7 @@ export function createUnwinder(host){
      */
     const virtualUnwind = (type, fn, pc, context)=>{
         const header = (/** @type {number} */ info)=>{
-            const bytes = host.readMemory(info, 4);
+            const bytes = host.readMemory(wholeAddress(info), 4);
             return {
                 version: bytes[0] & 7, flags: bytes[0] >> 3, prolog: bytes[1], count: bytes[2],
                 frameRegister: bytes[3] & 15, frameOffset: bytes[3] >> 4,
@@ -431,8 +435,7 @@ export function createUnwinder(host){
         {
             if (head.frameRegister !== 0)
             {
-                establisher = low(context, head.frameRegister)
-                    - head.frameOffset * 16 >>> 0;
+                establisher = addressIn(context, head.frameRegister) - head.frameOffset * 16;
             }
             const finished = epilogue(fn, at, context, head.frameRegister);
             if (finished)
@@ -445,7 +448,7 @@ export function createUnwinder(host){
         let machineFrame = false;
         for (let chained = 0; ; chained++)
         {
-            const codes = host.readMemory(info + 4, head.count * 2 + 8);
+            const codes = host.readMemory(wholeAddress(info) + 4, head.count * 2 + 8);
             const slot = (/** @type {number} */ index)=>codes[index * 2] | codes[index * 2 + 1] << 8;
             const far = (/** @type {number} */ index)=>(slot(index) | slot(index + 1) << 16) >>> 0;
             const setsFrame = head.frameRegister !== 0 && Array.from({ length: head.count },
@@ -454,7 +457,7 @@ export function createUnwinder(host){
             // Saves are addressed from the frame base: the frame register's
             // value less its offset once it is set, RSP before that.
             const frame = setsFrame
-                ? low(context, head.frameRegister) - head.frameOffset * 16 >>> 0
+                ? addressIn(context, head.frameRegister) - head.frameOffset * 16
                 : stackOf(context);
             for (let index = 0; index < head.count;)
             {
@@ -472,40 +475,40 @@ export function createUnwinder(host){
                 {
                     case UWOP.PUSH_NONVOL:
                         context.gpr[opInfo] = readU64(rsp);
-                        context.gpr[RSP] = BigInt(rsp + 8 >>> 0);
+                        context.gpr[RSP] = BigInt(rsp + 8);
                         break;
                     case UWOP.ALLOC_LARGE:
                         context.gpr[RSP] = BigInt(rsp + (opInfo === 0 ? slot(index + 1) * 8
-                            : far(index + 1)) >>> 0);
+                            : far(index + 1)));
                         break;
                     case UWOP.ALLOC_SMALL:
-                        context.gpr[RSP] = BigInt(rsp + opInfo * 8 + 8 >>> 0);
+                        context.gpr[RSP] = BigInt(rsp + opInfo * 8 + 8);
                         break;
                     case UWOP.SET_FPREG:
-                        establisher = low(context, head.frameRegister)
-                    - head.frameOffset * 16 >>> 0;
+                        establisher = addressIn(context, head.frameRegister)
+                            - head.frameOffset * 16;
                         context.gpr[RSP] = BigInt(establisher);
                         break;
                     case UWOP.SAVE_NONVOL:
-                        context.gpr[opInfo] = readU64(frame + slot(index + 1) * 8 >>> 0);
+                        context.gpr[opInfo] = readU64(frame + slot(index + 1) * 8);
                         break;
                     case UWOP.SAVE_NONVOL_FAR:
-                        context.gpr[opInfo] = readU64(frame + far(index + 1) >>> 0);
+                        context.gpr[opInfo] = readU64(frame + far(index + 1));
                         break;
                     case UWOP.SAVE_XMM128:
-                        context.xmm.set(host.readMemory(frame + slot(index + 1) * 16 >>> 0, 16),
+                        context.xmm.set(host.readMemory(frame + slot(index + 1) * 16, 16),
                             opInfo * 16);
                         break;
                     case UWOP.SAVE_XMM128_FAR:
-                        context.xmm.set(host.readMemory(frame + far(index + 1) >>> 0, 16),
+                        context.xmm.set(host.readMemory(frame + far(index + 1), 16),
                             opInfo * 16);
                         break;
                     case UWOP.PUSH_MACHFRAME:
                     {
                     // An interrupt's frame: RIP, CS, EFLAGS, RSP, SS, after an
                     // error code when the info says one was pushed.
-                        const base = rsp + (opInfo === 1 ? 8 : 0) >>> 0;
-                        context.rip = Number(BigInt.asUintN(32, readU64(base)));
+                        const base = rsp + (opInfo === 1 ? 8 : 0);
+                        context.rip = Number(readU64(base));
                         context.eflags = Number(BigInt.asUintN(32, readU64(base + 16)));
                         context.gpr[RSP] = readU64(base + 24);
                         machineFrame = true;
@@ -533,8 +536,8 @@ export function createUnwinder(host){
         if (!inPrologue && (head.flags & type) !== 0 && type !== UNW_FLAG.NHANDLER)
         {
             const handlerAt = info + 4 + (head.count + 1 & ~1) * 2;
-            handler = fn.imageBase + readU32(handlerAt) >>> 0;
-            handlerData = handlerAt + 4 >>> 0;
+            handler = fn.imageBase + readU32(handlerAt);
+            handlerData = handlerAt + 4;
         }
         if (!machineFrame)
         {
@@ -564,7 +567,7 @@ export function createUnwinder(host){
          *
          * @param {number} pc
          */
-        imageBase: pc=>host.imageOf(pc >>> 0)?.base ?? 0,
+        imageBase: pc=>host.imageOf(wholeAddress(pc))?.base ?? 0,
         virtualUnwind,
         unwindLeaf,
         known,
@@ -583,11 +586,12 @@ export function createUnwinder(host){
          * @param {number} table @param {number} count @param {number} base
          */
         add(table, count, base){
-            if (count === 0 || dynamic.some(added=>added.table === table >>> 0))
+            if (count === 0 || dynamic.some(added=>added.table === wholeAddress(table)))
             {
                 return false;
             }
-            dynamic.push({ table: table >>> 0, count: count >>> 0, base: base >>> 0 });
+            dynamic.push({ table: wholeAddress(table), count: count >>> 0,
+                base: wholeAddress(base) });
             return true;
         },
 
@@ -598,13 +602,13 @@ export function createUnwinder(host){
          * @param {number} table
          */
         remove(table){
-            const at = dynamic.findIndex(added=>added.table === table >>> 0);
+            const at = dynamic.findIndex(added=>added.table === wholeAddress(table));
             if (at >= 0)
             {
                 dynamic.splice(at, 1);
                 return true;
             }
-            const range = callbacks.findIndex(added=>added.id === table >>> 0);
+            const range = callbacks.findIndex(added=>added.id === wholeAddress(table));
             if (range >= 0)
             {
                 callbacks.splice(range, 1);
@@ -623,12 +627,13 @@ export function createUnwinder(host){
          */
         install(id, base, length, callback, context){
             if ((id & 3) !== 3 || length === 0 || callback === 0
-                || callbacks.some(added=>added.id === id >>> 0))
+                || callbacks.some(added=>added.id === wholeAddress(id)))
             {
                 return false;
             }
-            callbacks.push({ id: id >>> 0, base: base >>> 0, end: base + length >>> 0,
-                callback: callback >>> 0, context: context >>> 0 });
+            callbacks.push({ id: wholeAddress(id), base: wholeAddress(base),
+                end: wholeAddress(base) + (length >>> 0), callback: wholeAddress(callback),
+                context: wholeAddress(context) });
             return true;
         },
 
@@ -642,8 +647,8 @@ export function createUnwinder(host){
         addGrowable(table, count, max, base, end){
             const handle = nextGrowable;
             nextGrowable += 0x10;
-            growable.set(handle, { table: table >>> 0, count: Math.min(count, max) >>> 0,
-                max: max >>> 0, base: base >>> 0, end: end >>> 0 });
+            growable.set(handle, { table: wholeAddress(table), count: Math.min(count, max) >>> 0,
+                max: max >>> 0, base: wholeAddress(base), end: wholeAddress(end) });
             return handle;
         },
 

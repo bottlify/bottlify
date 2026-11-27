@@ -808,7 +808,8 @@ export function createBridgeModule(){
                  * @param {(number | bigint)[]} [call.args]
                  *   Each a dword, which a 64-bit process takes widened by its sign
                  *   as JavaScript holds it -- an address given unsigned (`>>> 0`)
-                 *   zero-extended, an LPARAM or a handle of -1 sign-extended -- or a
+                 *   zero-extended, one past 4 GiB whole, an LPARAM or a handle of
+                 *   -1 sign-extended -- or a
                  *   bigint, a quadword whole (an argument that came in whole, its
                  *   high half from `args.high`); a 32-bit process takes its low dword.
                  * @param {any} [call.thread]
@@ -828,8 +829,10 @@ export function createBridgeModule(){
                  * @param {Record<string, number>} [call.registers]
                  *   Registers the routine reads before it sets them -- the frame
                  *   pointer a funclet addresses its parent's locals through.
-                 * @returns {Promise<number>} resolves to 0 once this instance is
-                 *     disposed -- there is no guest left to call into.
+                 * @returns {Promise<number> & { high?: number }} EAX; `high`, once
+                 *     resolved, a 64-bit routine's high half of RAX. Resolves to 0
+                 *     once this instance is disposed -- there is no guest left to
+                 *     call into.
                  */
                 callGuest({ entry, args = [], thread, stackAtRest, registers }){
                     if (!live())

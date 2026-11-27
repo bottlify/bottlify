@@ -33,6 +33,17 @@ test('a fault the host raised reads as the sentence it was given', ()=>{
         'unimplemented import KERNEL32.dll!NoSuchExport, called from 0x00401234');
 });
 
+test('a fault in an image past 4 GiB is where it was, not at its low dword', ()=>{
+    // A 64-bit program's handlers are found by this address (`seh64.js`): its
+    // low dword is in no image.
+    const fault = hostFault({ vector: 0, name: 'divide error', detail: 'divide error',
+        eip: 0x140001533, calledFrom: 0x140001150 });
+    assert.equal(fault.eip, 0x140001533);
+    assert.equal(fault.calledFrom, 0x140001150);
+    assert.equal(hostFault({ name: 'x', detail: 'x', eip: -1 }).eip, 0xffffffff,
+        'a dword read signed is still its unsigned self');
+});
+
 test('a stand-in for an exception the processor could not deliver keeps its vector', ()=>{
     const fault = hostFault({
         vector: 8, errorCode: 0, name: 'double fault', eip: 0xf001c,

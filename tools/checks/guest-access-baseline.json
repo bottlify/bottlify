@@ -681,27 +681,6 @@
    "accessor i32": 1,
    "accessor u32": 1
   },
-  "msvcrt/functions.js": {
-   "string readString": 1,
-   "string readWide": 1,
-   "string writeString": 1
-  },
-  "msvcrt/io.js": {
-   "string wide": 1
-  },
-  "msvcrt/paths.js": {
-   "string readString": 1,
-   "string readWide": 1,
-   "string writeString": 1,
-   "string writeWide": 1
-  },
-  "msvcrt/time.js": {
-   "accessor dword": 1,
-   "accessor readInt": 1,
-   "accessor writeInt": 1,
-   "string writeString": 1,
-   "string writeWide": 1
-  },
   "msvfw32/codecs.js": {
    "copy readMemory().slice()": 9
   },

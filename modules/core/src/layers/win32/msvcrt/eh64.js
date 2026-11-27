@@ -670,17 +670,20 @@ export function createCxxExceptions64(host){
      */
     const thrownBy = record=>{
         const parameters = record.parameters ?? [];
+        // Every one a number: one past 2^53 (a bigint) is no address a
+        // runtime threw, and no C++ exception.
         if (record.code >>> 0 !== EH_EXCEPTION_NUMBER || parameters.length < 3
+            || parameters.some(value=>typeof value === 'bigint')
             || parameters[0] < EH_MAGIC.V1 || parameters[0] > EH_MAGIC.V3)
         {
             return null;
         }
-        const throwInfo = wholeAddress(parameters[2]);
+        const [, object, info, base] = /** @type {number[]} */ (parameters);
+        const throwInfo = wholeAddress(info);
         return {
-            object: wholeAddress(parameters[1]),
+            object: wholeAddress(object),
             throwInfo,
-            throwBase: parameters.length >= 4 ? wholeAddress(parameters[3])
-                : host.imageBaseOf(throwInfo),
+            throwBase: parameters.length >= 4 ? wholeAddress(base) : host.imageBaseOf(throwInfo),
         };
     };
 
@@ -795,7 +798,7 @@ export function createCxxExceptions64(host){
                     return;
                 }
                 await release(by);
-            }) >>> 0;
+            });
         await release(pass);
         // FH4 may name the continuation in its tables; the funclet then
         // answers its index.

@@ -199,8 +199,48 @@ const VECTOR_TO_STATUS = Object.freeze({
     19: STATUS.FLOAT_MULTIPLE_TRAPS,
 });
 
-/** @param {number} value */
-const hex = value=>`0x${(value >>> 0).toString(16)}`;
+/** @param {number | bigint} value */
+const hex = value=>`0x${(typeof value === 'bigint' ? value : wholeAddress(value)).toString(16)}`;
+
+/** The largest integer a number holds exactly: past it, a quadword is kept a bigint. */
+const EXACT = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
+ * A quadword as the engine carries it: a number while a number holds it
+ * exactly - every address and count does - and a bigint past 2^53, which no
+ * address is but a ULONG_PTR a program raised may be (a -1).
+ *
+ * @param {bigint} quad
+ * @returns {number | bigint}
+ */
+const valueOf = quad=>(quad <= EXACT ? Number(quad) : quad);
+
+/**
+ * The 64 bits a value is written as: a bigint's own, a number's whole - a
+ * dword read signed by its unsigned value.
+ *
+ * @param {number | bigint} value
+ */
+const quadOf = value=>(typeof value === 'bigint' ? BigInt.asUintN(64, value)
+    : BigInt(value < 0 ? value >>> 0 : Math.trunc(value)));
+
+/** RAX as a funclet answers it, as EAX: a filter's or a handler's int. @param {bigint} rax */
+const eaxOf = rax=>Number(BigInt.asIntN(32, rax));
+
+/** A stack address rounded down to 16, whole. @param {number} at */
+const align16 = at=>at - at % 16;
+
+/**
+ * RAX whole from a call into a 64-bit routine as the bridge makes it
+ * (`callGuest`): the dword it resolves with, and the high half it sets on the
+ * promise before resolving. A catch block answers where its function goes
+ * on, which past 4 GiB the dword alone does not say.
+ *
+ * @param {Promise<number> & { high?: number }} call
+ * @returns {Promise<bigint>}
+ */
+export const raxOf = call=>call.then(low=>
+    BigInt((call.high ?? 0) >>> 0) << 32n | BigInt(low >>> 0));
 /** The general registers in the encoding's order, as an UnwindContext keeps them. */
 const LONG_NAMES = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
     'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
@@ -217,7 +257,8 @@ const LONG_NAMES = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
  * @property {number} code
  * @property {number} flags
  * @property {number} address
- * @property {number[]} [parameters]
+ * @property {(number | bigint)[]} [parameters]  ExceptionInformation, ULONG_PTRs
+ *     whole: a number up to 2^53, a bigint past it.
  */
 
 /**
@@ -260,6 +301,7 @@ const LONG_NAMES = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
  *     => Promise<number>} callNested
  *     The same for a funclet that runs on after the frames below its function
  *     are unwound -- a catch block: a walk from inside it goes on at `resume`.
+ *     Answers RAX whole: where the thread goes on after it.
  * @property {(target: { frame: number, ip: number, state?: number }) => Promise<void>} unwindTo
  *     Runs the termination handlers of every frame from the raise up to the
  *     frame whose establisher is `frame`, that frame's own included.
@@ -288,9 +330,10 @@ const LONG_NAMES = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
  * @property {() => { gpr: bigint[], eflags: number, xmm: Uint8Array, mxcsr: number }} longState
  *     The running thread's registers whole (`cpu.longState`).
  * @property {(options: { entry: number, rcx?: number, rdx?: number, r8?: number, r9?: number,
- *     stack: number, thread?: any }) => Promise<number>} callFunclet
+ *     stack: number, thread?: any }) => Promise<bigint>} callFunclet
  *     Runs a funclet or filter with the x64 argument registers set and its
- *     stack at `stack`; answers EAX.
+ *     stack at `stack`; answers RAX whole, as a catch block answers where its
+ *     function goes on.
  * @property {(registers: { rip: number, rsp: number,
  *     long: { gpr: bigint[], xmm: Uint8Array, mxcsr: number } }) => any} continueAt
  *     Sends the thread on at a whole 64-bit context, abandoning the calls below.
@@ -319,16 +362,19 @@ export function createSeh64(host){
         const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
-    /** @param {number} at */
-    const readU64Low = at=>readU32(at);
-    /** A quadword whole, exact for every address a process has. @param {number} at */
-    const readQuad = at=>readU32(at) + readU32(at + 4) * 2 ** 32;
-    /** @param {number} value  Negative as a 32-bit value is, below 2^53 else. */
-    const quadOf = value=>BigInt(value < 0 ? value >>> 0 : Math.trunc(value));
-    /** @param {number} at @param {number} value */
+    /** A quadword's 64 bits. @param {number} at */
+    const readQuad = at=>{
+        const bytes = host.readMemory(wholeAddress(at), 8);
+        return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
+    };
+    /** A pointer-wide field, whole. @param {number} at */
+    const addressAt = at=>Number(readQuad(at));
+    /** A DWORD64 argument from its two dwords, low first. @param {number} low @param {number} high */
+    const joined = (low, high)=>(high >>> 0) * 2 ** 32 + (low >>> 0);
+    /** @param {number} at @param {number | bigint} value */
     const writeQuad = (at, value)=>{
         const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigUint64(0, BigInt(value >>> 0), true);
+        new DataView(bytes.buffer).setBigUint64(0, quadOf(value), true);
         host.writeMemory(wholeAddress(at), bytes);
     };
 
@@ -393,7 +439,7 @@ export function createSeh64(host){
         view.setUint32(CONTEXT64.MXCSR, context.mxcsr >>> 0, true);
         context.gpr.forEach((value, index)=>
             view.setBigUint64(CONTEXT64.RAX + index * 8, BigInt.asUintN(64, value), true));
-        view.setBigUint64(CONTEXT64.RIP, BigInt(context.rip >>> 0), true);
+        view.setBigUint64(CONTEXT64.RIP, quadOf(context.rip), true);
         view.setUint32(CONTEXT64.EFLAGS, context.eflags >>> 0, true);
         bytes.set(context.xmm.subarray(0, 256), CONTEXT64.XMM0);
         host.writeMemory(at, bytes);
@@ -411,7 +457,7 @@ export function createSeh64(host){
         return {
             gpr: Array.from({ length: 16 }, (_, index)=>
                 view.getBigUint64(CONTEXT64.RAX + index * 8, true)),
-            rip: Number(view.getBigUint64(CONTEXT64.RIP, true) & 0xffffffffn),
+            rip: Number(view.getBigUint64(CONTEXT64.RIP, true)),
             eflags: view.getUint32(CONTEXT64.EFLAGS, true),
             xmm: bytes.slice(CONTEXT64.XMM0, CONTEXT64.XMM0 + 256),
             mxcsr: view.getUint32(CONTEXT64.MXCSR, true),
@@ -447,17 +493,17 @@ export function createSeh64(host){
     const readRecord = at=>{
         const count = Math.min(readU32(at + RECORD64.PARAMETER_COUNT), 15);
         return { code: readU32(at + RECORD64.CODE), flags: readU32(at + RECORD64.FLAGS),
-            address: readQuad(at + RECORD64.ADDRESS),
+            address: addressAt(at + RECORD64.ADDRESS),
             parameters: Array.from({ length: count },
-                (_, index)=>readQuad(at + RECORD64.INFORMATION + index * 8)) };
+                (_, index)=>valueOf(readQuad(at + RECORD64.INFORMATION + index * 8))) };
     };
 
     /** EXCEPTION_POINTERS: the record and the context, each a quadword. */
     const pointerPair = (/** @type {number} */ record, /** @type {number} */ context)=>{
         const bytes = new Uint8Array(16);
         const view = new DataView(bytes.buffer);
-        view.setBigUint64(0, BigInt(record >>> 0), true);
-        view.setBigUint64(8, BigInt(context >>> 0), true);
+        view.setBigUint64(0, quadOf(record), true);
+        view.setBigUint64(8, quadOf(context), true);
         return bytes;
     };
 
@@ -470,7 +516,7 @@ export function createSeh64(host){
      */
     const scratchBelow = floor=>{
         const size = RECORD64.SIZE + CONTEXT64.SIZE + DISPATCHER64.SIZE + 0x10;
-        const base = (floor - size & ~15) >>> 0;
+        const base = align16(floor - size);
         return {
             record: base,
             context: base + RECORD64.SIZE,
@@ -481,7 +527,7 @@ export function createSeh64(host){
     };
 
     /** @param {number} stack */
-    const floorBelow = stack=>(stack - FLOOR_GAP & ~15) >>> 0;
+    const floorBelow = stack=>align16(stack - FLOOR_GAP);
 
     /**
      * Where this engine's own C language handler is in the guest, and the
@@ -504,7 +550,7 @@ export function createSeh64(host){
             {
                 if (stub !== 0)
                 {
-                    interpreted.set(stub >>> 0, scopeTable);
+                    interpreted.set(wholeAddress(stub), scopeTable);
                 }
             }
             for (const { stubs, interpreter } of host.interpreters?.() ?? [])
@@ -513,25 +559,26 @@ export function createSeh64(host){
                 {
                     if (stub !== 0)
                     {
-                        interpreted.set(stub >>> 0, interpreter);
+                        interpreted.set(wholeAddress(stub), interpreter);
                     }
                 }
             }
         }
-        const known = interpreted.get(address >>> 0);
+        const known = interpreted.get(wholeAddress(address));
         if (known)
         {
             return known;
         }
-        // A jmp [rip+disp] thunk: follow it to the import slot and the stub.
+        // A jmp [rip+disp] thunk: follow it to the import slot, a quadword,
+        // and the stub.
         const bytes = host.readMemory(wholeAddress(address), 6);
         if (bytes[0] === 0xff && bytes[1] === 0x25)
         {
             const disp = (bytes[2] | bytes[3] << 8 | bytes[4] << 16 | bytes[5] << 24) | 0;
-            const target = interpreted.get(readU32(address + 6 + disp >>> 0));
+            const target = interpreted.get(addressAt(wholeAddress(address) + 6 + disp));
             if (target)
             {
-                interpreted.set(address >>> 0, target);
+                interpreted.set(wholeAddress(address), target);
                 return target;
             }
         }
@@ -582,8 +629,8 @@ export function createSeh64(host){
         const caller = host.callbackCaller?.(thread, stack);
         if (caller)
         {
-            context.rip = caller.rip >>> 0;
-            context.gpr[4] = BigInt(caller.rsp >>> 0);
+            context.rip = wholeAddress(caller.rip);
+            context.gpr[4] = BigInt(wholeAddress(caller.rsp));
             return {};
         }
         return null;
@@ -607,7 +654,7 @@ export function createSeh64(host){
         const bytes = new Uint8Array(DISPATCHER64.SIZE);
         const view = new DataView(bytes.buffer);
         /** @param {number} at @param {number} value */
-        const quad = (at, value)=>view.setBigUint64(at, BigInt(value >>> 0), true);
+        const quad = (at, value)=>view.setBigUint64(at, quadOf(value), true);
         quad(DISPATCHER64.CONTROL_PC, visit.context.rip);
         quad(DISPATCHER64.IMAGE_BASE, visit.fn.imageBase);
         quad(DISPATCHER64.FUNCTION_ENTRY, visit.fn.entry);
@@ -626,7 +673,7 @@ export function createSeh64(host){
                 r8: scratch.context, r9: scratch.dispatcher, stack: scratch.top,
                 thread: pass.thread,
             });
-            return { answer: answer >>> 0, context: scratch.context };
+            return { answer: eaxOf(answer) >>> 0, context: scratch.context };
         }
         finally
         {
@@ -647,7 +694,8 @@ export function createSeh64(host){
      *     where the walk ended when it never met the target
      */
     const unwindFrames = async(pass, target)=>{
-        const everything = (target.frame >>> 0) === 0;
+        const frame = wholeAddress(target.frame);
+        const everything = frame === 0;
         const context = copyContext(pass.faultContext);
         /** @type {Map<string, any>} */
         const memo = new Map();
@@ -680,10 +728,10 @@ export function createSeh64(host){
             {
                 continue;
             }
-            const atTarget = !everything && (visit.establisher >>> 0) === (target.frame >>> 0);
+            const atTarget = !everything && wholeAddress(visit.establisher) === frame;
             if (visit.handler !== 0)
             {
-                const options = { at: atTarget, ip: target.ip >>> 0,
+                const options = { at: atTarget, ip: wholeAddress(target.ip),
                     ...target.state === undefined ? {} : { state: target.state } };
                 const interpreter = interpreterFor(visit.handler);
                 if (interpreter)
@@ -699,7 +747,7 @@ export function createSeh64(host){
             {
                 return visit.context;
             }
-            if (!everything && stackOf(context) > (target.frame >>> 0))
+            if (!everything && stackOf(context) > frame)
             {
                 // Past the target without meeting it: the target is not on the
                 // stack, which is the caller's error. Nothing more is unwound.
@@ -725,7 +773,7 @@ export function createSeh64(host){
             floor,
             call: (entry, registers = {})=>host.callFunclet({
                 entry, ...registers, stack: pass.floor, thread,
-            }),
+            }).then(eaxOf),
             callNested: async(entry, registers, resume, abandoned)=>{
                 const list = nestedOf(thread);
                 /** @type {NestedCall} */
@@ -734,8 +782,9 @@ export function createSeh64(host){
                 list.push(nested);
                 try
                 {
-                    return await host.callFunclet({ entry, ...registers, stack: pass.floor,
-                        thread });
+                    // Where the thread goes on, an address: RAX whole.
+                    return Number(BigInt.asUintN(64, await host.callFunclet({ entry,
+                        ...registers, stack: pass.floor, thread })));
                 }
                 finally
                 {
@@ -750,7 +799,7 @@ export function createSeh64(host){
                 await unwindFrames(pass, target);
             },
             continueAt: context=>host.continueAt({
-                rip: context.rip >>> 0,
+                rip: wholeAddress(context.rip),
                 rsp: stackOf(context),
                 long: { gpr: context.gpr.slice(), xmm: context.xmm.slice(), mxcsr: context.mxcsr },
             }),
@@ -777,11 +826,11 @@ export function createSeh64(host){
         // The target frame is not itself unwound -- execution goes on inside it
         // with its own registers.
         const resume = copyContext(await unwindFrames(pass,
-            { frame: targetFrame >>> 0, ip: targetIp >>> 0 }));
-        resume.rip = targetIp >>> 0;
-        resume.gpr[0] = BigInt(returnValue >>> 0);
+            { frame: wholeAddress(targetFrame), ip: wholeAddress(targetIp) }));
+        resume.rip = wholeAddress(targetIp);
+        resume.gpr[0] = quadOf(returnValue);
         const callback = record.code === STATUS_UNWIND_CONSOLIDATE
-            ? record.parameters?.[0] ?? 0 : 0;
+            ? Number(record.parameters?.[0] ?? 0) : 0;
         if (callback !== 0)
         {
             // Called as a catch block is, on the target's registers: an
@@ -790,7 +839,7 @@ export function createSeh64(host){
             const scratch = scratchBelow(pass.floor);
             writeRecord(scratch.record, record);
             const below = passFor(record, pass.faultContext, thread, scratch.top);
-            resume.rip = await below.callNested(callback, { rcx: scratch.record }, resume) >>> 0;
+            resume.rip = await below.callNested(callback, { rcx: scratch.record }, resume);
         }
         return pass.continueAt(resume);
     };
@@ -825,10 +874,10 @@ export function createSeh64(host){
                     host.writeMemory(scratch.pointers,
                         pointerPair(scratch.record, scratch.context));
                     answer = await host.callFunclet({
-                        entry: visit.fn.imageBase + scope.handler >>> 0,
+                        entry: visit.fn.imageBase + scope.handler,
                         rcx: scratch.pointers, rdx: establisher, stack: scratch.top,
                         thread: pass.thread,
-                    }) | 0;
+                    }).then(eaxOf);
                 }
                 if (answer === EXCEPTION_CONTINUE_SEARCH)
                 {
@@ -839,7 +888,7 @@ export function createSeh64(host){
                     return pass.continueAt(pass.faultContext);
                 }
                 // Accepted: unwind the frames below the __except to it and jump in.
-                const targetIp = visit.fn.imageBase + scope.target >>> 0;
+                const targetIp = visit.fn.imageBase + scope.target;
                 const resume = copyContext(await unwindFrames(pass,
                     { frame: establisher, ip: targetIp }));
                 resume.rip = targetIp;
@@ -871,7 +920,7 @@ export function createSeh64(host){
                 {
                     continue;
                 }
-                await pass.call(visit.fn.imageBase + scope.handler >>> 0,
+                await pass.call(visit.fn.imageBase + scope.handler,
                     { rcx: 1, rdx: visit.establisher });
             }
         },
@@ -897,35 +946,41 @@ export function createSeh64(host){
     };
 
     /**
-     * The low dwords of the 48 quadwords at a fault's RSP, where a
-     * frame's return addresses are, for the fault's trace: none when the
-     * stack is not there to read.
+     * Up to 48 quadwords at a fault's RSP, where a frame's return addresses
+     * are, for the fault's trace: as far as the stack is there to read, which
+     * near its top is fewer.
      *
      * @param {number} rsp
      */
     const stackWords = rsp=>{
+        /** @type {string[]} */
+        const words = [];
         try
         {
-            return Array.from({ length: 48 }, (_, slot)=>readU32(rsp + slot * 8).toString(16))
-                .join(' ');
+            while (words.length < 48)
+            {
+                words.push(readQuad(rsp + words.length * 8).toString(16));
+            }
         }
         catch {
-            return 'unreadable';
+            // The stack's end: what was read is all there is.
         }
+        return words.length > 0 ? words.join(' ') : 'unreadable';
     };
 
     /**
      * RtlDispatchException: walks the frames from the fault, offering the
      * exception to each frame's handler until one takes it.
      *
-     * @param {{ code: number, flags?: number, address: number, parameters?: number[] }} what
+     * @param {{ code: number, flags?: number, address: number,
+     *     parameters?: (number | bigint)[] }} what
      * @param {UnwindContext} faultContext
      * @returns {Promise<{ handled: boolean, continuation?: any }>}
      */
     const dispatch = async(what, faultContext)=>{
         /** @type {ExceptionRecord} */
         const record = { code: what.code >>> 0, flags: what.flags ?? 0,
-            address: what.address >>> 0,
+            address: wholeAddress(what.address),
             ...what.parameters ? { parameters: what.parameters } : {} };
         // An error -- an access violation, an illegal instruction -- says
         // what it touched and the registers it had, which is all a fault in
@@ -935,7 +990,7 @@ export function createSeh64(host){
             record.code >= 0xc0000000 ? ` [${(record.parameters ?? []).map(hex).join(', ')}] ${
                 LONG_NAMES.map((name, index)=>`${name}=${
                     faultContext.gpr[index].toString(16)}`).join(' ')} stack=${
-                stackWords(Number(faultContext.gpr[4] & 0xffffffffn))}` : ''}`);
+                stackWords(stackOf(faultContext))}` : ''}`);
         const thread = host.currentThread();
         const pass = passFor(record, faultContext, thread);
         // A dispatcher context below this raise belongs to a walk a handler
@@ -960,10 +1015,10 @@ export function createSeh64(host){
             const frames = [];
             for (let depth = 0; depth < 24; depth++)
             {
-                frames.push(probe.rip >>> 0);
-                const at = { rip: probe.rip >>> 0, stack: stackOf(probe) };
+                frames.push(wholeAddress(probe.rip));
+                const at = { rip: wholeAddress(probe.rip), stack: stackOf(probe) };
                 if (!await step(probe, thread, UNW_FLAG.NHANDLER, new Map())
-                    || (probe.rip >>> 0) === at.rip && stackOf(probe) === at.stack)
+                    || wholeAddress(probe.rip) === at.rip && stackOf(probe) === at.stack)
                 {
                     break;
                 }
@@ -972,7 +1027,7 @@ export function createSeh64(host){
         }
         for (let guard = 0; guard < WALK_LIMIT; guard++)
         {
-            const before = { rip: context.rip >>> 0, stack: stackOf(context) };
+            const before = { rip: wholeAddress(context.rip), stack: stackOf(context) };
             const taken = await step(context, thread, UNW_FLAG.EHANDLER, memo);
             if (!taken)
             {
@@ -1001,7 +1056,7 @@ export function createSeh64(host){
                     }
                 }
             }
-            if ((context.rip >>> 0) === before.rip && stackOf(context) === before.stack)
+            if (wholeAddress(context.rip) === before.rip && stackOf(context) === before.stack)
             {
                 break;
             }
@@ -1013,7 +1068,8 @@ export function createSeh64(host){
      * An exception nothing took: the last-chance filter, then the process
      * ends with the exception's code.
      *
-     * @param {{ code: number, flags?: number, address: number, parameters?: number[] }} what
+     * @param {{ code: number, flags?: number, address: number,
+     *     parameters?: (number | bigint)[] }} what
      * @param {UnwindContext} faultContext
      * @returns {Promise<{ handled: boolean, continuation?: any }>}
      */
@@ -1022,14 +1078,14 @@ export function createSeh64(host){
         {
             const scratch = scratchBelow(floorBelow(stackOf(faultContext)));
             writeRecord(scratch.record, { code: what.code >>> 0, flags: what.flags ?? 0,
-                address: what.address >>> 0,
+                address: wholeAddress(what.address),
                 ...what.parameters ? { parameters: what.parameters } : {} });
             writeContext(scratch.context, faultContext);
             host.writeMemory(scratch.pointers, pointerPair(scratch.record, scratch.context));
             const answer = await host.callFunclet({
                 entry: topLevelFilter, rcx: scratch.pointers, stack: scratch.top,
                 thread: host.currentThread(),
-            }) | 0;
+            }).then(eaxOf);
             if (answer === EXCEPTION_CONTINUE_EXECUTION
                 && ((what.flags ?? 0) & EXCEPTION_NONCONTINUABLE) === 0)
             {
@@ -1041,14 +1097,15 @@ export function createSeh64(host){
             }
         }
         host.trace?.(`unhandled exception ${hex(what.code)} at ${hex(what.address)}`);
-        host.terminate?.({ code: what.code >>> 0, address: what.address >>> 0 });
+        host.terminate?.({ code: what.code >>> 0, address: wholeAddress(what.address) });
         return { handled: false };
     };
 
     /**
      * An exception raised or faulted: dispatched, then the last chance.
      *
-     * @param {{ code: number, flags?: number, address: number, parameters?: number[] }} what
+     * @param {{ code: number, flags?: number, address: number,
+     *     parameters?: (number | bigint)[] }} what
      * @param {UnwindContext} faultContext
      */
     const raiseOn = async(what, faultContext)=>{
@@ -1074,18 +1131,18 @@ export function createSeh64(host){
      * @param {number} recordPtr @param {number} returnValue
      */
     const unwindCalled = (context, targetFrame, targetIp, recordPtr, returnValue)=>{
-        const record = (recordPtr >>> 0) !== 0
-            ? readRecord(recordPtr >>> 0)
+        const record = wholeAddress(recordPtr) !== 0
+            ? readRecord(wholeAddress(recordPtr))
             : { code: STATUS.UNWIND, flags: EH_UNWINDING, address: context.rip };
-        return unwindEx(context, targetFrame >>> 0, targetIp >>> 0, returnValue >>> 0,
-            record, host.currentThread());
+        return unwindEx(context, targetFrame, targetIp, returnValue, record,
+            host.currentThread());
     };
 
     const callerContext = ()=>{
         const context = captureContext();
         const rsp = stackOf(context);
-        context.rip = readU64Low(rsp);
-        context.gpr[4] = BigInt(rsp + 8 >>> 0);
+        context.rip = addressAt(rsp);
+        context.gpr[4] = BigInt(rsp + 8);
         return context;
     };
 
@@ -1099,12 +1156,12 @@ export function createSeh64(host){
         const context = callerContext();
         const head = new Uint8Array(JUMP_BUFFER64.FPCSR + 2);
         const view = new DataView(head.buffer);
-        view.setBigUint64(JUMP_BUFFER64.FRAME, BigInt(frame), true);
+        view.setBigUint64(JUMP_BUFFER64.FRAME, quadOf(frame), true);
         for (const [register, at] of JUMP_REGISTERS)
         {
             view.setBigUint64(at, BigInt.asUintN(64, context.gpr[register]), true);
         }
-        view.setBigUint64(JUMP_BUFFER64.RIP, BigInt(context.rip >>> 0), true);
+        view.setBigUint64(JUMP_BUFFER64.RIP, quadOf(context.rip), true);
         view.setUint32(JUMP_BUFFER64.MXCSR, context.mxcsr >>> 0, true);
         view.setUint16(JUMP_BUFFER64.FPCSR, host.controlWord?.() ?? 0x27f, true);
         host.writeMemory(buffer, head);
@@ -1124,8 +1181,8 @@ export function createSeh64(host){
     const longJump = async(buffer, value)=>{
         const bytes = host.readMemory(buffer, JUMP_BUFFER64.SIZE);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        const frame = Number(view.getBigUint64(JUMP_BUFFER64.FRAME, true) & 0xffffffffn);
-        const rip = Number(view.getBigUint64(JUMP_BUFFER64.RIP, true) & 0xffffffffn);
+        const frame = Number(view.getBigUint64(JUMP_BUFFER64.FRAME, true));
+        const rip = Number(view.getBigUint64(JUMP_BUFFER64.RIP, true));
         const context = callerContext();
         const thread = host.currentThread();
         const pass = passFor({ code: STATUS_LONGJUMP, flags: EH_UNWINDING, address: context.rip,
@@ -1153,7 +1210,7 @@ export function createSeh64(host){
      * @param {number} address
      */
     const dispatcherContextAt = address=>{
-        const found = dispatching.get(address >>> 0);
+        const found = dispatching.get(wholeAddress(address));
         if (!found)
         {
             return null;
@@ -1209,7 +1266,7 @@ export function createSeh64(host){
             }
             const parameters = code === STATUS.ACCESS_VIOLATION
                 ? [(fault.errorCode ?? 0) & 2 ? 1 : 0,
-                    fault.vector === 13 ? 0xffffffff : (fault.address ?? 0) >>> 0]
+                    fault.vector === 13 ? 0xffffffff : wholeAddress(fault.address ?? 0)]
                 : [];
             const result = await dispatch({ code, address: faultContext.rip, parameters },
                 faultContext);
@@ -1337,8 +1394,8 @@ export function createSeh64(host){
                     const bytes = new Uint8Array(frames.length * 8);
                     const view = new DataView(bytes.buffer);
                     frames.forEach((address, index)=>{
-                        view.setUint32(index * 8, address >>> 0, true);
-                        sum = (sum + address) >>> 0;
+                        view.setBigUint64(index * 8, quadOf(address), true);
+                        sum = (sum + (address >>> 0)) >>> 0;
                     });
                     host.writeMemory(wholeAddress(out), bytes);
                     if (wholeAddress(hash) !== 0)
@@ -1367,7 +1424,7 @@ export function createSeh64(host){
                     {
                         writeQuad(wholeAddress(baseOut), base);
                     }
-                    return BigInt(base >>> 0);
+                    return BigInt(base);
                 },
             },
 
@@ -1378,22 +1435,26 @@ export function createSeh64(host){
             RtlLookupFunctionEntry: {
                 returns: 'pointer',
                 argBytes: 12,
+                // One register each at 64 bits, where the signature table
+                // counts the DWORD64 as two dwords.
+                addresses: [0, 1, 2],
                 /** @param {number[]} args */
                 handler: ([pc, imageBaseOut])=>{
                     /** @param {FunctionEntry | null} fn */
                     const answer = fn=>{
-                        if (fn && (imageBaseOut >>> 0) !== 0)
+                        if (fn && wholeAddress(imageBaseOut) !== 0)
                         {
-                            writeQuad(imageBaseOut >>> 0, fn.imageBase);
+                            writeQuad(imageBaseOut, fn.imageBase);
                         }
-                        return fn ? fn.entry >>> 0 : 0;
+                        return BigInt(fn ? fn.entry : 0);
                     };
                     // Answered at once from a table; a JIT's range waits on
-                    // its callback, and an answer that waited is a number.
-                    const fn = unwinder.lookup(pc >>> 0);
-                    return fn || !unwinder.asksCallback(pc >>> 0)
-                        ? BigInt(answer(fn))
-                        : unwinder.resolve(pc >>> 0).then(answer);
+                    // its callback.
+                    const at = wholeAddress(pc);
+                    const fn = unwinder.lookup(at);
+                    return fn || !unwinder.asksCallback(at)
+                        ? answer(fn)
+                        : unwinder.resolve(at).then(answer);
                 },
             },
 
@@ -1406,14 +1467,17 @@ export function createSeh64(host){
             RtlVirtualUnwind: {
                 returns: 'pointer',
                 argBytes: 32,
+                // One register each at 64 bits: the DWORD64s are addresses too.
+                addresses: [1, 2, 3, 4, 5, 6, 7],
                 /** @param {number[]} args */
                 handler: ([type, imageBase, controlPc, functionEntry, contextRecord,
                     handlerDataOut, establisherOut])=>{
-                    const fn = unwinder.entryAt(imageBase >>> 0, functionEntry >>> 0);
-                    const context = readContext(contextRecord >>> 0);
-                    const unwound = unwinder.virtualUnwind(type >>> 0, fn, controlPc >>> 0,
-                        context);
-                    writeContext(contextRecord >>> 0, context);
+                    const fn = unwinder.entryAt(wholeAddress(imageBase),
+                        wholeAddress(functionEntry));
+                    const context = readContext(wholeAddress(contextRecord));
+                    const unwound = unwinder.virtualUnwind(type >>> 0, fn,
+                        wholeAddress(controlPc), context);
+                    writeContext(wholeAddress(contextRecord), context);
                     if (wholeAddress(handlerDataOut) !== 0)
                     {
                         writeQuad(wholeAddress(handlerDataOut), unwound.handlerData);
@@ -1422,7 +1486,7 @@ export function createSeh64(host){
                     {
                         writeQuad(wholeAddress(establisherOut), unwound.establisher);
                     }
-                    return BigInt(unwound.handler >>> 0);
+                    return BigInt(unwound.handler);
                 },
             },
 
@@ -1477,16 +1541,16 @@ export function createSeh64(host){
              * Called with any other context, the search goes on.
              */
             __C_specific_handler: {
-                argBytes: 32, lastError: false,
+                argBytes: 32, lastError: false, addresses: [0, 1, 2, 3],
                 /** @param {number[]} args */
                 handler: ([, , , dispatcher])=>{
-                    const found = dispatcherContextAt(dispatcher >>> 0);
+                    const found = dispatcherContextAt(dispatcher);
                     if (!found)
                     {
                         return Disposition.CONTINUE_SEARCH;
                     }
                     const visit = { ...found.visit, handlerData:
-                        readU32(wholeAddress(dispatcher) + DISPATCHER64.HANDLER_DATA) };
+                        addressAt(wholeAddress(dispatcher) + DISPATCHER64.HANDLER_DATA) };
                     if (found.unwinding)
                     {
                         return scopeTable.unwind(visit, found.pass, found.unwinding)
@@ -1503,9 +1567,11 @@ export function createSeh64(host){
              */
             RtlAddFunctionTable: {
                 argBytes: 12,
+                // The DWORD64 base one register, an address as the table is.
+                addresses: [0, 2],
                 /** @param {number[]} args */
                 handler: ([table, count, base])=>
-                    (unwinder.add(wholeAddress(table), count >>> 0, base >>> 0) ? 1 : 0),
+                    (unwinder.add(wholeAddress(table), count >>> 0, wholeAddress(base)) ? 1 : 0),
             },
 
             /**
@@ -1535,9 +1601,9 @@ export function createSeh64(host){
                 argBytes: 32,
                 quadwords: [0, 2],
                 /** @param {number[]} args */
-                handler: ([id, , base, , length, callback, context])=>(unwinder.install(
-                    id >>> 0, base >>> 0, length >>> 0, wholeAddress(callback),
-                    wholeAddress(context)) ? 1 : 0),
+                handler: ([id, idHigh, base, baseHigh, length, callback, context])=>(
+                    unwinder.install(joined(id, idHigh), joined(base, baseHigh), length >>> 0,
+                        wholeAddress(callback), wholeAddress(context)) ? 1 : 0),
             },
 
             /**
@@ -1549,6 +1615,8 @@ export function createSeh64(host){
              */
             RtlAddGrowableFunctionTable: {
                 argBytes: 24,
+                // The range's ULONG_PTRs are addresses beside the two pointers.
+                addresses: [0, 1, 4, 5],
                 /** @param {number[]} args */
                 handler: ([out, table, count, max, base, end])=>{
                     if (wholeAddress(out) === 0 || wholeAddress(table) === 0
@@ -1557,8 +1625,7 @@ export function createSeh64(host){
                         return STATUS_INVALID_PARAMETER;
                     }
                     writeQuad(wholeAddress(out), unwinder.addGrowable(wholeAddress(table),
-                        count >>> 0,
-                        max >>> 0, base >>> 0, end >>> 0));
+                        count >>> 0, max >>> 0, wholeAddress(base), wholeAddress(end)));
                     return 0;
                 },
             },
@@ -1594,7 +1661,7 @@ export function createSeh64(host){
                 handler: ([filter])=>{
                     const previous = topLevelFilter;
                     topLevelFilter = wholeAddress(filter);
-                    return BigInt(previous >>> 0);
+                    return BigInt(previous);
                 },
             },
 
@@ -1612,11 +1679,11 @@ export function createSeh64(host){
                 handler: ([code, flags, count, argsPtr])=>{
                     const from = wholeAddress(argsPtr);
                     const total = from === 0 ? 0 : Math.min(count >>> 0, 15);
-                    /** @type {number[]} */
+                    /** @type {(number | bigint)[]} */
                     const parameters = [];
                     for (let index = 0; index < total; index++)
                     {
-                        parameters.push(readU64Low(from + index * 8));
+                        parameters.push(valueOf(readQuad(from + index * 8)));
                     }
                     const context = callerContext();
                     return raiseOn({ code: code >>> 0,

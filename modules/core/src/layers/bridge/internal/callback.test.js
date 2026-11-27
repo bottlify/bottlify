@@ -544,7 +544,8 @@ test('a 64-bit routine is handed a quadword whole: an argument that came into th
     made.reserve();
     made.placeLongCall(()=>0x9000);
     made.call({ thread: thread('main'), entry: 0x402000,
-        args: [0x40, 0x9000_0000 | 0, 0x9000_0000n, 0x1_2345_6780n, 0x8000_0000n | 1n],
+        args: [0x40, 0x9000_0000 | 0, 0x9000_0000n, 0x1_2345_6780n, 0x8000_0000n | 1n,
+            0x1_4000_2fe8],
         stackAtRest: 0x2ff000 });
     const frameBase = resumed[0].esp + 8;
     /** @param {number} at */
@@ -554,4 +555,7 @@ test('a 64-bit routine is handed a quadword whole: an argument that came into th
     assert.deepEqual(quad(24), [0x23456780, 1], 'R9: past 4 GiB');
     assert.deepEqual(quad(72), [0x80000001, 0], 'the fifth, on the stack past the home slots');
     assert.deepEqual(quad(40 + 16), [0x90000000, 0], 'and its home slot');
+    // An address past 4 GiB the host holds as a number - a thrown object or
+    // a frame a 64-bit dispatcher hands a funclet - is not its low dword.
+    assert.deepEqual(quad(80), [0x40002fe8, 1], 'the sixth: a number past 4 GiB, whole');
 });

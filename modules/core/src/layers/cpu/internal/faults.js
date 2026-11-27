@@ -11,6 +11,8 @@
  * and an illegal instruction read as what they were.
  */
 
+import { wholeAddress } from '../../../system/address.js';
+
 /** What each exception is called, so a report names it rather than numbering it. */
 const NAMES = Object.freeze([
     'divide error', 'debug', 'non-maskable interrupt', 'breakpoint',
@@ -25,7 +27,8 @@ const NAMES = Object.freeze([
  * @typedef {Object} GuestFault
  * @property {number} vector
  * @property {string} name
- * @property {number} eip          Where the faulting instruction is.
+ * @property {number} eip          Where the faulting instruction is, whole: a 64-bit
+ *           image at its own base lies past 4 GiB.
  * @property {number} cs
  * @property {number} eflags
  * @property {number | null} errorCode  Null for the exceptions that carry none.
@@ -66,9 +69,9 @@ export const HOST_VECTOR = -1;
 export function hostFault({ name, detail, eip, calledFrom = 0, vector = HOST_VECTOR, errorCode }){
     return {
         vector, name, detail,
-        eip: eip >>> 0, cs: 0, eflags: 0,
+        eip: wholeAddress(eip), cs: 0, eflags: 0,
         errorCode: errorCode ?? null,
-        calledFrom: calledFrom >>> 0,
+        calledFrom: wholeAddress(calledFrom),
     };
 }
 
