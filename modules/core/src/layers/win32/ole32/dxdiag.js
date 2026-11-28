@@ -209,9 +209,7 @@ export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9], physi
  *              interfaceId: string) => number }} vtables
  * @property {{ allocate: (bytes: number) => number }} heap
  *           The heap SysFreeString and VariantClear free a BSTR to.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {import('../kernel32/versions.js').WindowsVersion} windows
  * @property {import('../advapi32/registry.js').DirectXRelease} [directx]
  *           The DirectX the bottle reports; absent, 9.0c.
@@ -228,21 +226,7 @@ export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9], physi
  * @param {DxDiagHost} host
  */
 export function registerDxDiagClasses(host){
-    const writeU32 = (/** @type {number} */ address, /** @type {number} */ value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
-    };
-    /** @param {number} address @param {string} value  With its terminator. */
-    const writeWide = (address, value)=>{
-        const bytes = new Uint8Array(value.length * 2 + 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < value.length; at++)
-        {
-            view.setUint16(at * 2, value.charCodeAt(at), true);
-        }
-        host.writeMemory(address, bytes);
-    };
+    const { guest } = host;
 
     /** @param {string} value @returns {number} a BSTR from the heap, or 0 */
     const allocateBstr = value=>{
@@ -258,7 +242,7 @@ export function registerDxDiagClasses(host){
         {
             view.setUint16(4 + at * 2, value.charCodeAt(at), true);
         }
-        host.writeMemory(block, bytes);
+        guest.setBytes(block, bytes);
         return block + 4;
     };
 
@@ -277,15 +261,15 @@ export function registerDxDiagClasses(host){
         const name = names[index >>> 0];
         if (name === undefined)
         {
-            writeWide(wholeAddress(out), '');
+            guest.writeWide(out, '');
             return E_INVALIDARG;
         }
-        writeWide(wholeAddress(out), name.slice(0, (size >>> 0) - 1));
+        guest.writeWide(out, name.slice(0, (size >>> 0) - 1));
         return name.length < (size >>> 0) ? S_OK : DXDIAG_E_INSUFFICIENT_BUFFER;
     };
 
     /** @param {number} address @returns {string} */
-    const readName = address=>host.readWideString(address, MAX_NAME * 2);
+    const readName = address=>guest.wstr(address, MAX_NAME * 2);
 
     /** @param {number} out @param {number} value */
     const count = (out, value)=>{
@@ -293,7 +277,7 @@ export function registerDxDiagClasses(host){
         {
             return E_INVALIDARG;
         }
-        writeU32(wholeAddress(out), value);
+        guest.set32(out, value);
         return S_OK;
     };
 
@@ -312,7 +296,7 @@ export function registerDxDiagClasses(host){
             object.release();
             return E_OUTOFMEMORY;
         }
-        writeU32(out, pointer);
+        guest.set32(out, pointer);
         return S_OK;
     };
 
@@ -400,7 +384,7 @@ export function registerDxDiagClasses(host){
                     {
                         view.setUint32(8, property.value >>> 0, true);
                     }
-                    host.writeMemory(wholeAddress(out), variant);
+                    guest.setBytes(out, variant);
                     return S_OK;
                 } },
         ],
@@ -426,10 +410,8 @@ export function registerDxDiagClasses(host){
                             {
                                 return E_POINTER;
                             }
-                            const block = new DataView(
-                                host.readMemory(wholeAddress(params), 8).slice().buffer);
-                            if (block.getUint32(0, true) !== INIT_PARAMS_SIZE
-                                || block.getUint32(4, true) !== DXDIAG_DX9_SDK_VERSION)
+                            if (guest.u32(params) !== INIT_PARAMS_SIZE
+                                || guest.u32(params + 4) !== DXDIAG_DX9_SDK_VERSION)
                             {
                                 return E_INVALIDARG;
                             }

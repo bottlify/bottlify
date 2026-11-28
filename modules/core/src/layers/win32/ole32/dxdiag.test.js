@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { windowsVersion } from '../kernel32/versions.js';
@@ -51,16 +52,7 @@ function setup(screen){
             },
         },
         heap: { allocate: size=>(nextBlock += size + 16) - size - 16 },
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readWideString: address=>{
-            let text = '';
-            for (let at = address; view.getUint16(at, true) !== 0; at += 2)
-            {
-                text += String.fromCharCode(view.getUint16(at, true));
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         windows: windowsVersion('winxp'),
         screen,
         physicalMemory: 512 * 0x100000,

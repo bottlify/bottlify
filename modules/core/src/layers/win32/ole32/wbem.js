@@ -429,9 +429,7 @@ const SLOTS = {
  *              interfaceId: string) => number }} vtables
  * @property {{ allocate: (bytes: number) => number }} heap
  *           The heap SysFreeString and VariantClear free a BSTR to.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {number} [physicalMemory]  What GlobalMemoryStatus reports as physical memory.
  * @property {number} [processors]  How many processors GetSystemInfo reports.
  * @property {number} [processorMhz]  The time-stamp counter's rate, as the registry's `~MHz`.
@@ -446,17 +444,13 @@ const SLOTS = {
  * @param {WbemHost} host
  */
 export function registerWbemClasses(host){
+    const { guest } = host;
     const CLASSES = machineClasses({ physicalMemory: host.physicalMemory,
         processors: host.processors, processorMhz: host.processorMhz, windows: host.windows });
     const diverge = (/** @type {string} */ api, /** @type {string} */ detail)=>
         host.divergence?.(api, detail);
-    const writeU32 = (/** @type {number} */ address, /** @type {number} */ value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
-    };
-    const readString = (/** @type {number} */ address)=>
-        address === 0 ? '' : host.readWideString(address, MAX_WBEM_STRING * 2);
+    const oleText = (/** @type {number} */ address)=>
+        address === 0 ? '' : guest.wstr(address, MAX_WBEM_STRING * 2);
 
     /**
      * An object of ours, published, its pointer written to `out`.
@@ -475,7 +469,7 @@ export function registerWbemClasses(host){
             object.release();
             return E_OUTOFMEMORY;
         }
-        writeU32(out, pointer);
+        guest.set32(out, pointer);
         return S_OK;
     };
 
@@ -519,7 +513,7 @@ export function registerWbemClasses(host){
         {
             view.setUint16(4 + at * 2, text.charCodeAt(at), true);
         }
-        host.writeMemory(block, bytes);
+        guest.setBytes(block, bytes);
         return block + 4;
     };
 
@@ -550,11 +544,11 @@ export function registerWbemClasses(host){
         view.setUint32(DESCRIPTOR_PREFIX + 12, data, true);
         // Its count, from a lower bound of 0.
         view.setUint32(DESCRIPTOR_PREFIX + 16, values.length, true);
-        host.writeMemory(block, header);
+        guest.setBytes(block, header);
         const elements = new Uint8Array(values.length * 4);
         values.forEach((value, index)=>new DataView(elements.buffer)
             .setUint32(index * 4, value >>> 0, true));
-        host.writeMemory(data, elements);
+        guest.setBytes(data, elements);
         return descriptor;
     };
 
@@ -573,7 +567,7 @@ export function registerWbemClasses(host){
     const publishInstance = (className, properties, out)=>publish(CLSID_WBEM_LOCATOR, {
         interfaces: [describe(IID_IWBEM_CLASS_OBJECT, 'IWbemClassObject', SLOTS.object, {
             Get: ([name, , value, type, flavor])=>{
-                const key = readString(wholeAddress(name));
+                const key = oleText(wholeAddress(name));
                 const property = properties[key.toLowerCase()];
                 if (!property && !WBEM_SCHEMAS[className]?.has(key.toLowerCase()))
                 {
@@ -586,15 +580,15 @@ export function registerWbemClasses(host){
                     {
                         const variant = new Uint8Array(16);
                         new DataView(variant.buffer).setUint16(0, VT_NULL, true);
-                        host.writeMemory(wholeAddress(value), variant);
+                        guest.setBytes(value, variant);
                     }
                     if ((type >>> 0) !== 0)
                     {
-                        writeU32(wholeAddress(type), CIM_STRING);
+                        guest.set32(type, CIM_STRING);
                     }
                     if ((flavor >>> 0) !== 0)
                     {
-                        writeU32(wholeAddress(flavor), 0);
+                        guest.set32(flavor, 0);
                     }
                     return S_OK;
                 }
@@ -634,15 +628,15 @@ export function registerWbemClasses(host){
                         view.setUint16(0, VT_I4, true);
                         view.setUint32(8, content >>> 0, true);
                     }
-                    host.writeMemory(wholeAddress(value), variant);
+                    guest.setBytes(value, variant);
                 }
                 if ((type >>> 0) !== 0)
                 {
-                    writeU32(wholeAddress(type), cimType);
+                    guest.set32(type, cimType);
                 }
                 if ((flavor >>> 0) !== 0)
                 {
-                    writeU32(wholeAddress(flavor), 0);
+                    guest.set32(flavor, 0);
                 }
                 return S_OK;
             },
@@ -683,7 +677,7 @@ export function registerWbemClasses(host){
                             index++;
                             fetched++;
                         }
-                        writeU32(wholeAddress(returned), fetched);
+                        guest.set32(returned, fetched);
                         return fetched === (count >>> 0) ? S_OK : WBEM_S_FALSE;
                     },
                     Skip: ([, count])=>{
@@ -717,8 +711,8 @@ export function registerWbemClasses(host){
             {
                 return WBEM_E_INVALID_PARAMETER;
             }
-            writeU32(wholeAddress(out), 0);
-            const name = readString(wholeAddress(filter));
+            guest.set32(out, 0);
+            const name = oleText(wholeAddress(filter));
             return publishEnumerator(name.toLowerCase(),
                 instancesOf(name, 'IWbemServices::CreateInstanceEnum'), out >>> 0);
         },
@@ -727,12 +721,12 @@ export function registerWbemClasses(host){
             {
                 return WBEM_E_INVALID_PARAMETER;
             }
-            writeU32(wholeAddress(out), 0);
-            if (readString(wholeAddress(language)).toUpperCase() !== 'WQL')
+            guest.set32(out, 0);
+            if (oleText(wholeAddress(language)).toUpperCase() !== 'WQL')
             {
                 return WBEM_E_INVALID_QUERY_TYPE;
             }
-            const text = readString(wholeAddress(query));
+            const text = oleText(wholeAddress(query));
             const from = /\bfrom\s+(\w+)/i.exec(text);
             if (!from)
             {
@@ -754,8 +748,8 @@ export function registerWbemClasses(host){
             {
                 return WBEM_E_INVALID_PARAMETER;
             }
-            writeU32(wholeAddress(out), 0);
-            const namespace = readString(wholeAddress(resource));
+            guest.set32(out, 0);
+            const namespace = oleText(wholeAddress(resource));
             // `\\.\root\cimv2`, `root\cimv2` or `//./root/cimv2`: the local
             // default namespace is the only one kept.
             if (!/(^|[\\/])root[\\/]cimv2$/i.test(namespace))

@@ -2990,7 +2990,7 @@ export function createWin32Module(){
             // WMI's locator, which a program asks about its video memory and its
             // machine.
             registerWbemClasses({
-                registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
+                registry: com, vtables: comVtables, heap, guest,
                 physicalMemory, processors: processors.count(), windows: reported,
                 divergence: config?.divergence, processorMhz: config?.processorMhz,
             });
@@ -3057,7 +3057,7 @@ export function createWin32Module(){
             // DxDiag's provider, which an installer asks which DirectX this is
             // and a configuration tool how much video memory there is.
             registerDxDiagClasses({
-                registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
+                registry: com, vtables: comVtables, heap, guest,
                 windows, directx, screen: config?.screen, physicalMemory,
                 divergence: config?.divergence,
             });

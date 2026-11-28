@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComRegistry } from './objects.js';
@@ -47,16 +48,7 @@ function setup(){
         } },
         physicalMemory: 512 << 20,
         windows: WINDOWS_VERSIONS.winxp,
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readWideString: address=>{
-            let text = '';
-            for (let at = address; view.getUint16(at, true) !== 0; at += 2)
-            {
-                text += String.fromCharCode(view.getUint16(at, true));
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
     });
     return {
