@@ -15,7 +15,9 @@ import {
     DTS_SHORTDATECENTURYFORMAT, DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, DTM_GETRANGE, DTM_SETRANGE,
     DTM_SETFORMATA, DTM_SETMCCOLOR, DTM_GETMCCOLOR, DTM_GETMONTHCAL, DTM_SETMCFONT, DTM_GETMCFONT,
     DTN_DATETIMECHANGE, DTN_DROPDOWN, DTN_CLOSEUP, GDT_VALID, GDT_NONE, stepField, typeField,
+    createDateTimePickProcedure,
 } from './datetime.js';
+import { wideControl } from './wide.fixture.js';
 import { GDTR_MIN, GDTR_MAX, MCSC_TEXT } from './monthcal.js';
 
 /**
@@ -231,4 +233,43 @@ test('F4 drops a calendar down with the picker\'s day; the day chosen there is t
         context.send([hwnd, DTM_GETSYSTEMTIME, 0, OUT]);
         assert.deepEqual(timeAt(context, OUT).filter((_, at)=>at !== 2),
             [2026, 3, 20, 8, 30, 0, 0], 'the day chosen, the time of day kept');
+    });
+
+test('in a 64-bit process its NMHDR is laid out at the width, and a calendar\'s is read whole',
+    async()=>{
+        const CALENDAR = 0x10030;
+        /** @type {number[][]} */
+        const headers = [];
+        const control = wideControl((host, tk)=>createDateTimePickProcedure(host, tk),
+            (hwnd, message, wParam, lParam)=>{
+                if (message === 0x004e)
+                {
+                    const { guest } = control;
+                    headers.push([guest.ptr(lParam), guest.ptr(lParam + 8),
+                        guest.u32(lParam + 16)]);
+                }
+                return undefined;
+            }, { popup: ()=>CALENDAR, show: ()=>0, destroy: ()=>0 });
+        const { guest, record } = control;
+        const ST64 = 0x1000;
+        moment(2026, 3, 10, 8, 30, 0, 0).forEach((value, at)=>guest.set16(ST64 + at * 2, value));
+        await control.send(DTM_SETSYSTEMTIME, GDT_VALID, ST64);
+        headers.length = 0;
+        await control.send(0x0100, 0x73, 0);
+        assert.deepEqual(headers, [[record.hwnd, record.id, DTN_DROPDOWN]]);
+        assert.equal(await control.send(DTM_GETMONTHCAL, 0, 0), CALENDAR);
+        // MCN_SELECT: an NMSELCHANGE, its day after the 24-byte NMHDR.
+        const note = 0x2000;
+        moment(2026, 3, 20, 0, 0, 0, 0)
+            .forEach((value, at)=>guest.set16(note + 24 + at * 2, value));
+        guest.set32(note + 16, -746);
+        guest.setPtr(note, CALENDAR + 2 ** 32);
+        await control.send(0x004e, 0, note);
+        assert.equal(await control.send(DTM_GETMONTHCAL, 0, 0), CALENDAR,
+            'a window that is not the calendar in its high dword is not it');
+        guest.setPtr(note, CALENDAR);
+        await control.send(0x004e, 0, note);
+        assert.equal(await control.send(DTM_GETMONTHCAL, 0, 0), 0, 'closed');
+        await control.send(DTM_GETSYSTEMTIME, 0, ST64);
+        assert.equal(guest.u16(ST64 + 6), 20, 'the day chosen');
     });

@@ -135,7 +135,7 @@ function createImageListStreams(host, lists){
      * @param {unknown} thread
      */
     const callMethod = async(stream, slot, args, thread)=>{
-        const entry = guest.ptr(guest.ptr(stream) + slot * guest.pointerSize);
+        const entry = guest.method(stream, slot);
         const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
         return (await call(entry, [stream, ...args], thread)) | 0;
     };

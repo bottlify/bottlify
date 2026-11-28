@@ -278,3 +278,42 @@ test('a string a call may be passed as NULL reads as null, an empty one as empty
     assert.equal(guest.optionalText(0x40, false), 'ab');
     assert.equal(guest.optionalText(0x10, true, 2), 'A', 'its limit is the text\'s');
 });
+
+test('a signed pointer-wide value round-trips -1 and a high dword at either width', ()=>{
+    for (const width of /** @type {(4 | 8)[]} */ ([4, 8]))
+    {
+        const bytes = new Uint8Array(0x40);
+        const guest = guestOver(bytes, width);
+        guest.setIptr(0x10, -1);
+        assert.deepEqual([...bytes.subarray(0x10, 0x10 + width)], Array(width).fill(0xff),
+            `${width}: -1 is all ones`);
+        assert.equal(guest.iptr(0x10), -1, `${width}: all ones reads as -1`);
+        guest.setIptr(0x20, -2);
+        assert.equal(guest.iptr(0x20), -2);
+        guest.setIptr(0x30, 0x7fff_1234);
+        assert.equal(guest.iptr(0x30), 0x7fff_1234);
+    }
+    const bytes = new Uint8Array(0x40);
+    const guest = guestOver(bytes, 8);
+    guest.setIptr(0x10, 0x1_2345_6789);
+    assert.equal(guest.ptr(0x10), 0x1_2345_6789, 'a value past 4 GiB is the pointer');
+    assert.equal(guest.iptr(0x10), 0x1_2345_6789);
+    guest.setIptr(0x18, -0x1_0000_0001);
+    assert.equal(guest.u32(0x18), 0xffff_ffff);
+    assert.equal(guest.u32(0x1c), 0xffff_fffe, 'the sign is carried into the upper dword');
+    assert.equal(guest.iptr(0x18), -0x1_0000_0001);
+    guest.set64(0x20, 0xffff_ffff);
+    assert.equal(guest.iptr(0x20), 0xffff_ffff, 'a dword of ones in a 64-bit field is no -1');
+});
+
+test('a COM object\'s method is its vtable\'s entry at the slot, at either width', ()=>{
+    const bytes = new Uint8Array(0x100);
+    const narrow = guestOver(bytes, 4);
+    narrow.set32(0x10, 0x40);
+    narrow.set32(0x40 + 3 * 4, 0x1234_5678);
+    assert.equal(narrow.method(0x10, 3), 0x1234_5678);
+    const wide = guestOver(bytes, 8);
+    wide.setPtr(0x10, 0x80);
+    wide.setPtr(0x80 + 3 * 8, 0x1_2345_6789);
+    assert.equal(wide.method(0x10, 3), 0x1_2345_6789, 'a slot of eight, the entry whole');
+});

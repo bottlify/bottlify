@@ -12,8 +12,9 @@ import { createScreen } from '../../graphics/gdi/screen.js';
 import { setupBars as setupWith, OUT, ITEM, HINSTANCE } from './bars.fixture.js';
 import {
     PAGER_CLASS, PGS_HORZ, PGM_SETCHILD, PGM_SETPOS, PGM_GETPOS, PGN_CALCSIZE, WM_NOTIFY,
-    WM_NOTIFYFORMAT, NF_QUERY, NF_REQUERY, NFR_ANSI, NFR_UNICODE,
+    WM_NOTIFYFORMAT, NF_QUERY, NF_REQUERY, NFR_ANSI, NFR_UNICODE, createPagerProcedure,
 } from './pager.js';
+import { HIGH, wideControl } from './wide.fixture.js';
 
 const setupBars = ()=>setupWith({ createGdiDrawing, createScreen, ...surfaces });
 
@@ -192,4 +193,116 @@ test('a pager keeps no font', async()=>{
     const { context, hwnd } = await pagerOn(NFR_UNICODE);
     await context.send([hwnd, 0x0030, 0x1d0, 0]);
     assert.equal(await context.send([hwnd, 0x0031, 0, 0]), 0);
+});
+
+/**
+ * A pager of a 64-bit process with an ANSI parent, `onNotify` for what the
+ * parent does with a WM_NOTIFY.
+ *
+ * @param {(address: number, control: ReturnType<typeof wideControl>) => void} onNotify
+ */
+const widePager = async onNotify=>{
+    /** @type {ReturnType<typeof wideControl>} */
+    let control;
+    control = wideControl(createPagerProcedure, (hwnd, message, wParam, lParam)=>{
+        if (message === WM_NOTIFYFORMAT)
+        {
+            return NFR_ANSI;
+        }
+        if (message === WM_NOTIFY)
+        {
+            onNotify(lParam, control);
+        }
+        return undefined;
+    });
+    await control.send(WM_NOTIFYFORMAT, 0, NF_REQUERY);
+    return control;
+};
+
+/** A notification's NMHDR of a 64-bit child, its code and the rest zero. */
+const NOTE64 = 0x2000;
+
+test('in a 64-bit process a text past 4 GiB crosses to an ANSI parent whole, and back',
+    async()=>{
+        const wide = HIGH + 0x100;
+        const answer = HIGH + 0x400;
+        /** @type {string[]} */
+        const seen = [];
+        const control = await widePager((address, { guest })=>{
+            seen.push(guest.cstr(guest.ptr(address + 48)));
+            guest.writeAnsi(answer, 'answer');
+            guest.setPtr(address + 48, answer);
+        });
+        const { guest, putWide: plantWide } = control;
+        plantWide(wide, 'test');
+        guest.set32(NOTE64 + 16, -175);
+        guest.set32(NOTE64 + 24, 1);
+        guest.setPtr(NOTE64 + 48, wide);
+        guest.set32(NOTE64 + 56, 64);
+        await control.send(WM_NOTIFY, 1, NOTE64);
+        assert.deepEqual(seen, ['test']);
+        assert.equal(guest.ptr(NOTE64 + 48), wide, 'the program\'s buffer again, whole');
+        assert.equal(guest.wstr(wide), 'answer');
+    });
+
+test('in a 64-bit process LPSTR_TEXTCALLBACK reaches an ANSI parent as all ones and stays so',
+    async()=>{
+        /** @type {number[]} */
+        const seen = [];
+        const control = await widePager((address, { guest })=>{
+            seen.push(guest.iptr(address + 48));
+        });
+        const { guest } = control;
+        guest.set32(NOTE64 + 16, -175);
+        guest.set32(NOTE64 + 24, 1);
+        guest.setIptr(NOTE64 + 48, -1);
+        await control.send(WM_NOTIFY, 1, NOTE64);
+        assert.deepEqual(seen, [-1]);
+        assert.equal(guest.iptr(NOTE64 + 48), -1);
+    });
+
+test('in a 64-bit process a header item, its text and its filter past 4 GiB cross whole',
+    async()=>{
+        const item = HIGH + 0x200;
+        const filter = HIGH + 0x300;
+        /** @type {(string | boolean)[]} */
+        const seen = [];
+        const control = await widePager((address, { guest })=>{
+            const copy = guest.ptr(address + 32);
+            seen.push(copy !== item, guest.cstr(guest.ptr(copy + 8)),
+                guest.cstr(guest.ptr(guest.ptr(copy + 56))));
+        });
+        const { guest, putWide: plantWide } = control;
+        plantWide(HIGH + 0x500, 'head');
+        plantWide(HIGH + 0x600, 'filt');
+        guest.set32(item, 0x0102);
+        guest.setPtr(item + 8, HIGH + 0x500);
+        guest.setPtr(item + 56, filter);
+        guest.setPtr(filter, HIGH + 0x600);
+        guest.set32(NOTE64 + 16, -320);
+        guest.setPtr(NOTE64 + 32, item);
+        await control.send(WM_NOTIFY, 1, NOTE64);
+        assert.deepEqual(seen, [true, 'head', 'filt']);
+        assert.equal(guest.ptr(NOTE64 + 32), item, 'the program\'s item again, whole');
+        assert.equal(guest.i32(NOTE64 + 16), -300);
+    });
+
+test('in a 64-bit process DTN_FORMAT\'s format and display past 4 GiB cross whole', async()=>{
+    const shown = HIGH + 0x700;
+    /** @type {string[]} */
+    const seen = [];
+    const control = await widePager((address, { guest })=>{
+        seen.push(guest.cstr(guest.ptr(address + 24)));
+        guest.writeAnsi(shown, 'shown');
+        guest.setPtr(address + 48, shown);
+    });
+    const { guest, putWide: plantWide } = control;
+    plantWide(HIGH + 0x800, 'yyyy');
+    guest.set32(NOTE64 + 16, -743);
+    guest.setPtr(NOTE64 + 24, HIGH + 0x800);
+    await control.send(WM_NOTIFY, 1, NOTE64);
+    assert.deepEqual(seen, ['yyyy']);
+    assert.equal(guest.ptr(NOTE64 + 24), HIGH + 0x800, 'the format given back whole');
+    assert.ok(guest.ptr(NOTE64 + 48) > 2 ** 32);
+    assert.equal(guest.wstr(guest.ptr(NOTE64 + 48)), 'shown');
 });

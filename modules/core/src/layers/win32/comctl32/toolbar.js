@@ -54,6 +54,7 @@ import { readText, writeText, LPSTR_TEXTCALLBACK } from './strings.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
 import { stripOfBitmapId } from './strips.js';
 import { utf16z } from '../common/utf16.js';
+import { struct } from '../../../system/layout.js';
 
 /** The class name a program creates the control by. */
 export const TOOLBAR_CLASS = 'ToolbarWindow32';
@@ -195,8 +196,18 @@ const TIP_TEXT = 80;
 
 /** TBBUTTON: iBitmap, idCommand, fsState, fsStyle, two bytes, dwData, iString. */
 const TBBUTTON_SIZE = 20;
-/** TBADDBITMAP's hInst for comctl32's own strips, and how many images each holds. */
+/**
+ * TBADDBITMAP's hInst for comctl32's own strips, and how many images each
+ * holds: (HINSTANCE)-1, all ones at the width, held as the low dword a
+ * message's lParam (TB_LOADIMAGES) carries it as.
+ */
 const HINST_COMMCTRL = 0xffffffff;
+
+/** commctrl.h's TBADDBITMAP: a module, or none, and a resource id or a bitmap handle. */
+export const TBADDBITMAP = struct([['hInst', 'ptr'], ['nID', 'ptr']]);
+/** commctrl.h's TBREPLACEBITMAP: the bitmap a module gave, and the one it gives instead. */
+const TBREPLACEBITMAP = struct([['hInstOld', 'ptr'], ['nIDOld', 'ptr'], ['hInstNew', 'ptr'],
+    ['nIDNew', 'ptr'], ['nButtons', 'i32']]);
 const ILC_MASK_COLOR32 = 0x0021;
 /** The first row's distance from the top, and a separator's width when it gives none. */
 const TOP_MARGIN = 2;
@@ -474,6 +485,9 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         }
     };
 
+    /** A structure's HINSTANCE: a module's base, or HINST_COMMCTRL. @param {number} at */
+    const instanceAt = at=>(guest.iptr(at) === -1 ? HINST_COMMCTRL : guest.ptr(at));
+
     /**
      * TB_ADDBITMAP's TBADDBITMAP: a bitmap handle (hInst NULL), a bitmap
      * resource of a module, or one of comctl32's standard strips.
@@ -485,7 +499,8 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         {
             return -1;
         }
-        return addFrom(record, count, guest.u32(address), guest.u32(address + 4));
+        const at = TBADDBITMAP.at(guest.pointerSize);
+        return addFrom(record, count, instanceAt(address + at.hInst), guest.ptr(address + at.nID));
     };
 
     /**
@@ -550,8 +565,11 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         {
             return 0;
         }
-        const [oldInstance, oldId, instance, id] = [0, 4, 8, 12]
-            .map(at=>guest.u32(address + at));
+        const at = TBREPLACEBITMAP.at(guest.pointerSize);
+        const oldInstance = instanceAt(address + at.hInstOld);
+        const oldId = guest.ptr(address + at.nIDOld);
+        const instance = instanceAt(address + at.hInstNew);
+        const id = guest.ptr(address + at.nIDNew);
         const source = held.sources.find(entry=>entry.instance === oldInstance
             && entry.id === oldId);
         const bitmap = instance === 0 ? id : resources.loadBitmap?.(instance, id) ?? 0;
@@ -560,7 +578,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             return 0;
         }
         Object.assign(source, { instance, id, bitmap, strip: null,
-            declared: guest.i32(address + 16) });
+            declared: guest.i32(address + at.nButtons) });
         if (!held.ownList)
         {
             host.divergence?.('TB_REPLACEBITMAP', 'a list the program gave is not refilled');

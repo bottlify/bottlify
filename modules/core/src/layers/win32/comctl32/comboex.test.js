@@ -16,8 +16,9 @@ import {
     CBEM_SETEXSTYLE, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_GETITEMDATA, CB_SETITEMDATA, CB_SETCURSEL,
     CB_GETCURSEL, CB_FINDSTRINGEXACT, CBEIF_TEXT, CBEIF_IMAGE, CBEIF_INDENT, CBEIF_LPARAM,
     CBEIF_DI_SETITEM, CBEN_GETDISPINFOA, CBEN_INSERTITEM, CBEN_DELETEITEM, CBEN_ENDEDITA,
-    CBENF_DROPDOWN, CBES_EX_CASESENSITIVE,
+    CBENF_DROPDOWN, CBES_EX_CASESENSITIVE, createComboBoxExProcedure,
 } from './comboex.js';
+import { HIGH, wideControl } from './wide.fixture.js';
 
 /**
  * The expectations are the extended combo box's documented contract and
@@ -300,3 +301,61 @@ test('an item the combo box asks it to draw is drawn, highlighted when selected'
     assert.equal(context.pixel(hwnd, 58, 1) & 0xffffff, (highlight & 0xff) << 16
         | highlight & 0xff00 | highlight >>> 16 & 0xff, 'the highlight behind it');
 });
+
+/** COMBOBOXEXITEM's offsets in a 64-bit process. */
+const ITEM64 = { iItem: 8, pszText: 16, cchTextMax: 24, lParam: 48, header: 24 };
+
+test('in a 64-bit process an item\'s text, index and lParam are whole, both ways', async()=>{
+    /** @type {number[]} */
+    const told = [];
+    const control = wideControl((host, tk)=>createComboBoxExProcedure(host, tk),
+        (hwnd, message, wParam, lParam)=>{
+            if (message === 0x004e && control.guest.u32(lParam + 16) === CBEN_INSERTITEM)
+            {
+                const at = lParam + ITEM64.header;
+                told.push(control.guest.ptr(lParam), control.guest.iptr(at + ITEM64.iItem),
+                    control.guest.iptr(at + ITEM64.lParam));
+            }
+            return undefined;
+        });
+    const { guest } = control;
+    const item = 0x1000;
+    guest.writeAnsi(HIGH + 0x100, 'one');
+    guest.set32(item, CBEIF_TEXT | CBEIF_LPARAM);
+    guest.setIptr(item + ITEM64.iItem, -1);
+    guest.setPtr(item + ITEM64.pszText, HIGH + 0x100);
+    guest.setIptr(item + ITEM64.lParam, -0x1_2345_6789);
+    assert.equal(await control.send(CBEM_INSERTITEMA, 0, item), 0);
+    assert.deepEqual(told, [control.record.hwnd, 0, -0x1_2345_6789]);
+
+    guest.fill(item, 0, 56);
+    guest.set32(item, CBEIF_TEXT | CBEIF_LPARAM);
+    guest.setPtr(item + ITEM64.pszText, HIGH + 0x200);
+    guest.set32(item + ITEM64.cchTextMax, 32);
+    await control.send(CBEM_GETITEMA, 0, item);
+    assert.equal(guest.cstr(HIGH + 0x200), 'one', 'into the buffer past 4 GiB');
+    assert.equal(guest.iptr(item + ITEM64.lParam), -0x1_2345_6789);
+});
+
+test('in a 64-bit process LPSTR_TEXTCALLBACK, all ones, asks the parent for the text',
+    async()=>{
+        const control = wideControl((host, tk)=>createComboBoxExProcedure(host, tk),
+            (hwnd, message, wParam, lParam)=>{
+                if (message === 0x004e && control.guest.u32(lParam + 16) === CBEN_GETDISPINFOA)
+                {
+                    const at = lParam + ITEM64.header;
+                    control.guest.writeAnsi(control.guest.ptr(at + ITEM64.pszText), 'asked');
+                }
+                return undefined;
+            });
+        const { guest } = control;
+        const item = 0x1000;
+        guest.set32(item, CBEIF_TEXT);
+        guest.setIptr(item + ITEM64.iItem, 0);
+        guest.setIptr(item + ITEM64.pszText, -1);
+        assert.equal(await control.send(CBEM_INSERTITEMA, 0, item), 0);
+        guest.setPtr(item + ITEM64.pszText, HIGH + 0x200);
+        guest.set32(item + ITEM64.cchTextMax, 32);
+        await control.send(CBEM_GETITEMA, 0, item);
+        assert.equal(guest.cstr(HIGH + 0x200), 'asked');
+    });

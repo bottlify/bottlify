@@ -58,6 +58,10 @@
  * @property {(address: number) => number} f32
  * @property {(address: number) => number} f64
  * @property {(address: number) => number} ptr  a pointer of the process's width, whole
+ * @property {(address: number) => number} iptr
+ *     A signed value of the process's width (INT_PTR, LONG_PTR, LPARAM,
+ *     LRESULT): all ones is -1 at either width, as a sentinel pointer
+ *     (`(LPSTR)-1`, `I_IMAGECALLBACK`, `INVALID_HANDLE_VALUE`) is compared.
  * @property {(address: number, value: number) => void} set8  either sign: the low byte
  * @property {(address: number, value: number) => void} set16
  * @property {(address: number, value: number) => void} set32
@@ -65,6 +69,9 @@
  * @property {(address: number, value: number) => void} setF32
  * @property {(address: number, value: number) => void} setF64
  * @property {(address: number, value: number) => void} setPtr
+ * @property {(address: number, value: number) => void} setIptr
+ *     `iptr`'s value written at the process's width, its sign carried into
+ *     the upper dword: -1 is all ones at either width.
  * @property {(address: number, values: ArrayLike<number>) => number} set32s
  *     Consecutive dwords; answers the address after the last, where a
  *     marshaler writes on.
@@ -167,6 +174,11 @@ export function createPort(memory, pointerSize = 4){
             return word.getFloat64(0, true);
         },
         ptr: wide ? address=>readU32(address) + readU32(address + 4) * 2 ** 32 : readU32,
+        // Signed apart from `ptr`: an address is never negative, and the one
+        // pointer all ones names is no address but the sentinel, which `ptr`
+        // would read as 2^64 and `setPtr` could not write back.
+        iptr: wide ? address=>readU32(address) + (readU32(address + 4) | 0) * 2 ** 32
+            : address=>readU32(address) | 0,
         set8: writeU8,
         set16: writeU16,
         set32: writeU32,
@@ -189,6 +201,12 @@ export function createPort(memory, pointerSize = 4){
             ? (address, value)=>{
                 const whole = value < 0 ? value >>> 0 : value;
                 set64(address, whole % 2 ** 32, Math.floor(whole / 2 ** 32));
+            }
+            : writeU32,
+        setIptr: wide
+            ? (address, value)=>{
+                const high = Math.floor(value / 2 ** 32);
+                set64(address, value - high * 2 ** 32, high);
             }
             : writeU32,
         set32s: (address, values)=>{

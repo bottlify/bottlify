@@ -14,7 +14,7 @@
  * LoadImage and gdi32's bits, the hit test is the list box's own messages.
  */
 
-import { TB_ADDBITMAP, TB_ADDBUTTONSA, TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE,
+import { TBADDBITMAP, TB_ADDBITMAP, TB_ADDBUTTONSA, TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE,
     TOOLBAR_CLASS } from './toolbar.js';
 import { createRefusals } from '../common/refusal.js';
 import { after } from '../user32/controls.js';
@@ -138,9 +138,10 @@ export function createHelperFunctions(host){
                         'no window manager to make a toolbar with');
                     return 0;
                 }
-                // The class's name, and a TBADDBITMAP after it.
-                const name = TOOLBAR_CLASS.length + 1;
-                return withBlock(name + 8, block=>{
+                // The class's name, and a TBADDBITMAP after it on its alignment.
+                const bitmap = TBADDBITMAP.at(guest.pointerSize);
+                const name = Math.ceil((TOOLBAR_CLASS.length + 1) / 8) * 8;
+                return withBlock(name + bitmap.SIZE, block=>{
                     guest.writeAnsi(block, TOOLBAR_CLASS);
                     const made = api('user32', 'CreateWindowExA', [0, block, 0,
                         (style | WS_CHILD) >>> 0, 0, 0, 100, 30, parent, id, 0, 0]);
@@ -152,7 +153,8 @@ export function createHelperFunctions(host){
                         /** @param {number} message @param {number} wParam @param {number} lParam */
                         const send = (message, wParam, lParam)=>()=>api('user32', 'SendMessageA',
                             [hwnd, message, wParam, lParam]);
-                        guest.set32s(block + name, [instance, bitmapId]);
+                        guest.setPtr(block + name + bitmap.hInst, instance);
+                        guest.setPtr(block + name + bitmap.nID, bitmapId);
                         const steps = [send(TB_BUTTONSTRUCTSIZE, structSize >>> 0, 0)];
                         // Each pair is used when neither side is zero, -1 a
                         // side left as it is; the buttons' pair sizes the

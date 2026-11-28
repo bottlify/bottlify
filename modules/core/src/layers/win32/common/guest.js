@@ -63,6 +63,10 @@ import { createPort } from '../../../system/port.js';
  * @property {(address: number) => string} guid  the GUID there, in its canonical form
  * @property {(address: number, guid: string) => boolean} setGuid
  *     The GUID's sixteen bytes; nothing is written for a string that is no GUID.
+ * @property {(object: number, slot: number) => number} method
+ *     A COM object's method: the entry at `slot` of the vtable its first
+ *     pointer names, pointers of the process's width; what every call a
+ *     handler makes into a program's object starts from.
  */
 
 /** @typedef {import('../../../system/port.js').Port & GuestText} Guest */
@@ -189,9 +193,10 @@ export function createGuest(memory, pointerSize = 4){
         writeU8(address + count, 0);
         return count;
     };
+    const port = createPort(memory, pointerSize);
     /** @type {Guest} */
     const guest = {
-        ...createPort(memory, pointerSize),
+        ...port,
         stringBytes,
         text,
         optionalText: (address, wide, limit)=>(address === 0 ? null : text(address, wide, limit)),
@@ -202,6 +207,7 @@ export function createGuest(memory, pointerSize = 4){
         writeWide: (address, value, room)=>setText(address, value, true, room),
         // Formatted where it lies: nothing runs between the read and the text.
         guid: address=>formatGuid(memory.window(address, GUID_SIZE)),
+        method: (object, slot)=>port.ptr(port.ptr(object) + slot * pointerSize),
         setGuid: (address, guid)=>{
             const bytes = parseGuid(guid);
             if (bytes !== null)

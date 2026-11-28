@@ -20,7 +20,7 @@ import { guestOver } from '../common/guest.fixture.js';
  * @param {Record<string, (args: number[]) => any>} user32
  * @param {Record<string, (args: number[]) => any>} [gdi32]
  */
-function machine(user32, gdi32){
+function machine(user32, gdi32, width = /** @type {4 | 8} */ (4)){
     const bytes = new Uint8Array(0x20000);
     const view = new DataView(bytes.buffer);
     let next = 0x10000;
@@ -36,7 +36,7 @@ function machine(user32, gdi32){
         return table[name](args);
     } } : undefined);
     const host = {
-        guest: guestOver(bytes),
+        guest: guestOver(bytes, width),
         allocate: (/** @type {number} */ size)=>{
             const at = next;
             next += (size + 15) & ~15;
@@ -103,6 +103,26 @@ test('CreateToolbarEx makes the toolbar and tells it its sizes, bitmap and butto
     assert.deepEqual(sent.map(([message])=>message), [TB_BUTTONSTRUCTSIZE],
         'nothing else when nothing else was given');
     assert.equal(m.fns.CreateToolbarEx.argBytes, 52);
+});
+
+test('in a 64-bit process CreateToolbarEx hands TBADDBITMAP at the width, a module past 4 GiB '
+    + 'whole', ()=>{
+    /** @type {number[]} */
+    const given = [];
+    /** @type {any} */
+    let m = null;
+    m = machine({
+        CreateWindowExA: ()=>0x1234,
+        SendMessageA: ([, message, , lParam])=>{
+            if (message === TB_ADDBITMAP)
+            {
+                given.push(m.host.guest.ptr(lParam), m.host.guest.ptr(lParam + 8), lParam % 8);
+            }
+            return 1;
+        },
+    }, undefined, 8);
+    m.fns.CreateToolbarEx.handler([0x100, 0, 7, 4, 0x1_4000_0000, 0x65, 0, 0, 0, 0, 0, 0, 20]);
+    assert.deepEqual(given, [0x1_4000_0000, 0x65, 0]);
 });
 
 test('CreateToolbarEx answers NULL when the window could not be made', async()=>{
