@@ -56,6 +56,8 @@ import { isMain } from '../lib/common.mjs';
 import { testCache } from '../../modules/core/src/layers/cache/testing.fixture.js';
 import { testPageFile } from '../../modules/core/src/process/page-file.fixture.js';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
+import { logHost, testLog } from '../../modules/core/src/layers/log/testing.fixture.js';
+import { cpuForMemory } from '../../modules/core/src/layers/memory/cpu.fixture.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const LAYERS = join(ROOT, 'modules', 'core', 'src', 'layers');
@@ -333,9 +335,11 @@ async function build(){
         /** @param {number} at @param {Uint8Array} data */
         writePhysical: (at, data)=>bytes.set(data, at),
     };
+    // A real log, as every layer is handed one.
+    const log = await testLog();
     const memoryModule = createMemoryModule();
     const memory = await memoryModule.create({}, /** @type {any} */ ({
-        requireApi: (/** @type {string} */ name)=>(name === 'cpu' ? raw : {}),
+        requireApi: (/** @type {string} */ name)=>(name === 'cpu' ? cpuForMemory(raw) : log),
     }));
     memory.register({ name: 'heap', base: HEAP.base, size: HEAP.size,
         kind: memory.RegionKind.STACK, access: memory.Access.READ_WRITE });
@@ -359,7 +363,8 @@ async function build(){
         }
     };
     const filesystemModule = createFilesystemModule();
-    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+        await logHost());
 
     const thread = { id: 1, tebAddress: 0 };
     /** @type {Map<number, { type: string, object: any }>} */
@@ -371,7 +376,7 @@ async function build(){
         filesystem,
         // The run's cache as a test makes it: a real Cellar in memory.
         cache: (await testCache()).api,
-        log: standIn('log', { enabled: ()=>false, Level: {}, write: ()=>{} }),
+        log,
         kernel: standIn('kernel', {
             // Where the win32 layer lends the pool its thread stacks, at create.
             lendStacks: ()=>{},

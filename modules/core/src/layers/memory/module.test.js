@@ -7,17 +7,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MEMORY_COUNTERS, REGION_COLUMNS, memoryModule } from './module.js';
-import { createMetrics } from '../log/internal/metrics.js';
 import { openTable } from '@bottlify/cellar';
+import { cpuForMemory } from './cpu.fixture.js';
+import { testLog } from '../log/testing.fixture.js';
 
-/** A log layer that only publishes, with a dictionary that numbers words in order. */
-function fakeLog(){
+/** A real log layer, its dictionary numbering words in order where a test reads them back. */
+async function fakeLog(){
     /** @type {string[]} */
     const words = [];
-    const metrics = createMetrics();
     return {
+        ...await testLog(),
         words,
-        metrics,
         /** @param {string} text */
         intern: text=>{
             const at = words.indexOf(text);
@@ -30,13 +30,13 @@ function fakeLog(){
 async function open(log, cpu = {}){
     return memoryModule.create({}, /** @type {any} */ ({
         /** @param {string} name */
-        requireApi: name=>(name === 'log' ? log : cpu),
+        requireApi: name=>(name === 'log' ? log : cpuForMemory(cpu)),
         provide: ()=>{},
     }));
 }
 
 test('the layout is published as a table, lowest first, and kept current', async()=>{
-    const log = fakeLog();
+    const log = await fakeLog();
     const memory = await open(log);
     memory.register({ name: 'stack', base: 0x300000, size: 0x10000, kind: 'stack', access: 'rw' });
     memory.register({ name: 'game.exe', base: 0x400000, size: 0x200000, kind: 'image',
@@ -56,8 +56,8 @@ test('the layout is published as a table, lowest first, and kept current', async
     await memoryModule.dispose();
 });
 
-test('the diagnostics table is the cold path and a fake log without a registry is fine', async()=>{
-    const memory = await open({});
+test('the diagnostics table is the cold path', async()=>{
+    const memory = await open(await testLog());
     memory.register({ name: 'stack', base: 0x300000, size: 0x10000, kind: 'stack', access: 'rw' });
     const metrics = /** @type {any} */ (memoryModule.diagnostics().metrics);
     assert.equal(metrics.regions, 1);
@@ -66,7 +66,7 @@ test('the diagnostics table is the cold path and a fake log without a registry i
 });
 
 test('a write is charged to whoever is in flight, and the frame names the busiest', async()=>{
-    const log = fakeLog();
+    const log = await fakeLog();
     const bytes = new Uint8Array(0x2000);
     const memory = await open(log, {
         /** @param {number} address @param {number} length */
@@ -100,9 +100,9 @@ test('a write is charged to whoever is in flight, and the frame names the busies
     await memoryModule.dispose();
 });
 
-test('an unknown name and a build with no tables charge nothing and still write', async()=>{
+test('a write no writer is charged for still writes', async()=>{
     const bytes = new Uint8Array(0x2000);
-    const memory = await open({}, {
+    const memory = await open(await testLog(), {
         /** @param {number} address @param {number} length */
         readPhysical: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -110,19 +110,17 @@ test('an unknown name and a build with no tables charge nothing and still write'
     });
     memory.register({ name: 'data', base: 0x1000, size: 0x1000, kind: 'thunk-data',
         access: 'rw' });
-    assert.equal(memory.writer('LockRect'), -1, 'no account, no slot');
-    assert.equal(memory.charging(3), -1);
     memory.writeU32(0x1000, 0x11223344);
     assert.equal(bytes[0x1000], 0x44, 'the write still happens');
     await memoryModule.dispose();
 });
 
 test('a second instance in one realm does not take the first one\'s state', async()=>{
-    const first = await open({});
+    const first = await open(await testLog());
     first.register({ name: 'first-only', base: 0x300000, size: 0x1000, kind: 'stack',
         access: 'rw' });
 
-    const second = await open({});
+    const second = await open(await testLog());
     second.register({ name: 'second-only', base: 0x500000, size: 0x1000, kind: 'stack',
         access: 'rw' });
 
@@ -135,7 +133,7 @@ test('a second instance in one realm does not take the first one\'s state', asyn
 
 test('nextRegionAfter answers the lowest region above an address, or nothing past the last one',
     async()=>{
-        const memory = await open({});
+        const memory = await open(await testLog());
         memory.register({ name: 'a', base: 0x1000, size: 0x1000, kind: 'stack', access: 'rw' });
         memory.register({ name: 'c', base: 0x5000, size: 0x1000, kind: 'stack', access: 'rw' });
         memory.register({ name: 'b', base: 0x3000, size: 0x1000, kind: 'stack', access: 'rw' });
@@ -154,7 +152,7 @@ test('nextRegionAfter answers the lowest region above an address, or nothing pas
 
 test('a disposed memory answers harmlessly rather than throwing', async()=>{
     const bytes = new Uint8Array(0x2000);
-    const memory = await open({}, {
+    const memory = await open(await testLog(), {
         /** @param {number} address @param {number} length */
         readPhysical: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -195,7 +193,7 @@ test('readU32sInto and readF32sInto read a whole span in one call, through the m
     async()=>{
         const bytes = new Uint8Array(0x2000);
         const view = new DataView(bytes.buffer);
-        const memory = await open({}, {
+        const memory = await open(await testLog(), {
             /** @param {number} address @param {number} length */
             readPhysical: (address, length)=>bytes.slice(address, address + length),
             /** @param {number} address @param {Uint8Array} data */
@@ -225,7 +223,7 @@ test('readU32sInto and readF32sInto read a whole span in one call, through the m
     });
 
 test('readU32sInto and readF32sInto answer harmlessly once disposed', async()=>{
-    const memory = await open({});
+    const memory = await open(await testLog());
     memory.register({ name: 'data', base: 0x1000, size: 0x10, kind: 'stack', access: 'rw' });
     await memoryModule.dispose();
 
@@ -241,8 +239,8 @@ test('readU32sInto and readF32sInto answer harmlessly once disposed', async()=>{
 });
 
 test('diagnostics answers for the live instance', async()=>{
-    await open({});
-    const second = await open({});
+    await open(await testLog());
+    const second = await open(await testLog());
     second.register({ name: 'a', base: 0x1000, size: 0x10, kind: 'stack', access: 'rw' });
     second.register({ name: 'b', base: 0x2000, size: 0x10, kind: 'stack', access: 'rw' });
 
@@ -256,7 +254,7 @@ test('diagnostics answers for the live instance', async()=>{
 test('the reader and the charge slot are lent while the instance is open', async()=>{
     // What the bridge takes on every host call: the checked dword reads out
     // of the machine's RAM, and the cell a call's writes are charged by.
-    const log = fakeLog();
+    const log = await fakeLog();
     const bytes = new Uint8Array(0x2000);
     const view = new DataView(bytes.buffer);
     const memory = await open(log, {
@@ -337,7 +335,7 @@ function wideMachine(){
 
 test('a pointer is read and written whole, past 4 GiB too, its upper half never kept', async()=>{
     const machine = wideMachine();
-    const memory = await open({}, machine.cpu);
+    const memory = await open(await testLog(), machine.cpu);
     const high = 2 ** 32 + 0x10000;
     memory.register({ name: 'low', base: 0x1000, size: 0x1000, kind: 'thunk-data', access: 'rw' });
     memory.register({ name: 'high', base: high, size: 0x1000, kind: 'thunk-data', access: 'rw' });
@@ -361,7 +359,7 @@ test('a pointer is read and written whole, past 4 GiB too, its upper half never 
 
 test('a word past 4 GiB is never taken from the shared word `>>>` wraps it onto', async()=>{
     const machine = wideMachine();
-    const memory = await open({}, machine.cpu);
+    const memory = await open(await testLog(), machine.cpu);
     const high = 2 ** 32 + 0x10;
     memory.register({ name: 'low', base: 0, size: 0x4000, kind: 'thunk-data', access: 'rw' });
     memory.register({ name: 'high', base: 2 ** 32, size: 0x1000, kind: 'thunk-data',
@@ -397,7 +395,7 @@ test('a swap or a worker\'s write taken as the host\'s is not written again:'
     let between = null;
     /** @type {[number, number][]} */
     const told = [];
-    const memory = await open({}, {
+    const memory = await open(await testLog(), {
         /** @param {number} address @param {number} length */
         readPhysical: (address, length)=>{
             const bytes = ram.slice(address, address + length);
