@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createHandleTableFunctions } from './handle-table.js';
 
 function setup(){
@@ -15,8 +16,7 @@ function setup(){
     /** @type {number[]} */
     const freed = [];
     const fns = createHandleTableFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         allocate: bytes=>(heap += bytes) - bytes,
         free: address=>freed.push(address) > 0,
     });

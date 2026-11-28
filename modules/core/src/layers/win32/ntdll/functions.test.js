@@ -174,14 +174,7 @@ test('a native call answers a pointer it cannot reach with STATUS_ACCESS_VIOLATI
     // The kernel probes what a system call is handed; the same pointer handed
     // to a user-mode Rtl function faults there.
     const host = fakeHost();
-    const unreachable = Object.assign(new Error('no page'), { code: 'GUEST_ACCESS' });
-    const fns = createNtdllFunctions({ ...host, writeMemory: (address, data)=>{
-        if (address >= 0x1000)
-        {
-            throw unreachable;
-        }
-        host.writeMemory(address, data);
-    } });
+    const fns = createNtdllFunctions(host);
     assert.equal(fns.NtQuerySystemInformation.handler([35, 0x2000, 2, 0]),
         STATUS.ACCESS_VIOLATION);
     assert.equal(fns.ZwQuerySystemInformation.handler([35, 0x2000, 2, 0]),

@@ -6,15 +6,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createRandomFunctions } from './random.js';
 
 const machine = ()=>{
     const memory = new Uint8Array(0x100);
     const view = new DataView(memory.buffer);
-    const fns = createRandomFunctions({
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
-    });
+    const fns = createRandomFunctions({ guest: guestOver(memory) });
     return { view, fns };
 };
 

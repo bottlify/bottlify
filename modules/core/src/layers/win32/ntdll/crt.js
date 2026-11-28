@@ -101,8 +101,7 @@ const isLatin1Space = character=>character !== undefined
 
 /**
  * @typedef {Object} CrtHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {Record<string | symbol, any>} [crt]  msvcrt.dll's table, whose
  *     readings these give ntdll's rules.
  */
@@ -137,21 +136,7 @@ const digitsOf = (value, base)=>{
  * @param {CrtHost} host
  */
 export function createNtdllCrt(host){
-    /** @param {number} at @param {string} text @param {boolean} wide */
-    const put = (at, text, wide)=>{
-        const units = Array.from(text, unit=>unit.charCodeAt(0));
-        if (!wide)
-        {
-            host.writeMemory(wholeAddress(at), Uint8Array.from([...units, 0]));
-            return;
-        }
-        const bytes = new Uint8Array((units.length + 1) * 2);
-        units.forEach((unit, index)=>{
-            bytes[index * 2] = unit & 0xff;
-            bytes[index * 2 + 1] = unit >>> 8;
-        });
-        host.writeMemory(wholeAddress(at), bytes);
-    };
+    const { guest } = host;
 
     /**
      * One of the number-to-text entries: `slots` the value's words, `signed`
@@ -179,7 +164,8 @@ export function createNtdllCrt(host){
                 pattern = (pattern << 32n) | BigInt(args[slot] >>> 0);
             }
             const negative = signed && base === 10 && BigInt.asIntN(Number(bits), pattern) < 0n;
-            put(buffer, negative ? `-${digitsOf(-BigInt.asIntN(Number(bits), pattern), base)}`
+            guest.setText(buffer, negative
+                ? `-${digitsOf(-BigInt.asIntN(Number(bits), pattern), base)}`
                 : digitsOf(pattern, base), wide);
             return buffer;
         },
@@ -204,15 +190,14 @@ export function createNtdllCrt(host){
             }
             for (let offset = at; ; offset += 2)
             {
-                const pair = host.readMemory(offset, 2);
-                const unit = pair[0] | pair[1] << 8;
+                const unit = guest.u16(offset);
                 if (unit === 0)
                 {
                     break;
                 }
                 if (unit >= from && unit <= to)
                 {
-                    host.writeMemory(offset, Uint8Array.of(unit + by, 0));
+                    guest.set16(offset, unit + by);
                 }
             }
             return at;
@@ -241,10 +226,8 @@ export function createNtdllCrt(host){
             const limit = counted ? count >>> 0 : Infinity;
             for (let at = 0; at < limit; at++)
             {
-                const a = host.readMemory(wholeAddress(first) + at * 2, 2);
-                const b = host.readMemory(wholeAddress(second) + at * 2, 2);
-                const left = asciiLower(a[0] | a[1] << 8);
-                const right = asciiLower(b[0] | b[1] << 8);
+                const left = asciiLower(guest.u16(wholeAddress(first) + at * 2));
+                const right = asciiLower(guest.u16(wholeAddress(second) + at * 2));
                 if (left !== right || left === 0)
                 {
                     return left - right;

@@ -25,7 +25,8 @@
  */
 
 import { GUID_NULL, GUID_SIZE, parseGuid } from '../../../system/guid.js';
-import { GUID, bytesView, fieldOf, struct, write } from '../../../system/layout.js';
+import { GUID, fieldOf, struct, write } from '../../../system/layout.js';
+import { bufferPort } from '../../../system/port.js';
 
 /**
  * The header as [MS-CFB] 2.2 lays it out: the signature and a class, the
@@ -424,7 +425,7 @@ export function planCompound(root){
                 view.setUint32(at + index * 4, words[index], true);
             }
         };
-        const fields = bytesView(out);
+        const fields = bufferPort(out);
         /**
          * @param {number} at @param {import('../../../system/layout.js').Table} table
          * @param {Record<string, number>} values

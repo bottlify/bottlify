@@ -24,7 +24,8 @@
 import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
-import { bytesView, fieldOf, struct, write as writeField } from '../../../system/layout.js';
+import { fieldOf, struct, write as writeField } from '../../../system/layout.js';
+import { bufferPort } from '../../../system/port.js';
 
 /** The last errors DeleteFile and RemoveDirectory leave. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -450,7 +451,7 @@ export function createPathFunctions(host){
      */
     const writeFound = (address, entry, layout)=>{
         const bytes = new Uint8Array(layout.SIZE);
-        const view = bytesView(bytes);
+        const view = bufferPort(bytes);
         writeField(view, 0, layout, 'attrib', entry.isDirectory ? A_SUBDIR : A_ARCH);
         const time = Math.floor((entry.modified ?? 0) / 1000);
         for (const field of ['time_create', 'time_access', 'time_write'])

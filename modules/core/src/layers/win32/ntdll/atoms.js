@@ -45,7 +45,6 @@ const ATOM_BASIC_INFORMATION = 0;
 /**
  * @typedef {Object} AtomTableHost
  * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(bytes: number) => number} allocate  The process heap.
  * @property {(address: number) => boolean} free
  */
@@ -113,7 +112,7 @@ export function createAtomTableFunctions(host){
     /** @param {number} pointer @returns {ReturnType<typeof parseAtomName>} */
     const nameAt = pointer=>{
         const raw = wholeAddress(pointer);
-        return parseAtomName(raw < 0x10000 ? raw : host.readWideString(raw, MAX_READ_BYTES));
+        return parseAtomName(raw < 0x10000 ? raw : host.guest.wstr(raw, MAX_READ_BYTES));
     };
 
     /** @param {Table} table @param {string} name */

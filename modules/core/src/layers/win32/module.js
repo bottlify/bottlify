@@ -7289,11 +7289,7 @@ export function createWin32Module(){
             // would reject the very handle GetProcessHeap hands out.
             lazyLibraries.define('ntdll.dll', ()=>createNtdllFunctions({
                 pointerSize,
-                readMemory,
-                writeMemory,
                 guest,
-                readCString,
-                readWideString,
                 kernel32: libraries['KERNEL32.dll'],
                 pool: threadPool.native,
                 dllNotifications: modules.dllNotifications,

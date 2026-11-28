@@ -37,8 +37,6 @@ const GUID_TEXT = /^\{([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([
 /**
  * @typedef {Object} StringOpsHost
  * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(bytes: number) => number} allocate
  */
 
@@ -102,7 +100,7 @@ export function parseInteger(text, base){
  * @param {StringOpsHost} host
  */
 export function createStringOperations(host){
-    const { readDescriptor, writeDescriptor, wideAt } = countedStringAccess(host);
+    const { readDescriptor, writeDescriptor, countedText } = countedStringAccess(host);
     const { guest } = host;
 
     /** The characters of a narrow counted string, as bytes. @param {number} at */
@@ -112,10 +110,7 @@ export function createStringOperations(host){
     };
 
     /** The units of a wide counted string. @param {number} at */
-    const wideUnits = at=>{
-        const { length, buffer } = readDescriptor(wholeAddress(at));
-        return textUnits(wideAt(buffer, length));
-    };
+    const wideUnits = at=>textUnits(countedText(readDescriptor(wholeAddress(at)), true));
 
     /** @param {number} flag  A BOOLEAN in its slot. */
     const asked = flag=>(flag & 0xff) !== 0;
@@ -297,7 +292,7 @@ export function createStringOperations(host){
                         buffer: 0 });
                     return STATUS.SUCCESS;
                 }
-                const text = host.readWideString(wholeAddress(source), MAX_WIDE_BYTES + 2 * 2);
+                const text = guest.wstr(wholeAddress(source), MAX_WIDE_BYTES + 2 * 2);
                 if (text.length * 2 > MAX_WIDE_BYTES)
                 {
                     return STATUS.NAME_TOO_LONG;
@@ -351,7 +346,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.SUCCESS;
                 }
-                return append(destination, encodeAnsi(host.readCString(wholeAddress(source),
+                return append(destination, encodeAnsi(guest.cstr(wholeAddress(source),
                     0x10000)), 1);
             },
         },
@@ -366,7 +361,7 @@ export function createStringOperations(host){
                     return STATUS.SUCCESS;
                 }
                 return append(destination,
-                    utf16(host.readWideString(wholeAddress(source), 0x20000)), 2);
+                    utf16(guest.wstr(wholeAddress(source), 0x20000)), 2);
             },
         },
 
@@ -644,7 +639,7 @@ export function createStringOperations(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([string, base, out])=>{
-                const value = parseInteger(host.readCString(wholeAddress(string), 0x10000),
+                const value = parseInteger(guest.cstr(wholeAddress(string), 0x10000),
                     base >>> 0);
                 if (value === null)
                 {
@@ -664,8 +659,8 @@ export function createStringOperations(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([string, base, out])=>{
-                const { length, buffer } = readDescriptor(wholeAddress(string));
-                const value = parseInteger(wideAt(buffer, length), base >>> 0);
+                const value = parseInteger(countedText(readDescriptor(wholeAddress(string)), true),
+                    base >>> 0);
                 if (value === null)
                 {
                     return STATUS.INVALID_PARAMETER;
@@ -731,7 +726,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.BUFFER_OVERFLOW;
                 }
-                guest.setBytes(to.buffer, utf16z(text));
+                guest.writeWide(to.buffer, text);
                 writeDescriptor(wholeAddress(string), { ...to, length: text.length * 2 });
                 return STATUS.SUCCESS;
             },
@@ -742,8 +737,8 @@ export function createStringOperations(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, guid])=>{
-                const { length, buffer } = readDescriptor(wholeAddress(string));
-                const match = GUID_TEXT.exec(wideAt(buffer, length));
+                const text = countedText(readDescriptor(wholeAddress(string)), true);
+                const match = GUID_TEXT.exec(text);
                 if (!match)
                 {
                     return STATUS.INVALID_PARAMETER;
@@ -779,7 +774,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.NO_MEMORY;
                 }
-                guest.setBytes(buffer, utf16z(text));
+                guest.writeWide(buffer, text);
                 writeDescriptor(wholeAddress(string),
                     { length: text.length * 2, maximumLength: (text.length + 1) * 2, buffer });
                 return STATUS.SUCCESS;
@@ -858,7 +853,7 @@ export function createStringOperations(host){
             /** @param {number[]} args */
             handler: ([message, width, ignoreInserts, ansi, isArray, list, buffer, size,
                 returned])=>{
-                const format = message === 0 ? '' : host.readWideString(wholeAddress(message),
+                const format = message === 0 ? '' : guest.wstr(wholeAddress(message),
                     0x20000);
                 // A va_list is a pointer to the first argument, passed by
                 // address; an array is passed as itself.
@@ -873,8 +868,8 @@ export function createStringOperations(host){
                     args: list === 0 ? null
                         : { array: asked(isArray), read: slot=>guest.u32(slots + slot * 4) },
                     readString: (address, wide)=>(address === 0 ? '(null)' : wide
-                        ? host.readWideString(wholeAddress(address), 0x20000)
-                        : host.readCString(wholeAddress(address), 0x10000)),
+                        ? guest.wstr(wholeAddress(address), 0x20000)
+                        : guest.cstr(wholeAddress(address), 0x10000)),
                     room,
                 });
                 // A va_list is used up as far as it was read, as va_arg leaves it.
@@ -893,7 +888,7 @@ export function createStringOperations(host){
                     guest.setBytes(wholeAddress(buffer), overflowed(text, piece, total));
                     return STATUS.BUFFER_OVERFLOW;
                 }
-                guest.setBytes(wholeAddress(buffer), utf16z(text));
+                guest.writeWide(wholeAddress(buffer), text);
                 if (returned !== 0)
                 {
                     guest.set32(wholeAddress(returned), (text.length + 1) * 2);

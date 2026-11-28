@@ -123,9 +123,12 @@ seeded accesses of every kind through the port and through a plain model of memo
 faults, bytes and the write path told compared. A handler has it as `host.guest`
 ([`common/guest.js`](../../modules/core/src/layers/win32/common/guest.js)), with the process's
 text beside it, which the win32 layer builds once per process and hands to each library, and to
-the sound and input layers through its api: `cstr` and `wstr` read a string to its terminator or
-to a limit in bytes (cut there, a fault only where memory ends), `writeAnsi` and `writeWide` write
-one cut to its room, `guid` and `setGuid` a GUID in its canonical form. A write whose length is
+the sound and input layers through its api. Its text is one reader and one writer, the width
+(ANSI or UTF-16) their modifier, and every A/W pair's guest text goes through them: `text` reads a
+string to its terminator or to a limit in bytes (cut there, a fault only where memory ends), or a
+counted string's length whole; `setText` writes one cut to its room; `cstr`, `wstr`,
+`writeAnsi` and `writeWide` are the two widths named. `guid` and `setGuid` read and write a
+GUID in its canonical form. A write whose length is
 the program's is never made on the host first: `fill` is the memory layer's own, and `setMade`
 (`writeMade` for a library handed only a write, `writeZeros` for zeros) makes a pattern or random
 bytes a 64 KiB chunk at a time as it writes them, so a length the destination does not have
@@ -139,7 +142,8 @@ a handler ([`msvcrt/guest-code.js`](../../modules/core/src/layers/win32/msvcrt/g
 `guestEntry`), so the C runtime's libraries are handed the view and nothing else; a structure
 they lay out in guest memory, `__pioinfo`'s entries among them, is declared once with
 [`system/layout.js`](../../modules/core/src/system/layout.js)'s `struct` and laid out at the
-process's width.
+process's width, its fields read and written through the port (or `bufferPort`'s, the same calls
+over a host buffer, for a structure put together before it is written whole).
 
 ## One call, from the program to JS and back
 

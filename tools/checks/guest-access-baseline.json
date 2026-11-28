@@ -55,8 +55,7 @@
    "string stringAt": 1
   },
   "graphics/d3d10/effect.js": {
-   "accessor word": 1,
-   "string string": 1
+   "accessor word": 1
   },
   "graphics/d3d10/geometry.js": {
    "accessor word": 1
@@ -222,7 +221,6 @@
    "accessor readDword": 1,
    "accessor writeDword": 1,
    "copy readMemory().slice()": 1,
-   "string ansi": 1,
    "string wideAt": 1
   },
   "win32/advapi32/crypto.js": {
@@ -305,8 +303,7 @@
    "copy readMemory().slice()": 5
   },
   "win32/cabinet/functions.js": {
-   "accessor writeU32": 1,
-   "string string": 1
+   "accessor writeU32": 1
   },
   "win32/cfgmgr32/functions.js": {
    "accessor writeDword": 1
@@ -508,8 +505,7 @@
   },
   "win32/dbghelp/functions.js": {
    "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "string wide": 1
+   "accessor writeU32": 1
   },
   "win32/dbghelp/image-certificates.js": {
    "accessor dword": 1,
@@ -581,8 +577,7 @@
    "accessor writeU32s": 1
   },
   "win32/gdiplus/codecs.js": {
-   "accessor putPointer": 1,
-   "string wide": 1
+   "accessor putPointer": 1
   },
   "win32/gdiplus/fonts.js": {
    "accessor putFloat": 1,
@@ -759,8 +754,7 @@
   "win32/kernel32/slimsync.js": {
    "accessor dword": 1,
    "accessor readWord": 1,
-   "accessor writeWord": 1,
-   "string wide": 1
+   "accessor writeWord": 1
   },
   "win32/kernel32/slist.js": {
    "accessor read32": 1,
@@ -837,8 +831,7 @@
    "accessor f64": 1,
    "accessor putF64": 1,
    "accessor putU64": 1,
-   "accessor u64": 1,
-   "string wide": 1
+   "accessor u64": 1
   },
   "win32/mfplat/objects.js": {
    "accessor word": 2,
@@ -911,14 +904,6 @@
   "win32/netapi32/workstation.js": {
    "accessor writeU32": 1
   },
-  "win32/ntdll/integer.js": {
-   "string wide": 1
-  },
-  "win32/ntdll/strings.js": {
-   "string ansiAt": 1,
-   "string wideAt": 1,
-   "string writeWide": 1
-  },
   "win32/odbc32/functions.js": {
    "accessor writeI16": 1,
    "accessor writeU32": 1
@@ -964,8 +949,7 @@
    "accessor readU32": 1,
    "accessor writePointer": 1,
    "accessor writeU32": 1,
-   "copy readMemory().slice()": 6,
-   "string ansi": 1
+   "copy readMemory().slice()": 6
   },
   "win32/ole32/mmdevapi.js": {
    "accessor writeU32": 1,
@@ -983,9 +967,7 @@
   "win32/ole32/ole2.js": {
    "accessor word": 1,
    "copy readMemory().slice()": 1,
-   "string ansi": 1,
-   "string string": 1,
-   "string wide": 1
+   "string string": 1
   },
   "win32/ole32/oleutil.js": {
    "accessor readU16": 1,
@@ -1028,9 +1010,6 @@
   "win32/ole32/wbem.js": {
    "accessor writeU32": 1,
    "string readString": 1
-  },
-  "win32/oleaut32/arithmetic.js": {
-   "string wide": 1
   },
   "win32/oleaut32/errorinfo.js": {
    "accessor writeU32": 1,
@@ -1093,9 +1072,6 @@
   },
   "win32/programs/dxsetup.js": {
    "accessor u32": 1
-  },
-  "win32/programs/functions.js": {
-   "string wide": 1
   },
   "win32/programs/reg.js": {
    "accessor dword": 1
@@ -1165,8 +1141,7 @@
   },
   "win32/rpcrt4/proxyfile.js": {
    "accessor u16": 1,
-   "accessor u32": 1,
-   "string ansi": 1
+   "accessor u32": 1
   },
   "win32/rpcrt4/runtime.js": {
    "accessor u32": 1
@@ -1193,8 +1168,7 @@
   "win32/setupapi/functions.js": {
    "accessor readU32": 1,
    "accessor writeU32": 1,
-   "copy readMemory().slice()": 10,
-   "string ansi": 1
+   "copy readMemory().slice()": 10
   },
   "win32/setupapi/stringtable.js": {
    "accessor readU32": 1,
@@ -1202,8 +1176,7 @@
    "copy readMemory().slice()": 6
   },
   "win32/shell32/associations.js": {
-   "accessor u32": 1,
-   "string ansi": 1
+   "accessor u32": 1
   },
   "win32/shell32/desktop.js": {
    "accessor dword": 1,
@@ -1308,8 +1281,7 @@
   "win32/urlmon/monikers.js": {
    "accessor readU32": 1,
    "accessor writeU32": 1,
-   "copy readMemory().slice()": 1,
-   "string wide": 1
+   "copy readMemory().slice()": 1
   },
   "win32/urlmon/security.js": {
    "accessor readU32": 1,
@@ -1335,8 +1307,7 @@
   "win32/user32/msgbox.js": {
    "accessor u16": 1,
    "accessor u32": 1,
-   "copy readMemory().slice()": 1,
-   "string wide": 1
+   "copy readMemory().slice()": 1
   },
   "win32/user32/objects.js": {
    "accessor dword": 1,
@@ -1460,8 +1431,7 @@
    "accessor putPointer": 1,
    "accessor readDword": 1,
    "accessor writeDword": 1,
-   "copy readMemory().slice()": 4,
-   "string wide": 1
+   "copy readMemory().slice()": 4
   }
  }
 }

@@ -7,9 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    GUID, POINT, RECT, bytesView, fieldOf, fieldsOf, highOf, layoutOf, read, struct, union, widthOf,
+    GUID, POINT, RECT, fieldOf, fieldsOf, highOf, layoutOf, read, struct, union, widthOf,
     write,
 } from './layout.js';
+import { bufferPort } from './port.js';
 
 test('a field sits on its natural alignment and the end is padded to the most aligned', ()=>{
     // { char; short; char; int; char } is 1+1pad+2+1+3pad+4+1+3pad = 16 by
@@ -67,7 +68,7 @@ test('every scalar kind is read back as it was written, in place', ()=>{
     {
         const table = all.at(width);
         const bytes = new Uint8Array(0x10 + table.SIZE);
-        const view = bytesView(bytes);
+        const view = bufferPort(bytes);
         const values = { u8: 0xfe, i8: -2, u16: 0xfffe, i16: -2, u32: 0xfffffffe, i32: -2,
             f32: 1.5, f64: Math.PI, u64: 0xfedcba9876543210n, i64: -2n,
             ptr: width === 8 ? 0x1234_5678_9abc : 0x89abcdef, handle: 0x88 };
@@ -88,7 +89,7 @@ test('a 64-bit handle is sign-extended, an address zero-extended and kept whole'
     const pair = struct([['h', 'handle'], ['p', 'ptr']]);
     const table = pair.at(8);
     const bytes = new Uint8Array(16);
-    const view = bytesView(bytes);
+    const view = bufferPort(bytes);
     const words = new DataView(bytes.buffer);
     write(view, 0, table, 'h', -1);
     write(view, 0, table, 'p', -1);
@@ -109,7 +110,7 @@ test('a 64-bit handle is sign-extended, an address zero-extended and kept whole'
 
 test('a field that is no scalar is not read or written as one', ()=>{
     const table = struct([['where', POINT], ['name', 'u16', 4]]).at(4);
-    const view = bytesView(new Uint8Array(16));
+    const view = bufferPort(new Uint8Array(16));
     assert.throws(()=>read(view, 0, table, 'where'), RangeError);
     assert.throws(()=>write(view, 0, table, 'name', 1), RangeError);
     assert.throws(()=>read(view, 0, table, 'missing'), RangeError);

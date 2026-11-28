@@ -35,8 +35,7 @@ const STATUS_SUCCESS = 0;
 
 /**
  * @typedef {Object} HandleTableHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} allocate  the process heap
  * @property {(address: number) => boolean} free
  */
@@ -45,17 +44,7 @@ const STATUS_SUCCESS = 0;
  * @param {HandleTableHost} host
  */
 export function createHandleTableFunctions(host){
-    /** @param {number} address */
-    const read = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const write = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
+    const { guest } = host;
 
     /**
      * The record at an index, where one has been given out and is in use.
@@ -63,12 +52,12 @@ export function createHandleTableFunctions(host){
      * @param {number} table @param {number} index
      */
     const inUseAt = (table, index)=>{
-        if (index >= read(table + HANDED_OUT))
+        if (index >= guest.u32(table + HANDED_OUT))
         {
             return 0;
         }
-        const record = read(table + FIRST_HANDLE) + index * read(table + HANDLE_SIZE);
-        return (read(record) & ALLOCATED) !== 0 ? record : 0;
+        const record = guest.u32(table + FIRST_HANDLE) + index * guest.u32(table + HANDLE_SIZE);
+        return (guest.u32(record) & ALLOCATED) !== 0 ? record : 0;
     };
 
     return {
@@ -79,10 +68,11 @@ export function createHandleTableFunctions(host){
         RtlInitializeHandleTable: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([count, size, table])=>{
-                host.writeMemory(wholeAddress(table), new Uint8Array(TABLE_SIZE));
-                write(table + MAX_HANDLE_COUNT, count);
-                write(table + HANDLE_SIZE, size);
+            handler: ([count, size, handed])=>{
+                const table = wholeAddress(handed);
+                guest.fill(table, 0, TABLE_SIZE);
+                guest.set32(table + MAX_HANDLE_COUNT, count);
+                guest.set32(table + HANDLE_SIZE, size);
                 return 0;
             },
         },
@@ -96,40 +86,41 @@ export function createHandleTableFunctions(host){
             returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([table, index])=>{
-                const size = read(table + HANDLE_SIZE);
-                const count = read(table + MAX_HANDLE_COUNT);
-                if (read(table + RESERVED_MEMORY) === 0)
+            handler: ([given, index])=>{
+                const table = wholeAddress(given);
+                const size = guest.u32(table + HANDLE_SIZE);
+                const count = guest.u32(table + MAX_HANDLE_COUNT);
+                if (guest.u32(table + RESERVED_MEMORY) === 0)
                 {
                     const reserved = size * count === 0 ? 0 : host.allocate(size * count);
                     if (reserved === 0)
                     {
                         return 0;
                     }
-                    write(table + RESERVED_MEMORY, reserved);
-                    write(table + FIRST_HANDLE, reserved);
-                    write(table + MAX_HANDLE, reserved + size * count);
+                    guest.set32(table + RESERVED_MEMORY, reserved);
+                    guest.set32(table + FIRST_HANDLE, reserved);
+                    guest.set32(table + MAX_HANDLE, reserved + size * count);
                 }
-                const first = read(table + FIRST_HANDLE);
-                let record = read(table + NEXT_FREE);
+                const first = guest.u32(table + FIRST_HANDLE);
+                let record = guest.u32(table + NEXT_FREE);
                 if (record !== 0)
                 {
-                    write(table + NEXT_FREE, read(record));
+                    guest.set32(table + NEXT_FREE, guest.u32(record));
                 }
                 else
                 {
-                    const handed = read(table + HANDED_OUT);
+                    const handed = guest.u32(table + HANDED_OUT);
                     if (handed >= count)
                     {
                         return 0;
                     }
                     record = first + handed * size;
-                    write(table + HANDED_OUT, handed + 1);
+                    guest.set32(table + HANDED_OUT, handed + 1);
                 }
-                host.writeMemory(record, new Uint8Array(size));
+                guest.fill(record, 0, size);
                 if (wholeAddress(index) !== 0)
                 {
-                    write(index, (record - first) / size);
+                    guest.set32(wholeAddress(index), (record - first) / size);
                 }
                 return record;
             },
@@ -142,15 +133,17 @@ export function createHandleTableFunctions(host){
         RtlFreeHandle: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([table, record])=>{
-                const first = read(table + FIRST_HANDLE);
-                if (wholeAddress(record) < first || wholeAddress(record) >= read(table + MAX_HANDLE)
-                    || (read(record) & ALLOCATED) === 0)
+            handler: ([handed, given])=>{
+                const table = wholeAddress(handed);
+                const record = wholeAddress(given);
+                const first = guest.u32(table + FIRST_HANDLE);
+                if (record < first || record >= guest.u32(table + MAX_HANDLE)
+                    || (guest.u32(record) & ALLOCATED) === 0)
                 {
                     return 0;
                 }
-                write(record, read(table + NEXT_FREE));
-                write(table + NEXT_FREE, record);
+                guest.set32(record, guest.u32(table + NEXT_FREE));
+                guest.set32(table + NEXT_FREE, record);
                 return 1;
             },
         },
@@ -160,14 +153,16 @@ export function createHandleTableFunctions(host){
         RtlIsValidHandle: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([table, record])=>{
-                const first = read(table + FIRST_HANDLE);
-                const size = read(table + HANDLE_SIZE);
-                if (size === 0 || wholeAddress(record) < first || (record - first) % size !== 0)
+            handler: ([handed, given])=>{
+                const table = wholeAddress(handed);
+                const record = wholeAddress(given);
+                const first = guest.u32(table + FIRST_HANDLE);
+                const size = guest.u32(table + HANDLE_SIZE);
+                if (size === 0 || record < first || (record - first) % size !== 0)
                 {
                     return 0;
                 }
-                return inUseAt(table, (record - first) / size) === wholeAddress(record) ? 1 : 0;
+                return inUseAt(table, (record - first) / size) === record ? 1 : 0;
             },
         },
         /**
@@ -178,12 +173,12 @@ export function createHandleTableFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([table, index, out])=>{
-                const record = inUseAt(table, index >>> 0);
+                const record = inUseAt(wholeAddress(table), index >>> 0);
                 if (record === 0)
                 {
                     return 0;
                 }
-                write(out, record);
+                guest.set32(wholeAddress(out), record);
                 return 1;
             },
         },
@@ -191,13 +186,14 @@ export function createHandleTableFunctions(host){
         RtlDestroyHandleTable: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([table])=>{
-                const reserved = read(table + RESERVED_MEMORY);
+            handler: ([handed])=>{
+                const table = wholeAddress(handed);
+                const reserved = guest.u32(table + RESERVED_MEMORY);
                 if (reserved !== 0)
                 {
                     host.free(reserved);
                 }
-                host.writeMemory(wholeAddress(table), new Uint8Array(TABLE_SIZE));
+                guest.fill(table, 0, TABLE_SIZE);
                 return STATUS_SUCCESS;
             },
         },

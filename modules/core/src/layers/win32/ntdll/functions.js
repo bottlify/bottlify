@@ -61,7 +61,6 @@ import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES, USER_SID_TEXT } from '../advapi32/tokens.js';
 import { PROCESSOR_NAME } from '../kernel32/processor.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -193,12 +192,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
 
 /**
  * @typedef {Object} NtdllHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {import('../common/guest.js').Guest} guest  The guest's memory at the
  *     process's pointer width.
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
  * @property {Record<string, Entry>} kernel32  The assembled KERNEL32.dll table.
  * @property {import('./pool.js').PoolDeletions} [pool]  The thread pool's deletions,
  *           answered as statuses.
@@ -443,7 +438,7 @@ export function createNtdllFunctions(host){
             try
             {
                 fill(at);
-                return host.readMemory(at, size);
+                return guest.snapshot(at, size);
             }
             finally
             {
@@ -551,35 +546,28 @@ export function createNtdllFunctions(host){
         ...createSecurityFunctions({ advapi32: host.advapi32 ?? {}, guest, teb: host.teb }),
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
         // Where ntdll's own runtime answers otherwise than msvcrt (`crt.js`).
-        ...createNtdllCrt({ readMemory: host.readMemory, writeMemory: host.writeMemory,
-            crt }),
+        ...createNtdllCrt({ guest, crt }),
 
         ...createCountedStringFunctions({
             guest,
-            readCString: host.readCString,
-            readWideString: host.readWideString,
             allocate,
             free,
         }),
 
         ...createStringOperations({
             guest,
-            readCString: host.readCString,
-            readWideString: host.readWideString,
             allocate,
         }),
 
         ...createImageFunctions({ guest }),
 
-        ...createRandomFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
-        ...createChecksumFunctions({ readMemory: host.readMemory }),
+        ...createRandomFunctions({ guest }),
+        ...createChecksumFunctions({ guest }),
         ...createIpStringFunctions({ guest }),
         ...createCompressionFunctions({ guest }),
-        ...createHandleTableFunctions({ readMemory: host.readMemory,
-            writeMemory: host.writeMemory, allocate, free }),
+        ...createHandleTableFunctions({ guest, allocate, free }),
 
-        ...createAtomTableFunctions({ guest,
-            readWideString: host.readWideString, allocate, free }),
+        ...createAtomTableFunctions({ guest, allocate, free }),
 
         ...createBitmapFunctions({ guest: host.guest }),
 
@@ -616,7 +604,7 @@ export function createNtdllFunctions(host){
                             base: guest.u32(entry + layout.entry.DLL_BASE),
                             size: guest.u32(entry + layout.entry.SIZE_OF_IMAGE),
                             path: units === 0 ? ''
-                                : host.readWideString(guest.u32(name + 4), units * 2),
+                                : guest.wstr(guest.u32(name + 4), units * 2),
                         };
                     });
                 },
@@ -684,7 +672,7 @@ export function createNtdllFunctions(host){
                     const length = kernel32.GetFinalPathNameByHandleW.handler([handle, buffer, room,
                         VOLUME_NAME_NT]) >>> 0;
                     return length === 0 || length >= room ? null
-                        : host.readWideString(buffer, length * 2);
+                        : guest.wstr(buffer, length * 2);
                 }
                 finally
                 {
@@ -746,13 +734,11 @@ export function createNtdllFunctions(host){
 
         ...(['WaitForSingleObjectEx', 'WaitForMultipleObjectsEx', 'SleepEx', 'GetLastError',
             'GetSystemTimeAsFileTime'].every(name=>kernel32[name])
-            ? createWaitFunctions({ readMemory: host.readMemory, kernel32, allocate })
+            ? createWaitFunctions({ guest, kernel32, allocate })
             : {}),
 
         ...(kernel32.GetFullPathNameW
-            ? createPathFunctions({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, readWideString: host.readWideString,
-                kernel32, allocate, free })
+            ? createPathFunctions({ guest, kernel32, allocate, free })
             : {}),
 
         ...(HANDLE_ENTRIES.every(name=>kernel32[name]) ? createHandleNatives({ kernel32 }) : {}),
@@ -768,7 +754,6 @@ export function createNtdllFunctions(host){
 
         ...createDebugFunctions({
             guest,
-            readCString: host.readCString,
             kernel32,
             crt,
             teb: host.teb,
@@ -989,19 +974,16 @@ export function createNtdllFunctions(host){
             /** @param {number[]} args */
             handler: ([out])=>{
                 const text = `\\REGISTRY\\USER\\${USER_SID_TEXT}`;
-                const bytes = utf16z(text);
-                const buffer = allocate(bytes.length);
+                const buffer = allocate((text.length + 1) * 2);
                 if (buffer === 0)
                 {
                     return STATUS.NO_MEMORY;
                 }
-                host.writeMemory(buffer, bytes);
-                const descriptor = new Uint8Array(8);
-                const view = new DataView(descriptor.buffer);
-                view.setUint16(0, text.length * 2, true);
-                view.setUint16(2, bytes.length, true);
-                view.setUint32(4, buffer, true);
-                host.writeMemory(wholeAddress(out), descriptor);
+                guest.writeWide(buffer, text);
+                const at = wholeAddress(out);
+                guest.set16(at, text.length * 2);
+                guest.set16(at + 2, (text.length + 1) * 2);
+                guest.set32(at + 4, buffer);
                 return STATUS.SUCCESS;
             },
         },
@@ -1133,8 +1115,8 @@ export function createNtdllFunctions(host){
             /** @param {number[]} args */
             handler: ([left, right, length])=>{
                 const total = length >>> 0;
-                const a = host.readMemory(wholeAddress(left), total);
-                const b = host.readMemory(wholeAddress(right), total);
+                const a = guest.snapshot(wholeAddress(left), total);
+                const b = guest.view(wholeAddress(right), total);
                 let matched = 0;
                 while (matched < total && a[matched] === b[matched])
                 {
@@ -1156,11 +1138,9 @@ export function createNtdllFunctions(host){
             /** @param {number[]} args */
             handler: ([source, length, pattern])=>{
                 const words = (length >>> 0) >>> 2;
-                const bytes = words === 0 ? new Uint8Array(0)
-                    : host.readMemory(wholeAddress(source), words * 4);
-                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+                const at = wholeAddress(source);
                 let matched = 0;
-                while (matched < words && view.getUint32(matched * 4, true) === pattern >>> 0)
+                while (matched < words && guest.u32(at + matched * 4) === pattern >>> 0)
                 {
                     matched++;
                 }

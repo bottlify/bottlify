@@ -16,9 +16,8 @@
  */
 
 import { STATUS } from './status.js';
-import { COUNTED_STRING } from './strings.js';
+import { COUNTED_STRING, countedStringAccess } from './strings.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 /** RTL_RELATIVE_NAME_U: a counted string, a directory handle and a reference. */
 const RELATIVE_NAME_SIZE = 16;
@@ -28,9 +27,7 @@ const DOS_DEVICES = '\\??\\';
 
 /**
  * @typedef {Object} PathHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {Record<string, { handler: Function }>} kernel32  Needs GetFullPathNameW; with
  *           GetCurrentDirectoryW and SetCurrentDirectoryW, the current directory too.
  * @property {(bytes: number) => number} allocate  The process heap, so that
@@ -217,6 +214,10 @@ function shortNameLegality(name){
  * @param {PathHost} host
  */
 export function createPathFunctions(host){
+    const { guest } = host;
+    const { readDescriptor, writeDescriptor, countedText } = countedStringAccess(host);
+    /** A UNICODE_STRING's text, none for none. @param {number} at */
+    const unicodeText = at=>(at === 0 ? '' : countedText(readDescriptor(wholeAddress(at)), true));
     /**
      * The object name a DOS path stands for, or null when it names nothing:
      * an empty path, or one GetFullPathNameW refuses.
@@ -225,7 +226,7 @@ export function createPathFunctions(host){
      * @returns {string | null}
      */
     const objectName = dos=>{
-        const text = dos === 0 ? '' : host.readWideString(dos, 0x10000);
+        const text = dos === 0 ? '' : guest.wstr(dos, 0x10000);
         if (text === '')
         {
             return null;
@@ -252,7 +253,7 @@ export function createPathFunctions(host){
         }
         const written = fullPath([dos, needed, scratch, 0]) >>> 0;
         const full = written === 0 || written >= needed
-            ? null : host.readWideString(scratch, needed * 2);
+            ? null : guest.wstr(scratch, needed * 2);
         host.free(scratch);
         if (full === null)
         {
@@ -278,23 +279,18 @@ export function createPathFunctions(host){
         {
             return STATUS.OBJECT_NAME_INVALID;
         }
-        const bytes = utf16z(name);
-        if (bytes.length > 0xffff)
+        const total = (name.length + 1) * 2;
+        if (total > 0xffff)
         {
             return STATUS.NAME_TOO_LONG;
         }
-        const buffer = host.allocate(bytes.length);
+        const buffer = host.allocate(total);
         if (buffer === 0)
         {
             return STATUS.NO_MEMORY;
         }
-        host.writeMemory(buffer, bytes);
-        const descriptor = new Uint8Array(COUNTED_STRING.SIZE);
-        const view = new DataView(descriptor.buffer);
-        view.setUint16(COUNTED_STRING.LENGTH, bytes.length - 2, true);
-        view.setUint16(COUNTED_STRING.MAXIMUM_LENGTH, bytes.length, true);
-        view.setUint32(COUNTED_STRING.BUFFER, buffer, true);
-        host.writeMemory(wholeAddress(nt), descriptor);
+        guest.writeWide(buffer, name);
+        writeDescriptor(wholeAddress(nt), { length: total - 2, maximumLength: total, buffer });
         if ((filePart >>> 0) !== 0)
         {
             // The last component, inside the buffer just handed out; none
@@ -302,18 +298,16 @@ export function createPathFunctions(host){
             // A share's server alone is no file either.
             const server = /^\\\?\?\\UNC\\[^\\]*$/.test(name);
             // Nor is a DOS device.
-            const device = dosDeviceName(host.readWideString(wholeAddress(dos), 0x10000)) !== null;
+            const device = dosDeviceName(guest.wstr(wholeAddress(dos), 0x10000)) !== null;
             const part = name.endsWith('\\') || server || device ? 0
                 : buffer + (name.lastIndexOf('\\') + 1) * 2;
-            const out = new Uint8Array(4);
-            new DataView(out.buffer).setUint32(0, part, true);
-            host.writeMemory(wholeAddress(filePart), out);
+            guest.set32(wholeAddress(filePart), part);
         }
         if ((relative >>> 0) !== 0)
         {
             // Nothing is made relative to an open directory here: every name
             // this produces is a full one.
-            host.writeMemory(wholeAddress(relative), new Uint8Array(RELATIVE_NAME_SIZE));
+            guest.fill(wholeAddress(relative), 0, RELATIVE_NAME_SIZE);
         }
         return STATUS.SUCCESS;
     };
@@ -346,7 +340,7 @@ export function createPathFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>(path === 0 ? 0
-                : dosPathType(host.readWideString(wholeAddress(path), 0x10000))),
+                : dosPathType(guest.wstr(wholeAddress(path), 0x10000))),
         },
 
         /**
@@ -360,7 +354,7 @@ export function createPathFunctions(host){
             /** @param {number[]} args */
             handler: ([path])=>{
                 const found = path === 0 ? null
-                    : dosDeviceName(host.readWideString(wholeAddress(path), 0x10000));
+                    : dosDeviceName(guest.wstr(wholeAddress(path), 0x10000));
                 return found === null ? 0 : (found.offset << 16 | found.length) >>> 0;
             },
         },
@@ -376,7 +370,7 @@ export function createPathFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, oem, spaces])=>{
-                const text = countedText(name);
+                const text = unicodeText(name);
                 if (text.length > 12)
                 {
                     return 0;
@@ -384,21 +378,18 @@ export function createPathFunctions(host){
                 const upper = text.toUpperCase();
                 if (oem !== 0)
                 {
-                    const head = new DataView(
-                        host.readMemory(wholeAddress(oem), COUNTED_STRING.SIZE).buffer);
-                    if (head.getUint16(COUNTED_STRING.MAXIMUM_LENGTH, true) < upper.length)
+                    const head = readDescriptor(wholeAddress(oem));
+                    if (head.maximumLength < upper.length)
                     {
                         return 0;
                     }
-                    const bytes = Uint8Array.from(upper, c=>c.charCodeAt(0) & 0xff);
-                    host.writeMemory(head.getUint32(COUNTED_STRING.BUFFER, true), bytes);
-                    host.writeMemory((oem + COUNTED_STRING.LENGTH) >>> 0,
-                        Uint8Array.of(bytes.length & 0xff, bytes.length >> 8));
+                    guest.setBytes(head.buffer, Uint8Array.from(upper, c=>c.charCodeAt(0) & 0xff));
+                    guest.set16(wholeAddress(oem) + COUNTED_STRING.LENGTH, upper.length);
                 }
                 const { legal, spaces: hasSpaces } = shortNameLegality(text);
                 if (legal && spaces !== 0)
                 {
-                    host.writeMemory(wholeAddress(spaces), Uint8Array.of(hasSpaces ? 1 : 0));
+                    guest.set8(wholeAddress(spaces), hasSpaces ? 1 : 0);
                 }
                 return legal ? 1 : 0;
             },
@@ -415,7 +406,7 @@ export function createPathFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, size, buffer, filePart])=>{
-                if (name === 0 || host.readWideString(wholeAddress(name), 2 * 2) === '')
+                if (name === 0 || guest.wstr(wholeAddress(name), 2 * 2) === '')
                 {
                     return 0;
                 }
@@ -444,13 +435,13 @@ export function createPathFunctions(host){
                     argBytes: 4,
                     /** @param {number[]} args */
                     handler: ([path])=>{
-                        const text = countedText(path);
+                        const text = unicodeText(path);
                         const scratch = host.allocate((text.length + 1) * 2);
                         if (scratch === 0)
                         {
                             return STATUS.NO_MEMORY;
                         }
-                        host.writeMemory(scratch, utf16z(text));
+                        guest.writeWide(scratch, text);
                         const done = host.kernel32.SetCurrentDirectoryW.handler([scratch]) !== 0;
                         host.free(scratch);
                         if (done)
@@ -464,27 +455,6 @@ export function createPathFunctions(host){
             }
             : {}),
     };
-
-    /**
-     * The characters of a UNICODE_STRING.
-     *
-     * @param {number} at
-     */
-    function countedText(at){
-        if (at === 0)
-        {
-            return '';
-        }
-        const head = new DataView(host.readMemory(wholeAddress(at), COUNTED_STRING.SIZE).buffer);
-        const length = head.getUint16(COUNTED_STRING.LENGTH, true) & ~1;
-        const bytes = host.readMemory(head.getUint32(COUNTED_STRING.BUFFER, true), length);
-        let text = '';
-        for (let index = 0; index + 1 < bytes.length; index += 2)
-        {
-            text += String.fromCharCode(bytes[index] | bytes[index + 1] << 8);
-        }
-        return text;
-    }
 }
 
 /** The status SetCurrentDirectory's error stands for. */

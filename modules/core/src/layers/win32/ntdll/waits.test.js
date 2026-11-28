@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createWaitFunctions } from './waits.js';
 
 const STATUS_TIMEOUT = 0x102;
@@ -32,7 +33,7 @@ function setup({ answer = 0, lastError = 0 } = {}){
         },
     });
     const fns = createWaitFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
+        guest: guestOver(memory),
         allocate: ()=>0x800,
         kernel32: {
             WaitForSingleObjectEx: recorder('WaitForSingleObjectEx'),

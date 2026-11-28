@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createPathFunctions, fullPathName } from './paths.js';
 
 const DOS = 0x100;
@@ -61,11 +62,7 @@ function fakeHost(){
         },
     };
     const host = {
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            bytes.slice(address, address + length),
-        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, address),
-        readWideString,
+        guest: guestOver(bytes),
         kernel32,
         allocate: (/** @type {number} */ size)=>{
             const at = next;
@@ -204,7 +201,7 @@ test('a full path: devices, device paths, the last name\'s dots, a directory\'s 
 test('an object name is taken as written, a device path is a \\??\\ name, a server no file', ()=>{
     const { host, putWide, dword, counted } = fakeHost();
     host.kernel32.GetFullPathNameW.handler = ([name, size, buffer])=>{
-        const asked = host.readWideString(name, 0x1000);
+        const asked = host.guest.wstr(name, 0x1000);
         const full = asked === 'AUX' ? '\\\\.\\AUX' : asked === '//?/x' ? '\\\\?\\x' : asked;
         if (buffer === 0 || full.length + 1 > size)
         {

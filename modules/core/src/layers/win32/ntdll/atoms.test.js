@@ -38,7 +38,6 @@ function machine(){
     };
     const functions = createAtomTableFunctions({
         guest: guestOver(bytes),
-        readWideString,
         allocate: size=>{
             const at = next;
             next += size;

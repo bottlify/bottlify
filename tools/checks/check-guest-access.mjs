@@ -51,6 +51,47 @@ const ACCESSOR = /^(?:(?:read|write|put|get|set|peek|poke|load|store)(?:U8|U16|U
 const STRING = /^(?:(?:read|write|put|get)(?:C|W|Ansi|Wide)?(?:Str|String|Wide|Ansi)(?:At|Z)?|(?:string|wide|ansi|cstr|wstr)(?:At)?)$/i;
 /** A function defined by a declaration, an arrow or a function expression. */
 const DEFINITION = /(?:^|[^\w$.])(?:function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|(?:\([^()]*(?:\([^()]*\)[^()]*)*\)|[A-Za-z_$][\w$]*)\s*=>))/g;
+/**
+ * A string helper's name that is also a plain word (`wide`, `ansi`,
+ * `string`): one only when its body reaches guest memory, since the same
+ * word names a widening, a flag or a wire's encoder as often.
+ */
+const PLAIN = /^(?:string|wide|ansi)$/i;
+/** What reaching guest memory reads as in a body. */
+const MEMORY = /(?<![\w$])(?:readMemory|writeMemory|readBytes|writeBytes|readCString|readWideString|guest|memory|window|view|snapshot|setBytes|heap)(?![\w$])/;
+
+/**
+ * The body of the definition whose text ends at `end`: to the end of its
+ * statement, its block's close or the list it stands in, at most 4000
+ * characters of it. `depth` is 1 inside a declaration's parameters.
+ *
+ * @param {string} code @param {number} end @param {number} depth
+ */
+function bodyOf(code, end, depth){
+    let at = end;
+    for (; at < Math.min(code.length, end + 4000); at++)
+    {
+        const char = code[at];
+        if ('([{'.includes(char))
+        {
+            depth++;
+        }
+        else if (')]}'.includes(char))
+        {
+            depth--;
+            if (depth < 0 || (depth === 0 && char === '}'))
+            {
+                break;
+            }
+        }
+        else if (depth === 0 && (char === ';' || char === ','))
+        {
+            break;
+        }
+    }
+    return code.slice(end, at + 1);
+}
+
 /** The two reads that answer a copy already. */
 const READ = /(?<![\w$])(?:readMemory|readBytes)\s*\(/g;
 
@@ -114,7 +155,8 @@ export function occurrences(text){
         {
             add(`accessor ${name}`);
         }
-        else if (STRING.test(name))
+        else if (STRING.test(name) && (!PLAIN.test(name)
+            || MEMORY.test(bodyOf(code, end, match[1] ? 1 : 0))))
         {
             add(`string ${name}`);
         }

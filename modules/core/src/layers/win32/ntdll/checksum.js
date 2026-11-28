@@ -17,7 +17,7 @@ import { crc32 } from '../../../system/hash.js';
  */
 
 /**
- * @param {{ readMemory: (address: number, length: number) => Uint8Array }} host
+ * @param {{ guest: import('../common/guest.js').Guest }} host
  */
 export function createChecksumFunctions(host){
     return {
@@ -26,7 +26,7 @@ export function createChecksumFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([initial, data, length])=>crc32((length | 0) <= 0 ? new Uint8Array(0)
-                : host.readMemory(wholeAddress(data), length | 0), initial >>> 0),
+                : host.guest.view(wholeAddress(data), length | 0), initial >>> 0),
         },
     };
 }

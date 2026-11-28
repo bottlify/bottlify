@@ -37,7 +37,6 @@ function setup({ teb = TEB } = {}){
     };
     const fns = /** @type {Record<string, any>} */ (createDebugFunctions({
         guest: guestOver(bytes),
-        readCString,
         kernel32: {
             RaiseException: { handler: (/** @type {number[]} */ args)=>{
                 raised.push(args);

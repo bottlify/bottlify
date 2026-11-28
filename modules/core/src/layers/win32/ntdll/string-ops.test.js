@@ -22,22 +22,6 @@ function machine(){
     let next = 0x2000;
     const ops = createStringOperations({
         guest: guestOver(bytes),
-        readCString: address=>{
-            let text = '';
-            for (let at = address; bytes[at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[at]);
-            }
-            return text;
-        },
-        readWideString: address=>{
-            let text = '';
-            for (let at = address; view.getUint16(at, true) !== 0; at += 2)
-            {
-                text += String.fromCharCode(view.getUint16(at, true));
-            }
-            return text;
-        },
         allocate: size=>{
             const at = next;
             next += size + 15 & ~15;

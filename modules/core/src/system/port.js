@@ -216,3 +216,28 @@ export function createPort(memory, pointerSize = 4){
     };
     return port;
 }
+
+/**
+ * A port over a host buffer, its offsets the addresses: for a structure put
+ * together before it is written whole (`system/layout.js`), read and written
+ * by the same calls as the guest's memory.
+ *
+ * @param {Uint8Array} bytes
+ * @param {4 | 8} [pointerSize]
+ * @returns {Port}
+ */
+export function bufferPort(bytes, pointerSize = 4){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return createPort({
+        readU8: at=>view.getUint8(at),
+        readU16: at=>view.getUint16(at, true),
+        readU32: at=>view.getUint32(at, true),
+        writeU8: (at, value)=>view.setUint8(at, value & 0xff),
+        writeU16: (at, value)=>view.setUint16(at, value & 0xffff, true),
+        writeU32: (at, value)=>view.setUint32(at, value >>> 0, true),
+        readBytes: (at, length)=>bytes.slice(at, at + length),
+        window: (at, length)=>bytes.subarray(at, at + length),
+        writeBytes: (at, data)=>bytes.set(data, at),
+        fillBytes: (at, value, length)=>void bytes.fill(value, at, at + length),
+    }, pointerSize);
+}

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createNtdllCrt } from './crt.js';
 import { createConversionFunctions } from '../msvcrt/convert.js';
 import { createScanFunctions } from '../msvcrt/scan.js';
@@ -14,10 +15,7 @@ import { guestWindow } from '../msvcrt/guest-window.fixture.js';
 
 const machine = ()=>{
     const memory = new Uint8Array(0x1000);
-    const crt = createNtdllCrt({
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
-    });
+    const crt = createNtdllCrt({ guest: guestOver(memory) });
     /** @param {number} at */
     const text = at=>String.fromCharCode(...memory.slice(at, memory.indexOf(0, at)));
     /** @param {number} at */
@@ -104,6 +102,7 @@ const memoryIo = ()=>{
                 memory.slice(at, at + length),
             writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
                 memory.set(bytes, at),
+            guest: guestOver(memory),
         },
     };
 };

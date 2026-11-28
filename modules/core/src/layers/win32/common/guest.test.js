@@ -196,6 +196,22 @@ test('a string stops at its terminator or at its limit, and is written cut to it
     assert.equal(guest.wstr(0x300, 8192), long.slice(0, 2047));
 });
 
+test('text is one reader and one writer with the width a modifier, a counted string whole', ()=>{
+    const ram = new Uint8Array(0x400);
+    const guest = guestOver(ram);
+    for (const wide of [false, true])
+    {
+        const at = wide ? 0x200 : 0x100;
+        assert.equal(guest.setText(at, 'abécd', wide, 4), 3, 'cut to the room');
+        assert.equal(guest.text(at, wide, 64), 'abé');
+        assert.equal(guest.text(at, wide, 64), (wide ? guest.wstr : guest.cstr)(at, 64));
+        // A counted string's length decides: its terminator is a character of it.
+        assert.equal(guest.text(at, wide, 4 * (wide ? 2 : 1), true), 'abé\0');
+        assert.equal(guest.text(at, wide, 0, true), '', 'none read for no length');
+    }
+    assert.equal(guest.text(0x200, true, 5, true), 'ab', 'a wide length in whole units');
+});
+
 test('bytes are one copy, or none into a buffer given; a copy moves as memmove', ()=>{
     const ram = new Uint8Array(0x100);
     ram.set([1, 2, 3, 4, 5, 6, 7, 8], 0x10);

@@ -35,7 +35,8 @@ import {
 } from './widetext.js';
 import { wholeAddress } from '../common/pointers.js';
 import { bytesOfUnits } from '../common/utf16.js';
-import { bytesView, fieldOf, struct, widthOf, write } from '../../../system/layout.js';
+import { fieldOf, struct, widthOf, write } from '../../../system/layout.js';
+import { bufferPort } from '../../../system/port.js';
 
 /** `_open` flags, at msvcrt's values (fcntl.h). */
 /** The system error a read or write without the access answers. */
@@ -405,7 +406,7 @@ export function createDescriptors(host){
      * open.
      *
      * @param {number} fd @param {IoinfoLayout} layout
-     * @param {import('../../../system/layout.js').LayoutView} view @param {number} entry
+     * @param {import('../../../system/port.js').Port} view @param {number} entry
      */
     const writeEntry = (fd, layout, view, entry)=>{
         const descriptor = table.get(fd);
@@ -879,7 +880,7 @@ export function createDescriptors(host){
         ioinfoBytes(layout){
             const blocks = IOINFO.BLOCKS * widthOf(layout);
             const bytes = new Uint8Array(blocks + IOINFO.BLOCK * layout.SIZE);
-            const view = bytesView(bytes);
+            const view = bufferPort(bytes);
             for (let fd = 0; fd < IOINFO.BLOCK; fd++)
             {
                 writeEntry(fd, layout, view, blocks + fd * layout.SIZE);
@@ -1195,7 +1196,7 @@ export function createIoFunctions(host, descriptors){
      */
     const writeStat = (address, entry, layout)=>{
         const bytes = new Uint8Array(layout.SIZE);
-        const view = bytesView(bytes);
+        const view = bufferPort(bytes);
         write(view, 0, layout, 'st_dev', entry.device);
         write(view, 0, layout, 'st_mode', entry.mode);
         write(view, 0, layout, 'st_nlink', 1);
@@ -1493,7 +1494,7 @@ export function createIoFunctions(host, descriptors){
         __badioinfo: {
             data: ()=>{
                 const bytes = new Uint8Array(ioinfoEntry.SIZE);
-                write(bytesView(bytes), 0, ioinfoEntry, 'osfhnd', INVALID_HANDLE_VALUE);
+                write(bufferPort(bytes), 0, ioinfoEntry, 'osfhnd', INVALID_HANDLE_VALUE);
                 bytes[ioinfoEntry.wxflag] = WX_TEXT;
                 return bytes;
             },

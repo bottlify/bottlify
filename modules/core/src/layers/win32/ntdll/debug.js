@@ -87,7 +87,6 @@ const VARIADIC_SLOTS = 32;
 /**
  * @typedef {Object} DebugHost
  * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, maxLength: number) => string} readCString
  * @property {Record<string, { handler: Function } | undefined>} kernel32
  *           RaiseException, OutputDebugStringA.
  * @property {Record<string, { handler: Function } | undefined>} crt  _snprintf.
@@ -207,7 +206,7 @@ export function createDebugFunctions(host){
             /** @param {number[]} args */
             handler: ([prefix, , , format, list])=>{
                 const lead =
-                    wholeAddress(prefix) === 0 ? '' : host.readCString(wholeAddress(prefix),
+                    wholeAddress(prefix) === 0 ? '' : host.guest.cstr(wholeAddress(prefix),
                         DBG_PRINT_LIMIT);
                 const print = host.crt._snprintf;
                 const say = host.kernel32.OutputDebugStringA;

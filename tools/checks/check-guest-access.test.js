@@ -21,13 +21,23 @@ test('a local accessor or string helper is counted however it is defined', ()=>{
         'const writeDword = (address, value)=>host.writeMemory(address, bytes(value));',
         'function u16(address){ return host.readMemory(address, 2)[0]; }',
         'let readPointer = async (/** @type {number} */ at)=>at;',
-        'const wide = function(text){ return text; };',
+        'const wide = function(at){ return host.readWideString(at); };',
         'const stringAt = (at, limit = f(1))=>host.readCString(at, limit);',
     ].join('\n');
     assert.deepEqual(occurrences(code), {
         'accessor readU32': 1, 'accessor writeDword': 1, 'accessor u16': 1,
         'accessor readPointer': 1, 'string wide': 1, 'string stringAt': 1,
     });
+});
+
+test('a plain word named as a string helper is one only where its body reaches memory', ()=>{
+    const code = [
+        'const wide = value=>{ host.setRegisters({ edx: hi(value) }); return lo(value); };',
+        'const string = text=>strings.get(text) ?? add(text);',
+        'function ansi(at){ return memory.readCString(at); }',
+        'const wideAt = at=>at;',
+    ].join('\n');
+    assert.deepEqual(occurrences(code), { 'string ansi': 1, 'string wideAt': 1 });
 });
 
 test('a value, a call, a property or a comment of the same name is not a definition', ()=>{

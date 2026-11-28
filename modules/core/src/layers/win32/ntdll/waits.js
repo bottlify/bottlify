@@ -52,7 +52,7 @@ const TICKS_PER_MS = 10000n;
 
 /**
  * @typedef {Object} WaitHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {Record<string, Entry>} kernel32
  * @property {(bytes: number) => number} allocate  scratch for reading the system time
  */
@@ -61,14 +61,14 @@ const TICKS_PER_MS = 10000n;
  * @param {WaitHost} host
  */
 export function createWaitFunctions(host){
-    const { kernel32 } = host;
+    const { kernel32, guest } = host;
 
     let clock = 0;
     /** The system time now, as a FILETIME count, for a timeout that names a moment. */
     const systemTime = ()=>{
         clock ||= host.allocate(8);
         kernel32.GetSystemTimeAsFileTime.handler([clock]);
-        return new DataView(host.readMemory(clock, 8).buffer).getBigUint64(0, true);
+        return guest.u64(clock);
     };
 
     /**
@@ -81,8 +81,7 @@ export function createWaitFunctions(host){
         {
             return INFINITE;
         }
-        const value = new DataView(host.readMemory(wholeAddress(pointer), 8).buffer)
-            .getBigInt64(0, true);
+        const value = guest.i64(wholeAddress(pointer));
         const ticks = value < 0n ? -value : value - BigInt(systemTime());
         if (ticks <= 0n)
         {
@@ -144,10 +143,10 @@ export function createWaitFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const view = new DataView(host.readMemory(wholeAddress(handles), total * 4).buffer);
+                const list = wholeAddress(handles);
                 for (let at = 0; at < total; at++)
                 {
-                    if (standard(view.getUint32(at * 4, true)))
+                    if (standard(guest.u32(list + at * 4)))
                     {
                         return STATUS.INVALID_HANDLE;
                     }

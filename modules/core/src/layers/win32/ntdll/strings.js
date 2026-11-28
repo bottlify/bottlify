@@ -24,7 +24,6 @@ import { STATUS } from './status.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from '../kernel32/locale.js';
 import { foldName } from '../../../system/text.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 /** UNICODE_STRING and ANSI_STRING, which differ only in what they point at. */
 export const COUNTED_STRING = Object.freeze({
@@ -46,8 +45,6 @@ const MAX_WIDE_BYTES = 0xfffc;
 /**
  * @typedef {Object} CountedStringHost
  * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(bytes: number) => number} allocate  The process heap, so that what
  *           this hands out is what RtlFreeHeap takes back.
  * @property {(address: number) => boolean} free
@@ -79,38 +76,17 @@ export function countedStringAccess({ guest }){
     };
 
     /**
-     * The bytes a counted string covers, rather than what a terminator would
-     * say: a counted string is allowed to hold one, and its length is what
-     * decides where it ends. They are the ANSI code page's, which is what the
-     * Rtl conversions convert from.
+     * The text a counted string covers, rather than what a terminator would
+     * say: a counted string is allowed to hold one, and its length (bytes,
+     * the wide one's too) is what decides where it ends. A narrow one is the
+     * ANSI code page's, which is what the Rtl conversions convert from.
      *
-     * @param {number} buffer @param {number} length
+     * @param {{ length: number, buffer: number }} string @param {boolean} wide
      */
-    const ansiAt = (buffer, length)=>{
-        if (buffer === 0 || length === 0)
-        {
-            return '';
-        }
-        return decodeAnsi(guest.view(buffer, length));
-    };
+    const countedText = ({ length, buffer }, wide)=>(buffer === 0 ? ''
+        : guest.text(buffer, wide, length, true));
 
-    /** @param {number} buffer @param {number} length  In bytes, as the field is. */
-    const wideAt = (buffer, length)=>{
-        const bytes = length & ~1;
-        if (buffer === 0 || bytes === 0)
-        {
-            return '';
-        }
-        const raw = guest.view(buffer, bytes);
-        let text = '';
-        for (let at = 0; at + 1 < bytes; at += 2)
-        {
-            text += String.fromCharCode(raw[at] | raw[at + 1] << 8);
-        }
-        return text;
-    };
-
-    return { readDescriptor, writeDescriptor, ansiAt, wideAt };
+    return { readDescriptor, writeDescriptor, countedText };
 }
 
 /**
@@ -122,13 +98,8 @@ export function countedStringAccess({ guest }){
  * @param {CountedStringHost} host
  */
 export function createCountedStringFunctions(host){
-    const { readDescriptor, writeDescriptor, wideAt } = countedStringAccess(host);
+    const { readDescriptor, writeDescriptor, countedText } = countedStringAccess(host);
     const { guest } = host;
-
-    /** @param {number} at @param {string} text  The terminator is written too. */
-    const writeWide = (at, text)=>{
-        guest.setBytes(at, utf16z(text));
-    };
 
     /**
      * The allocate flag is a BOOLEAN -- one byte in a four-byte slot, and the
@@ -163,7 +134,7 @@ export function createCountedStringFunctions(host){
         /** @param {number[]} args */
         handler: ([destination, source])=>{
             const at = wholeAddress(source);
-            const text = at === 0 ? '' : host.readCString(at, MAX_ANSI_BYTES);
+            const text = at === 0 ? '' : guest.cstr(at, MAX_ANSI_BYTES);
             writeDescriptor(wholeAddress(destination), {
                 length: text.length,
                 // Zero rather than one for a NULL source: there is no buffer, so
@@ -217,7 +188,7 @@ export function createCountedStringFunctions(host){
                 return STATUS.BUFFER_OVERFLOW;
             }
 
-            writeWide(buffer, text);
+            guest.writeWide(buffer, text);
             writeDescriptor(wholeAddress(destination), { length: total - 2, maximumLength,
                 buffer });
             return STATUS.SUCCESS;
@@ -241,7 +212,7 @@ export function createCountedStringFunctions(host){
         /** @param {number[]} args */
         handler: ([destination, source, allocateDestination])=>{
             const from = readDescriptor(wholeAddress(source));
-            const read = wideAt(from.buffer, from.length);
+            const read = countedText(from, true);
             const text = upcase ? foldName(read) : read;
             const terminator = counted ? 0 : 1;
             const total = text.length + terminator;
@@ -298,7 +269,7 @@ export function createCountedStringFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, source])=>{
                 const at = wholeAddress(source);
-                const text = at === 0 ? '' : host.readWideString(at, MAX_WIDE_BYTES);
+                const text = at === 0 ? '' : guest.wstr(at, MAX_WIDE_BYTES);
                 writeDescriptor(wholeAddress(destination), {
                     length: text.length * 2,
                     maximumLength: at === 0 ? 0 : text.length * 2 + 2,
@@ -353,7 +324,7 @@ export function createCountedStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([destination, source])=>{
-                const text = host.readCString(wholeAddress(source), MAX_ANSI_BYTES);
+                const text = guest.cstr(wholeAddress(source), MAX_ANSI_BYTES);
                 const total = text.length * 2 + 2;
                 if (total > MAX_MAXIMUM)
                 {
@@ -364,7 +335,7 @@ export function createCountedStringFunctions(host){
                 {
                     return 0;
                 }
-                writeWide(buffer, text);
+                guest.writeWide(buffer, text);
                 writeDescriptor(wholeAddress(destination),
                     { length: total - 2, maximumLength: total, buffer });
                 return 1;
@@ -382,7 +353,7 @@ export function createCountedStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([destination, source])=>{
-                const text = host.readWideString(wholeAddress(source), MAX_WIDE_BYTES);
+                const text = guest.wstr(wholeAddress(source), MAX_WIDE_BYTES);
                 const total = text.length * 2 + 2;
                 if (total > MAX_MAXIMUM)
                 {
@@ -393,7 +364,7 @@ export function createCountedStringFunctions(host){
                 {
                     return 0;
                 }
-                writeWide(buffer, text);
+                guest.writeWide(buffer, text);
                 writeDescriptor(wholeAddress(destination),
                     { length: total - 2, maximumLength: total, buffer });
                 return 1;
