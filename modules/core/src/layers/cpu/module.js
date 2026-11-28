@@ -72,6 +72,42 @@ const EXECUTOR_BYTES = 12 << 20;
 const executorRoom = (settings, room)=>openAccount(settings.memoryBudget,
     { holder: settings.memoryHolder, room }).take(EXECUTOR_BYTES, 'engine');
 
+/**
+ * How a process says what it made that did not happen (`loss`): a divergence
+ * of kind loss where the run takes them, else an error in its journal; and a
+ * take of the run's account refused once its cache made what room it could, or
+ * the translator's taken past it (`past`), as one (`memoryRefused`), whichever
+ * executor's it was.
+ *
+ * @param {any} config  the layer's
+ * @param {any} log  the log layer's api
+ */
+export function accountLosses(config, log){
+    /** @param {string} detail */
+    const loss = detail=>{
+        if (config?.divergence)
+        {
+            config.divergence('cpu', detail, 'loss');
+        }
+        else
+        {
+            log.error('cpu', detail);
+        }
+    };
+    /**
+     * @param {{ kind: string, bytes: number, used: number, limit: number | null,
+     *     past?: boolean }} refusal
+     */
+    const memoryRefused = refusal=>loss(refusal.past
+        ? `the translator holds ${refusal.bytes} bytes past the machine's memory`
+            + ` (${refusal.used} of ${refusal.limit} held): nothing was left to let go`
+            + ' for code the program runs'
+        : `the machine's memory has no room for ${refusal.bytes} bytes of`
+            + ` ${refusal.kind} (${refusal.used} of ${refusal.limit} held): refused, as a`
+            + ' machine out of memory refuses it');
+    return { loss, memoryRefused };
+}
+
 /** The most executors a process has: an x86 affinity mask has 32 bits, a processor each. */
 export const MAX_EXECUTORS = 32;
 
@@ -317,31 +353,7 @@ export function createCpuModule(){
             // The run's cache, where a translation another executor of the process
             // asks for is put once and read there in place (`createRemoteExecutor`).
             const cache = moduleHost.requireApi('cache');
-            /** @param {string} detail  something the program made that did not happen */
-            const loss = detail=>{
-                if (config?.divergence)
-                {
-                    config.divergence('cpu', detail, 'loss');
-                }
-                else
-                {
-                    log.error('cpu', detail);
-                }
-            };
-            /**
-             * A take the run's account refused once its cache made what room it
-             * could, or the translator's taken past it (`past`): a loss either way.
-             *
-             * @param {{ kind: string, bytes: number, used: number, limit: number | null,
-             *     past?: boolean }} refusal
-             */
-            const memoryRefused = refusal=>loss(refusal.past
-                ? `the translator holds ${refusal.bytes} bytes past the machine's memory`
-                    + ` (${refusal.used} of ${refusal.limit} held): nothing was left to let go`
-                    + ' for code the program runs'
-                : `the machine's memory has no room for ${refusal.bytes} bytes of`
-                    + ` ${refusal.kind} (${refusal.used} of ${refusal.limit} held): refused, as a`
-                    + ' machine out of memory refuses it');
+            const { loss, memoryRefused } = accountLosses(config, log);
 
             /**
              * Who is told the guest's memory grew (`onGrow`), kept from before

@@ -19,7 +19,11 @@ import { createCorkHost } from './cork-host.js';
 import { createBell, createRemoteExecutor } from './executor.js';
 import { unbrokenTable } from './unbroken.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { openAccount } from '@bottlify/cellar';
 import { testAccount, testAccountCalls } from '../testing.fixture.js';
+import { accountLosses } from '../module.js';
+import { testLog } from '../../log/testing.fixture.js';
+import { openRunCache } from '../../../process/run-cache.js';
 
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 const MEMORY = 4 << 20;
@@ -661,4 +665,106 @@ test('an executor whose worker goes after it is ready ends the slice out on it, 
     {
         await remote.close();
     }
+});
+
+/**
+ * Programs run on another executor of a process whose account is full, until
+ * its translator holds something of the account: its takes ask the process
+ * across the link (`account`), answered inside the process's slices, so
+ * nothing here waits on the worker between them.
+ *
+ * @param {import('@bottlify/cellar').AccountMemory} memoryBudget
+ * @param {{ room: ((bytes: number) => boolean) | null, refused: (refusal: any) => void }} account
+ * @param {() => void} fill  takes the rest of the account, once the executor is open
+ */
+async function runFull(memoryBudget, account, fill){
+    const config = { ...CONFIG, memoryBudget, executors: 2 };
+    const process = createCorkHost({ ...config, engine });
+    handle(process);
+    const remote = await createRemoteExecutor({ account, host: process, index: 1,
+        engineUrl: ENGINE_URL, config });
+    fill();
+    const translated = ()=>openAccount(memoryBudget).report().kinds.translation.bytes > 0;
+    try
+    {
+        const next = random(0xacc0);
+        for (let index = 0; index < 40 && !translated(); index++)
+        {
+            begin(process, program(next), random(next(1 << 30)));
+            remote.block().set(process.block());
+            let slice = remote.runSlice(500);
+            for (let turn = 1; turn < 2000 && !slice.halted; turn++)
+            {
+                await settle();
+                slice = remote.runSlice(500);
+            }
+        }
+        assert.ok(translated(), 'the executor translated, its modules taken from the account');
+    }
+    finally
+    {
+        remote.close();
+    }
+}
+
+test('an executor\'s take that does not fit asks the process across its link: a cold body of the '
+    + 'run\'s cache goes for it, and the take is made', async()=>{
+    const memoryBudget = testAccount({ machineMemory: 1 << 30 });
+    const run = await openRunCache({ account: memoryBudget });
+    try
+    {
+        assert.equal(run.reader.put('cold/1', new Uint8Array(1 << 20).fill(5)), true);
+        const guest = openAccount(memoryBudget);
+        /** @type {number[]} */
+        const asked = [];
+        await runFull(memoryBudget, {
+            room: bytes=>{
+                asked.push(bytes);
+                return run.room(bytes);
+            },
+            refused: refusal=>assert.fail(`refused: ${JSON.stringify(refusal)}`),
+        }, ()=>{
+            /** All the account has left taken: none of it room. */
+            const fill = ()=>{
+                const { used, limit } = guest.report();
+                assert.equal(guest.take(/** @type {number} */ (limit) - used, 'guest'), true);
+            };
+            fill();
+            // The cache's empty segments let go and taken too: what room is
+            // made next is the cold body's.
+            run.room(4096);
+            fill();
+        });
+        assert.ok(asked.length >= 1, 'the executor asked the process for room');
+        assert.equal(run.reader.look('cold/1'), null, 'the cold body went for it');
+        assert.equal(guest.report().overdrawn, 0, 'within the account');
+    }
+    finally
+    {
+        run.close();
+    }
+});
+
+test('an executor\'s take no room can be made for is taken past the account, and the loss lands '
+    + 'in the process\'s journal', async()=>{
+    const memoryBudget = testAccount({ machineMemory: 1 << 30 });
+    const guest = openAccount(memoryBudget);
+    const log = await testLog();
+    const { memoryRefused } = accountLosses({}, log);
+    let asked = 0;
+    await runFull(memoryBudget, {
+        room: ()=>{
+            asked++;
+            return false;
+        },
+        refused: memoryRefused,
+    }, ()=>{
+        const { used, limit } = guest.report();
+        assert.equal(guest.take(/** @type {number} */ (limit) - used, 'guest'), true);
+    });
+    assert.ok(asked >= 1, 'room was asked first');
+    assert.ok(guest.report().overdrawn >= 1, 'the code it runs taken past the account, counted');
+    const said = log.recent(64).filter((/** @type {any} */ record)=>
+        /the translator holds \d+ bytes past the machine's memory/.test(JSON.stringify(record)));
+    assert.ok(said.length >= 1, 'said in the process\'s journal');
 });
