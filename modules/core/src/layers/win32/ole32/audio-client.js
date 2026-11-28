@@ -33,7 +33,6 @@
 
 import { createComObject } from './objects.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 import { formatGuid } from '../../../system/guid.js';
 
 export const IID_IAUDIO_CLIENT = '{1CB9AD4C-DBFA-4C32-B178-C2F568A703B2}';
@@ -226,12 +225,9 @@ export function validateFormat(format, compatible){
 
 /**
  * @typedef {Object} AudioClientHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number }} heap  The task allocator's memory.
  * @property {{ publish: (object: import('./objects.js').ComObject, id: string) => number }} vtables
- * @property {(at: number, value: number) => void} writePointer
  * @property {() => number} now  The guest's clock, in milliseconds.
  * @property {() => any} [output]  The machine's mixer, when anything is listening.
  * @property {{ set: (delay: number, target: number, user: number, flags: number,
@@ -252,31 +248,23 @@ export function validateFormat(format, compatible){
  *     of a channel (IAudioEndpointVolume), which every stream to it plays at
  */
 export function createAudioClients(host, endpoint){
+    const { guest } = host;
+    /**
+     * A REFERENCE_TIME or a count of frames, whole and never below zero, as a
+     * quadword out-parameter. @param {number} at @param {number} value
+     */
+    const setTicks = (at, value)=>guest.set64(at, Math.max(0, Math.floor(value)));
     /** Every stream handed out, for diagnostics. @type {Set<any>} */
     const streams = new Set();
-    /** @param {number} at @param {number} value */
-    const writeU32 = (at, value)=>host.writeMemory(wholeAddress(at),
-        new Uint8Array(Uint32Array.of(value >>> 0).buffer));
-    /** @param {number} at @param {number} value */
-    const writeU64 = (at, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigUint64(0, BigInt(Math.max(0, Math.floor(value))), true);
-        host.writeMemory(wholeAddress(at), bytes);
-    };
-    /** @param {number} at @param {number} value */
-    const writeFloat = (at, value)=>host.writeMemory(wholeAddress(at),
-        new Uint8Array(Float32Array.of(value).buffer));
     /** A float passed by value, as its bits arrive. @param {number} bits */
     const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
-    /** @param {number} at */
-    const readFloat = at=>new Float32Array(host.readMemory(wholeAddress(at), 4).slice().buffer)[0];
     /** A copy of the mix format in task memory; 0 when none is left. */
     const taskMixFormat = ()=>{
         const bytes = endpoint.mixFormat();
         const at = host.heap.allocate(bytes.length);
         if (at !== 0)
         {
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
         }
         return at;
     };
@@ -286,14 +274,14 @@ export function createAudioClients(host, endpoint){
         const at = host.heap.allocate(text.length * 2 + 2);
         if (at !== 0)
         {
-            host.writeMemory(at, utf16z(text));
+            guest.writeWide(at, text);
         }
         return at;
     };
     /** @param {number} out @param {string} text */
     const handOutString = (out, text)=>{
         const at = taskString(text);
-        host.writePointer(out, at);
+        guest.setPtr(out, at);
         return at === 0 ? E_OUTOFMEMORY : S_OK;
     };
 
@@ -476,11 +464,11 @@ export function createAudioClients(host, endpoint){
         if (pointer === 0)
         {
             object.release();
-            host.writePointer(out, 0);
+            guest.setPtr(out, 0);
             return E_OUTOFMEMORY;
         }
         stream.made = object;
-        host.writePointer(out, pointer);
+        guest.setPtr(out, pointer);
         return S_OK;
     };
 
@@ -494,7 +482,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                host.writePointer(out, 0);
+                guest.setPtr(out, 0);
                 if (stream.held !== null)
                 {
                     return AUDCLNT_E_OUT_OF_ORDER;
@@ -510,9 +498,9 @@ export function createAudioClients(host, endpoint){
                     return AUDCLNT_E_BUFFER_TOO_LARGE;
                 }
                 const bytes = (frames >>> 0) * stream.format.blockAlign;
-                host.writeMemory(stream.scratch, new Uint8Array(bytes).fill(stream.silence));
+                guest.setBytes(stream.scratch, new Uint8Array(bytes).fill(stream.silence));
                 stream.held = frames >>> 0;
-                host.writePointer(out, stream.scratch);
+                guest.setPtr(out, stream.scratch);
                 return S_OK;
             } },
             /** HRESULT ReleaseBuffer(UINT32 NumFramesWritten, DWORD dwFlags) */
@@ -535,7 +523,7 @@ export function createAudioClients(host, endpoint){
                 {
                     const data = ((flags >>> 0) & BUFFERFLAGS_SILENT) !== 0
                         ? new Uint8Array(bytes).fill(stream.silence)
-                        : host.readMemory(stream.scratch, bytes).slice();
+                        : guest.snapshot(stream.scratch, bytes);
                     stream.written += frames >>> 0;
                     if (stream.track)
                     {
@@ -558,7 +546,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                writeU64(out, stream.format.rate * stream.format.blockAlign);
+                setTicks(out, stream.format.rate * stream.format.blockAlign);
                 return S_OK;
             } },
             /** HRESULT GetPosition(UINT64 *pu64Position, UINT64 *pu64QPCPosition) */
@@ -567,11 +555,11 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                writeU64(out, played(stream) * stream.format.blockAlign);
+                setTicks(out, played(stream) * stream.format.blockAlign);
                 if ((qpc >>> 0) !== 0)
                 {
                     // In 100 ns units, on the clock everything else reads.
-                    writeU64(qpc, host.now() * 10000 + 1);
+                    setTicks(qpc, host.now() * 10000 + 1);
                 }
                 return S_OK;
             } },
@@ -581,7 +569,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, 1); // AUDIOCLOCK_CHARACTERISTIC_FIXED_FREQ
+                guest.set32(out, 1); // AUDIOCLOCK_CHARACTERISTIC_FIXED_FREQ
                 return S_OK;
             } },
         ],
@@ -609,7 +597,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_NULL_REFERENCE;
                 }
-                writeFloat(out, session.volume);
+                guest.setF32(out, session.volume);
                 return S_OK;
             } },
             /** HRESULT SetMute(BOOL bMute, LPCGUID EventContext) */
@@ -624,7 +612,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_NULL_REFERENCE;
                 }
-                writeU32(out, session.muted ? 1 : 0);
+                guest.set32(out, session.muted ? 1 : 0);
                 return S_OK;
             } },
         ],
@@ -649,7 +637,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return nullError;
                 }
-                writeU32(out, levels(stream).length);
+                guest.set32(out, levels(stream).length);
                 return S_OK;
             } },
             /** HRESULT SetChannelVolume(UINT32 dwIndex, const float fLevel[, LPCGUID]) */
@@ -676,7 +664,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_INVALIDARG;
                 }
-                writeFloat(out, list[index >>> 0]);
+                guest.setF32(out, list[index >>> 0]);
                 return S_OK;
             } },
             /** HRESULT SetAllVolumes(UINT32 dwCount, const float *pfVolumes[, LPCGUID]) */
@@ -691,7 +679,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_INVALIDARG;
                 }
-                const wanted = list.map((_, index)=>readFloat((at >>> 0) + index * 4));
+                const wanted = list.map((_, index)=>guest.f32((at >>> 0) + index * 4));
                 if (!wanted.every(level=>level >= 0 && level <= 1))
                 {
                     return E_INVALIDARG;
@@ -713,7 +701,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_INVALIDARG;
                 }
-                list.forEach((level, index)=>writeFloat((at >>> 0) + index * 4, level));
+                list.forEach((level, index)=>guest.setF32((at >>> 0) + index * 4, level));
                 return S_OK;
             } },
         ],
@@ -740,7 +728,7 @@ export function createAudioClients(host, endpoint){
                 return E_NULL_REFERENCE;
             }
             const active = [...session.streams].some(one=>one.started);
-            writeU32(out, active ? SESSION_ACTIVE : SESSION_INACTIVE);
+            guest.set32(out, active ? SESSION_ACTIVE : SESSION_INACTIVE);
             return S_OK;
         } },
         /** HRESULT GetDisplayName(LPWSTR *pRetVal) */
@@ -753,7 +741,7 @@ export function createAudioClients(host, endpoint){
             {
                 return E_NULL_REFERENCE;
             }
-            session.name = host.readWideString(wholeAddress(text), NAME_BYTES);
+            session.name = guest.wstr(text, NAME_BYTES);
             return S_OK;
         } },
         /** HRESULT GetIconPath(LPWSTR *pRetVal) */
@@ -766,7 +754,7 @@ export function createAudioClients(host, endpoint){
             {
                 return E_NULL_REFERENCE;
             }
-            session.icon = host.readWideString(wholeAddress(text), NAME_BYTES);
+            session.icon = guest.wstr(text, NAME_BYTES);
             return S_OK;
         } },
         /** HRESULT GetGroupingParam(GUID *pRetVal) */
@@ -775,7 +763,7 @@ export function createAudioClients(host, endpoint){
             {
                 return E_NULL_REFERENCE;
             }
-            host.writeMemory(wholeAddress(out), session.grouping);
+            guest.setBytes(out, session.grouping);
             return S_OK;
         } },
         /** HRESULT SetGroupingParam(LPCGUID Override, LPCGUID EventContext) */
@@ -784,7 +772,7 @@ export function createAudioClients(host, endpoint){
             {
                 return E_NULL_REFERENCE;
             }
-            session.grouping = host.readMemory(wholeAddress(guid), 16).slice();
+            session.grouping = guest.snapshot(guid, 16);
             return S_OK;
         } },
         /**
@@ -836,7 +824,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, host.processId?.() ?? 0);
+                guest.set32(out, host.processId?.() ?? 0);
                 return S_OK;
             } },
             /** HRESULT IsSystemSoundsSession(void): a program's session never is. */
@@ -914,7 +902,7 @@ export function createAudioClients(host, endpoint){
                         'a loopback stream is refused: nothing records here');
                     return AUDCLNT_E_ENDPOINT_CREATE_FAILED;
                 }
-                const read = readStreamFormat(host.readMemory, format);
+                const read = readStreamFormat(guest.snapshot, format);
                 const compatible = ((flags >>> 0) & STREAMFLAGS_AUTOCONVERTPCM) !== 0
                     || read.channels === endpoint.channels
                         && (read.rate === endpoint.rate
@@ -947,7 +935,7 @@ export function createAudioClients(host, endpoint){
                     stream.track.paused = true;
                 }
                 stream.session = sessionOf((session >>> 0) === 0 ? GUID_NULL
-                    : guidAt(host.readMemory, session));
+                    : guest.guid(session));
                 stream.session.streams.add(stream);
                 applyVolume(stream);
                 return S_OK;
@@ -962,7 +950,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, stream.bufferFrames);
+                guest.set32(out, stream.bufferFrames);
                 return S_OK;
             } },
             /** HRESULT GetStreamLatency(REFERENCE_TIME *phnsLatency) */
@@ -975,7 +963,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                writeU64(out, DEFAULT_PERIOD);
+                setTicks(out, DEFAULT_PERIOD);
                 return S_OK;
             } },
             /** HRESULT GetCurrentPadding(UINT32 *pNumPaddingFrames) */
@@ -991,7 +979,7 @@ export function createAudioClients(host, endpoint){
                 const frames = padding(stream);
                 stream.counts.paddings++;
                 stream.counts.paddingSum += frames;
-                writeU32(out, frames);
+                guest.set32(out, frames);
                 return S_OK;
             } },
             /**
@@ -1001,7 +989,7 @@ export function createAudioClients(host, endpoint){
             { name: 'IsFormatSupported', argBytes: 16, invoke: (_, [mode, format, closest])=>{
                 if ((closest >>> 0) !== 0)
                 {
-                    host.writePointer(closest, 0);
+                    guest.setPtr(closest, 0);
                 }
                 if ((format >>> 0) === 0)
                 {
@@ -1019,7 +1007,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                const read = readStreamFormat(host.readMemory, format);
+                const read = readStreamFormat(guest.snapshot, format);
                 const valid = validateFormat(read, true);
                 if (valid !== S_OK)
                 {
@@ -1034,7 +1022,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_OUTOFMEMORY;
                 }
-                host.writePointer(closest, at);
+                guest.setPtr(closest, at);
                 return S_FALSE;
             } },
             /** HRESULT GetMixFormat(WAVEFORMATEX **ppDeviceFormat) */
@@ -1044,7 +1032,7 @@ export function createAudioClients(host, endpoint){
                     return E_POINTER;
                 }
                 const at = taskMixFormat();
-                host.writePointer(out, at);
+                guest.setPtr(out, at);
                 return at === 0 ? E_OUTOFMEMORY : S_OK;
             } },
             /**
@@ -1058,11 +1046,11 @@ export function createAudioClients(host, endpoint){
                 }
                 if ((byDefault >>> 0) !== 0)
                 {
-                    writeU64(byDefault, DEFAULT_PERIOD);
+                    setTicks(byDefault, DEFAULT_PERIOD);
                 }
                 if ((least >>> 0) !== 0)
                 {
-                    writeU64(least, MINIMUM_PERIOD);
+                    setTicks(least, MINIMUM_PERIOD);
                 }
                 return S_OK;
             } },
@@ -1166,7 +1154,7 @@ export function createAudioClients(host, endpoint){
                 const stream = object.state;
                 if ((out >>> 0) !== 0)
                 {
-                    host.writePointer(out, 0);
+                    guest.setPtr(out, 0);
                 }
                 if (!stream.initialized)
                 {
@@ -1176,7 +1164,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                const wanted = guidAt(host.readMemory, iid);
+                const wanted = guest.guid(iid);
                 const service = [renderClient, clock, simpleVolume, streamVolume, sessionChannels]
                     .find(one=>one.id === wanted);
                 if (service)
@@ -1191,7 +1179,7 @@ export function createAudioClients(host, endpoint){
                     if (held && !held.destroyed)
                     {
                         held.addRef();
-                        host.writePointer(out,
+                        guest.setPtr(out,
                             host.vtables.publish(held, IID_IAUDIO_SESSION_CONTROL));
                         return S_OK;
                     }
@@ -1209,7 +1197,7 @@ export function createAudioClients(host, endpoint){
                         return E_INVALIDARG;
                     }
                     object.addRef();
-                    host.writePointer(out,
+                    guest.setPtr(out,
                         host.vtables.publish(object, IID_IAUDIO_CLOCK_ADJUSTMENT));
                     return S_OK;
                 }
@@ -1233,14 +1221,14 @@ export function createAudioClients(host, endpoint){
         if (pointer === 0)
         {
             object.release();
-            host.writePointer(out, 0);
+            guest.setPtr(out, 0);
             return E_OUTOFMEMORY;
         }
-        host.writePointer(out, pointer);
+        guest.setPtr(out, pointer);
         return S_OK;
     };
     /** The session a manager's call names: GUID_NULL, or none, is the default one. @param {number} at */
-    const namedSession = at=>sessionOf((at >>> 0) === 0 ? GUID_NULL : guidAt(host.readMemory, at));
+    const namedSession = at=>sessionOf((at >>> 0) === 0 ? GUID_NULL : guest.guid(at));
     /** The session interfaces a control is made of, whoever hands it out. */
     const controlInterfaces = ()=>[sessionControl, sessionControl2, simpleVolume, sessionChannels];
 
@@ -1286,7 +1274,7 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, state.session.length);
+                guest.set32(out, state.session.length);
                 return S_OK;
             } },
             /** HRESULT GetSession(int SessionCount, IAudioSessionControl **Session) */
@@ -1297,7 +1285,7 @@ export function createAudioClients(host, endpoint){
                 }
                 if ((index >>> 0) >= state.session.length)
                 {
-                    host.writePointer(out, 0);
+                    guest.setPtr(out, 0);
                     return E_INVALIDARG;
                 }
                 return handOutSession(state.session[index >>> 0], controlInterfaces(), out);

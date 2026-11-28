@@ -3089,7 +3089,7 @@ export function createWin32Module(){
             };
 
             mmDevApi = registerMmDevApiClasses({
-                registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
+                registry: com, vtables: comVtables, heap, guest,
                 pointerSize, windows, divergence: config?.divergence,
                 // A stream plays into the mixer waveOut writes to, against the
                 // guest's clock where nothing listens, and an event-driven one is

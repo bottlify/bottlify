@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { soundMemory } from '../../audio/output/sound.fixture.js';
@@ -139,19 +140,9 @@ function setup(options = {}){
         return nextPointer;
     };
     const clients = createAudioClients({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readWideString: address=>{
-            let text = '';
-            for (let at = address; view.getUint16(at, true) !== 0; at += 2)
-            {
-                text += String.fromCharCode(view.getUint16(at, true));
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         heap: { allocate: size=>(nextBlock += size + 16) - size - 16 },
         vtables: { publish },
-        writePointer: (at, value)=>view.setUint32(at, value >>> 0, true),
         now: ()=>time,
         output: options.output ? ()=>({
             open: (/** @type {any} */ wanted)=>{

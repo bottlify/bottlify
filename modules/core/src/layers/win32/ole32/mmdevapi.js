@@ -29,14 +29,12 @@
  */
 
 import { createComObject } from './objects.js';
-import { IID_IAUDIO_CLIENT, IID_IAUDIO_SESSION_MANAGER, createAudioClients, guidAt }
+import { IID_IAUDIO_CLIENT, IID_IAUDIO_SESSION_MANAGER, createAudioClients }
     from './audio-client.js';
 import { SOUND_DEVICE_GUID } from '../devices.js';
 import { IID_IUNKNOWN } from './objects.js';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { IID_IAUDIO_ENDPOINT_VOLUME, createEndpointVolume } from './endpoint-volume.js';
-import { pointerIo, wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 export const CLSID_MMDEVICE_ENUMERATOR = '{BCDE0395-E52F-467C-8E3D-C4579291692E}';
 export const IID_IMMDEVICE_ENUMERATOR = '{A95664D2-9614-4F35-A746-DE8DB63617E6}';
@@ -173,9 +171,7 @@ const deviceFormat = ()=>endpointFormat(16, SUBTYPE_PCM);
  *     id: string) => number }} vtables
  * @property {{ allocate: (bytes: number) => number, free?: (address: number) => void }} heap
  *     The task allocator's memory.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose pointers and
  *     PROPVARIANT are wider
  * @property {(api: string, detail: string) => void} [divergence]
@@ -211,30 +207,23 @@ export function registerMmDevApiClasses(host){
         return;
     }
     const pointerSize = host.pointerSize ?? 4;
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address),
-        new Uint8Array(Uint32Array.of(value >>> 0).buffer));
-    /** An interface or a block written to an out pointer, whole. @param {number} at @param {number} value */
-    const writePointer = pointerIo(host, pointerSize).write;
+    const { guest } = host;
     /** A string in task memory, its terminator after it; 0 when none is left. @param {string} text */
     const taskString = text=>{
         const at = host.heap.allocate(text.length * 2 + 2);
         if (at !== 0)
         {
-            host.writeMemory(at, utf16z(text));
+            guest.writeWide(at, text);
         }
         return at;
     };
     /** The endpoint's volume, which every stream to it plays at. */
     const endpointVolume = createEndpointVolume({
-        readMemory: host.readMemory, writeMemory: host.writeMemory,
-        channels: SPEAKERS.channels, divergence: host.divergence,
+        guest, channels: SPEAKERS.channels, divergence: host.divergence,
         changed: ()=>audioClients.refreshVolumes(),
     });
     const audioClients = createAudioClients({
-        readMemory: host.readMemory, writeMemory: host.writeMemory, heap: host.heap,
-        readWideString: host.readWideString,
-        vtables: host.vtables, writePointer, now: host.now ?? (()=>Date.now()),
+        guest, heap: host.heap, vtables: host.vtables, now: host.now ?? (()=>Date.now()),
         output: host.output, timers: host.timers, divergence: host.divergence,
         program: host.program, processId: host.processId,
     }, { id: SPEAKERS.id, rate: SPEAKERS.rate, channels: SPEAKERS.channels, mixFormat,
@@ -264,13 +253,13 @@ export function registerMmDevApiClasses(host){
             object.release();
             return E_OUTOFMEMORY;
         }
-        writePointer(out, pointer);
+        guest.setPtr(out, pointer);
         return S_OK;
     };
 
     /** A PROPERTYKEY at an address, as `{fmtid} pid`. @param {number} at */
     const readKey = at=>{
-        const bytes = host.readMemory(wholeAddress(at), 20);
+        const bytes = guest.snapshot(at, 20);
         return `${formatGuid(bytes)} ${new DataView(bytes.buffer, bytes.byteOffset, 20)
             .getUint32(16, true)}`;
     };
@@ -312,7 +301,7 @@ export function registerMmDevApiClasses(host){
             {
                 return E_OUTOFMEMORY;
             }
-            host.writeMemory(at, format);
+            guest.setBytes(at, format);
             view.setUint16(0, VT_BLOB, true);
             view.setUint32(8, format.length, true);
             view.setUint32(8 + pointerSize, at, true);
@@ -322,7 +311,7 @@ export function registerMmDevApiClasses(host){
             // A property the endpoint does not have: VT_EMPTY, and S_OK, as Windows.
             view.setUint16(0, VT_EMPTY, true);
         }
-        host.writeMemory(wholeAddress(out), variant);
+        guest.setBytes(out, variant);
         return S_OK;
     };
 
@@ -336,7 +325,7 @@ export function registerMmDevApiClasses(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, Object.keys(KEYS).length);
+                guest.set32(out, Object.keys(KEYS).length);
                 return S_OK;
             } },
             /** HRESULT GetAt(DWORD iProp, PROPERTYKEY *pkey): the keys GetValue answers, in order. */
@@ -354,7 +343,7 @@ export function registerMmDevApiClasses(host){
                 const bytes = new Uint8Array(20);
                 bytes.set(/** @type {Uint8Array} */ (parseGuid(fmtid)), 0);
                 new DataView(bytes.buffer).setUint32(16, Number(pid), true);
-                host.writeMemory(wholeAddress(out), bytes);
+                guest.setBytes(out, bytes);
                 return S_OK;
             } },
             /** HRESULT GetValue(REFPROPERTYKEY key, PROPVARIANT *pv) */
@@ -385,8 +374,8 @@ export function registerMmDevApiClasses(host){
                 {
                     return E_POINTER;
                 }
-                writePointer(out, 0);
-                const wanted = guidAt(host.readMemory, iid);
+                guest.setPtr(out, 0);
+                const wanted = guest.guid(iid);
                 if (wanted === IID_IAUDIO_CLIENT)
                 {
                     return audioClients.activate(out);
@@ -436,7 +425,7 @@ export function registerMmDevApiClasses(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                writePointer(out, at);
+                guest.setPtr(out, at);
                 return S_OK;
             } },
             /** HRESULT GetState(DWORD *pdwState) */
@@ -445,7 +434,7 @@ export function registerMmDevApiClasses(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, DEVICE_STATE_ACTIVE);
+                guest.set32(out, DEVICE_STATE_ACTIVE);
                 return S_OK;
             } },
         ],
@@ -458,7 +447,7 @@ export function registerMmDevApiClasses(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, E_RENDER);
+                guest.set32(out, E_RENDER);
                 return S_OK;
             } },
         ],
@@ -483,22 +472,21 @@ export function registerMmDevApiClasses(host){
         {
             return hr;
         }
-        const object = new DataView(host.readMemory(wholeAddress(out), 4).slice().buffer)
-            .getUint32(0, true);
+        const object = guest.u32(out);
         const guid = host.heap.allocate(16);
         if (guid === 0)
         {
             await host.callMethod(object, 2, []);
-            writePointer(out, 0);
+            guest.setPtr(out, 0);
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(guid, /** @type {Uint8Array} */ (parseGuid(SOUND_DEVICE_GUID)));
+        guest.setGuid(guid, SOUND_DEVICE_GUID);
         const initialized = (await host.callMethod(object, made.initialize, [guid])) | 0;
         host.heap.free?.(guid);
         if (initialized < 0)
         {
             await host.callMethod(object, 2, []);
-            writePointer(out, 0);
+            guest.setPtr(out, 0);
         }
         return initialized;
     };
@@ -515,7 +503,7 @@ export function registerMmDevApiClasses(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, object.state.length);
+                guest.set32(out, object.state.length);
                 return S_OK;
             } },
             /** HRESULT Item(UINT nDevice, IMMDevice **ppDevice) */
@@ -526,7 +514,7 @@ export function registerMmDevApiClasses(host){
                 }
                 if ((index >>> 0) >= object.state.length)
                 {
-                    writePointer(out, 0);
+                    guest.setPtr(out, 0);
                     return E_INVALIDARG;
                 }
                 return handOutDevice(out);
@@ -556,7 +544,7 @@ export function registerMmDevApiClasses(host){
                         {
                             return E_POINTER;
                         }
-                        writePointer(out, 0);
+                        guest.setPtr(out, 0);
                         if ((flow >>> 0) > E_ALL || ((mask >>> 0) & ~0xf) !== 0)
                         {
                             return E_INVALIDARG;
@@ -575,7 +563,7 @@ export function registerMmDevApiClasses(host){
                             {
                                 return E_POINTER;
                             }
-                            writePointer(out, 0);
+                            guest.setPtr(out, 0);
                             if ((flow >>> 0) >= E_ALL || (role >>> 0) >= ROLES)
                             {
                                 return E_INVALIDARG;
@@ -588,10 +576,10 @@ export function registerMmDevApiClasses(host){
                         {
                             return E_POINTER;
                         }
-                        writePointer(out, 0);
+                        guest.setPtr(out, 0);
                         // An id not of an endpoint's form is an invalid argument;
                         // one of the form that names no endpoint here is not found.
-                        const asked = host.readWideString(wholeAddress(id), 128 * 2);
+                        const asked = guest.wstr(id, 128 * 2);
                         if (asked === SPEAKERS.id)
                         {
                             return handOutDevice(out);

@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { IID_IUNKNOWN, createComRegistry } from './objects.js';
@@ -61,9 +62,7 @@ function setup(pointerSize = 4, com = {}){
         },
         heap: { allocate: size=>(nextBlock += size + 16) - size - 16, free: ()=>{} },
         ...com,
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readWideString: address=>wideAt(address),
+        guest: guestOver(bytes, pointerSize),
         pointerSize,
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
     });

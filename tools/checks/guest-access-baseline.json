@@ -753,25 +753,10 @@
   "win32/offline/functions.js": {
    "accessor u32": 1
   },
-  "win32/ole32/audio-client.js": {
-   "accessor readFloat": 1,
-   "accessor writeFloat": 1,
-   "accessor writeU32": 1,
-   "accessor writeU64": 1,
-   "copy readMemory().slice()": 3
-  },
   "win32/ole32/dxdiag.js": {
    "accessor writeU32": 1,
    "copy readMemory().slice()": 1,
    "string writeWide": 1
-  },
-  "win32/ole32/endpoint-volume.js": {
-   "accessor writeFloat": 1,
-   "accessor writeU32": 1
-  },
-  "win32/ole32/mmdevapi.js": {
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 1
   },
   "win32/ole32/wbem.js": {
    "accessor writeU32": 1,

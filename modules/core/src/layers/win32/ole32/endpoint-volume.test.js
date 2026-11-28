@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -26,8 +27,7 @@ function setup(){
     /** @type {string[]} */
     const said = [];
     const volume = createEndpointVolume({
-        readMemory: (at, length)=>bytes.slice(at, at + length),
-        writeMemory: (at, data)=>bytes.set(data, at),
+        guest: guestOver(bytes),
         channels: 2,
         changed: ()=>changes++,
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),

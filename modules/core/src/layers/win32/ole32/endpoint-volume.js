@@ -4,7 +4,6 @@
  * See LICENSE for details
  */
 
-import { wholeAddress } from '../common/pointers.js';
 
 /**
  * IAudioEndpointVolume, as IMMDevice::Activate hands it out: the endpoint's
@@ -46,8 +45,7 @@ export const levelOf = scalar=>(scalar <= 0 ? LEVEL_FLOOR
 
 /**
  * @typedef {Object} EndpointVolumeHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {number} channels
  * @property {() => void} changed  The endpoint's volume changed: streams play at it.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -59,6 +57,7 @@ export const levelOf = scalar=>(scalar <= 0 ? LEVEL_FLOOR
  * @param {EndpointVolumeHost} host
  */
 export function createEndpointVolume(host){
+    const { guest } = host;
     /** The endpoint's state: levels in decibels. */
     const state = {
         master: LEVEL_CEILING,
@@ -70,12 +69,6 @@ export function createEndpointVolume(host){
     };
     let toldOfListeners = false;
 
-    /** @param {number} at @param {number} value */
-    const writeU32 = (at, value)=>host.writeMemory(wholeAddress(at),
-        new Uint8Array(Uint32Array.of(value >>> 0).buffer));
-    /** @param {number} at @param {number} value */
-    const writeFloat = (at, value)=>host.writeMemory(wholeAddress(at),
-        new Uint8Array(Float32Array.of(value).buffer));
     /** A float passed by value, as its bits arrive. @param {number} bits */
     const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
 
@@ -138,7 +131,7 @@ export function createEndpointVolume(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, host.channels);
+                guest.set32(out, host.channels);
                 return S_OK;
             } },
             /** HRESULT SetMasterVolumeLevel(float fLevelDB, LPCGUID pguidEventContext) */
@@ -160,7 +153,7 @@ export function createEndpointVolume(host){
                 {
                     return E_POINTER;
                 }
-                writeFloat(out, state.master);
+                guest.setF32(out, state.master);
                 return S_OK;
             } },
             /** HRESULT GetMasterVolumeLevelScalar(float *pfLevel) */
@@ -169,7 +162,7 @@ export function createEndpointVolume(host){
                 {
                     return E_POINTER;
                 }
-                writeFloat(out, scalarOf(state.master));
+                guest.setF32(out, scalarOf(state.master));
                 return S_OK;
             } },
             /** HRESULT SetChannelVolumeLevel(UINT nChannel, float fLevelDB, LPCGUID) */
@@ -195,7 +188,7 @@ export function createEndpointVolume(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeFloat(out, state.channels[channel >>> 0]);
+                guest.setF32(out, state.channels[channel >>> 0]);
                 return S_OK;
             } },
             /** HRESULT GetChannelVolumeLevelScalar(UINT nChannel, float *pfLevel) */
@@ -208,7 +201,7 @@ export function createEndpointVolume(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeFloat(out, scalarOf(state.channels[channel >>> 0]));
+                guest.setF32(out, scalarOf(state.channels[channel >>> 0]));
                 return S_OK;
             } },
             /** HRESULT SetMute(BOOL bMute, LPCGUID): S_FALSE when it already was so. */
@@ -228,7 +221,7 @@ export function createEndpointVolume(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, state.muted ? 1 : 0);
+                guest.set32(out, state.muted ? 1 : 0);
                 return S_OK;
             } },
             /** HRESULT GetVolumeStepInfo(UINT *pnStep, UINT *pnStepCount) */
@@ -237,8 +230,8 @@ export function createEndpointVolume(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(current, Math.round((state.master - LEVEL_FLOOR) / LEVEL_STEP));
-                writeU32(count, STEPS);
+                guest.set32(current, Math.round((state.master - LEVEL_FLOOR) / LEVEL_STEP));
+                guest.set32(count, STEPS);
                 return S_OK;
             } },
             /** HRESULT VolumeStepUp(LPCGUID pguidEventContext) */
@@ -251,7 +244,7 @@ export function createEndpointVolume(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 return S_OK;
             } },
             /** HRESULT GetVolumeRange(float *pflVolumeMindB, float *pflVolumeMaxdB, float *pflVolumeIncrementdB) */
@@ -260,9 +253,9 @@ export function createEndpointVolume(host){
                 {
                     return E_POINTER;
                 }
-                writeFloat(min, LEVEL_FLOOR);
-                writeFloat(max, LEVEL_CEILING);
-                writeFloat(increment, LEVEL_STEP);
+                guest.setF32(min, LEVEL_FLOOR);
+                guest.setF32(max, LEVEL_CEILING);
+                guest.setF32(increment, LEVEL_STEP);
                 return S_OK;
             } },
         ],
