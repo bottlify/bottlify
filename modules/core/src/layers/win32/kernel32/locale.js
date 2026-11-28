@@ -726,7 +726,10 @@ export const mapCaseAnsi = (bytes, upper)=>{
 
 /**
  * @typedef {Object} LocaleHost
- * @property {import('../common/guest.js').Guest} guest
+ * @property {import('../../../system/port.js').Port & { text: (address: number, wide: boolean,
+ *     limit?: number, counted?: boolean) => string }} guest
+ *     The guest (`common/guest.js`), named by what is read of it: its text is
+ *     made over this file's ANSI page, so its type is not imported from there.
  * @property {(address: number, unit: number) => number} stringLength
  *           The code units of a NUL-terminated string of 1- or 2-byte units
  *           before its terminator.

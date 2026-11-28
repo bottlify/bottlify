@@ -642,7 +642,6 @@
   "loadperf.dll!UnloadPerfCounterTextStringsW": "argument 1 a pointer: threw nothing low, GUEST_ACCESS high",
   "msvcrt.dll!_fcvt_s": "argument 5 a pointer: threw GUEST_ACCESS low, Invalid string length high - argument 5 is the count of places, an int: an address there asks for a billion of them, the int cut as its type says",
   "msvcrt.dll!rand_s": "argument 1 a pointer: memory differs at window offset 0x10000 - a random number: each call draws its own",
-  "ntdll.dll!DbgUiConvertStateChangeStructure": "argument 1 a pointer: threw nothing low, GUEST_ACCESS high",
   "ntdll.dll!NtCreateKey": "argument 3 a pointer: RAX 0xffffffffc000000d low, 0xffffffffc0000005 high",
   "ntdll.dll!NtCreateMailslotFile": "argument 3 a pointer: RAX 0xffffffffc0000033 low, 0xffffffffc0000005 high",
   "ntdll.dll!NtOpenKey": "argument 3 a pointer: RAX 0xffffffffc000000d low, 0xffffffffc0000005 high",
