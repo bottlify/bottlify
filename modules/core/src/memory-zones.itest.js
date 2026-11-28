@@ -5,21 +5,22 @@
  */
 
 /**
- * A run's report sums what its layers hold of the tab's memory by zone
+ * A run's report is its account and what the account does not count
  * (`memory-zones.js`): the guest's by what the program took, not by its RAM,
- * and a pool nothing measured said so rather than counted as nothing.
+ * the run's cache once, and a pool nothing measured said so rather than
+ * counted as nothing.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { MEMORY_ZONES, NOT_MEASURED, TAB_MEMORY_LIMIT } from './memory-zones.js';
+import { NOT_MEASURED } from './memory-zones.js';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
-test('a run given two gigabytes of RAM holds what its program took, and the report sums the zones',
+test('a run given two gigabytes of RAM holds what its program took, the report summing to it',
     { timeout: 60000 }, async t=>{
         // mov ecx, 1000000; L: inc eax; dec ecx; jnz L; push 0; call [ExitProcess]
         const loop = [0xb9, ...u32(1_000_000), 0x40, 0x49, 0x75, 0xfc];
@@ -40,7 +41,8 @@ test('a run given two gigabytes of RAM holds what its program took, and the repo
         const zones = table('zones');
         assert.ok(zones, 'the zones\' sums are in the report');
         assert.equal(report.diagnostics.at(-1).name, 'zones', 'last, over every other table');
-        const { guest, translation, heaps } = zones.metrics.zones;
+        const { guest, translation } = zones.metrics.zones;
+        const { account, notAccounted, total } = zones.metrics;
         // The image, its stacks and a few heap blocks: megabytes of the RAM's
         // two gigabytes, every pool measured.
         assert.deepEqual(guest.notMeasured, []);
@@ -48,13 +50,18 @@ test('a run given two gigabytes of RAM holds what its program took, and the repo
         assert.ok(guest.pools['app.mainStack'] >= 0x10000);
         assert.ok(guest.pools['app.heap'] > 0, 'the runtime\'s own blocks');
         assert.equal(typeof guest.pools['kernel.stacks'], 'number');
-        assert.ok(guest.bytes < 64 * 1024 * 1024, `guest ${guest.bytes}`);
-        assert.ok(guest.bytes <= MEMORY_ZONES.guest);
+        assert.ok(guest.accounted > 0 && guest.accounted < 64 * 1024 * 1024,
+            `guest ${guest.accounted}`);
         assert.ok(translation.pools['cpu.tables'] > 0, 'the engine\'s tables are measured');
         const modules = translation.pools['cpu.modules'];
         assert.ok(modules > 0 || translation.notMeasured.includes('cpu.modules'),
             `the translator's modules are measured or said not to be, never nothing: ${modules}`);
-        assert.ok(heaps.notMeasured.includes('graphics.engine'));
-        assert.ok(zones.metrics.total <= TAB_MEMORY_LIMIT);
+        assert.equal(notAccounted['graphics.engine'], NOT_MEASURED);
+        assert.ok(account.kinds.cache > 0, 'the run\'s cache, a kind of the account');
+        assert.equal(Object.values(account.kinds).reduce((/** @type {number} */ sum, bytes)=>sum
+            + /** @type {number} */ (bytes), 0), account.used, 'the kinds sum to the account');
+        assert.ok(!Object.keys(notAccounted).some(key=>key.endsWith('.cache')),
+            'the cache is not counted again outside the account');
+        assert.ok(total >= account.used);
         assert.equal(typeof NOT_MEASURED, 'string');
     });

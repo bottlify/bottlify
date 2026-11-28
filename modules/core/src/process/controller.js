@@ -1370,18 +1370,13 @@ export function processController(deps){
                         // mode, the page's messages read between turns, the yields
                         // to the event loop, and the sleeps on the doorbell.
                         pacing: /** @type {any} */ (pacing).counts?.() ?? null,
-                        // What the program holds of its RAM, the bundle's pools,
+                        // What the program holds of its RAM, and the bundle's pools
                         // where this process mounted it (a bundle the run's system
-                        // mounted is the system's to report), and the run's cache
-                        // where its keeper is on this thread (a process in a
-                        // worker of its own holds none of it).
+                        // mounted is the system's to report). The run's cache is a
+                        // kind of the run's account, counted there once.
                         bytesHeld: {
                             guest: guestHeld(),
-                            heaps: {
-                                ...mountedBlocks() ? blocks()?.held?.() ?? {} : {},
-                                ...options.cache?.figures
-                                    ? { cache: options.cache.figures().segmentBytes } : {},
-                            },
+                            heaps: mountedBlocks() ? blocks()?.held?.() ?? {} : {},
                         },
                     },
                 }] : []];

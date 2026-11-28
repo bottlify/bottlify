@@ -55,6 +55,10 @@ flowchart TD
   holds the 8 MiB of pieces it is writing in memory of its own and the rest in the run's cache,
   inside its budget and on its disk past it; its first write into a file the bundle carries copies
   that file into the writable layer a mebibyte at a time.
+- **The run's cache is one kind of the run's account** (`createRunAccount` in
+  [`run-cache.js`](../../modules/core/src/process/run-cache.js)): its segments count against the
+  machine's memory beside the guests', the engine's and the translator's, and a take of theirs
+  that does not fit has its keeper let cold bodies go to the run's folder, or out, first.
 
 Where to look in the code: [`core/src/layers/filesystem/internal/bundle/cache.js`](../../modules/core/src/layers/filesystem/internal/bundle/cache.js) (blocks),
 [`core/src/layers/filesystem/internal/opfs-disk.js`](../../modules/core/src/layers/filesystem/internal/opfs-disk.js) (the keeper's disk),

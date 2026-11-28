@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { processMemories } from './memories.js';
+import { createRunAccount } from './run-cache.js';
 
 const MIB = 1 << 20;
 
@@ -14,7 +15,8 @@ const MIB = 1 << 20;
 const spare = mib=>/** @type {any} */ ({ memory: { buffer: { byteLength: mib * MIB } } });
 
 test('a run keeps gone processes\' memories up to 2 GiB of length in all, oldest out first', ()=>{
-    const { keepSpare, spareMemories } = processMemories({ options: {} });
+    const { keepSpare, spareMemories } = processMemories({
+        options: { memoryBudget: createRunAccount() } });
     const [a, b, c] = [spare(1024), spare(512), spare(768)];
     keepSpare(a);
     keepSpare(b);

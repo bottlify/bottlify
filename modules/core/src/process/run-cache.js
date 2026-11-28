@@ -21,14 +21,18 @@
  * worker of that process's (`across`). Its going lets go of all it held; one
  * that goes without saying so goes with its process, or with the run.
  *
+ * Its segments are one kind of the run's account (`createRunAccount`), the
+ * machine's memory every process of the run takes its own from: a take there
+ * that does not fit has the keeper let cold bodies go for it (`room`).
+ *
  * Its disk is a folder in the run's own (`run-folder.js`), for the bodies that
  * are the only copy for this run (texels the GPU was given, `disk: 'run'`): a
  * body that can be made again is never written there (`disk: 'never'`, the
  * cache layer's default), and the next run finds nothing in it.
  */
 
-import { answerKeeper, createChannel, createReader, keeperWords, linkCarrier, openKeeper,
-    openKeeperClient, openServer, serveKeeperChannel } from '@bottlify/cellar';
+import { answerKeeper, createAccountMemory, createChannel, createReader, keeperWords, linkCarrier,
+    openKeeper, openKeeperClient, openServer, serveKeeperChannel } from '@bottlify/cellar';
 import { ownedSpace } from '../layers/cache/module.js';
 import { createScratches } from '../layers/cache/scratch.js';
 import { opfsDisk } from '../layers/filesystem/internal/opfs-disk.js';
@@ -41,6 +45,21 @@ const MIB = 1024 * 1024;
  * 32 MiB for ranges read again and one range alone up to 128 MiB, fit.
  */
 export const RUN_CACHE_BYTES = 160 * MIB;
+
+/**
+ * The run's account (Cellar's): the machine's memory, `machineMemory` bytes
+ * (none: no limit), and what it is held for, by kind - the guests' memories,
+ * the engine's own parts, the translator's modules, and the run's cache's
+ * segments, at most `cacheBytes` of it. Every process of the run is handed
+ * it and takes from it on its own holder (`roadmap/decisions.md` A243).
+ *
+ * @param {{ machineMemory?: number, cacheBytes?: number }} [sizes]
+ */
+export function createRunAccount({ machineMemory, cacheBytes = RUN_CACHE_BYTES } = {}){
+    const limit = machineMemory !== undefined && machineMemory > 0 ? machineMemory : Infinity;
+    return createAccountMemory({ limit,
+        kinds: { cache: cacheBytes, guest: Infinity, engine: Infinity, translation: Infinity } });
+}
 
 /**
  * The shared memory the keeper adds and lets go of at a time, bodies shared
@@ -62,16 +81,19 @@ const IDLE_MS = 30_000;
 const SWEEP_MS = 1000;
 
 /**
- * @param {{ budget?: number,
+ * @param {{ account?: import('@bottlify/cellar').AccountMemory, budget?: number,
  *     runFolder?: import('../layers/filesystem/internal/run-folder.js').RunFolder | null,
  *     onTail?: (tail: import('../layers/cache/module.js').OwnerTail) => void,
  *     onLoss?: (detail: string) => void }} [opened]
+ *     `account`: the run's (`createRunAccount`), by default one with no limit
+ *     and the cache's segments at most `budget`;
  *     `runFolder`: where the cache's disk is made; none, a cache in memory alone;
  *     `onTail`: an owner that went left bodies under its names past what it held;
  *     `onLoss`: the disk in the run's folder did not open, said once
  */
 export async function openRunCache(opened = {}){
-    const { budget = RUN_CACHE_BYTES, runFolder = null, onTail = ()=>{}, onLoss = ()=>{} } = opened;
+    const { budget, runFolder = null, onTail = ()=>{}, onLoss = ()=>{} } = opened;
+    const account = opened.account ?? createRunAccount({ cacheBytes: budget });
     /** What each thread reading is told of a segment made or let go. @type {Set<(message: any) => void>} */
     const told = new Set();
     /**
@@ -90,7 +112,7 @@ export async function openRunCache(opened = {}){
             hotBytes: number, placedBytes: number }>} */ ({}) };
     /** @param {import('@bottlify/cellar').Disk | null} disk */
     const open = disk=>openKeeper({
-        budget, segmentBytes: SEGMENT_BYTES, coldAfterMs: IDLE_MS, disk,
+        account, segmentBytes: SEGMENT_BYTES, coldAfterMs: IDLE_MS, disk,
         announce: message=>{
             for (const tell of told)
             {
@@ -173,7 +195,7 @@ export async function openRunCache(opened = {}){
     /** What owners that went left behind them, summed. */
     const tails = { owners: 0, bodies: 0, bytes: 0 };
     /** The keeper as a remote keeper's readers call it: each reserve weighed by space. */
-    const remote = { reserve, raise: keeper.raise, drop: keeper.drop };
+    const remote = { reserve, raise: keeper.raise, drop: keeper.drop, makeRoom: keeper.makeRoom };
     /** @param {import('../layers/cache/module.js').OwnerTail} tail */
     const tailed = tail=>{
         tails.owners++;
@@ -249,7 +271,7 @@ export async function openRunCache(opened = {}){
             peak.roundingBytes = figures.roundingBytes;
             peak.spaces = weighSpaces();
         }
-        return { ...figures, budget,
+        return { ...figures, budget: figures.account.kinds.cache.ceiling,
             peakPlacedBytes: peak.placedBytes, peakRoundingBytes: peak.roundingBytes,
             peakSpaces: peak.spaces, owners, ownerTails: { ...tails },
             // Threads joined but this one's own reader, and owners' channels open.
@@ -322,6 +344,15 @@ export async function openRunCache(opened = {}){
         },
 
         own,
+
+        /**
+         * Room in the run's account for `bytes` more of another kind, cold
+         * bodies let go for it (`Keeper.makeRoom`): an account's `room` on
+         * this thread.
+         *
+         * @param {number} bytes
+         */
+        room: (/** @type {number} */ bytes)=>keeper.makeRoom(bytes),
 
         /**
          * A scratch of the run's own (its presenter's), held under names of
@@ -470,6 +501,8 @@ export function remoteCache(joined, link, post){
     return {
         reader: createReader({ shared: joined.shared, segments: joined.segments,
             keeper: client.keeper }),
+        /** Room in the run's account, made by its keeper across the link. */
+        room: client.room,
         /** @type {import('../layers/cache/module.js').Own} */
         own: name=>{
             const prefix = prefixOf(name);

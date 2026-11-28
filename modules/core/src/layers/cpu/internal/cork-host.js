@@ -27,11 +27,25 @@
  * and page arithmetic) is handed in by `module.js`, which loaded it by URL.
  */
 
-import { guestByLength, openCharge, openMemoryBudget, RUN_HOLDER } from './memory-budget.js';
+import { RUN_HOLDER, openAccount, openCharge } from '@bottlify/cellar';
 import { exceptionName, hostFault } from './faults.js';
-import { releasedCode } from './gc-nudge.js';
+import { releasedCode, runsJavaScriptCore } from './gc-nudge.js';
 import { captureBlockContext, restoreBlockContext } from './context.js';
 import { createPorts } from './ports.js';
+
+/**
+ * How a guest's memory is counted in the run's account: by its length where
+ * growing a memory makes its pages the tab's at once (JavaScriptCore: a grow
+ * made every grown page resident), by what the guest was given elsewhere (V8
+ * holds a page only once it is written), as Windows counts a process's commit
+ * and not its address space.
+ *
+ * @param {'length' | 'given' | undefined} asked  `cpu.guestCharge`
+ * @returns {boolean} whether by length
+ */
+export function guestByLength(asked){
+    return asked === 'length' || (asked === undefined && runsJavaScriptCore());
+}
 
 /**
  * What a byte of a translated module held costs the tab, its own included:
@@ -191,14 +205,20 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     `executorsTouched`), each zeroed as it opens; all when absent. `engine`: where the gone
  *     process's engine pages lay (its `engineLeft`): laid out elsewhere, they are zeroed at
  *     the start and every executor's as it opens.
- * @property {SharedArrayBuffer | ArrayBuffer} [memoryBudget]  The machine's memory
- *     (`memory-budget.js`): a memory made here, and every page it grows by, is taken from it,
- *     and a grow it cannot cover is refused as one past the ceiling is. Absent, nothing bounds
- *     the memory but its own ceiling.
+ * @property {import('@bottlify/cellar').AccountMemory} [memoryBudget]  The run's account
+ *     (Cellar's, `createRunAccount`): a memory made here, and every page it grows by, is taken
+ *     from it as `guest`, the engine's tables as `engine`, the modules as `translation`; a grow
+ *     it cannot cover, once its keeper let cold bodies go for it (`memoryRoom`), is refused as
+ *     one past the ceiling is, and said (`onMemoryRefused`). Absent, nothing bounds the memory
+ *     but its own ceiling.
+ * @property {((bytes: number) => boolean) | null} [memoryRoom]  Room made in the account for
+ *     `bytes` more (the run's cache's keeper, here or across the link)
+ * @property {(refusal: { kind: string, bytes: number, used: number, limit: number | null })
+ *     => void} [onMemoryRefused]  a take the account refused once room was asked for
  * @property {'length' | 'given'} [guestCharge]  How the guest's memory is counted
  *     against the machine's (`guestByLength`): its length, or what it was given.
- * @property {number} [memoryHolder]  The holder of the machine's memory this process
- *     takes on (`memory-budget.js`), given back whole as it is gone.
+ * @property {number} [memoryHolder]  The holder of the run's account this process
+ *     takes on, given back whole as it is gone.
  * @property {{ left: number }} [memoryCredit]  What the run took of the machine's memory for
  *     this process's start (`roomForProcess`): its memory and its grows draw on it first, so a
  *     start never finds the machine full half way.
@@ -305,13 +325,13 @@ const sharedCharges = new WeakMap();
  * the run, so its processes share one keeping and another run on the same
  * store keeps its own (`sharedModulesOf`).
  *
- * @param {SharedArrayBuffer | ArrayBuffer} budget  the run's (`memoryBudget`)
+ * @param {import('@bottlify/cellar').AccountMemory} budget  the run's (`memoryBudget`)
  */
 function runSharedCharge(budget){
     let charge = sharedCharges.get(budget);
     if (charge === undefined)
     {
-        charge = openCharge(openMemoryBudget(budget, RUN_HOLDER), 'translation',
+        charge = openCharge(openAccount(budget, { holder: RUN_HOLDER }), 'translation',
             TRANSLATION_WEIGHT);
         sharedCharges.set(budget, charge);
     }
@@ -328,21 +348,23 @@ export function createCorkHost(config){
         closedBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
         window: wideWindow, codeBase = 0, hostAlias, wideRam, memoryBudget, memoryCredit,
-        memoryHolder, guestCharge, ramLimit = Infinity, far: farAsked = false } = config;
+        memoryHolder, memoryRoom = null, onMemoryRefused, guestCharge, ramLimit = Infinity,
+        far: farAsked = false } = config;
     // Whether the guest's memory counts by its length, not by what it was given.
     // A wide window is 8 GiB long whatever its program takes of it, more than
     // any machine's memory here: counted by what was given wherever it runs.
     const byLength = guestByLength(guestCharge) && wideWindow === undefined;
     /** The machine's memory this process's grows are taken from, where the run has one. */
     const machine = memoryBudget === undefined ? null
-        : openMemoryBudget(memoryBudget, memoryHolder);
+        : openAccount(memoryBudget, { holder: memoryHolder, room: memoryRoom,
+            ...onMemoryRefused ? { onRefused: onMemoryRefused } : {} });
     /**
      * The machine's memory as this process takes it: what the run took for its
      * start first, then the machine's own.
      */
     const machineBudget = machine === null ? null : {
         ...machine,
-        /** @param {number} bytes @param {import('./memory-budget.js').MemoryKind} [kind] */
+        /** @param {number} bytes @param {string} [kind] */
         take(bytes, kind = 'guest'){
             const credit = memoryCredit ?? { left: 0 };
             const drawn = Math.min(credit.left, bytes);
@@ -353,6 +375,8 @@ export function createCorkHost(config){
             credit.left -= drawn;
             return true;
         },
+        /** @param {number} bytes @param {string} [kind] */
+        give: (bytes, kind = 'guest')=>machine.give(bytes, kind),
     };
     // A wide window's image as the host is handed it: a pointer's low dword (a handler
     // reads `args[i] >>> 0`). The image's span below 4 GiB is kept free (`app.js`), so a
@@ -555,7 +579,6 @@ export function createCorkHost(config){
                 + ` (${pages * 65536} bytes wanted, ${machineBudget.report().used} of`
                 + ` ${machineBudget.report().limit} held)`), { code: 'MACHINE_MEMORY' });
         }
-        machineBudget.made();
     }
     const memory = given ?? taken
         // Shared, so another worker -- an executor, the graphics worker, the
@@ -594,8 +617,11 @@ export function createCorkHost(config){
     // fell from 58 to 42 frames a second in its menu, under one core's 61.
     // The translator's modules taken from the machine's memory, each byte
     // weighed for what holding it costs past itself (`TRANSLATION_WEIGHT`).
-    const translationCharge = machine === null ? null
-        : openCharge(machine, 'translation', TRANSLATION_WEIGHT);
+    // A take refused here is no loss: the translator lets its coldest modules go
+    // for it, and counts what it holds past the account (`unchargedBytes`).
+    const translationCharge = memoryBudget === undefined ? null
+        : openCharge(openAccount(memoryBudget, { holder: memoryHolder, room: memoryRoom }),
+            'translation', TRANSLATION_WEIGHT);
     // The modules kept for every runtime sharing the run's store are the run's:
     // they outlive this process, in the run's thread where the store is (a
     // worker's store is its process's alone and keeps none), so they are taken

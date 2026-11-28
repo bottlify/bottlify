@@ -327,7 +327,8 @@ export async function serveProcess(start){
             // yield, as the engine's thread takes its own.
             ...cacheReader === null ? {}
                 : { cache: { reader: cacheReader, join: cacheRelay?.join ?? null,
-                    own: cacheOwners?.own ?? null, serve: cacheOwners?.serve ?? null } },
+                    own: cacheOwners?.own ?? null, serve: cacheOwners?.serve ?? null,
+                    room: cacheOwners?.room ?? null } },
             cork: { ...options.cork, config: { ...options.cork?.config,
                 // The run's store, kept by the system's thread.
                 store: options.cork?.config?.store === 'run'

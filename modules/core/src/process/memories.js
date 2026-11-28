@@ -4,9 +4,8 @@
  * See LICENSE for details
  */
 
-import {
-    RUN_HOLDER, guestByLength, openMemoryBudget,
-} from '../layers/cpu/internal/memory-budget.js';
+import { RUN_HOLDER, openAccount } from '@bottlify/cellar';
+import { guestByLength } from '../layers/cpu/internal/cork-host.js';
 
 /** @typedef {import('../app-options.js').SpareMemory} SpareMemory */
 
@@ -22,7 +21,7 @@ import {
  */
 export function processMemories(deps){
     const {
-        options,
+        options, runCache,
     } = deps;
 
     /**
@@ -42,15 +41,16 @@ export function processMemories(deps){
      */
     const spareMemories = options.spareMemories ?? [];
     /**
-     * The machine's memory, where the run has one, as the run itself holds it
+     * The run's account (`createRunAccount`) as the run itself holds it
      * (`RUN_HOLDER`): the memories kept for the next process. Each process
      * holds its own part on a holder of its own (`holderOf`), given back whole
-     * when it is gone however it ended.
+     * when it is gone however it ended. Where it has no room, the run's cache
+     * lets cold bodies go for it first.
      */
-    const machineMemory = options.memoryBudget === undefined ? null
-        : openMemoryBudget(options.memoryBudget);
+    const room = runCache?.room ?? options.cache?.room ?? null;
+    const machineMemory = openAccount(options.memoryBudget, { room });
     /** @param {number} holder */
-    const holderView = holder=>openMemoryBudget(/** @type {any} */ (options.memoryBudget), holder);
+    const holderView = holder=>openAccount(options.memoryBudget, { holder, room });
     /**
      * Each process's holder, and whether the run claimed it (a process started
      * in a worker holds what its parent claimed for it).
@@ -70,10 +70,9 @@ export function processMemories(deps){
         : /** @type {any} */ (spare).charged ?? 0);
     /** @param {SpareMemory | undefined} spare */
     const dropSpare = spare=>{
-        if (spare && machineMemory !== null && /** @type {any} */ (spare).onRun !== false)
+        if (spare && /** @type {any} */ (spare).onRun !== false)
         {
-            machineMemory.give(spareCharge(spare));
-            machineMemory.dropped();
+            machineMemory.give(spareCharge(spare), 'guest');
         }
     };
     /**
@@ -84,7 +83,7 @@ export function processMemories(deps){
      * @param {number} holder
      */
     const spareToRun = (spare, holder)=>{
-        if (!spare || machineMemory === null || /** @type {any} */ (spare).onRun === true)
+        if (!spare || /** @type {any} */ (spare).onRun === true)
         {
             return;
         }
@@ -101,7 +100,7 @@ export function processMemories(deps){
      * @param {number} holder
      */
     const spareToProcess = (spare, holder)=>{
-        if (!spare || machineMemory === null || /** @type {any} */ (spare).onRun === false)
+        if (!spare || /** @type {any} */ (spare).onRun === false)
         {
             return;
         }
@@ -117,12 +116,12 @@ export function processMemories(deps){
         // A memory kept already, handed back again: one memory, one charge, the
         // larger of the two (each counts what a process was given in it).
         const kept = spare && spareMemories.find(one=>one.memory === spare.memory);
-        if (spare && kept && machineMemory !== null && !byLength)
+        if (spare && kept && !byLength)
         {
             const had = spareCharge(kept);
             const more = spareCharge(spare);
             /** @type {any} */ (kept).charged = Math.max(had, more);
-            machineMemory.give(had + more - Math.max(had, more));
+            machineMemory.give(had + more - Math.max(had, more), 'guest');
         }
         if (spare && !kept)
         {
@@ -141,13 +140,10 @@ export function processMemories(deps){
             // A spare holds its whole length of the machine's memory: past three
             // quarters of it, the oldest go, so a process that needs a memory of
             // its own still finds room (one made anew starts at its floor).
-            if (machineMemory !== null)
+            const limit = machineMemory.report().limit ?? Infinity;
+            while (spareMemories.length > 0 && machineMemory.report().used > limit * 3 / 4)
             {
-                const { limit } = machineMemory.report();
-                while (spareMemories.length > 0 && machineMemory.report().used > limit * 3 / 4)
-                {
-                    dropSpare(spareMemories.shift());
-                }
+                dropSpare(spareMemories.shift());
             }
         }
     };
@@ -159,11 +155,6 @@ export function processMemories(deps){
      * @param {(SpareMemory | null | undefined)[]} kept  its memories the run keeps
      */
     const releaseHolder = (holder, kept)=>{
-        if (machineMemory === null)
-        {
-            kept.forEach(keepSpare);
-            return;
-        }
         kept.forEach(spare=>spareToRun(spare, holder));
         machineMemory.release(holder);
         kept.forEach(keepSpare);
@@ -178,7 +169,8 @@ export function processMemories(deps){
      * machine has, and a start that cannot finish is the child failing.
      *
      * Before it waits, the memories of gone processes go to make room: the
-     * ones kept for the next process, then the one this process took - it is
+     * ones kept for the next process, then the run's cache's cold bodies
+     * (`room`), then the one this process took - it is
      * built in a memory of its own instead. Kept, they held the room the
      * processes taking them waited for: four children, each in a memory a
      * child before them was given 100 MiB in, waited on each other and none
@@ -190,10 +182,6 @@ export function processMemories(deps){
      * @returns {Promise<{ left: number } | undefined>}
      */
     const roomForProcess = async(start, holder)=>{
-        if (machineMemory === null)
-        {
-            return undefined;
-        }
         const view = holderView(holder);
         // Counted by length: in a memory of its own, the floor grown to cover
         // the heap's first block; in a gone one, the room to grow that far. By
@@ -210,6 +198,10 @@ export function processMemories(deps){
             while (!fits() && spareMemories.length > 0)
             {
                 dropSpare(spareMemories.shift());
+            }
+            if (!fits())
+            {
+                room?.(wantedNow() + PROCESS_ENGINE_BYTES);
             }
             if (!fits() && start.reused)
             {
@@ -232,7 +224,7 @@ export function processMemories(deps){
             await new Promise(resolve=>setTimeout(resolve, 50));
         }
         const wanted = wantedNow();
-        if (!view.take(wanted))
+        if (!view.take(wanted, 'guest'))
         {
             view.give(PROCESS_ENGINE_BYTES, 'engine');
             throw Object.assign(new Error('the machine\'s memory had no room for the process'),
@@ -247,9 +239,9 @@ export function processMemories(deps){
      * @param {number} holder
      */
     const releaseCredit = (credit, holder)=>{
-        if (credit && credit.left > 0 && machineMemory !== null)
+        if (credit && credit.left > 0)
         {
-            holderView(holder).give(credit.left);
+            holderView(holder).give(credit.left, 'guest');
             credit.left = 0;
         }
     };

@@ -5,8 +5,7 @@
  */
 
 import { createCorkHost, createTsc } from './internal/cork-host.js';
-import { openMemoryBudget } from './internal/memory-budget.js';
-import { mayWait } from '@bottlify/cellar';
+import { mayWait, openAccount } from '@bottlify/cellar';
 import { codeNudgesMade, gcNudgeOf, releasedCode, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { KEPT_OPTIONS, KEPT_SPACE, STORE_SPACE } from './internal/store-relay.js';
@@ -75,10 +74,11 @@ const EXECUTOR_BYTES = 12 << 20;
  * on the process's holder where it has: without it the process runs its
  * threads on the executors it has.
  *
- * @param {{ memoryBudget?: SharedArrayBuffer | ArrayBuffer, memoryHolder?: number }} settings
+ * @param {{ memoryBudget?: import('@bottlify/cellar').AccountMemory,
+ *     memoryHolder?: number }} settings
  */
 const executorRoom = settings=>settings.memoryBudget === undefined
-    || openMemoryBudget(settings.memoryBudget, settings.memoryHolder)
+    || openAccount(settings.memoryBudget, { holder: settings.memoryHolder })
         .take(EXECUTOR_BYTES, 'engine');
 
 /** The most executors a process has: an x86 affinity mask has 32 bits, a processor each. */
@@ -514,8 +514,8 @@ export function createCpuModule(){
                 // A gone process's memory, taken in place of a new one where it
                 // fits (`CorkHostConfig.reused`).
                 reused: config?.reused,
-                // The machine's memory every process of the run takes its
-                // memory from (`memory-budget.js`); none bounds only each.
+                // The run's account every process of the run takes its
+                // memory from (`createRunAccount`); none bounds only each.
                 memoryBudget: config?.memoryBudget,
                 memoryCredit: config?.memoryCredit,
                 memoryHolder: config?.memoryHolder,
@@ -853,7 +853,25 @@ export function createCpuModule(){
                     };
                     state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                         reused: settings.reused,
-                        ...settings.memoryBudget ? { memoryCredit: settings.memoryCredit } : {} });
+                        ...settings.memoryBudget ? { memoryCredit: settings.memoryCredit,
+                            // The process's own host grows the guest's memory: cold
+                            // bodies of the run's cache let go for a take that does
+                            // not fit, and one refused even so is a loss.
+                            memoryRoom: cache?.room ?? null,
+                            onMemoryRefused: (/** @type {any} */ refusal)=>{
+                                const detail = 'the machine\'s memory has no room for'
+                                    + ` ${refusal.bytes} bytes of ${refusal.kind} (${refusal.used}`
+                                    + ` of ${refusal.limit} held): refused, as a machine out of`
+                                    + ' memory refuses it';
+                                if (config?.divergence)
+                                {
+                                    config.divergence('cpu', detail, 'loss');
+                                }
+                                else
+                                {
+                                    log?.error?.('cpu', detail);
+                                }
+                            } } : {} });
                     for (const listener of growListeners)
                     {
                         state.host.onGrow?.(listener);

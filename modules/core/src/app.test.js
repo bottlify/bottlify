@@ -34,7 +34,7 @@ import { journalEvents } from './process/system-host.js';
 import { liveDumpOf } from './process/live-dump.js';
 import {
     groupBlocks, inParallel, withReadAhead, withWindow, refetchedIn, windowFor,
-    NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES, retryingFetch,
+    BLOCK_CACHE_BYTES, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES, retryingFetch,
 } from './process/bundle-mount.js';
 import {
     fixedLibraryPath, searchedDirectories, startDirectoryOf, libraryCandidates,
@@ -42,7 +42,6 @@ import {
     placeLibrary, missingImportCall, readWholeFile, WHOLE_READ_BYTES,
 } from './process/libraries.js';
 import { createHeapAllocator } from './layers/win32/kernel32/heap.js';
-import { HEAP_POOLS } from './memory-zones.js';
 import { writeBundle } from './bundle-node.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
@@ -2202,7 +2201,7 @@ test('a whole file larger than the heap\'s pool of fetched blocks is read whole,
         assert.ok(fetches <= 10, `a fetch a piece (${fetches})`);
         await assert.rejects(readWholeFile(filesystem, blocks, 'game.exe', Infinity),
             /fetched for ever/, 'the whole file in one read never fits the pool');
-        assert.ok(WHOLE_READ_BYTES * 2 <= HEAP_POOLS.blockCache,
+        assert.ok(WHOLE_READ_BYTES * 2 <= BLOCK_CACHE_BYTES,
             'a piece and the read-ahead beside it fit the pool');
     });
 

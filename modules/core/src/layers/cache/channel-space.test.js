@@ -27,6 +27,7 @@ test('a worker\'s bodies reach the keeper as the only copy for this run, to its 
         },
         raise: (name, options)=>keeper.raise(name, options),
         drop: name=>keeper.drop(name),
+        makeRoom: bytes=>keeper.makeRoom(bytes),
     } }));
     const worker = new Worker(`
         const { parentPort, workerData } = require('node:worker_threads');

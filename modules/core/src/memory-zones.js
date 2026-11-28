@@ -5,63 +5,29 @@
  */
 
 /**
- * What a run may hold in memory, in three zones that grow for different
- * reasons: the guest's, what the program fills of its RAM; the translator's, which
- * grows with the code the program reaches; and the engine's own heaps --
- * decoded and fetched bundle blocks, mirrors of guest memory behind a played
- * device, texels kept for a reader, sound rings -- which grow with what the
- * program reads and draws. A phone's browser ends a tab past a line it does
- * not announce, so each zone has a ceiling and the ceilings sum to the tab's
- * limit with nothing past it: memory no zone counts has no room in the tab.
+ * What a run holds in memory, as one report: the run's account (Cellar's,
+ * `createRunAccount`), which every process takes its memory from by kind -
+ * the guests', the engine's own parts, the translator's modules, the run's
+ * cache's segments - and, by name, what the layers hold that the account does
+ * not count.
  *
  * Each layer says what it holds in its diagnostics as `bytesHeld`, by zone and
- * pool -- `{ heaps: { blockCache: 1048576, mirror: 'not measured' } }` -- and
- * the run's report sums them here (`zonesTable`). A zone of no tab's -- what a
- * device holds in the GPU's process -- is reported beside them, not summed.
+ * pool -- `{ heaps: { blockCache: 1048576, mirror: 'not measured' } }`. A zone
+ * that is an account's kind (`guest`, `translation`) lists its pools beside the
+ * account's sum, which already holds them; every other zone of the tab
+ * (`heaps`) is memory no account counts, each pool named in `notAccounted`, as
+ * is a table that says nothing of what it holds. A zone of no tab's -- what a
+ * device holds in the GPU's process, the page file's disk -- is reported
+ * beside them, not summed.
  */
-
-import { TRANSLATION_ZONE_BYTES } from './layers/cpu/module.js';
-import { WORKING_BYTES } from './layers/filesystem/internal/page-file.js';
-
-const MIB = 1024 * 1024;
-
-/** The most a tab running one program holds, all zones together. */
-export const TAB_MEMORY_LIMIT = 1536 * MIB;
-
-/**
- * Each zone's ceiling, on what is held, not on what could be. The guest's is
- * on what the program holds of its RAM -- its images, its threads' stacks, the
- * heap's blocks it was handed -- and not on the RAM, which is an address space
- * (the system's shared page is at 0x7FFE0000, which only two gigabytes reach)
- * whose pages the program never touched are no memory of the tab's. The
- * translator's zone holds its tables and modules (`TRANSLATION_ZONE_BYTES`);
- * the heaps' is the rest.
- */
-export const MEMORY_ZONES = Object.freeze({
-    guest: 1024 * MIB,
-    translation: TRANSLATION_ZONE_BYTES,
-    heaps: 256 * MIB,
-});
-
-/**
- * The heaps' pools that let go of what they hold to stay under a ceiling of
- * their own, inside the heaps' zone.
- *
- * `blockCache`: a bundle's fetched blocks where no durable store takes them (a
- * browser without the origin's file system in a worker), the least recently
- * read let go first: what a start reads before its first frame fits.
- * `writableFiles`: the pieces of what the program wrote that it is writing,
- * held in memory of their own until they are put in the run's cache
- * (`filesystem/internal/page-file.js`), the least recently written first;
- * the rest are the cache's bodies, inside its budget, and on its disk past it.
- */
-export const HEAP_POOLS = Object.freeze({
-    blockCache: 64 * MIB,
-    writableFiles: WORKING_BYTES,
-});
 
 /** What a pool says when nothing can measure it. */
 export const NOT_MEASURED = 'not measured';
+
+/** The zones a layer names that are kinds of the run's account. */
+const ACCOUNTED_ZONES = Object.freeze({ guest: 'guest', translation: 'translation' });
+/** The zones of the tab no account counts. */
+const UNACCOUNTED_ZONES = Object.freeze(['heaps']);
 
 /**
  * @typedef {Record<string, Record<string, number | string>>} BytesHeld
@@ -69,27 +35,29 @@ export const NOT_MEASURED = 'not measured';
  */
 
 /**
- * The zones' sums over a run's diagnostics tables: for each zone its ceiling,
- * the bytes measured, by `<table>.<pool>`, and the pools that could not say.
- * A table with no `bytesHeld` at all is named in `unreported`: what it holds
- * is counted nowhere, which the sums must not hide. A zone not of the tab
- * (`device`) is listed in `outside`, apart from the total.
+ * The run's memory over its diagnostics tables: the account as the cpu
+ * layer reads it (`machineMemory`, the same words whichever process's table
+ * holds it, counted once), each accounted zone's pools beside its kind's sum,
+ * the bytes no account counts by `<table>.<pool>`, and the total of both.
  *
  * @param {{ name: string, metrics?: any }[]} tables
  * @returns {{ name: string, version: string, status: string, metrics: any }}
  */
 export function zonesTable(tables){
-    /** @type {Record<string, { ceiling: number, bytes: number, free: number, over: boolean,
+    const account = tables.find(table=>table.name === 'cpu' && table.metrics?.machineMemory)
+        ?.metrics.machineMemory ?? null;
+    /** @type {Record<string, { kind: string, accounted: number | string,
      *     pools: Record<string, number>, notMeasured: string[] }>} */
     const zones = {};
-    for (const [zone, ceiling] of Object.entries(MEMORY_ZONES))
+    for (const [zone, kind] of Object.entries(ACCOUNTED_ZONES))
     {
-        zones[zone] = { ceiling, bytes: 0, free: ceiling, over: false, pools: {}, notMeasured: [] };
+        zones[zone] = { kind, accounted: account?.kinds?.[kind]?.bytes ?? NOT_MEASURED, pools: {},
+            notMeasured: [] };
     }
+    /** @type {Record<string, number | string>} */
+    const notAccounted = {};
     /** @type {Record<string, Record<string, number | string>>} */
     const outside = {};
-    /** @type {string[]} */
-    const unreported = [];
     for (const table of tables)
     {
         if (table.name === 'zones')
@@ -99,7 +67,7 @@ export function zonesTable(tables){
         const held = table.metrics?.bytesHeld;
         if (held === null || typeof held !== 'object')
         {
-            unreported.push(table.name);
+            notAccounted[table.name] = NOT_MEASURED;
             continue;
         }
         for (const [zone, pools] of Object.entries(held))
@@ -108,35 +76,46 @@ export function zonesTable(tables){
             {
                 const key = `${table.name}.${pool}`;
                 const into = zones[zone];
-                if (into === undefined)
+                if (into !== undefined)
                 {
-                    (outside[zone] ??= {})[key] = bytes;
+                    if (typeof bytes === 'number')
+                    {
+                        into.pools[key] = bytes;
+                    }
+                    else
+                    {
+                        into.notMeasured.push(key);
+                    }
                 }
-                else if (typeof bytes === 'number')
+                else if (UNACCOUNTED_ZONES.includes(zone))
                 {
-                    into.pools[key] = bytes;
-                    into.bytes += bytes;
+                    notAccounted[key] = bytes;
                 }
                 else
                 {
-                    into.notMeasured.push(key);
+                    (outside[zone] ??= {})[key] = bytes;
                 }
             }
         }
     }
-    let total = 0;
-    for (const zone of Object.values(zones))
-    {
-        zone.free = zone.ceiling - zone.bytes;
-        zone.over = zone.bytes > zone.ceiling;
-        total += zone.bytes;
-    }
-    const over = Object.values(zones).some(zone=>zone.over) || total > TAB_MEMORY_LIMIT;
+    const unaccountedBytes = Object.values(notAccounted)
+        .reduce((/** @type {number} */ sum, bytes)=>sum + (typeof bytes === 'number' ? bytes : 0), 0);
+    // Without the account nothing measured the most of it: no total, not a small one.
+    const total = account === null ? NOT_MEASURED : account.used + unaccountedBytes;
+    const limit = account?.limit ?? null;
     return {
         name: 'zones',
-        version: '0.1.0',
-        status: over ? 'over' : 'ready',
-        metrics: { limit: TAB_MEMORY_LIMIT, total, zones, outside, unreported },
+        version: '0.2.0',
+        status: limit !== null && typeof total === 'number' && total > limit ? 'over' : 'ready',
+        metrics: {
+            limit, total,
+            account: account === null ? NOT_MEASURED
+                : { used: account.used, peak: account.peak, refused: account.refused,
+                    roomAsked: account.roomAsked, roomMade: account.roomMade,
+                    kinds: Object.fromEntries(Object.entries(account.kinds ?? {})
+                        .map(([kind, one])=>[kind, /** @type {any} */ (one).bytes])) },
+            zones, notAccounted, outside,
+        },
     };
 }
 

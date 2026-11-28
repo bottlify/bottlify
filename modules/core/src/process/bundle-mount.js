@@ -14,7 +14,7 @@
 import { openBundle } from '../layers/filesystem/internal/bundle/format.js';
 import { createBlockCache, resolveBlockStore } from '../layers/filesystem/internal/bundle/cache.js';
 import { blockCacheName } from '../layers/filesystem/internal/bundle/saved.js';
-import { HEAP_POOLS, NOT_MEASURED } from '../memory-zones.js';
+import { NOT_MEASURED } from '../memory-zones.js';
 import { BLOCK_MISS, createBundleSource } from '../layers/filesystem/internal/bundle/source.js';
 import { decompressZstd } from '../zstd.js';
 import { inflateRaw } from '../storage.js';
@@ -106,6 +106,14 @@ export function retryingFetch({ fetch, events, retry }){
             + `attempts: ${reason}`);
     };
 }
+
+/**
+ * The bytes of shared memory a bundle's fetched blocks are held hot in, at
+ * most, where no durable store takes them: what a start reads before its
+ * first frame fits. The bundle's keeper's own, no kind of the run's account
+ * yet: its pool is named among what no account counts (`held`).
+ */
+export const BLOCK_CACHE_BYTES = 64 << 20;
 
 /**
  * How much one range request may ask for.
@@ -746,9 +754,8 @@ async function mountOneBundle(deps){
         name: blockCacheName(id, bundle.fingerprint),
         blockSize: bundle.blockSize,
         blockCount: bundle.blockCount,
-        // The heaps' pool for the bundle's blocks: what is hot past it goes
-        // to the disk, or, with none, away.
-        budget: HEAP_POOLS.blockCache,
+        // What is hot past it goes to the disk, or, with none, away.
+        budget: BLOCK_CACHE_BYTES,
         // The person is told there is no room, once, and the other bottles'
         // caches go, the oldest first, for the blocks that come next; the
         // run's own are named in `held` and stay.
@@ -1231,7 +1238,7 @@ async function mountOneBundle(deps){
          *  that has to stay at zero. */
         refetched: ()=>({ ...refetched }),
         decoded: ()=>({ ...decoded }),
-        /** What the bundle's pools hold of the tab's heaps (`memory-zones.js`). */
+        /** What the bundle's pools hold of the tab's heaps, no account's (`memory-zones.js`). */
         held: ()=>({
             blockCache: cache.diagnostics().heapBytes ?? NOT_MEASURED,
         }),
