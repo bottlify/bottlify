@@ -595,8 +595,6 @@ export function createRemoting(host){
     /** An argument to a guest call: a pointer past 4 GiB goes whole. @param {number | bigint} value */
     const guestValue = value=>(typeof value === 'number' && value >= 2 ** 32 ? BigInt(value)
         : value);
-    /** @param {number} pointer @param {number} slot */
-    const methodAt = (pointer, slot)=>guest.ptr(guest.ptr(pointer) + slot * POINTER);
 
     /**
      * A method of a guest object, called on the thread whose host call is
@@ -605,14 +603,14 @@ export function createRemoting(host){
      * @param {number} pointer @param {number} slot @param {(number | bigint)[]} args
      * @param {unknown} thread
      */
-    const callSlot = (pointer, slot, args, thread)=>host.call(methodAt(pointer, slot),
+    const callSlot = (pointer, slot, args, thread)=>host.call(guest.method(pointer, slot),
         [pointer, ...args].map(guestValue), thread);
     /**
      * @param {number} pointer @param {number} slot @param {(number | bigint)[]} args
      * @param {unknown} thread
      */
     const callGuarded = (pointer, slot, args, thread)=>(host.guardedCall ?? host.call)(
-        methodAt(pointer, slot), [pointer, ...args].map(guestValue), thread);
+        guest.method(pointer, slot), [pointer, ...args].map(guestValue), thread);
 
     /**
      * QueryInterface on a guest object, the IID and the answer in task memory

@@ -35,7 +35,7 @@ import { formatGuid } from '../../../system/guid.js';
 import {
     TKIND_ALIAS, TKIND_COCLASS, TKIND_DISPATCH, TKIND_ENUM, TKIND_INTERFACE, TKIND_RECORD,
     VT_BOOL, VT_BSTR, VT_CARRAY, VT_I1, VT_I2, VT_I4, VT_PTR, VT_R4, VT_R8, VT_SAFEARRAY,
-    VT_UI1, VT_UI2, VT_UI4, VT_USERDEFINED, isImport, resolveReference,
+    VT_UI1, VT_UI2, VT_UI4, VT_USERDEFINED, isImport, resolveReference, slotOf,
 } from './typelib.js';
 import { STDOLE_GUID, STDOLE_TYPES, parseTypeLibrary } from './sltg.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
@@ -729,8 +729,7 @@ export function describeType(library, type){
         }
         for (const fn of described.functions)
         {
-            // A 64-bit library counts its vtable in quadwords.
-            const slot = Math.floor(fn.vtableOffset / (library.sysKind === SYS_WIN64 ? 8 : 4));
+            const slot = slotOf(library, fn);
             const parameters = fn.parameters.map((parameter, index)=>({
                 name: parameter.name ?? `argument ${index}`,
                 flags: (parameter.flags & (PARAMFLAG_FIN | PARAMFLAG_FOUT)) || PARAMFLAG_FIN,

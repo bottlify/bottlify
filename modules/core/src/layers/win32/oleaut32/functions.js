@@ -321,12 +321,6 @@ export function createAutomationFunctions(host){
      * @param {number} psa
      */
     const recordInfoOf = psa=>guest.ptr(wholeAddress(psa) + SAFEARRAY.RECORD_INFO);
-    /**
-     * A method of a guest object: its vtable's `slot`th pointer.
-     *
-     * @param {number} object @param {number} slot
-     */
-    const methodAt = (object, slot)=>guest.ptr(guest.ptr(object) + slot * POINTER);
 
     /**
      * The IErrorInfo each thread last set and has not yet collected, by the
@@ -690,7 +684,7 @@ export function createAutomationFunctions(host){
             return hr;
         }
         return calls.reduce((before, [object, slot, rest])=>before.then(()=>
-            call(methodAt(object, slot), [object, ...rest], thread)),
+            call(guest.method(object, slot), [object, ...rest], thread)),
         Promise.resolve(0)).then(()=>hr);
     };
 
@@ -1139,7 +1133,7 @@ export function createAutomationFunctions(host){
                 guest.set16(dest, VT_RECORD);
                 guest.set32(dest + VARIANT_VALUE, copy);
                 guest.set32(dest + VARIANT_VALUE + 4, info);
-                return call(methodAt(info, RECORDINFO_RECORDCLEAR + 1),
+                return call(guest.method(info, RECORDINFO_RECORDCLEAR + 1),
                     [info, record, copy], thread)
                     .then(hr=>addRefOf(info).then(()=>hr));
             });
@@ -2569,7 +2563,7 @@ export function createAutomationFunctions(host){
             return E_OUTOFMEMORY;
         }
         guest.fill(block, 0, 48);
-        const invoke = methodAt(dispatch, 6);
+        const invoke = guest.method(dispatch, 6);
         return call(invoke, [dispatch, DISPID_VALUE, block + 32, lcid >>> 0,
             DISPATCH_PROPERTYGET, block + 16, block, 0, 0], thread).then(hr=>{
             const value = (hr | 0) < 0 ? hr | 0 : readOperand(block);
@@ -2956,14 +2950,14 @@ export function createAutomationFunctions(host){
             return Promise.resolve(null);
         }
         guest.set32(slot, 0);
-        return call(methodAt(info, RECORDINFO_GETSIZE), [info, slot],
+        return call(guest.method(info, RECORDINFO_GETSIZE), [info, slot],
             host.callerThread?.()).then(()=>guest.u32(slot))
             .finally(()=>host.heap.free(slot));
     };
 
     /** @param {number} object @returns {Promise<unknown>} */
     const addRefOf = object=>(host.call
-        ? host.call(methodAt(object, 1), [object], host.callerThread?.())
+        ? host.call(guest.method(object, 1), [object], host.callerThread?.())
         : Promise.resolve(0));
 
     /**

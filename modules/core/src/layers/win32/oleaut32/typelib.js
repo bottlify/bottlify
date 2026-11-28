@@ -629,6 +629,18 @@ export function resolveReference(library, hreftype){
     return library.typeInfos[hreftype / TYPEINFO_BYTES] ?? null;
 }
 
+/** SYSKIND's 64-bit library: its vtable offsets count quadwords. */
+const SYS_WIN64 = 3;
+
+/**
+ * A function's vtable slot: its offset in the slots of the library's width,
+ * whatever the width of the process reading it.
+ *
+ * @param {TypeLibrary} library @param {FunctionDescription} fn
+ */
+export const slotOf = (library, fn)=>Math.floor(fn.vtableOffset
+    / (library.sysKind === SYS_WIN64 ? 8 : 4));
+
 /**
  * Whether a resolved reference is an import rather than a type of the library.
  *

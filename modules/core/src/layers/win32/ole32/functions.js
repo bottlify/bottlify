@@ -567,7 +567,7 @@ export function createOleFunctions(host){
         {
             return Promise.resolve(E_NOINTERFACE);
         }
-        const entry = guest.ptr(guest.ptr(object) + slot * width.size);
+        const entry = guest.method(object, slot);
         return host.call(entry, [object >>> 0, ...args], thread);
     };
 
@@ -776,7 +776,7 @@ export function createOleFunctions(host){
         {
             return false;
         }
-        const procedure = guest.ptr(guest.ptr(pointer) + 3 * width.size);
+        const procedure = guest.method(pointer, 3);
         const made = host.system('KERNEL32.dll', 'CreateThread', [0, 0, procedure, pointer, 0, 0]);
         if (made === null)
         {

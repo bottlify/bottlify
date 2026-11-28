@@ -242,7 +242,7 @@ export function createUserMarshalFunctions(host){
                 'no call into the program: a reference it is owed is not taken or given back');
             return Promise.resolve(0);
         }
-        return call(guest.ptr(guest.ptr(object) + slot * guest.pointerSize), [object, ...args],
+        return call(guest.method(object, slot), [object, ...args],
             thread).then(answer=>answer | 0);
     };
     /** @param {number} object @param {unknown} thread */

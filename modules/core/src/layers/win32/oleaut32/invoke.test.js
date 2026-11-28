@@ -156,6 +156,22 @@ test('a property get: the retval slot is passed, read back, and put in the resul
     assert.equal(host.blocks.size, 1, 'the slots are freed, the string is not');
 });
 
+test('in a 64-bit process the method is its vtable\'s entry at a slot of eight, read whole',
+    async()=>{
+        const host = fakeHost();
+        const wide = guestOver(host.bytes, 8);
+        host.guest = wide;
+        const invoker = createInvoker(host);
+        const { type, fn } = describe('ISetupBasicFeature', 'Name', PROPERTYGET);
+        wide.fill(PARAMS, 0, 24);
+        wide.setPtr(INSTANCE, VTABLE);
+        wide.setPtr(VTABLE + 7 * 8, 0x1_0000_5007);
+        host.answer = ()=>0;
+        await invoker.invoke(library, type, fn, INSTANCE, PROPERTYGET, PARAMS, RESULT,
+            EXCEPINFO, ARGERR);
+        assert.equal(host.calls[0]?.entry, 0x1_0000_5007);
+    });
+
 test('a method with arguments: variants become the declared types, in declaration order',
     async()=>{
         const host = fakeHost();

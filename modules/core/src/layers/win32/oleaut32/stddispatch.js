@@ -63,7 +63,7 @@ export function createStdDispatchObjects(host){
      * @param {number} object @param {number} slot @param {number[]} args
      */
     const callMethod = (object, slot, args)=>
-        host.call(guest.ptr(guest.ptr(object) + slot * guest.pointerSize), [object, ...args]);
+        host.call(guest.method(object, slot), [object, ...args]);
 
     /** @param {number} riid */
     const isNull = riid=>riid !== 0 && guest.guid(riid) === GUID_NULL;
