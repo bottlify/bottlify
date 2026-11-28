@@ -99,10 +99,10 @@ export function createInputModule(){
                 // as a program then sees with GetRegisteredRawInputDevices.
                 rawInput: {
                     claim: (/** @type {number} */ usage, /** @type {number} */ flags)=>
-                        /** @type {any} */ (win32).claimRawInput?.(usage, flags,
+                        /** @type {any} */ (win32).claimRawInput(usage, flags,
                             bridge.callerThread()) ?? 0,
                     release: (/** @type {number} */ usage)=>
-                        /** @type {any} */ (win32).releaseRawInput?.(usage),
+                        /** @type {any} */ (win32).releaseRawInput(usage),
                 },
                 // Where a mouse in absolute mode starts when it is taken: the
                 // cursor, as the router keeps it. Made below; asked only later.
@@ -126,7 +126,7 @@ export function createInputModule(){
                 // The program's own foreground window, which a device that
                 // reads input only in the foreground needs to be acquired. Not
                 // the browser's focus: that never reaches the guest.
-                foreground: config?.foreground ?? (()=>win32.activeWindow?.()),
+                foreground: config?.foreground ?? (()=>win32.activeWindow()),
             });
 
             const xinput = createXInput();
@@ -173,7 +173,7 @@ export function createInputModule(){
              * @param {import('./router.js').HostInputEvent} event
              */
             const sendDevice = event=>{
-                const seam = queue.lowLevel ?? null;
+                const seam = queue.lowLevel;
                 const watched = seam !== null && event.injected !== true
                     && (seam.hooked('mouse') || seam.hooked('keyboard'));
                 if (!watched && behind === null)
@@ -245,13 +245,13 @@ export function createInputModule(){
                 // program's back buffer -- so it is pointed into from where
                 // that client lies on the screen.
                 origin: (width, height)=>viewportOrigin(width, height,
-                    win32.screenSize?.() ?? null, win32.windows()),
+                    win32.screenSize() ?? null, win32.windows()),
                 // A device a program holds exclusively is read through
                 // DirectInput alone, and the window hears nothing of it.
                 exclusive: kind=>dinput.exclusive(kind),
                 // The device's own report, for a program that registered for raw
                 // input; whether one did, and which window hears it, is user32's.
-                rawInput: report=>effect(()=>win32.rawInput?.(report)),
+                rawInput: report=>effect(()=>win32.rawInput(report)),
                 // Pasted text is the clipboard's, which is win32's.
                 paste: text=>effect(()=>win32.paste(text)),
             });

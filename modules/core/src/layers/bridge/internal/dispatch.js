@@ -934,7 +934,7 @@ class Dispatcher {
         let frame = ebp >>> 0;
         for (let depth = 0; depth < 2 && frame !== 0; depth++)
         {
-            const region = this.memory.find?.(frame);
+            const region = this.memory.find(frame);
             if (!region || region.access === 'none' || frame + 8 > region.base + region.size)
             {
                 break;
@@ -961,7 +961,7 @@ class Dispatcher {
      * @param {number} at @param {unknown} failure
      */
     readWithinStack(from, count, into, at, failure){
-        const region = this.memory.find?.(from);
+        const region = this.memory.find(from);
         if (!region)
         {
             throw failure;
@@ -1575,7 +1575,7 @@ class Dispatcher {
 
         // An x86-64 process: its registers are quadwords (no register file
         // here) and its calls follow the x64 convention (`readLongCall`).
-        const long = this.cpu.bits?.() === 64;
+        const long = this.cpu.bits() === 64;
         const regs = long ? null : this.registers();
         const pushed = regs === null ? this.cpu.readReg32('esp') : regs[ESP] >>> 0;
         const esp = pushed + entry.saved;
@@ -2015,7 +2015,7 @@ class Dispatcher {
             highs: null,
             cutSkip: null,
             cutSaid: false,
-            writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
+            writer: this.memory.writer(fn.name),
             sinkRevision: -1,
             sinkOn: true,
             calls: 0,

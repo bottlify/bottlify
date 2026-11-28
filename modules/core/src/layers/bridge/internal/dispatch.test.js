@@ -43,6 +43,7 @@ function machine(options = {}){
     /** @type {Record<string, number>} */
     const registers = { esp, ecx, eax: 0 };
     const cpu = {
+        bits: ()=>32,
         /** @param {string} name */
         readReg32: name=>registers[name] ?? 0,
         /** @param {string} name @param {number} value */
@@ -51,6 +52,7 @@ function machine(options = {}){
         },
     };
     const memory = {
+        writer: ()=>-1,
         ...options.memoryExtras,
         /** @param {number} address */
         readU32: address=>{
@@ -1499,6 +1501,7 @@ test('a register file lent by the cpu carries ESP and EAX, and one that reads em
     /** @type {string[]} */
     const byName = [];
     const cpu = {
+        bits: ()=>32,
         registerFile: ()=>{
             lent++;
             return file;
@@ -2047,6 +2050,7 @@ test('a quadword argument is one x64 slot, split into the two dwords the handler
     const words = new Map([[0x8000, 0x401234], [0x8028, 5], [0x8030, 0xfffffffe],
         [0x8034, 0xffffffff], [0x8038, 7]]);
     /** @type {any} */ (stack.dispatcher).memory = {
+        writer: ()=>-1,
         /** @param {number} address */
         readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
     stack.dispatcher.register(2, { name: 'X!Late', ...STDCALL, argBytes: 32, quadwords: [5],
@@ -2091,6 +2095,7 @@ test('a float or a double among the first four is read from the XMM register of 
     const words = new Map([[0x8000, 0x401234], [0x8028, 0x3f800000], [0x8030, 0x11],
         [0x8034, 0x40000000], [0x8038, 7]]);
     /** @type {any} */ (stack.dispatcher).memory = {
+        writer: ()=>-1,
         /** @param {number} address */
         readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
     /** @type {any} */ (stack.dispatcher).cpu.readXmm = ()=>Uint32Array.of(0, 0, 0, 0);
@@ -2119,6 +2124,7 @@ test('a structure passed by value is a pointer in one x64 slot, read into its dw
         [0x9010, 5], [0x9014, 6], [0x9018, 7], [0x901c, 8],
         [0x9020, 9], [0x9024, 10], [0x9028, 11], [0x902c, 12]]);
     /** @type {any} */ (dispatcher).memory = {
+        writer: ()=>-1,
         /** @param {number} address */
         readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
     /** @type {number[][]} */
@@ -2235,7 +2241,7 @@ test('a frame chain through a region nothing may read ends there, rather than fa
         { name: 'engine', base: 0x3c00000, size: 0x3de0000, access: 'none' },
     ];
     const words = new Map([[0x2ff000, 0x4000000], [0x2ff004, 0x401234]]);
-    const dispatcher = createDispatcher({ cpu: {}, parking: null, memory: {
+    const dispatcher = createDispatcher({ cpu: {}, parking: null, memory: { writer: ()=>-1,
         find: (/** @type {number} */ at)=>regions.find(one=>at >= one.base
             && at < one.base + one.size),
         readU32: (/** @type {number} */ at)=>{

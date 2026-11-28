@@ -21,7 +21,7 @@ function callbacks(threads){
     /** @type {Map<number, number>} */
     const written = new Map();
     const made = createCallbacks({
-        cpu: { readReg32: ()=>0 },
+        cpu: { readReg32: ()=>0, bits: ()=>32 },
         kernel: {
             threads: ()=>threads,
             /** @param {any} thread @param {any} where */
@@ -339,7 +339,7 @@ test('a callback whose handler jumped to its catch is passed over by the one tha
         const registers = { esp: 0, ecx: 0 };
         const main = thread('main');
         const made = createCallbacks({
-            cpu: { readReg32: (/** @type {'esp' | 'ecx'} */ name)=>registers[name] },
+            cpu: { readReg32: (/** @type {'esp' | 'ecx'} */ name)=>registers[name], bits: ()=>32 },
             kernel: { threads: ()=>[main], scheduleResume: ()=>{} },
             memory: { writeU32: ()=>{} },
             reserveTrap: ()=>({ id: 1, address: SENTINEL }),

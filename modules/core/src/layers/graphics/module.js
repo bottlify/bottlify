@@ -661,9 +661,9 @@ export function createGraphicsModule(){
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
                     // Where the memory is shared the worker writes what it reads
                     // back in place, and says only where.
-                    sharedMemory: ()=>memory.shared?.() ?? null,
-                    memoryGrown: listener=>memory.onGrow?.(listener),
-                    adoptMemory: (address, length)=>memory.adopt?.(address, length),
+                    sharedMemory: ()=>memory.shared() ?? null,
+                    memoryGrown: listener=>memory.onGrow(listener),
+                    adoptMemory: (address, length)=>memory.adopt(address, length),
                     // The bound the run's presenter holds a device here to, for
                     // the devices that draw there.
                     maxFrameLatency: config?.maxFrameLatency,
@@ -735,14 +735,14 @@ export function createGraphicsModule(){
                  *
                  * @returns {Uint8Array | null}
                  */
-                sharedMemory: ()=>memory.shared?.() ?? null,
+                sharedMemory: ()=>memory.shared() ?? null,
                 /**
                  * Watches a range for writes: what a draw from a dynamic buffer
                  * compares is the pages written since its last look.
                  *
                  * @param {number} address @param {number} length
                  */
-                watchWrites: (address, length)=>memory.watchWrites?.(address, length) ?? null,
+                watchWrites: (address, length)=>memory.watchWrites(address, length) ?? null,
                 /**
                  * A diagnostic: each draw from a buffer recorded for the
                  * graphics worker compares what it reads with what the worker
@@ -763,13 +763,10 @@ export function createGraphicsModule(){
                 writePointer: (address, value, bytes)=>memory.writePointer(address, value, bytes),
                 /**
                  * A dword, written in place: an out-parameter without an array
-                 * made to carry its four bytes. Absent where the memory given
-                 * writes only bytes, and then the bytes carry it.
+                 * made to carry its four bytes.
                  */
-                writeU32: typeof memory.writeU32 === 'function'
-                    ? (/** @type {number} */ address, /** @type {number} */ value)=>
-                        memory.writeU32(address, value)
-                    : undefined,
+                writeU32: (/** @type {number} */ address, /** @type {number} */ value)=>
+                    memory.writeU32(address, value),
                 /**
                  * `count` floats, decoded straight into `into` -- no window, no
                  * copy, no `DataView` -- for a fixed-count vector argument a
@@ -788,19 +785,15 @@ export function createGraphicsModule(){
                  * a guest routine takes with `lock cmpxchg` that the host also
                  * moves. Answers what the word held.
                  */
-                compareExchangeU32: typeof memory.compareExchangeU32 === 'function'
-                    ? (/** @type {number} */ address, /** @type {number} */ expected,
-                        /** @type {number} */ value)=>memory.compareExchangeU32(address, expected, value)
-                    : undefined,
+                compareExchangeU32: (/** @type {number} */ address, /** @type {number} */ expected,
+                    /** @type {number} */ value)=>memory.compareExchangeU32(address, expected, value),
                 /**
                  * A dword read in order after the store it finds, against the
                  * guest's threads on the process's other executors: a ring
                  * record's length, which a routine publishes with `xchg` once
                  * the record is written.
                  */
-                loadU32: typeof memory.loadU32 === 'function'
-                    ? (/** @type {number} */ address)=>memory.loadU32(address)
-                    : undefined,
+                loadU32: (/** @type {number} */ address)=>memory.loadU32(address),
                 /**
                  * Whether the guest may write `length` bytes at an address: an
                  * out-parameter the system probes before it writes through it,
@@ -809,7 +802,7 @@ export function createGraphicsModule(){
                  * @param {number} address @param {number} length
                  */
                 writable: (address, length)=>{
-                    const region = memory.find?.(address >>> 0);
+                    const region = memory.find(address >>> 0);
                     return !!region && (address >>> 0) + length <= region.base + region.size
                         && region.access.includes('w');
                 },
@@ -1001,7 +994,7 @@ export function createGraphicsModule(){
                     // would be lost to the next.
                     /** @param {number} hdc */
                     describeDrawable: hdc=>clientDrawable(win32.gdi().describeDrawable(hdc),
-                        win32.windows?.() ?? []),
+                        win32.windows()),
                     // A context on a memory DC draws into the bitmap selected
                     // there (`wgl-bitmap.js`).
                     /** @param {number} hdc */
@@ -1015,10 +1008,10 @@ export function createGraphicsModule(){
                     deleteDc: hdc=>win32.gdi().deleteSurfaceDc?.(hdc),
                     // WGL's refusals are read with GetLastError.
                     /** @param {number} code */
-                    setLastError: code=>win32.setLastError?.(code),
+                    setLastError: code=>win32.setLastError(code),
                     // A context is current on one thread at a time, and another
                     // thread's MakeCurrent or DeleteContext of it is ERROR_BUSY.
-                    currentThread: ()=>bridge.callerThread?.()?.id ?? 0,
+                    currentThread: ()=>bridge.callerThread()?.id ?? 0,
                     // The debug callback (4.3) runs on the thread whose call
                     // made the message.
                     /** @param {{ entry: number, args: number[] }} guestCall */
@@ -1028,7 +1021,7 @@ export function createGraphicsModule(){
                     // block: the calling thread's TEB. A 64-bit process has no
                     // such routines (they are i386 code), and every call traps.
                     ...config?.pointerSize === 8 ? { pointerSize: 8 } : {
-                        currentTeb: ()=>bridge.callerThread?.()?.tebAddress ?? 0,
+                        currentTeb: ()=>bridge.callerThread()?.tebAddress ?? 0,
                     },
                     // On the configuration rather than the device handle: it
                     // concerns the build that has no device.
@@ -1269,8 +1262,8 @@ export function createGraphicsModule(){
                 free: address=>config?.free?.(address),
                 bytesAt: (address, length)=>services.windowMemory(address, length),
                 size: ()=>services.screen,
-                surfaceOf: hwnd=>win32.windowSurfaceOf?.(hwnd) ?? null,
-                windows: ()=>win32.windowSurfaces?.() ?? [],
+                surfaceOf: hwnd=>win32.windowSurfaceOf(hwnd) ?? null,
+                windows: ()=>win32.windowSurfaces(),
             });
 
             // The exclusive-mode picture and its window, while one holds the
@@ -1331,7 +1324,7 @@ export function createGraphicsModule(){
              */
             const veilOver = holder=>{
                 const screen = services.screen;
-                const rects = windowsAbove(win32.windows?.() ?? [], holder,
+                const rects = windowsAbove(win32.windows(), holder,
                     { left: 0, top: 0, right: screen.width, bottom: screen.height });
                 // ponytail: the whole desktop is uploaded at each paint while a
                 // window is over the picture; only the windows' rows if a
@@ -1373,12 +1366,12 @@ export function createGraphicsModule(){
                 const wholeScreen = { left: 0, top: 0, right: screen.width, bottom: screen.height };
                 const usable = !state.shown.isClaimed(surface.buffer)
                     && surface.width === screen.width && surface.height === screen.height;
-                const windows = usable ? win32.windows?.() ?? [] : [];
+                const windows = usable ? win32.windows() : [];
                 if (usable && !exclusive)
                 {
                     const owning = primaryOwner(windows, window);
                     const top = owning
-                        ? win32.windowSurfaceOf?.(Number(owning.hwnd)) ?? null : null;
+                        ? win32.windowSurfaceOf(Number(owning.hwnd)) ?? null : null;
                     const held = top ? screens.windowSurface(top.hwnd, top.rect) : null;
                     const client = owning ? intersectRect(owning.client, wholeScreen) : null;
                     if (top && held && client && !isEmptyRect(client))
@@ -1454,14 +1447,14 @@ export function createGraphicsModule(){
                 pointerSize: config?.pointerSize === 8 ? 8 : 4,
                 floatResult: config?.floatResult,
                 // DXGI's swap chain hands out a kernel event, and its device sets one.
-                events: win32.events?.(),
+                events: win32.events(),
                 // A shared resource's NT handle is a kernel object of the process.
-                sharedHandles: win32.sharedHandles?.(),
+                sharedHandles: win32.sharedHandles(),
                 guestTraps: config?.guestTraps,
                 // A full-screen Direct3D 8 or 9 device's windows: user32's own
                 // calls on them, and a window procedure of the device's.
-                user32: (/** @type {string} */ name)=>win32.user32?.(name),
-                cover: (/** @type {number} */ hwnd)=>win32.coverWindow?.(hwnd),
+                user32: (/** @type {string} */ name)=>win32.user32(name),
+                cover: (/** @type {number} */ hwnd)=>win32.coverWindow(hwnd),
                 procedure: (/** @type {string} */ name,
                     /** @type {(args: number[]) => unknown} */ handler)=>
                     bridge.register(`<${name}>`, { argBytes: 16, handler }),
@@ -1470,7 +1463,7 @@ export function createGraphicsModule(){
                 free: config?.free,
                 // What a program is handed to free with HeapFree itself.
                 processHeapAllocate: (/** @type {number} */ bytes)=>
-                    win32.processHeapAllocate?.(bytes) ?? 0,
+                    win32.processHeapAllocate(bytes) ?? 0,
                 divergence: config?.divergence,
                 scratches,
                 // Where the work a device call does before its method -- the
@@ -1511,7 +1504,7 @@ export function createGraphicsModule(){
                     ? (/** @type {number} */ hwnd)=>Boolean(win32.windowShown(hwnd)) : undefined,
                 // A window's client area on the screen, which a DirectDraw
                 // clipper given the window clips to; null for no such window.
-                windowClient: (/** @type {number} */ hwnd)=>(win32.windows?.() ?? [])
+                windowClient: (/** @type {number} */ hwnd)=>win32.windows()
                     .find((/** @type {any} */ each)=>Number(each.hwnd) === hwnd)?.client ?? null,
                 // Absent in a build with no bridge behind it -- a test, an
                 // inspection -- which then gets tables that refuse rather than
@@ -1534,7 +1527,7 @@ export function createGraphicsModule(){
                     createSurfaceDc: attributes=>win32.gdi().createSurfaceDc(attributes),
                     /** @param {number} handle */
                     deleteSurfaceDc: handle=>win32.gdi().deleteSurfaceDc(handle),
-                    displayDc: ()=>Number(win32.user32?.('GetDC')?.handler([0]) ?? 0) >>> 0,
+                    displayDc: ()=>Number(win32.user32('GetDC')?.handler([0]) ?? 0) >>> 0,
                 },
 
                 present: presentPrimary,
@@ -1550,8 +1543,8 @@ export function createGraphicsModule(){
                 gamma: displayGamma,
                 // What exclusive mode is lost on. Asked on each TestCooperativeLevel
                 // rather than now: win32 answers about windows made later.
-                deactivated: ()=>win32.applicationDeactivated?.() === true,
-                deactivations: ()=>win32.applicationDeactivations?.() ?? 0,
+                deactivated: ()=>win32.applicationDeactivated() === true,
+                deactivations: ()=>win32.applicationDeactivations(),
 
                 // What a Direct3D 7 device draws with. Reached when a program
                 // first asks its DirectDraw object for Direct3D, not now, so a
@@ -1728,8 +1721,8 @@ export function createGraphicsModule(){
                     // the dialog's controls drawn over the picture.
                     const held = fullScreen;
                     const owner = held && `0x${(held.window >>> 0).toString(16)}`;
-                    if (held && !win32.applicationDeactivated?.()
-                        && (win32.windows?.() ?? []).some(
+                    if (held && !win32.applicationDeactivated()
+                        && win32.windows().some(
                             (/** @type {ListedWindow} */ listed)=>listed.hwnd === owner))
                     {
                         if (state.shown.isClaimed(held.surface.buffer))
@@ -1749,8 +1742,8 @@ export function createGraphicsModule(){
                     // box put up before that window first showed was laid over a
                     // frame never drawn, and the screen stayed black.
                     const covering = state.seam?.screenHeld?.() ?? 0;
-                    if (covering && !win32.applicationDeactivated?.()
-                        && windowShown(win32.windows?.() ?? [], covering))
+                    if (covering && !win32.applicationDeactivated()
+                        && windowShown(win32.windows(), covering))
                     {
                         veilOver(covering);
                         return;
@@ -1770,7 +1763,7 @@ export function createGraphicsModule(){
                     desktops.window = into?.window ?? 0;
                     if (screen && into)
                     {
-                        const listed = win32.windows?.() ?? [];
+                        const listed = win32.windows();
                         const hex = `0x${(into.window >>> 0).toString(16)}`;
                         desktops.client = listed.find((/** @type {ListedWindow} */ each)=>
                             each.hwnd === hex)?.client ?? null;
@@ -1814,17 +1807,14 @@ export function createGraphicsModule(){
             // with every present; one on this thread is asked only where there
             // is no worker, since asking a recorded device would send the
             // question to the worker as a call.
-            if (typeof log.metrics?.onFrame === 'function')
-            {
-                log.metrics.onFrame(publishFigures({
-                    metrics: log.metrics,
-                    intern: text=>log.intern(text),
-                    shown: ()=>state.presenter?.shown?.() ?? null,
-                    figures: ()=>(state.remote ? state.remote.figures()
-                        : state.seam?.figures?.() ?? null),
-                    worker: ()=>state.remote?.phases() ?? null,
-                }));
-            }
+            log.metrics.onFrame(publishFigures({
+                metrics: log.metrics,
+                intern: text=>log.intern(text),
+                shown: ()=>state.presenter?.shown?.() ?? null,
+                figures: ()=>(state.remote ? state.remote.figures()
+                    : state.seam?.figures?.() ?? null),
+                worker: ()=>state.remote?.phases() ?? null,
+            }));
 
             current = state;
             return {

@@ -33,9 +33,13 @@ async function open({ win32, config } = {}){
     });
     const apis = /** @type {Record<string, any>} */ ({
         memory,
-        bridge: {},
-        // One top-level window, the one the program has in front.
-        win32: win32 ?? { queue: ()=>queue, windows: ()=>[{ hwnd: String(HWND), child: false }] },
+        bridge: { callerThread: ()=>null },
+        // One top-level window, the one the program has in front, and what a
+        // test names in its place.
+        win32: { queue: ()=>queue, windows: ()=>[{ hwnd: String(HWND), child: false }],
+            screenSize: ()=>null, activeWindow: ()=>HWND, rawInput: ()=>{}, paste: ()=>{},
+            claimRawInput: ()=>{}, releaseRawInput: ()=>{},
+            ...win32 },
     });
     const api = await inputModule.create(
         { foreground: ()=>HWND, ...config },
@@ -81,6 +85,16 @@ test('an event reaches win32 as the device reported it, for raw input', async()=
 
     await inputModule.dispose();
 });
+
+test('a win32 without a method input calls is an error at the call, not a quiet nothing',
+    async()=>{
+        // win32 is required: its api has raw input, and one that lacks it is a
+        // defect said where it is met rather than an event that went nowhere.
+        const { api } = await open({ win32: { rawInput: undefined } });
+        assert.throws(()=>api.send({ kind: 'pointerMove', dx: 2, dy: 1 }),
+            /rawInput is not a function/);
+        await inputModule.dispose();
+    });
 
 test('a key sent to the layer arrives in the window queue the program pumps', async()=>{
     const { api, drain } = await open();

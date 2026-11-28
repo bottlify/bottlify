@@ -22,6 +22,8 @@ import { graphicsModule } from './module.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { createGdiFunctions } from '../win32/gdi32/functions.js';
 import { BITMAPINFOHEADER } from '../win32/gdi32/structs.js';
+import { graphicsWin32 } from './win32.fixture.js';
+import { testLog } from '../log/testing.fixture.js';
 
 const SRCCOPY = 0x00cc0020;
 const WHITENESS = 0x00ff0062;
@@ -41,6 +43,7 @@ const SCREEN = { width: 16, height: 8, bitsPerPixel: 32 };
  * @param {{ canvas?: boolean }} [options]  Whether the device has a canvas to show on.
  */
 async function assemble({ canvas = false } = {}){
+    const log = await testLog();
     const ram = new Uint8Array(0x40000);
     const view = new DataView(ram.buffer);
     /** @type {Map<number, { type: string, object: any }>} */
@@ -80,15 +83,19 @@ async function assemble({ canvas = false } = {}){
                     readU32: (/** @type {number} */ address)=>view.getUint32(address, true),
                 };
             }
+            if (name === 'log')
+            {
+                return log;
+            }
             if (name === 'cache')
             {
                 return roomy.api;
             }
             if (name === 'win32')
             {
-                return { heap: ()=>heap, windows: ()=>[] };
+                return graphicsWin32({ heap: ()=>heap });
             }
-            return { callGuest: ()=>Promise.resolve(0) };
+            return { callGuest: ()=>Promise.resolve(0), callerThread: ()=>null };
         },
     }));
     const drawing = graphics.gdiDrawing();

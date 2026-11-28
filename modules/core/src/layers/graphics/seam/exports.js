@@ -437,7 +437,7 @@ export function createGraphicsLibraries(
         ringBytes,
         windowClientSize, windowShown, shownIn, now, waitUntil, presented, refresh, phases,
         focus, callGuest,
-        currentThread, identity: ()=>graphics.adapter?.() ?? null,
+        currentThread, identity: ()=>graphics.adapter(),
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, placeCursor, cursorAt, resolution,
@@ -447,7 +447,7 @@ export function createGraphicsLibraries(
         waitUntil, presented, refresh, phases, allocate: guestCode9 ? allocate : undefined,
         allocateCode: guestCode9 ? allocateCode : undefined,
         traps: new Set(guestTraps), ringBytes, pointerSize, floatResult,
-        identity: ()=>graphics.adapter?.() ?? null,
+        identity: ()=>graphics.adapter(),
     }));
     // Direct3D 10 and 11 are one seam over one device, and DXGI is theirs.
     const d3d10 = built(DXGI_LIBRARIES, ()=>createDirect3D10Seam({
@@ -457,8 +457,8 @@ export function createGraphicsLibraries(
         allocateCode: guestCode9 ? allocateCode : undefined, traps: new Set(guestTraps), ringBytes,
         floatResult,
         pointerSize,
-        identity: ()=>graphics.adapter?.() ?? null,
-        videoMemory: ()=>graphics.videoMemory?.() ?? null,
+        identity: ()=>graphics.adapter(),
+        videoMemory: ()=>graphics.videoMemory(),
         events,
         sharedHandles,
         shownIn,
@@ -488,8 +488,8 @@ export function createGraphicsLibraries(
         now, schedule, refresh,
         extraInterfaces: [d3d7().interface, ...d3dLegacy().interfaces],
         extraSurfaceInterfaces: d3dLegacy().surfaceInterfaces,
-        identity: ()=>graphics.adapter?.() ?? null,
-        videoMemory: ()=>graphics.videoMemory?.() ?? null,
+        identity: ()=>graphics.adapter(),
+        videoMemory: ()=>graphics.videoMemory(),
         divergence,
         gamma,
         deactivated,

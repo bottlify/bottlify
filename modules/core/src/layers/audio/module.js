@@ -283,7 +283,7 @@ export function createAudioModule(){
                 // published there and not by this module, so a
                 // performance asked to play it has to look there.
                 objectAt: (/** @type {number} */ pointer)=>
-                    bridge?.interfaceObject?.(pointer) ?? null,
+                    bridge.interfaceObject(pointer),
                 allocate: config?.allocate,
                 free: config?.free,
                 // DirectMusic's notification message is the event the
