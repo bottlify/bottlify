@@ -19,6 +19,7 @@
 
 import { layoutOf } from './pixels.js';
 import { formatGuid } from '../../../system/guid.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const D3DUSAGE_RENDERTARGET = 0x1;
 const D3DUSAGE_DEPTHSTENCIL = 0x2;
@@ -634,11 +635,8 @@ export function deviceRig(options = {}){
     /** @type {string[][]} */
     const diverged = [];
     const host = {
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            memory.subarray(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, at),
-        heap, callGuest, ...options.pointerSize ? { pointerSize: options.pointerSize } : {},
+        guest: guestOver(memory, /** @type {4 | 8} */ (pointer)),
+        heap, callGuest,
         vtables: { publish: (/** @type {any} */ com, /** @type {string} */ id)=>
             publishAs(com, id) },
         currentThread: ()=>undefined,

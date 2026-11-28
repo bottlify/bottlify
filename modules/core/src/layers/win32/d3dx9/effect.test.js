@@ -239,10 +239,6 @@ function guest(options = {}){
     let nextPointer = 0x3000000;
     const host = { compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
         guest: guestOver(memory),
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            memory.subarray(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, at),
         heap, callGuest,
         vtables: { publish: (/** @type {any} */ obj, /** @type {string} */ iid)=>{
             nextPointer += 16;
@@ -431,7 +427,7 @@ const EFFECT = [['GetPool', 1], ['SetTechnique', 1], ['GetCurrentTechnique', 0],
     ['SetRawValue', 4]];
 
 test('the vtables are in the header\'s order, each slot popping its own arguments', ()=>{
-    const host = { readMemory: ()=>new Uint8Array(4), writeMemory: ()=>{} };
+    const host = { guest: guestOver(new Uint8Array(4)) };
     const helpers = { giveBuffer: ()=>0, includer: ()=>async()=>null, macrosAt: ()=>[],
         publishConstantTable: ()=>0 };
     /** @param {any} descriptor */
@@ -460,16 +456,12 @@ test('each width places its own setters\' code; a 64-bit process commits on the 
     const methodsAt = pointerSize=>{
         const memory = new Uint8Array(1 << 16);
         let next = 0x1000;
-        const host = { pointerSize, readMemory: (/** @type {number} */ at,
-            /** @type {number} */ length)=>memory.slice(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
-            memory.set(bytes, at);
-        },
-        heap: { allocate: (/** @type {number} */ bytes)=>{
-            const at = next;
-            next += (bytes + 15) & ~15;
-            return at;
-        }, free: ()=>{} } };
+        const host = { guest: guestOver(memory, pointerSize),
+            heap: { allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += (bytes + 15) & ~15;
+                return at;
+            }, free: ()=>{} } };
         const helpers = { giveBuffer: ()=>0, includer: ()=>async()=>null, macrosAt: ()=>[],
             publishConstantTable: ()=>0 };
         const methods = /** @type {any[]} */ (createEffects(host, helpers).effectInterface.methods);

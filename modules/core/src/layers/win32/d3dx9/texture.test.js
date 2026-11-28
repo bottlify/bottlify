@@ -11,6 +11,7 @@ import { D3DX_DEFAULT, D3DX_FROM_FILE, createTextureLoader } from './texture.js'
 import { FMT } from './pixels.js';
 import { deviceRig } from './device.fixture.js';
 import { writeDds } from './save-texture.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const D3DXERR_INVALIDDATA = 0x88760b59;
 
@@ -169,8 +170,7 @@ function rig(){
     /** @type {string[]} */
     const diverged = [];
     const created = createTextureLoader({ images: freshSpace('d3dx-images'),
-        readMemory: (at, length)=>memory.subarray(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
         heap, callGuest,
     });

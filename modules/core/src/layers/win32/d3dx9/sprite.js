@@ -6,7 +6,6 @@
 
 import { createComObject } from '../ole32/objects.js';
 import { DEVICE, STATEBLOCK_APPLY, TEXTURE, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
-import { wholeAddress } from '../common/pointers.js';
 
 /**
  * ID3DXSprite: textured rectangles queued between Begin and End and drawn on
@@ -46,8 +45,7 @@ const SAMPLER_STATES = [[5, 2], [6, 2], [7, 2], [1, 3], [2, 3]];
 
 /**
  * @typedef {Object} SpriteHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
@@ -70,9 +68,10 @@ const SAMPLER_STATES = [[5, 2], [6, 2], [7, 2], [1, 3], [2, 3]];
  * @param {SpriteHost} host
  */
 export function createSprites(host){
-    const { u32, putU32s, method } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
     /** @param {number} at @param {number} count */
-    const floats = (at, count)=>Array.from(new Float32Array(host.readMemory(wholeAddress(at),
+    const floats = (at, count)=>Array.from(new Float32Array(guest.snapshot(at,
         count * 4)
         .slice().buffer));
     const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
@@ -134,7 +133,7 @@ export function createSprites(host){
                 if (!sizes.has(texture))
                 {
                     await call(texture, TEXTURE.GetLevelDesc, [0, desc]);
-                    sizes.set(texture, [u32(desc + 24), u32(desc + 28)]);
+                    sizes.set(texture, [guest.u32(desc + 24), guest.u32(desc + 28)]);
                 }
                 const [width, height] = /** @type {number[]} */ (sizes.get(texture));
                 const vertices = new DataView(new ArrayBuffer((end - first) * 6 * STRIDE));
@@ -147,7 +146,7 @@ export function createSprites(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                host.writeMemory(data, new Uint8Array(vertices.buffer));
+                guest.setBytes(data, new Uint8Array(vertices.buffer));
                 await call(device, DEVICE.SetTexture, [0, texture]);
                 await call(device, DEVICE.DrawPrimitiveUP, [D3DPT_TRIANGLELIST, (end - first) * 2,
                     data, STRIDE]);
@@ -184,10 +183,10 @@ export function createSprites(host){
         await null;
         const heap = /** @type {NonNullable<SpriteHost['heap']>} */ (host.heap);
         const out = heap.allocate(4);
-        putU32s(out, [0]);
+        guest.set32s(out, [0]);
         // D3DSBT_ALL.
         const answer = await method(thread, state.device, DEVICE.CreateStateBlock, [1, out]);
-        state.saved = answer === D3D_OK ? u32(out) : 0;
+        state.saved = answer === D3D_OK ? guest.u32(out) : 0;
         heap.free(out);
         return D3D_OK;
     };
@@ -224,7 +223,7 @@ export function createSprites(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32s(out, [object.state.device]);
+                guest.set32s(out, [object.state.device]);
                 // A reference the caller releases.
                 const thread = host.currentThread?.();
                 return Promise.resolve().then(()=>method(thread, object.state.device, 1, []))
@@ -236,7 +235,7 @@ export function createSprites(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(wholeAddress(out),
+                guest.setBytes(out,
                     new Uint8Array(Float32Array.from(object.state.transform).buffer));
                 return D3D_OK;
             } },
@@ -273,7 +272,7 @@ export function createSprites(host){
                     return D3DERR_INVALIDCALL;
                 }
                 const rect = (source >>> 0) === 0 ? null
-                    : [0, 1, 2, 3].map(i=>u32(source + i * 4) | 0);
+                    : [0, 1, 2, 3].map(i=>guest.u32(source + i * 4) | 0);
                 state.queue.push({ texture: texture >>> 0, source: rect,
                     center: (center >>> 0) === 0 ? [0, 0, 0] : floats(center, 3),
                     position: (position >>> 0) === 0 ? [0, 0, 0] : floats(position, 3),

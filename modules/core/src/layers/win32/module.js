@@ -3217,7 +3217,7 @@ export function createWin32Module(){
                 },
             });
             const mediaFoundation = createMfplatFunctions({
-                readMemory, writeMemory, heap, vtables: comVtables, setRegisters,
+                guest, readMemory, writeMemory, heap, vtables: comVtables, setRegisters,
                 now: ()=>kernel.clock.virtualTime(),
                 // A byte stream's file is kernel32's, opened and read through
                 // its own calls, so it fails as CreateFile and ReadFile do.
@@ -5777,13 +5777,9 @@ export function createWin32Module(){
                 // functions, here for their stack width as much as their answers,
                 // since d3dx9 exports them undecorated though they are stdcall.
                 ...lazily((()=>{
-                    /** @type {import('./d3dx9/functions.js').D3dxHost} */
-                    const d3dxHost = { guest, readMemory, writeMemory, pointerSize,
-                        // A word read and written in place: an effect's commit reads
-                        // a version word for every constant of its pass.
-                        readU32: (/** @type {number} */ at)=>memory.readU32(at),
-                        writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>
-                            memory.writeU32(at, value),
+                    /** @type {import('./d3dx9/functions.js').D3dxHost
+                     *     & import('./d3dx10/functions.js').D3dx10Host} */
+                    const d3dxHost = { guest, readMemory, writeMemory,
                         divergence: config?.divergence, vtables: comVtables, heap,
                         shaderCompiled: config?.shaderCompiled,
                         // Compiles done, for every process of the run to answer again.
@@ -5970,7 +5966,7 @@ export function createWin32Module(){
                 ]),
                 // DirectWrite's fonts are gdi32's faces, measured and drawn by
                 // the same engine GDI's text is.
-                'DWrite.dll': ()=>createDwriteFunctions({ readMemory, writeMemory, heap,
+                'DWrite.dll': ()=>createDwriteFunctions({ guest, readMemory, writeMemory, heap,
                     vtables: comVtables, objectAt: pointer=>bridge.interfaceObject(pointer),
                     callGuest: call=>bridge.callGuest(call),
                     currentThread: ()=>kernel.currentThread(),

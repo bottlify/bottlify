@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createDeclarationFunctions, declarationBytes, declaratorFromFvf, declVertexSize,
     fvfFromDeclarator, readDeclaration } from './fvf.js';
 import { D3DXGetFVFVertexSize } from './inguest.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /** A declaration as rows: offset, type, usage, usage index (stream 0, method 0). */
 const rows = (/** @type {number} */ fvf)=>declaratorFromFvf(fvf)?.map(e=>[e.offset, e.type,
@@ -56,8 +57,7 @@ test('a declaration no FVF lays out has none', ()=>{
 test('the exports read and write declarations in guest memory, up to D3DDECL_END', ()=>{
     const memory = new Uint8Array(0x1000);
     const fns = createDeclarationFunctions({
-        readMemory: (at, length)=>memory.subarray(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
     });
     assert.equal(fns.D3DXDeclaratorFromFVF.handler([0x152, 0x100]), 0);
     assert.deepEqual([...memory.subarray(0x100 + 32, 0x100 + 40)], [0xff, 0, 0, 0, 17, 0, 0, 0],
@@ -69,7 +69,7 @@ test('the exports read and write declarations in guest memory, up to D3DDECL_END
     assert.equal(new DataView(memory.buffer).getUint32(0x800, true), 0x152);
     assert.equal(fns.D3DXDeclaratorFromFVF.handler([0xe, 0x100]) >>> 0, 0x8876086c);
     assert.equal(fns.D3DXFVFFromDeclarator.handler([0, 0x800]) >>> 0, 0x8876086c);
-    assert.deepEqual(readDeclaration((at, length)=>memory.subarray(at, at + length), 0x100),
+    assert.deepEqual(readDeclaration(guestOver(memory), 0x100),
         declaratorFromFvf(0x152));
     assert.deepEqual([...declarationBytes([])], [0xff, 0, 0, 0, 17, 0, 0, 0]);
 });

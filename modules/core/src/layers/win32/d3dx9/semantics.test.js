@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShaderSemantics } from './semantics.js';
 import { assembleShader } from './shader-asm.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 // What Windows answers, as Wine's conformance test (d3dx9_36 test_shader_semantics) has it.
 
@@ -113,8 +114,7 @@ function machine(code){
     code.forEach((word, i)=>view.setUint32(CODE + i * 4, word >>> 0, true));
     view.setUint32(COUNT, 0xdeadbeef, true);
     const host = {
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>memory.slice(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
     };
     return { api: createShaderSemantics(host), view };
 }

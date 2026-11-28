@@ -237,8 +237,7 @@ export function shaderProfile(kind, version){
 
 /**
  * @typedef {Object} TextureToolsHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
@@ -311,7 +310,8 @@ export function textureRequirements(asked, caps){
  * @param {TextureToolsHost} host
  */
 export function createTextureTools(host){
-    const { u32, putU32s, putPointer, lockedRect, method } = createDeviceCalls(host);
+    const { lockedRect, method } = createDeviceCalls(host);
+    const { guest } = host;
 
     /**
      * What a device's capabilities say about textures.
@@ -329,16 +329,18 @@ export function createTextureTools(host){
         }
         try
         {
-            host.writeMemory(at, new Uint8Array(CAPS_BYTES));
+            guest.fill(at, 0, CAPS_BYTES);
             const answer = await method(thread, device, DEVICE.GetDeviceCaps, [at]);
             if (answer !== D3D_OK)
             {
                 return answer;
             }
-            return { textureCaps: u32(at + CAPS_TEXTURE), maxWidth: u32(at + CAPS_MAX_WIDTH),
-                maxHeight: u32(at + CAPS_MAX_HEIGHT), maxVolume: u32(at + CAPS_MAX_VOLUME_EXTENT),
-                vertexShader: u32(at + CAPS_VERTEX_SHADER_VERSION),
-                pixelShader: u32(at + CAPS_PIXEL_SHADER_VERSION) };
+            return { textureCaps: guest.u32(at + CAPS_TEXTURE),
+                maxWidth: guest.u32(at + CAPS_MAX_WIDTH),
+                maxHeight: guest.u32(at + CAPS_MAX_HEIGHT),
+                maxVolume: guest.u32(at + CAPS_MAX_VOLUME_EXTENT),
+                vertexShader: guest.u32(at + CAPS_VERTEX_SHADER_VERSION),
+                pixelShader: guest.u32(at + CAPS_PIXEL_SHADER_VERSION) };
         }
         finally
         {
@@ -367,13 +369,13 @@ export function createTextureTools(host){
         const mode = parameters + CREATION_PARAMETERS_BYTES;
         try
         {
-            putPointer(at, 0);
+            guest.setPtr(at, 0);
             const found = await method(thread, device, DEVICE.GetDirect3D, [at]);
             if (found !== D3D_OK)
             {
                 return found;
             }
-            const d3d = u32(at);
+            const d3d = guest.u32(at);
             try
             {
                 for (const answer of [
@@ -390,7 +392,8 @@ export function createTextureTools(host){
                 for (const candidate of formatCandidates(wanted))
                 {
                     const answer = await method(thread, d3d, D3D9_CHECK_DEVICE_FORMAT,
-                        [u32(parameters), u32(parameters + 4), u32(mode + DISPLAY_MODE_FORMAT),
+                        [guest.u32(parameters), guest.u32(parameters + 4),
+                            guest.u32(mode + DISPLAY_MODE_FORMAT),
                             usage, type, candidate]);
                     // D3DOK_NOAUTOGEN is a success too.
                     if ((answer & 0x80000000) === 0)
@@ -533,17 +536,17 @@ export function createTextureTools(host){
                 {
                     return described;
                 }
-                const format = u32(scratch);
-                const width = u32(scratch + 16);
-                const height = u32(scratch + 20);
-                const depth = u32(scratch + 24);
+                const format = guest.u32(scratch);
+                const width = guest.u32(scratch + 16);
+                const height = guest.u32(scratch + 20);
+                const depth = guest.u32(scratch + 24);
                 if (!FLOATS.has(format) && !isSupported(format))
                 {
                     host.divergence?.('D3DXFillVolumeTexture', `format ${format} is not one a `
                         + 'fill writes: answered D3DERR_INVALIDCALL');
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(size, new Uint8Array(Float32Array.of(1 / width, 1 / height,
+                guest.setBytes(size, new Uint8Array(Float32Array.of(1 / width, 1 / height,
                     1 / depth).buffer));
                 const answer = await method(thread, texture, VOLUME_TEXTURE.LockBox,
                     [level, locked, 0, 0]);
@@ -551,9 +554,9 @@ export function createTextureTools(host){
                 {
                     return answer;
                 }
-                const rowPitch = u32(locked);
-                const slicePitch = u32(locked + 4);
-                const bits = u32(locked + 8);
+                const rowPitch = guest.u32(locked);
+                const slicePitch = guest.u32(locked + 4);
+                const bits = guest.u32(locked + 8);
                 for (let z = 0; z < depth; z++)
                 {
                     const rgba = new Float32Array(width * height * 4);
@@ -561,12 +564,12 @@ export function createTextureTools(host){
                     {
                         for (let x = 0; x < width; x++)
                         {
-                            host.writeMemory(out, new Uint8Array(16));
-                            host.writeMemory(coord, new Uint8Array(Float32Array.of(
+                            guest.fill(out, 0, 16);
+                            guest.setBytes(coord, new Uint8Array(Float32Array.of(
                                 (x + 0.5) / width, (y + 0.5) / height, (z + 0.5) / depth).buffer));
                             await callGuest({ entry: fill >>> 0, args: [out, coord, size,
                                 data >>> 0], ...(thread === undefined ? {} : { thread }) });
-                            rgba.set(new Float32Array(host.readMemory(out, 16).slice().buffer),
+                            rgba.set(new Float32Array(guest.snapshot(out, 16).buffer),
                                 (y * width + x) * 4);
                         }
                     }
@@ -576,7 +579,7 @@ export function createTextureTools(host){
                     const rowBytes = packed.length / rows;
                     for (let row = 0; row < rows; row++)
                     {
-                        host.writeMemory(bits + z * slicePitch + row * rowPitch,
+                        guest.setBytes(bits + z * slicePitch + row * rowPitch,
                             packed.subarray(row * rowBytes, (row + 1) * rowBytes));
                     }
                 }
@@ -591,7 +594,7 @@ export function createTextureTools(host){
     };
 
     /** @param {number} at  A UINT in-out pointer: D3DX_DEFAULT when null. */
-    const given = at=>((at >>> 0) === 0 ? D3DX_DEFAULT : u32(at));
+    const given = at=>((at >>> 0) === 0 ? D3DX_DEFAULT : guest.u32(at));
 
     /**
      * A check's answer: the corrections written through the pointers that
@@ -609,7 +612,7 @@ export function createTextureTools(host){
         {
             if ((at >>> 0) !== 0)
             {
-                putU32s(at, [found[field]]);
+                guest.set32s(at, [found[field]]);
             }
         }
         return D3D_OK;
@@ -648,9 +651,9 @@ export function createTextureTools(host){
                 {
                     return described;
                 }
-                const format = u32(scratch);
-                const width = u32(scratch + 24);
-                const height = u32(scratch + 28);
+                const format = guest.u32(scratch);
+                const width = guest.u32(scratch + 24);
+                const height = guest.u32(scratch + 28);
                 if (!FLOATS.has(format) && !isSupported(format))
                 {
                     host.divergence?.('D3DXFillTexture', `format ${format} is not one a fill `
@@ -658,18 +661,18 @@ export function createTextureTools(host){
                     return D3DERR_INVALIDCALL;
                 }
                 const rgba = new Float32Array(width * height * 4);
-                host.writeMemory(size, new Uint8Array(Float32Array.of(1 / width, 1 / height)
+                guest.setBytes(size, new Uint8Array(Float32Array.of(1 / width, 1 / height)
                     .buffer));
                 for (let y = 0; y < height; y++)
                 {
                     for (let x = 0; x < width; x++)
                     {
-                        host.writeMemory(out, new Uint8Array(16));
-                        host.writeMemory(coord, new Uint8Array(Float32Array.of(
+                        guest.fill(out, 0, 16);
+                        guest.setBytes(coord, new Uint8Array(Float32Array.of(
                             (x + 0.5) / width, (y + 0.5) / height).buffer));
                         await callGuest({ entry: fill >>> 0, args: [out, coord, size,
                             data >>> 0], ...(thread === undefined ? {} : { thread }) });
-                        rgba.set(new Float32Array(host.readMemory(out, 16).slice().buffer),
+                        rgba.set(new Float32Array(guest.snapshot(out, 16).buffer),
                             (y * width + x) * 4);
                     }
                 }
@@ -686,7 +689,7 @@ export function createTextureTools(host){
                 const rowBytes = packed.length / rows;
                 for (let row = 0; row < rows; row++)
                 {
-                    host.writeMemory(bits + row * pitch, packed.subarray(row * rowBytes,
+                    guest.setBytes(bits + row * pitch, packed.subarray(row * rowBytes,
                         (row + 1) * rowBytes));
                 }
                 await method(thread, texture, TEXTURE.UnlockRect, [level]);
@@ -744,8 +747,8 @@ export function createTextureTools(host){
                 {
                     return answer;
                 }
-                described[level] = { format: u32(scratch), width: u32(scratch + 24),
-                    height: u32(scratch + 28) };
+                described[level] = { format: guest.u32(scratch), width: guest.u32(scratch + 24),
+                    height: guest.u32(scratch + 28) };
             }
             const { format } = described[top];
             if (!isSupported(format))
@@ -778,7 +781,7 @@ export function createTextureTools(host){
                         const packed = new Uint8Array(rowBytes * rows);
                         for (let row = 0; row < rows; row++)
                         {
-                            packed.set(host.readMemory(bits + row * pitch, rowBytes),
+                            packed.set(guest.snapshot(bits + row * pitch, rowBytes),
                                 row * rowBytes);
                         }
                         bgra = decodeTexels(format, packed, width, height);
@@ -791,7 +794,7 @@ export function createTextureTools(host){
                         const bytes = encodeTexels(format, bgra, width, height);
                         for (let row = 0; row < rows; row++)
                         {
-                            host.writeMemory(bits + row * pitch,
+                            guest.setBytes(bits + row * pitch,
                                 bytes.subarray(row * rowBytes, (row + 1) * rowBytes));
                         }
                     }
@@ -821,7 +824,7 @@ export function createTextureTools(host){
             at = host.heap?.allocate(name.length + 1) ?? 0;
             if (at !== 0)
             {
-                host.writeMemory(at, Uint8Array.from([...name, '\0'], c=>c.charCodeAt(0)));
+                guest.setBytes(at, Uint8Array.from([...name, '\0'], c=>c.charCodeAt(0)));
                 profileNames.set(name, at);
             }
         }
@@ -940,7 +943,7 @@ export function createTextureTools(host){
             handler: ([device, width, height, levels, usage, format, pool, out])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    putPointer(out, 0);
+                    guest.setPtr(out, 0);
                 }
                 if (wholeAddress(device) === 0 || wholeAddress(out) === 0 || !host.callGuest
                     || !host.heap)
@@ -971,7 +974,7 @@ export function createTextureTools(host){
             handler: ([device, size, levels, usage, format, pool, out])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    putPointer(out, 0);
+                    guest.setPtr(out, 0);
                 }
                 if (wholeAddress(device) === 0 || wholeAddress(out) === 0 || !host.callGuest
                     || !host.heap)
@@ -1000,7 +1003,7 @@ export function createTextureTools(host){
             handler: ([device, width, height, depth, levels, usage, format, pool, out])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    putPointer(out, 0);
+                    guest.setPtr(out, 0);
                 }
                 if (wholeAddress(device) === 0 || wholeAddress(out) === 0 || !host.callGuest
                     || !host.heap)

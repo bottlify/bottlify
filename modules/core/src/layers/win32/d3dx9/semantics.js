@@ -149,18 +149,13 @@ function shaderSemantics(token, output){
 /**
  * The exports that read a shader's bytecode in guest memory.
  *
- * @param {{ readMemory: (address: number, length: number) => Uint8Array,
- *     writeMemory: (address: number, bytes: Uint8Array) => void }} host
+ * @param {{ guest: import('../common/guest.js').Guest }} host
  */
 export function createShaderSemantics(host){
+    const { guest } = host;
     const D3D_OK = 0;
     const D3DERR_INVALIDCALL = 0x8876086c;
     const D3DXERR_INVALIDDATA = 0x88760b59;
-    /** @param {number} at */
-    const readU32 = at=>{
-        const bytes = host.readMemory(wholeAddress(at), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
     /**
      * @param {boolean} output
      * @returns {{ argBytes: number, handler: (args: number[]) => number }}
@@ -172,7 +167,7 @@ export function createShaderSemantics(host){
             {
                 return D3DERR_INVALIDCALL;
             }
-            const found = shaderSemantics(index=>readU32(wholeAddress(code) + index * 4), output);
+            const found = shaderSemantics(index=>guest.u32(wholeAddress(code) + index * 4), output);
             if (found === null)
             {
                 return D3DXERR_INVALIDDATA;
@@ -185,11 +180,11 @@ export function createShaderSemantics(host){
                     view.setUint32(i * 8, usage, true);
                     view.setUint32(i * 8 + 4, index, true);
                 });
-                host.writeMemory(wholeAddress(semantics), bytes);
+                guest.setBytes(semantics, bytes);
             }
             if ((count >>> 0) !== 0)
             {
-                host.writeMemory(wholeAddress(count), Uint8Array.of(found.length, 0, 0, 0));
+                guest.setBytes(count, Uint8Array.of(found.length, 0, 0, 0));
             }
             return D3D_OK;
         },
@@ -214,7 +209,7 @@ export function createShaderSemantics(host){
         D3DXGetShaderVersion: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([code])=>(wholeAddress(code) === 0 ? 0 : readU32(wholeAddress(code))),
+            handler: ([code])=>(wholeAddress(code) === 0 ? 0 : guest.u32(wholeAddress(code))),
         },
     };
 }

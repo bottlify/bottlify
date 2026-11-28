@@ -262,11 +262,7 @@ const COLOR_SCALE = 255;
 
 /**
  * @typedef {Object} EffectHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {4 | 8} [pointerSize]  8 in a 64-bit process, which places the setters' x86-64.
- * @property {(address: number) => number} [readU32]  A word read in place.
- * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any,
@@ -429,16 +425,15 @@ const COLOR_SCALE = 255;
  */
 export function createEffects(host, helpers, options = {}){
     const version = options.version ?? 43;
+    const { guest } = host;
     /** A 64-bit process, whose setters are their x86-64 (`effect-setters.js`). */
-    const long = host.pointerSize === 8;
+    const long = guest.pointerSize === 8;
     /** @type {Record<string, any>} */
     const setters = long ? SETTERS_LONG : SETTERS_IN_GUEST;
     /** Every handle any effect of this process handed out, to what it names. @type {Map<number, any>} */
     const handles = new Map();
-    const { u32, putU32s, method, string } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
     const heap = ()=>/** @type {NonNullable<EffectHost['heap']>} */ (host.heap);
-    /** @param {number} at @param {number} value */
-    const putU32 = (at, value)=>putU32s(at, [value]);
     /**
      * The clock that dates parameter writes and pass applications: a word of
      * guest memory, which the setters in the guest advance too.
@@ -510,7 +505,8 @@ export function createEffects(host, helpers, options = {}){
         if (inArena(p.handle))
         {
             const m = p.model;
-            putU32s(p.handle, [m.type, m.cls, m.rows, m.columns, m.elements, m.bytes, dataAt(p),
+            guest.set32s(p.handle, [m.type, m.cls, m.rows, m.columns, m.elements, m.bytes,
+                dataAt(p),
                 p.store.at]);
         }
     };
@@ -520,16 +516,16 @@ export function createEffects(host, helpers, options = {}){
         if (clockAt === 0)
         {
             clockAt = heap().allocate(4);
-            putU32(clockAt, 1);
+            guest.set32(clockAt, 1);
         }
-        const now = u32(clockAt);
-        putU32(clockAt, now + 1);
+        const now = guest.u32(clockAt);
+        guest.set32(clockAt, now + 1);
         return now;
     };
     /** A NUL-ended string, at most 4 KB. @param {number} at */
-    const cString = at=>string(at);
+    const cString = at=>guest.cstr(at, 4096);
     /** @param {number} at */
-    const wideString = at=>string(at, true, 512);
+    const wideString = at=>guest.wstr(at, 1024);
     /** Text as D3DX's strings are: a byte a character, then a NUL. @param {string} text */
     const encode = text=>Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff);
     /** @param {Uint8Array} bytes */
@@ -567,7 +563,7 @@ export function createEffects(host, helpers, options = {}){
             {
                 return 0;
             }
-            host.writeMemory(at, p);
+            guest.setBytes(at, p);
             at += p.length;
             return at - p.length;
         });
@@ -634,8 +630,8 @@ export function createEffects(host, helpers, options = {}){
         {
             throw new HeapFull(`no room for a parameter of ${bytes} bytes`);
         }
-        host.writeMemory(at, new Uint8Array(4 + Math.max(bytes, 4)));
-        putU32(at, tick());
+        guest.fill(at, 0, 4 + Math.max(bytes, 4));
+        guest.set32(at, tick());
         return { at, strings: new Map() };
     };
 
@@ -647,10 +643,10 @@ export function createEffects(host, helpers, options = {}){
     };
 
     /** When a store was last written. @param {Store} store */
-    const versionOf = store=>u32(store.at);
+    const versionOf = store=>guest.u32(store.at);
 
     /** When a pass's states were last set. @param {Pass} pass */
-    const appliedOf = pass=>u32(pass.appliedAt);
+    const appliedOf = pass=>guest.u32(pass.appliedAt);
 
     /**
      * A word for a pass's date, never set: owned by the effect.
@@ -665,7 +661,7 @@ export function createEffects(host, helpers, options = {}){
             throw new HeapFull('no room for a pass');
         }
         effect.owned.push(at);
-        putU32(at, 0);
+        guest.set32(at, 0);
         return at;
     };
 
@@ -683,30 +679,30 @@ export function createEffects(host, helpers, options = {}){
             const at = param.offset + i * 4;
             if ('word' in slot)
             {
-                putU32(param.store.at + 4 + at, slot.word >>> 0);
+                guest.set32(param.store.at + 4 + at, slot.word >>> 0);
             }
             else if ('string' in slot)
             {
-                writeString(param.store, at, slot.string);
+                storeString(param.store, at, slot.string);
             }
             else
             {
                 const shader = slot.shader === null ? null : param.effect.shaders[slot.shader];
-                putU32(param.store.at + 4 + at, shader?.pointer ?? 0);
+                guest.set32(param.store.at + 4 + at, shader?.pointer ?? 0);
             }
         });
     };
 
     /** @param {Store} store @param {number} at @param {string} text */
-    const writeString = (store, at, text)=>{
+    const storeString = (store, at, text)=>{
         const old = store.strings.get(at);
         const copy = heap().allocate(text.length + 1);
         if (copy !== 0)
         {
-            host.writeMemory(copy, encode(text));
+            guest.setBytes(copy, encode(text));
         }
         store.strings.set(at, copy);
-        putU32(store.at + 4 + at, copy);
+        guest.set32(store.at + 4 + at, copy);
         if (old)
         {
             heap().free(old);
@@ -722,23 +718,22 @@ export function createEffects(host, helpers, options = {}){
      *
      * @param {Param} p @param {number[]} words @param {number} [from]  The first word.
      */
-    const writeWords = (p, words, from = 0)=>{
+    const setValueWords = (p, words, from = 0)=>{
         const count = Math.max(0, Math.min(words.length, (p.model.bytes >>> 2) - from));
         if (count > 0)
         {
-            host.writeMemory(dataAt(p) + from * 4, new Uint8Array(Uint32Array.from(
-                words.slice(0, count), word=>word >>> 0).buffer));
+            guest.set32s(dataAt(p) + from * 4, words.slice(0, count));
         }
         touched(p);
     };
 
     /** @param {Param} p */
     const touched = p=>{
-        putU32(p.store.at, tick());
+        guest.set32(p.store.at, tick());
         const recording = p.effect.recording;
         if (recording)
         {
-            recording.push({ param: p, bytes: host.readMemory(dataAt(p), p.model.bytes).slice() });
+            recording.push({ param: p, bytes: guest.snapshot(dataAt(p), p.model.bytes) });
         }
     };
 
@@ -913,7 +908,7 @@ export function createEffects(host, helpers, options = {}){
 
     /** @param {number} at @param {number} count */
     const words = (at, count)=>{
-        const bytes = host.readMemory(wholeAddress(at), count * 4);
+        const bytes = guest.snapshot(at, count * 4);
         // One copy of the words in place of a call a word: every value an
         // effect is set comes through here, bone palettes of hundreds of words
         // among them, many times a frame. The guest's words are little-endian
@@ -1016,7 +1011,7 @@ export function createEffects(host, helpers, options = {}){
      * @param {Param} p @param {number[]} given
      */
     const setTextures = (p, given)=>{
-        writeWords(p, given.map(word=>word >>> 0));
+        setValueWords(p, given.map(word=>word >>> 0));
         return D3D_OK;
     };
 
@@ -1048,7 +1043,7 @@ export function createEffects(host, helpers, options = {}){
                 const given = words(data, p.model.bytes >>> 2);
                 if (p.model.type === PT.STRING)
                 {
-                    given.forEach((at, i)=>writeString(p.store, p.offset + i * 4,
+                    given.forEach((at, i)=>storeString(p.store, p.offset + i * 4,
                         at ? cString(at) : ''));
                     touched(p);
                     return D3D_OK;
@@ -1057,7 +1052,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return setTextures(p, given);
                 }
-                writeWords(p, given);
+                setValueWords(p, given);
                 return D3D_OK;
             } },
             /** HRESULT GetValue(D3DXHANDLE, LPVOID pData, UINT Bytes) */
@@ -1077,7 +1072,7 @@ export function createEffects(host, helpers, options = {}){
                 }
                 const held = wordsOf(p).map(word=>(p.model.type === PT.BOOL
                     ? (word !== 0 ? 1 : 0) : word));
-                putU32s(data, held);
+                guest.set32s(data, held);
                 if (isTexture(p.model.type) || isShader(p.model.type))
                 {
                     const thread = host.currentThread?.();
@@ -1093,7 +1088,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                writeWords(p, [convert(b, PT.BOOL, p.model.type)]);
+                setValueWords(p, [convert(b, PT.BOOL, p.model.type)]);
                 return D3D_OK;
             } },
             /** HRESULT GetBool(D3DXHANDLE, BOOL *pb) */
@@ -1104,7 +1099,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32(out, convert(wordsOf(p)[0], p.model.type, PT.BOOL));
+                guest.set32(out, convert(wordsOf(p)[0], p.model.type, PT.BOOL));
                 return D3D_OK;
             } },
             arraySetter('SetBoolArray', PT.INT),
@@ -1118,7 +1113,7 @@ export function createEffects(host, helpers, options = {}){
                 }
                 if (p.model.rows === 1 && p.model.columns === 1)
                 {
-                    writeWords(p, [convert(n, PT.INT, p.model.type)]);
+                    setValueWords(p, [convert(n, PT.INT, p.model.type)]);
                     return D3D_OK;
                 }
                 if (isColorVector(p))
@@ -1126,7 +1121,7 @@ export function createEffects(host, helpers, options = {}){
                     // A colour given as an int: ARGB bytes to the vector's r, g, b, a.
                     const [r, g, b, a] = unpackColor(n);
                     const count = Math.min(4, p.model.rows * p.model.columns);
-                    writeWords(p, [r, g, b, a].slice(0, count).map(floatBits));
+                    setValueWords(p, [r, g, b, a].slice(0, count).map(floatBits));
                     return D3D_OK;
                 }
                 return D3DERR_INVALIDCALL;
@@ -1140,7 +1135,7 @@ export function createEffects(host, helpers, options = {}){
                 }
                 if (p.model.rows === 1 && p.model.columns === 1)
                 {
-                    putU32(out, convert(wordsOf(p)[0], p.model.type, PT.INT));
+                    guest.set32(out, convert(wordsOf(p)[0], p.model.type, PT.INT));
                     return D3D_OK;
                 }
                 if (isColorVector(p))
@@ -1151,7 +1146,7 @@ export function createEffects(host, helpers, options = {}){
                     {
                         n += colorByte(a) << 24;
                     }
-                    putU32(out, n);
+                    guest.set32(out, n);
                     return D3D_OK;
                 }
                 return D3DERR_INVALIDCALL;
@@ -1165,7 +1160,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                writeWords(p, [convert(f, PT.FLOAT, p.model.type)]);
+                setValueWords(p, [convert(f, PT.FLOAT, p.model.type)]);
                 return D3D_OK;
             } },
             /** HRESULT GetFloat(D3DXHANDLE, FLOAT *pf) */
@@ -1176,7 +1171,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32(out, convert(wordsOf(p)[0], p.model.type, PT.FLOAT));
+                guest.set32(out, convert(wordsOf(p)[0], p.model.type, PT.FLOAT));
                 return D3D_OK;
             } },
             arraySetter('SetFloatArray', PT.FLOAT),
@@ -1194,11 +1189,11 @@ export function createEffects(host, helpers, options = {}){
                 {
                     // A vector given to an int: a colour, packed ARGB.
                     const [r, g, b, a] = v.map(bitsFloat);
-                    writeWords(p, [(colorByte(b) + (colorByte(g) << 8) + (colorByte(r) << 16)
+                    setValueWords(p, [(colorByte(b) + (colorByte(g) << 8) + (colorByte(r) << 16)
                         + (colorByte(a) << 24)) >>> 0]);
                     return D3D_OK;
                 }
-                writeWords(p, v.slice(0, p.model.columns).map(word=>convert(word, PT.FLOAT,
+                setValueWords(p, v.slice(0, p.model.columns).map(word=>convert(word, PT.FLOAT,
                     p.model.type)));
                 return D3D_OK;
             } },
@@ -1212,10 +1207,10 @@ export function createEffects(host, helpers, options = {}){
                 }
                 if (p.model.type === PT.INT && p.model.bytes === 4)
                 {
-                    putU32s(out, unpackColor(wordsOf(p)[0]).map(floatBits));
+                    guest.set32s(out, unpackColor(wordsOf(p)[0]).map(floatBits));
                     return D3D_OK;
                 }
-                host.writeMemory(wholeAddress(out), vectorBytes(p, 0));
+                guest.setBytes(out, vectorBytes(p, 0));
                 return D3D_OK;
             } },
             /** HRESULT SetVectorArray(D3DXHANDLE, CONST D3DXVECTOR4 *, UINT Count) */
@@ -1233,7 +1228,7 @@ export function createEffects(host, helpers, options = {}){
                     out.push(...words(at + i * 16, p.model.columns).map(word=>convert(word,
                         PT.FLOAT, p.model.type)));
                 }
-                writeWords(p, out);
+                setValueWords(p, out);
                 return D3D_OK;
             } },
             /** HRESULT GetVectorArray(D3DXHANDLE, D3DXVECTOR4 *, UINT Count) */
@@ -1250,7 +1245,7 @@ export function createEffects(host, helpers, options = {}){
                 }
                 for (let i = 0; i < (count >>> 0); i++)
                 {
-                    host.writeMemory(out + i * 16, vectorBytes(p, i * p.model.columns));
+                    guest.setBytes(out + i * 16, vectorBytes(p, i * p.model.columns));
                 }
                 return D3D_OK;
             } },
@@ -1263,7 +1258,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                writeString(p.store, p.offset, cString(at));
+                storeString(p.store, p.offset, cString(at));
                 touched(p);
                 return D3D_OK;
             } },
@@ -1274,7 +1269,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32(out, wordsOf(p)[0]);
+                guest.set32(out, wordsOf(p)[0]);
                 return D3D_OK;
             } },
             /** HRESULT SetTexture(D3DXHANDLE, LPDIRECT3DBASETEXTURE9) */
@@ -1316,7 +1311,7 @@ export function createEffects(host, helpers, options = {}){
             return D3DERR_INVALIDCALL;
         }
         const size = Math.min(count >>> 0, p.model.bytes >>> 2);
-        writeWords(p, words(at, size).map(word=>convert(word, from, p.model.type)));
+        setValueWords(p, words(at, size).map(word=>convert(word, from, p.model.type)));
         return D3D_OK;
     } });
 
@@ -1333,7 +1328,7 @@ export function createEffects(host, helpers, options = {}){
             return D3DERR_INVALIDCALL;
         }
         const size = Math.min(count >>> 0, p.model.bytes >>> 2);
-        putU32s(out, wordsOf(p).slice(0, size).map(word=>convert(word, p.model.type, to)));
+        guest.set32s(out, wordsOf(p).slice(0, size).map(word=>convert(word, p.model.type, to)));
         return D3D_OK;
     } });
 
@@ -1350,7 +1345,7 @@ export function createEffects(host, helpers, options = {}){
             return D3DERR_INVALIDCALL;
         }
         const pointer = wordsOf(p)[0];
-        putU32(out, pointer);
+        guest.set32(out, pointer);
         return addRefLater(host.currentThread?.(), pointer);
     } });
 
@@ -1370,7 +1365,7 @@ export function createEffects(host, helpers, options = {}){
          * @param {Param} p @param {number} count @param {(i: number) => number} matrixAt
          */
         const setMany = (p, count, matrixAt)=>{
-            writeWords(p, Array.from({ length: count }, (_, i)=>matrixWords(p, matrixAt(i),
+            setValueWords(p, Array.from({ length: count }, (_, i)=>matrixWords(p, matrixAt(i),
                 transpose)).flat());
             return D3D_OK;
         };
@@ -1380,7 +1375,7 @@ export function createEffects(host, helpers, options = {}){
         const getMany = (p, count, matrixAt)=>{
             for (let i = 0; i < count; i++)
             {
-                host.writeMemory(matrixAt(i) >>> 0, matrixBytes(p, i * size(p), transpose));
+                guest.setBytes(matrixAt(i) >>> 0, matrixBytes(p, i * size(p), transpose));
             }
             return D3D_OK;
         };
@@ -1397,7 +1392,7 @@ export function createEffects(host, helpers, options = {}){
                 if (p && (out >>> 0) !== 0 && !p.model.elements && transpose
                     && (p.model.cls === PC.SCALAR || p.model.cls === PC.VECTOR))
                 {
-                    host.writeMemory(wholeAddress(out), matrixBytes(p, 0, false));
+                    guest.setBytes(out, matrixBytes(p, 0, false));
                     return D3D_OK;
                 }
                 return p && (out >>> 0) !== 0 && !p.model.elements && isMatrix(p)
@@ -1421,7 +1416,7 @@ export function createEffects(host, helpers, options = {}){
                 invoke: (object, [h, at, count])=>{
                     const p = paramOf(object.state, h);
                     return p && (count >>> 0) <= p.model.elements && isMatrix(p)
-                        ? setMany(p, count >>> 0, i=>u32(at + i * 4)) : D3DERR_INVALIDCALL;
+                        ? setMany(p, count >>> 0, i=>guest.u32(at + i * 4)) : D3DERR_INVALIDCALL;
                 } },
             { name: `GetMatrix${kind}PointerArray`, argBytes: 16,
                 invoke: (object, [h, out, count])=>{
@@ -1431,7 +1426,7 @@ export function createEffects(host, helpers, options = {}){
                     }
                     const p = paramOf(object.state, h);
                     return p && (out >>> 0) !== 0 && (count >>> 0) <= p.model.elements
-                        && isMatrix(p) ? getMany(p, count >>> 0, i=>u32(out + i * 4))
+                        && isMatrix(p) ? getMany(p, count >>> 0, i=>guest.u32(out + i * 4))
                         : D3DERR_INVALIDCALL;
                 } },
         ];
@@ -1446,7 +1441,7 @@ export function createEffects(host, helpers, options = {}){
         /** @param {any} object @returns {EffectState} */
         const of = object=>object.state;
         /** @param {number} out @param {Param} p */
-        const describe = (out, p)=>putU32s(out, [p.nameAt, p.semanticAt, p.model.cls,
+        const describe = (out, p)=>guest.set32s(out, [p.nameAt, p.semanticAt, p.model.cls,
             p.model.type, p.model.rows, p.model.columns, p.model.elements,
             p.top === p ? p.annotations.length : 0, p.model.elements
                 ? p.model.members[0]?.members.length ?? 0 : p.model.members.length,
@@ -1460,7 +1455,7 @@ export function createEffects(host, helpers, options = {}){
                 }
                 const effect = of(object);
                 const compiler = effect.kind === 'compiler';
-                putU32s(out, [compiler ? 0 : creatorAt, effect.params.length,
+                guest.set32s(out, [compiler ? 0 : creatorAt, effect.params.length,
                     effect.techniques.length, compiler ? effect.functions.length : 0]);
                 return D3D_OK;
             } },
@@ -1482,7 +1477,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32s(out, [t.nameAt, t.passes.length, t.annotations.length]);
+                guest.set32s(out, [t.nameAt, t.passes.length, t.annotations.length]);
                 return D3D_OK;
             } },
             /** HRESULT GetPassDesc(D3DXHANDLE, D3DXPASS_DESC *) */
@@ -1505,7 +1500,7 @@ export function createEffects(host, helpers, options = {}){
                         }
                     }
                 }
-                putU32s(out, [pass.nameAt, pass.annotations.length, ...shaders]);
+                guest.set32s(out, [pass.nameAt, pass.annotations.length, ...shaders]);
                 return D3D_OK;
             } },
             /** HRESULT GetFunctionDesc(D3DXHANDLE, D3DXFUNCTION_DESC *) */
@@ -1515,7 +1510,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32s(out, [fn.nameAt, 0]);
+                guest.set32s(out, [fn.nameAt, 0]);
                 return D3D_OK;
             } },
             /** D3DXHANDLE GetParameter(D3DXHANDLE hParent, UINT Index) */
@@ -1657,8 +1652,9 @@ export function createEffects(host, helpers, options = {}){
      * @returns {Steps}
      */
     const methodStep = function*(thread, object, slot, rest){
-        const answer = yield { entry: u32(u32(object) + slot * 4), args: [object >>> 0, ...rest],
-            ...(thread === undefined ? {} : { thread }) };
+        const answer = yield { entry: guest.u32(guest.u32(object) + slot * 4), args: [object >>> 0,
+            ...rest],
+        ...(thread === undefined ? {} : { thread }) };
         return answer >>> 0;
     };
 
@@ -1711,7 +1707,7 @@ export function createEffects(host, helpers, options = {}){
         }
         try
         {
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
             return yield* use(at);
         }
         finally
@@ -1751,7 +1747,7 @@ export function createEffects(host, helpers, options = {}){
         }
         try
         {
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
             return await use(at);
         }
         finally
@@ -1831,7 +1827,8 @@ export function createEffects(host, helpers, options = {}){
             const cell = effect.cells?.get(state);
             if (cell !== undefined)
             {
-                putU32s(cell, [value.words[0] ?? 0, clockAt === 0 ? 0 : (u32(clockAt) - 1) >>> 0]);
+                guest.set32s(cell, [value.words[0] ?? 0,
+                    clockAt === 0 ? 0 : (guest.u32(clockAt) - 1) >>> 0]);
             }
             return value;
         }
@@ -1989,11 +1986,11 @@ export function createEffects(host, helpers, options = {}){
         effect.owned.push(program);
         const registers = (program + length * 4 + 7) & ~7;
         header[EXPRESSION.REGISTERS / 4] = registers;
-        putU32s(program, [...header, ...body]);
+        guest.set32s(program, [...header, ...body]);
         // The literals, once: nothing writes them.
         const literals = new Float64Array(slots);
         literals.set(immediates);
-        host.writeMemory(registers, new Uint8Array(literals.buffer));
+        guest.setBytes(registers, new Uint8Array(literals.buffer));
         return program;
     };
 
@@ -2333,7 +2330,7 @@ export function createEffects(host, helpers, options = {}){
         // The parameter's words, read once; each unit of the registers one of
         // them (`map`) or zero, converted as D3DX converts: a float into a float
         // register as its bits, which D3DX copies.
-        const raw = host.readMemory(dataAt(param), param.model.bytes & ~3);
+        const raw = guest.snapshot(dataAt(param), param.model.bytes & ~3);
         const data = (raw.byteOffset & 3) === 0
             ? new Uint32Array(raw.buffer, raw.byteOffset, raw.length >>> 2)
             : new Uint32Array(raw.slice().buffer);
@@ -2423,7 +2420,7 @@ export function createEffects(host, helpers, options = {}){
             answer = result !== D3D_OK ? result : answer;
         }
         effect.materialUpdated = false;
-        putU32(pass.appliedAt, now);
+        guest.set32(pass.appliedAt, now);
         return answer;
     };
 
@@ -2437,7 +2434,7 @@ export function createEffects(host, helpers, options = {}){
         {
             return effect.active;
         }
-        const id = u32(effect.block + EFFECT_BLOCK.ACTIVE);
+        const id = guest.u32(effect.block + EFFECT_BLOCK.ACTIVE);
         return id === 0 ? null : effect.passById[id - 1] ?? null;
     };
     /** @param {EffectState} effect @param {Pass | null} pass */
@@ -2445,7 +2442,7 @@ export function createEffects(host, helpers, options = {}){
         effect.active = pass;
         if (effect.block !== 0)
         {
-            putU32(effect.block + EFFECT_BLOCK.ACTIVE, pass?.id ?? 0);
+            guest.set32(effect.block + EFFECT_BLOCK.ACTIVE, pass?.id ?? 0);
         }
     };
 
@@ -2455,7 +2452,7 @@ export function createEffects(host, helpers, options = {}){
         {
             return effect.current;
         }
-        const record = u32(effect.block + EFFECT_BLOCK.TECHNIQUE);
+        const record = guest.u32(effect.block + EFFECT_BLOCK.TECHNIQUE);
         return effect.techniques.find(t=>t.record === record) ?? null;
     };
     /** @param {EffectState} effect @param {Technique | null} t */
@@ -2463,22 +2460,22 @@ export function createEffects(host, helpers, options = {}){
         effect.current = t;
         if (effect.block !== 0)
         {
-            putU32(effect.block + EFFECT_BLOCK.TECHNIQUE, t?.record ?? 0);
+            guest.set32(effect.block + EFFECT_BLOCK.TECHNIQUE, t?.record ?? 0);
         }
     };
     /** Whether a technique is begun, which Begin and End in the guest say. @param {EffectState} effect */
     const startedOf = effect=>(effect.block === 0 ? effect.started
-        : u32(effect.block + EFFECT_BLOCK.STARTED) !== 0);
+        : guest.u32(effect.block + EFFECT_BLOCK.STARTED) !== 0);
     /** The flags the technique begun was begun with. @param {EffectState} effect */
     const beginFlagsOf = effect=>(effect.block === 0 ? effect.beginFlags
-        : u32(effect.block + EFFECT_BLOCK.FLAGS));
+        : guest.u32(effect.block + EFFECT_BLOCK.FLAGS));
     /** @param {EffectState} effect @param {boolean} started @param {number} flags */
     const setStarted = (effect, started, flags)=>{
         effect.started = started;
         effect.beginFlags = flags >>> 0;
         if (effect.block !== 0)
         {
-            putU32s(effect.block + EFFECT_BLOCK.STARTED, [started ? 1 : 0, flags]);
+            guest.set32s(effect.block + EFFECT_BLOCK.STARTED, [started ? 1 : 0, flags]);
         }
     };
 
@@ -2511,14 +2508,15 @@ export function createEffects(host, helpers, options = {}){
             }
             if (list !== 0)
             {
-                putU32s(list, [t.passes.length, ...t.passes.flatMap(pass=>
+                guest.set32s(list, [t.passes.length, ...t.passes.flatMap(pass=>
                     [pass.begins?.get(effect.manager) ?? 0, pass.id])]);
             }
-            putU32(t.record + TECHNIQUE.PASSES, list);
+            guest.set32(t.record + TECHNIQUE.PASSES, list);
         }
         const current = currentOf(effect);
-        putU32(effect.block + EFFECT_BLOCK.PASSES, current && current.record && startedOf(effect)
-            ? u32(current.record + TECHNIQUE.PASSES) : 0);
+        guest.set32(effect.block + EFFECT_BLOCK.PASSES,
+            current && current.record && startedOf(effect)
+                ? guest.u32(current.record + TECHNIQUE.PASSES) : 0);
     };
 
     /** Where `Walk` is in guest memory, placed at the first effect's block; 0 for none. */
@@ -2538,7 +2536,7 @@ export function createEffects(host, helpers, options = {}){
             walkAt = host.heap && !long ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
             if (walkAt !== 0)
             {
-                host.writeMemory(walkAt, code);
+                guest.setBytes(walkAt, code);
             }
         }
         return walkAt;
@@ -2552,7 +2550,7 @@ export function createEffects(host, helpers, options = {}){
             resolveAt = host.heap ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
             if (resolveAt !== 0)
             {
-                host.writeMemory(resolveAt, code);
+                guest.setBytes(resolveAt, code);
             }
         }
         return resolveAt;
@@ -2599,7 +2597,7 @@ export function createEffects(host, helpers, options = {}){
             }
             slotWords.set([hash, copies[i], p.handle], 1 + 3 * slot);
         });
-        host.writeMemory(table, new Uint8Array(slotWords.buffer));
+        guest.setBytes(table, new Uint8Array(slotWords.buffer));
         return table;
     };
 
@@ -2612,7 +2610,7 @@ export function createEffects(host, helpers, options = {}){
     const commitIn = (effect, table)=>{
         if (effect.block !== 0)
         {
-            putU32(effect.block + EFFECT_BLOCK.COMMIT, table);
+            guest.set32(effect.block + EFFECT_BLOCK.COMMIT, table);
         }
     };
 
@@ -2711,7 +2709,7 @@ export function createEffects(host, helpers, options = {}){
                 return 'no room';
             }
             effect.owned.push(layout);
-            host.writeMemory(layout, u32Bytes([map.length, data, ...map]));
+            guest.setBytes(layout, u32Bytes([map.length, data, ...map]));
             entries.push([kind, dated, slotOf(setter), first, count, layout, 0, 0]);
             return '';
         };
@@ -2897,7 +2895,7 @@ export function createEffects(host, helpers, options = {}){
                     effect.owned.push(cell);
                     effect.cells.set(state, cell);
                     programRefused = '';
-                    putU32(cell + CELL.PROGRAM, expressionProgram(effect, state));
+                    guest.set32(cell + CELL.PROGRAM, expressionProgram(effect, state));
                     refusedFor.set(state, programRefused);
                     valueOf(effect, null, state);
                 }
@@ -3018,7 +3016,7 @@ export function createEffects(host, helpers, options = {}){
             entry[1] = table + tail;
             entry[5] = table + tail + 4 + 4 * entry[5];
         }
-        host.writeMemory(table, u32Bytes([effect.manager || effect.device, pass.appliedAt,
+        guest.setBytes(table, u32Bytes([effect.manager || effect.device, pass.appliedAt,
             entries.length,
             effect.commitScratch, triggers.length, stale.length / 2, ...triggers, ...stale,
             ...entries.flat(), 0, ...fixed]));
@@ -3094,7 +3092,7 @@ export function createEffects(host, helpers, options = {}){
                 return D3DERR_INVALIDCALL;
             }
             const effect = stateOf(object);
-            putU32(out, effect.pool ? effect.poolPointer : 0);
+            guest.set32(out, effect.pool ? effect.poolPointer : 0);
             effect.pool?.addRef();
             return D3D_OK;
         } },
@@ -3139,7 +3137,7 @@ export function createEffects(host, helpers, options = {}){
             const next = effect.techniques.slice(from).find(t=>valid(effect, t));
             if ((out >>> 0) !== 0)
             {
-                putU32(out, next?.handle ?? 0);
+                guest.set32(out, next?.handle ?? 0);
             }
             return next ? D3D_OK : S_FALSE;
         } },
@@ -3160,7 +3158,7 @@ export function createEffects(host, helpers, options = {}){
             }
             if ((passesOut >>> 0) !== 0)
             {
-                putU32(passesOut, t.passes.length);
+                guest.set32(passesOut, t.passes.length);
             }
             setStarted(effect, true, flags);
             passesIn(effect, t);
@@ -3210,11 +3208,11 @@ export function createEffects(host, helpers, options = {}){
             // Why the guest's commit came here, said once each: the first that holds.
             const table = pass.commits?.get(effect.manager) ?? 0;
             const why = table === 0 ? null : pass.handOvers?.get(effect.manager)?.find(h=>
-                u32(h.version) > u32(h.date));
+                guest.u32(h.version) > guest.u32(h.date));
             const name = pass.model.name ?? '';
             host.divergence?.('ID3DXEffect::CommitChanges', table === 0
                 ? `pass '${name}' commits on the host: it has no table for this manager`
-                : effect.block !== 0 && u32(effect.block + EFFECT_BLOCK.COMMIT) !== table
+                : effect.block !== 0 && guest.u32(effect.block + EFFECT_BLOCK.COMMIT) !== table
                     ? `pass '${name}' commits on the host: the block names another table`
                     : why ? `pass '${name}' commits on the host: ${why.what}`
                         : `pass '${name}' commits on the host with nothing in its table stale:`
@@ -3264,7 +3262,7 @@ export function createEffects(host, helpers, options = {}){
                 return D3DERR_INVALIDCALL;
             }
             const device = stateOf(object).device;
-            putU32(out, device);
+            guest.set32(out, device);
             return addRefLater(host.currentThread?.(), device);
         } },
         /**
@@ -3306,7 +3304,7 @@ export function createEffects(host, helpers, options = {}){
                 return D3DERR_INVALIDCALL;
             }
             const manager = stateOf(object).manager;
-            putU32(out, manager);
+            guest.set32(out, manager);
             return addRefLater(host.currentThread?.(), manager);
         } },
         /** HRESULT BeginParameterBlock() */
@@ -3319,7 +3317,7 @@ export function createEffects(host, helpers, options = {}){
             effect.recording = [];
             if (effect.block !== 0)
             {
-                putU32(effect.block + EFFECT_BLOCK.RECORDING, 1);
+                guest.set32(effect.block + EFFECT_BLOCK.RECORDING, 1);
             }
             return D3D_OK;
         } },
@@ -3334,7 +3332,7 @@ export function createEffects(host, helpers, options = {}){
             effect.recording = null;
             if (effect.block !== 0)
             {
-                putU32(effect.block + EFFECT_BLOCK.RECORDING, 0);
+                guest.set32(effect.block + EFFECT_BLOCK.RECORDING, 0);
             }
             const handle = heap().allocate(4);
             if (handle === 0)
@@ -3356,7 +3354,7 @@ export function createEffects(host, helpers, options = {}){
             for (const { param, bytes } of block)
             {
                 const view = new DataView(bytes.buffer);
-                writeWords(param, Array.from({ length: bytes.length >>> 2 }, (_, i)=>
+                setValueWords(param, Array.from({ length: bytes.length >>> 2 }, (_, i)=>
                     view.getUint32(i * 4, true)));
             }
             return D3D_OK;
@@ -3377,7 +3375,7 @@ export function createEffects(host, helpers, options = {}){
             const effect = stateOf(object);
             if ((out >>> 0) !== 0)
             {
-                putU32(out, 0);
+                guest.set32(out, 0);
             }
             if ((device >>> 0) === 0 || (out >>> 0) === 0 || (effect.flags & FX.NOT_CLONEABLE))
             {
@@ -3395,7 +3393,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                writeWords(p, words(data, (bytes >>> 0) >>> 2), (offset >>> 0) >>> 2);
+                setValueWords(p, words(data, (bytes >>> 0) >>> 2), (offset >>> 0) >>> 2);
                 return D3D_OK;
             } })] : []),
     ];
@@ -3422,7 +3420,7 @@ export function createEffects(host, helpers, options = {}){
                 block = Number(yield* withBytesStep(new Uint8Array(4), function*(at){
                     const answer = yield* methodStep(thread, effect.device,
                         DEVICE_MORE.EndStateBlock, [at]);
-                    return answer === D3D_OK ? u32(at) : 0;
+                    return answer === D3D_OK ? guest.u32(at) : 0;
                 }));
             }
             finally
@@ -3434,7 +3432,7 @@ export function createEffects(host, helpers, options = {}){
                 t.saved.set(keep, block);
                 if (t.record)
                 {
-                    putU32(t.record + TECHNIQUE.SAVED + keep * 2, block);
+                    guest.set32(t.record + TECHNIQUE.SAVED + keep * 2, block);
                 }
             }
         }
@@ -3467,7 +3465,7 @@ export function createEffects(host, helpers, options = {}){
             let slot = 0;
             try
             {
-                slot = u32(u32(texture) + TEXTURE_GETLEVELDESC * 4);
+                slot = guest.u32(guest.u32(texture) + TEXTURE_GETLEVELDESC * 4);
             }
             catch (e){
                 void e;
@@ -3480,11 +3478,11 @@ export function createEffects(host, helpers, options = {}){
             }
             const pool = await withBytes(new Uint8Array(32), async at=>{
                 const answer = await method(thread, texture, TEXTURE_GETLEVELDESC, [0, at]);
-                return answer === D3D_OK ? u32(at + 12) : -1;
+                return answer === D3D_OK ? guest.u32(at + 12) : -1;
             });
             if (pool === 0)
             {
-                writeWords(p, [0]);
+                setValueWords(p, [0]);
             }
         }
         for (const t of effect.techniques)
@@ -3494,7 +3492,7 @@ export function createEffects(host, helpers, options = {}){
                 let release = 0;
                 try
                 {
-                    release = u32(u32(block) + UNKNOWN_RELEASE * 4);
+                    release = guest.u32(guest.u32(block) + UNKNOWN_RELEASE * 4);
                 }
                 catch (e){
                     void e;
@@ -3510,7 +3508,7 @@ export function createEffects(host, helpers, options = {}){
             t.saved.clear();
             if (t.record)
             {
-                putU32s(t.record + TECHNIQUE.SAVED, [0, 0, 0, 0]);
+                guest.set32s(t.record + TECHNIQUE.SAVED, [0, 0, 0, 0]);
             }
         }
         return D3D_OK;
@@ -3539,12 +3537,13 @@ export function createEffects(host, helpers, options = {}){
         {
             return 'the effect has no block in guest memory';
         }
-        if (u32(block + EFFECT_BLOCK.RECORDING) !== 0)
+        if (guest.u32(block + EFFECT_BLOCK.RECORDING) !== 0)
         {
             return 'a parameter block is being recorded';
         }
-        const offset = (h - u32(block + EFFECT_BLOCK.ARENA)) >>> 0;
-        const recorded = offset < u32(block + EFFECT_BLOCK.ARENA_BYTES) && (offset & 31) === 0;
+        const offset = (h - guest.u32(block + EFFECT_BLOCK.ARENA)) >>> 0;
+        const recorded = offset < guest.u32(block + EFFECT_BLOCK.ARENA_BYTES)
+            && (offset & 31) === 0;
         if (!recorded && handles.get(h))
         {
             return 'a handle with no record the guest reads: the arena of records is full';
@@ -3614,7 +3613,7 @@ export function createEffects(host, helpers, options = {}){
                     // else a displacement from the end of the jump.
                     view.setUint32(compiled.host, bytes[compiled.host - 1] === 0xb8 ? trap >>> 0
                         : (trap - (at + compiled.host + 4)) >>> 0, true);
-                    host.writeMemory(at, bytes);
+                    guest.setBytes(at, bytes);
                     placed.set(trap, at);
                     return at;
                 }, { wide: true }) }));
@@ -3645,7 +3644,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32(out, p.flags & PARAMETER.LITERAL ? 1 : 0);
+                guest.set32(out, p.flags & PARAMETER.LITERAL ? 1 : 0);
                 return D3D_OK;
             } },
             /**
@@ -3658,13 +3657,13 @@ export function createEffects(host, helpers, options = {}){
             { name: 'CompileEffect', argBytes: 16, invoke: (object, [flags, out, errors])=>{
                 if ((errors >>> 0) !== 0)
                 {
-                    putU32(errors, 0);
+                    guest.set32(errors, 0);
                 }
                 if ((out >>> 0) === 0)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32(out, 0);
+                guest.set32(out, 0);
                 const origin = stateOf(object).origin;
                 host.divergence?.('ID3DXEffectCompiler::CompileEffect', 'the compiled effect is '
                     + 'this layer\'s own container of the source, not fx_2_0 bytecode');
@@ -3682,7 +3681,7 @@ export function createEffects(host, helpers, options = {}){
                     {
                         if ((out >>> 0) !== 0)
                         {
-                            putU32(out, 0);
+                            guest.set32(out, 0);
                         }
                     }
                     const effect = stateOf(object);
@@ -3827,7 +3826,7 @@ export function createEffects(host, helpers, options = {}){
                 effect.owned.push(effect.block);
                 tick();
                 const arena = effect.arena;
-                putU32s(effect.block, [0, arena?.at ?? 0, arena ? arena.size * HANDLE.SIZE : 0,
+                guest.set32s(effect.block, [0, arena?.at ?? 0, arena ? arena.size * HANDLE.SIZE : 0,
                     clockAt, 0, 0, 0, placeWalk(), 0, 0, 0, 0, nameTable(effect), placeResolve()]);
             }
             effect.techniques = model.techniques.map(t=>{
@@ -3866,12 +3865,12 @@ export function createEffects(host, helpers, options = {}){
                             throw new HeapFull('no room for a technique');
                         }
                         effect.owned.push(t.record);
-                        putU32s(t.record, [0, 0, 0, 0, 0]);
+                        guest.set32s(t.record, [0, 0, 0, 0, 0]);
                         passesIn(effect, t);
                     }
-                    putU32s(list, [effect.techniques.length,
+                    guest.set32s(list, [effect.techniques.length,
                         ...effect.techniques.flatMap(t=>[t.handle, t.record ?? 0])]);
-                    putU32(effect.block + EFFECT_BLOCK.TECHNIQUES, list);
+                    guest.set32(effect.block + EFFECT_BLOCK.TECHNIQUES, list);
                 }
             }
             setCurrent(effect, effect.techniques[0] ?? null);
@@ -3963,12 +3962,12 @@ export function createEffects(host, helpers, options = {}){
             return shader;
         }
         effect.owned.push(at);
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         shader.tokensAt = at;
         const pointer = await withBytes(new Uint8Array(4), async out=>{
             const answer = await method(thread, effect.device, model.pixel
                 ? DEVICE_MORE.CreatePixelShader : DEVICE_MORE.CreateVertexShader, [at, out]);
-            return answer === D3D_OK ? u32(out) : 0;
+            return answer === D3D_OK ? guest.u32(out) : 0;
         });
         shader.pointer = Number(pointer);
         shader.ok = shader.pointer !== 0;
@@ -4022,7 +4021,7 @@ export function createEffects(host, helpers, options = {}){
             const arena = arenaOf(p.handle);
             if (arena)
             {
-                putU32(p.handle + HANDLE.TYPE, RETIRED);
+                guest.set32(p.handle + HANDLE.TYPE, RETIRED);
                 arena.retired.push(p.handle);
             }
             p.members.forEach(forget);
@@ -4094,7 +4093,7 @@ export function createEffects(host, helpers, options = {}){
             object.release();
             return E_OUTOFMEMORY;
         }
-        putU32(out, pointer);
+        guest.set32(out, pointer);
         return D3D_OK;
     };
 
@@ -4114,12 +4113,12 @@ export function createEffects(host, helpers, options = {}){
             {
                 return;
             }
-            host.writeMemory(dataAt(target), host.readMemory(dataAt(p), p.model.bytes).slice());
+            guest.copy(dataAt(target), dataAt(p), p.model.bytes);
             for (const [at, copyAt] of p.store.strings)
             {
                 if (at >= p.offset && at < p.offset + p.model.bytes)
                 {
-                    writeString(target.store, at, cString(copyAt));
+                    storeString(target.store, at, cString(copyAt));
                 }
             }
         });
@@ -4221,7 +4220,7 @@ export function createEffects(host, helpers, options = {}){
         {
             if ((out >>> 0) !== 0)
             {
-                putU32(out, 0);
+                guest.set32(out, 0);
             }
         }
         if ((a.device >>> 0) === 0 || !a.bytes || !host.heap || !host.vtables || !host.callGuest)
@@ -4345,7 +4344,7 @@ export function createEffects(host, helpers, options = {}){
         {
             if ((out >>> 0) !== 0)
             {
-                putU32(out, 0);
+                guest.set32(out, 0);
             }
         }
         if (!a.bytes || (a.out >>> 0) === 0 || !host.heap || !host.vtables)
@@ -4389,7 +4388,7 @@ export function createEffects(host, helpers, options = {}){
                     object.release();
                     return E_OUTOFMEMORY;
                 }
-                putU32(a.out, pointer);
+                guest.set32(a.out, pointer);
                 return D3D_OK;
             });
     };
@@ -4443,7 +4442,7 @@ export function createEffects(host, helpers, options = {}){
         {
             if ((out >>> 0) !== 0)
             {
-                putU32(out, 0);
+                guest.set32(out, 0);
             }
         }
         return found.then(bytes=>(bytes ? createEffect(api, { ...rest, bytes })
@@ -4452,7 +4451,7 @@ export function createEffects(host, helpers, options = {}){
 
     /** @param {number} at @param {number} size */
     const bytesAt = (at, size)=>((at >>> 0) === 0 ? null
-        : host.readMemory(wholeAddress(at), size >>> 0).slice());
+        : guest.snapshot(at, size >>> 0));
 
     const exports = {
         /**
@@ -4507,7 +4506,7 @@ export function createEffects(host, helpers, options = {}){
                         {
                             return D3DERR_INVALIDCALL;
                         }
-                        putU32(out, 0);
+                        guest.set32(out, 0);
                         return fileBytes(api, path(file)).then(bytes=>(bytes ? createCompiler(api,
                             { bytes, defines, include, flags, out, errors })
                             : D3DXERR_INVALIDDATA));
@@ -4520,7 +4519,7 @@ export function createEffects(host, helpers, options = {}){
                         {
                             return D3DERR_INVALIDCALL;
                         }
-                        putU32(out, 0);
+                        guest.set32(out, 0);
                         return resourceBytes(api, module, resourceName(name, wide)).then(bytes=>
                             (bytes ? createCompiler(api, { bytes, defines, include, flags, out,
                                 errors }) : D3DXERR_INVALIDDATA));
@@ -4544,7 +4543,7 @@ export function createEffects(host, helpers, options = {}){
                 return E_OUTOFMEMORY;
             }
             pools.set(holder.pointer, object);
-            putU32(out, holder.pointer);
+            guest.set32(out, holder.pointer);
             return D3D_OK;
         } },
         /**
@@ -4559,7 +4558,7 @@ export function createEffects(host, helpers, options = {}){
         D3DXDisassembleEffect: { argBytes: 12, handler: (/** @type {number[]} */ [, , out])=>{
             if (wholeAddress(out) !== 0)
             {
-                putU32(out, 0);
+                guest.set32(out, 0);
             }
             host.divergence?.('D3DXDisassembleEffect', 'answered E_NOTIMPL: there is no fx_2_0 '
                 + 'listing of an effect read from source');

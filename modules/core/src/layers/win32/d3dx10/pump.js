@@ -46,10 +46,9 @@ const PROCESSOR = { Process: 0, CreateDeviceObject: 1, Destroy: 2 };
 
 /**
  * @typedef {Object} PumpHost
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number) => number} [readU32]
- * @property {(address: number, value: number) => void} [writeU32]
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
@@ -74,7 +73,8 @@ const PROCESSOR = { Process: 0, CreateDeviceObject: 1, Destroy: 2 };
  * @param {PumpHost} host @param {string} prefix  D3DX10 or D3DX11
  */
 export function createThreadPumps(host, prefix){
-    const { u32, putU32s, method } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
 
     /**
      * A pump with its threads.
@@ -110,7 +110,7 @@ export function createThreadPumps(host, prefix){
         const finish = async(item, hr, thread)=>{
             if (item.result !== 0)
             {
-                putU32s(item.result, [hr]);
+                guest.set32s(item.result, [hr]);
             }
             await destroy(item, thread);
         };
@@ -173,12 +173,12 @@ export function createThreadPumps(host, prefix){
                 let hr;
                 try
                 {
-                    putU32s(out, [0, 0]);
+                    guest.set32s(out, [0, 0]);
                     hr = await method(thread, item.loader, LOADER.Decompress, [out, out + 4]) | 0;
                     if (hr >= 0 && !item.purged)
                     {
                         hr = await method(thread, item.processor, PROCESSOR.Process,
-                            [u32(out), u32(out + 4)]) | 0;
+                            [guest.u32(out), guest.u32(out + 4)]) | 0;
                     }
                 }
                 finally
@@ -290,7 +290,7 @@ export function createThreadPumps(host, prefix){
                     }
                     if ((object >>> 0) !== 0)
                     {
-                        putU32s(object >>> 0, [0]);
+                        guest.set32s(object >>> 0, [0]);
                     }
                     /** @type {WorkItem} */
                     const item = { loader: loader >>> 0, processor: processor >>> 0,
@@ -337,7 +337,7 @@ export function createThreadPumps(host, prefix){
                     {
                         if ((at >>> 0) !== 0)
                         {
-                            putU32s(at >>> 0, [count]);
+                            guest.set32s(at >>> 0, [count]);
                         }
                     }
                     return S_OK;
@@ -378,7 +378,7 @@ export function createThreadPumps(host, prefix){
                 }
                 const pointer = make((ioThreads >>> 0) || 1,
                     (processThreads >>> 0) || DEFAULT_PROCESS_THREADS);
-                putU32s(wholeAddress(out), [pointer]);
+                guest.set32s(wholeAddress(out), [pointer]);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },

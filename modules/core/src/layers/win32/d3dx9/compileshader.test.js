@@ -42,8 +42,6 @@ function guest(files = {}, disk = {}, compiles = freshSpace('d3dx-compiles')){
     const opened = [];
     const fns = /** @type {any} */ (createD3dxFunctions({ images: freshSpace('d3dx-images'),
         guest: guestOver(memory),
-        readMemory: (address, length)=>memory.subarray(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
         compiles,
         readFile: async path=>{
             opened.push(`disk:${path}`);

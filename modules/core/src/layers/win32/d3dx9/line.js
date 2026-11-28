@@ -57,8 +57,7 @@ const FLOAT_RETURN_LENGTH = 17;
 
 /**
  * @typedef {Object} LineHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any,
  *     allocateCode?: (bytes: number) => number }} [heap]
@@ -75,9 +74,10 @@ const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
  * @param {LineHost} host
  */
 export function createLines(host){
-    const { u32, putU32s, method } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
     /** @param {number} at @param {number} count */
-    const floats = (at, count)=>Array.from(new Float32Array(host.readMemory(wholeAddress(at),
+    const floats = (at, count)=>Array.from(new Float32Array(guest.snapshot(at,
         count * 4)
         .slice().buffer));
 
@@ -96,9 +96,9 @@ export function createLines(host){
         {
             return E_OUTOFMEMORY;
         }
-        putU32s(out, [0]);
+        guest.set32s(out, [0]);
         // D3DSBT_ALL.
-        state.saved = await call(DEVICE.CreateStateBlock, [1, out]) === D3D_OK ? u32(out) : 0;
+        state.saved = await call(DEVICE.CreateStateBlock, [1, out]) === D3D_OK ? guest.u32(out) : 0;
         heap.free(out);
         await call(DEVICE.SetVertexShader, [0]);
         await call(DEVICE.SetPixelShader, [0]);
@@ -222,7 +222,7 @@ export function createLines(host){
             }
             else
             {
-                host.writeMemory(data, new Uint8Array(shape.data.buffer));
+                guest.setBytes(data, new Uint8Array(shape.data.buffer));
                 answer = await method(thread, state.device, DEVICE.DrawPrimitiveUP,
                     [shape.type, shape.count, data, STRIDE]);
                 heap.free(data);
@@ -265,7 +265,7 @@ export function createLines(host){
                 return trap;
             }
             const relative = (trap - (at + 9)) | 0;
-            host.writeMemory(at, Uint8Array.of(0xff, 0x74, 0x24, 0x04, 0xe8,
+            guest.setBytes(at, Uint8Array.of(0xff, 0x74, 0x24, 0x04, 0xe8,
                 relative & 0xff, relative >>> 8 & 0xff, relative >>> 16 & 0xff,
                 relative >>> 24 & 0xff, 0x50, 0xd9, 0x04, 0x24, 0x58, 0xc2, 0x04, 0x00));
             floatSlots.set(name, at);
@@ -283,7 +283,7 @@ export function createLines(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32s(out, [object.state.device]);
+                guest.set32s(out, [object.state.device]);
                 // A reference the caller releases.
                 const thread = host.currentThread?.();
                 return Promise.resolve().then(()=>method(thread, object.state.device,
@@ -328,7 +328,7 @@ export function createLines(host){
                     const heap = /** @type {NonNullable<LineHost['heap']>} */ (host.heap);
                     const viewport = heap.allocate(24);
                     await method(thread, state.device, DEVICE.GetViewport, [viewport]);
-                    const [x0, y0, width, height] = [0, 4, 8, 12].map(o=>u32(viewport + o));
+                    const [x0, y0, width, height] = [0, 4, 8, 12].map(o=>guest.u32(viewport + o));
                     const [minZ, maxZ] = floats(viewport + 16, 2);
                     heap.free(viewport);
                     return Array.from({ length: count >>> 0 }, (_, i)=>{
@@ -417,7 +417,7 @@ export function createLines(host){
     const create = ([device, out])=>{
         if ((out >>> 0) !== 0)
         {
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
         }
         if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
         {
@@ -435,7 +435,7 @@ export function createLines(host){
             return E_OUTOFMEMORY;
         }
         byPointer.set(pointer, object);
-        putU32s(out, [pointer]);
+        guest.set32s(out, [pointer]);
         return D3D_OK;
     };
 

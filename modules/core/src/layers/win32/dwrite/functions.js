@@ -97,7 +97,8 @@ export const bitsOf = value=>{
  * @param {DwriteHost} host
  */
 export function createDwriteFunctions(host){
-    const { u32, putU32s, method, string } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
     /** @type {Set<string>} */
     const said = new Set();
     /** @param {string} api @param {string} detail @param {'loss'} [kind] */
@@ -137,14 +138,14 @@ export function createDwriteFunctions(host){
         const pointer = host.vtables.publish(object, iid);
         if (pointer === 0)
         {
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             return E_NOINTERFACE;
         }
         if (!taken)
         {
             object.addRef();
         }
-        putU32s(out, [pointer]);
+        guest.set32s(out, [pointer]);
         return S_OK;
     };
 
@@ -271,8 +272,8 @@ export function createDwriteFunctions(host){
         {
             // IDWriteFontFileStream: ReadFileFragment 3, ReleaseFileFragment 4, GetFileSize 5.
             let hr = await method(thread, stream, 5, [out]);
-            const size = u32(out);
-            if (hr !== 0 || u32(out + 4) !== 0)
+            const size = guest.u32(out);
+            if (hr !== 0 || guest.u32(out + 4) !== 0)
             {
                 return null;
             }
@@ -281,8 +282,8 @@ export function createDwriteFunctions(host){
             {
                 return null;
             }
-            const bytes = host.readMemory(u32(out), size).slice();
-            await method(thread, stream, 4, [u32(out + 8)]);
+            const bytes = host.readMemory(guest.u32(out), size).slice();
+            await method(thread, stream, 4, [guest.u32(out + 8)]);
             return bytes;
         }
         finally
@@ -324,7 +325,7 @@ export function createDwriteFunctions(host){
             {
                 // IDWriteFontFileLoader::CreateStreamFromKey(key, size, &stream).
                 const hr = await method(thread, file.loader, 3, [key, file.key.length, out]);
-                const stream = u32(out);
+                const stream = guest.u32(out);
                 if (hr === 0 && stream !== 0)
                 {
                     file.bytes = await readStream(stream, thread);
@@ -365,11 +366,11 @@ export function createDwriteFunctions(host){
             o.state.entries.length },
         /** HRESULT FindLocaleName(WCHAR const*, UINT32 *index, BOOL *exists) */
         { name: 'FindLocaleName', argBytes: bytes(3), invoke: (o, [name, indexAt, existsAt])=>{
-            const wanted = (name >>> 0) === 0 ? '' : string(name, true, 85).toLowerCase();
+            const wanted = (name >>> 0) === 0 ? '' : guest.wstr(name, 170).toLowerCase();
             const index = o.state.entries.findIndex((/** @type {[string, string]} */ [locale])=>
                 locale === wanted);
-            putU32s(indexAt, [index < 0 ? 0xffffffff : index]);
-            putU32s(existsAt, [index < 0 ? 0 : 1]);
+            guest.set32s(indexAt, [index < 0 ? 0xffffffff : index]);
+            guest.set32s(existsAt, [index < 0 ? 0 : 1]);
             return S_OK;
         } },
         ...['Locale', 'String'].flatMap(/** @returns {ComMethod[]} */ kind=>{
@@ -381,10 +382,10 @@ export function createDwriteFunctions(host){
                         const entry = o.state.entries[index >>> 0];
                         if (!entry)
                         {
-                            putU32s(lengthAt, [0xffffffff]);
+                            guest.set32s(lengthAt, [0xffffffff]);
                             return E_FAIL;
                         }
-                        putU32s(lengthAt, [entry[pick].length]);
+                        guest.set32s(lengthAt, [entry[pick].length]);
                         return S_OK;
                     } },
                 /** HRESULT Get{LocaleName,String}(UINT32 index, WCHAR *buffer, UINT32 size) */
@@ -451,7 +452,7 @@ export function createDwriteFunctions(host){
         {
             return E_INVALIDARG;
         }
-        putU32s(out, [0]);
+        guest.set32s(out, [0]);
         const file = fileRef(0, key);
         const data = await bytesOf(file);
         if (!data)
@@ -474,7 +475,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [fromLocalKey(keyAt(key, size)).path.length]);
+            guest.set32s(out, [fromLocalKey(keyAt(key, size)).path.length]);
             return S_OK;
         } },
         /** HRESULT GetFilePathFromKey(void const *key, UINT32 size, WCHAR *path, UINT32 length) */
@@ -499,7 +500,7 @@ export function createDwriteFunctions(host){
                 return E_INVALIDARG;
             }
             const { modified } = fromLocalKey(keyAt(key, size));
-            putU32s(out, words(modified));
+            guest.set32s(out, words(modified));
             return S_OK;
         } },
     ] };
@@ -521,27 +522,27 @@ export function createDwriteFunctions(host){
          */
         { name: 'ReadFileFragment', argBytes: bytes(6), quadwords: [2, 4], invoke: (o, args)=>{
             const [startAt, offsetLow, offsetHigh, sizeLow, sizeHigh, contextAt] = args;
-            putU32s(startAt, [0]);
-            putU32s(contextAt, [0]);
+            guest.set32s(startAt, [0]);
+            guest.set32s(contextAt, [0]);
             const offset = (offsetLow >>> 0) + (offsetHigh >>> 0) * 0x100000000;
             const size = (sizeLow >>> 0) + (sizeHigh >>> 0) * 0x100000000;
             if (offset > o.state.data.length || size > o.state.data.length - offset)
             {
                 return E_FAIL;
             }
-            putU32s(startAt, [inGuest(o.state.data) + offset]);
+            guest.set32s(startAt, [inGuest(o.state.data) + offset]);
             return S_OK;
         } },
         /** void ReleaseFileFragment(void *context) */
         { name: 'ReleaseFileFragment', argBytes: bytes(1), invoke: ()=>0 },
         /** HRESULT GetFileSize(UINT64 *size) */
         { name: 'GetFileSize', argBytes: bytes(1), invoke: (o, [out])=>{
-            putU32s(out, [o.state.data.length, 0]);
+            guest.set32s(out, [o.state.data.length, 0]);
             return S_OK;
         } },
         /** HRESULT GetLastWriteTime(UINT64 *time) */
         { name: 'GetLastWriteTime', argBytes: bytes(1), invoke: (o, [out])=>{
-            putU32s(out, words(o.state.modified));
+            guest.set32s(out, words(o.state.modified));
             return S_OK;
         } },
     ] };
@@ -558,8 +559,8 @@ export function createDwriteFunctions(host){
     descriptors.file = { id: IID.FONT_FILE, methods: [
         /** HRESULT GetReferenceKey(void const **key, UINT32 *size) */
         { name: 'GetReferenceKey', argBytes: bytes(2), invoke: (o, [keyOut, sizeOut])=>{
-            putU32s(keyOut, [o.state.key]);
-            putU32s(sizeOut, [o.state.file.key.length]);
+            guest.set32s(keyOut, [o.state.key]);
+            guest.set32s(sizeOut, [o.state.file.key.length]);
             return S_OK;
         } },
         /** HRESULT GetLoader(IDWriteFontFileLoader**) */
@@ -572,7 +573,7 @@ export function createDwriteFunctions(host){
             if (loader !== 0)
             {
                 await touch(loader, 1);
-                putU32s(out, [loader]);
+                guest.set32s(out, [loader]);
                 return S_OK;
             }
             return give(out, localLoader, IID.FONT_FILE_LOADER, false);
@@ -585,16 +586,16 @@ export function createDwriteFunctions(host){
             const [supportedAt, fileTypeAt, faceTypeAt, countAt] = args;
             const data = await bytesOf(o.state.file);
             const kind = data ? analyzeFile(data) : { fileType: 0, faceType: 6, faces: [] };
-            putU32s(supportedAt, [kind.faces.length ? 1 : 0]);
+            guest.set32s(supportedAt, [kind.faces.length ? 1 : 0]);
             if ((fileTypeAt >>> 0) !== 0)
             {
-                putU32s(fileTypeAt, [kind.fileType]);
+                guest.set32s(fileTypeAt, [kind.fileType]);
             }
             if ((faceTypeAt >>> 0) !== 0)
             {
-                putU32s(faceTypeAt, [kind.faceType]);
+                guest.set32s(faceTypeAt, [kind.faceType]);
             }
-            putU32s(countAt, [kind.faces.length]);
+            guest.set32s(countAt, [kind.faces.length]);
             return data ? S_OK : failureOf(o.state.file);
         } },
     ] };
@@ -710,8 +711,8 @@ export function createDwriteFunctions(host){
      * @param {number} emSize @param {number} pixelsPerDip @param {number} transform
      */
     const pixelsPerEm = (emSize, pixelsPerDip, transform)=>{
-        const m22 = (transform >>> 0) === 0 ? 1 : f32(u32(transform + 12));
-        const m21 = (transform >>> 0) === 0 ? 0 : f32(u32(transform + 8));
+        const m22 = (transform >>> 0) === 0 ? 1 : f32(guest.u32(transform + 12));
+        const m21 = (transform >>> 0) === 0 ? 0 : f32(guest.u32(transform + 8));
         return emSize * pixelsPerDip * Math.hypot(m21, m22);
     };
     descriptors.face = { id: IID.FONT_FACE, methods: [
@@ -726,10 +727,10 @@ export function createDwriteFunctions(host){
             }
             if ((filesAt >>> 0) === 0)
             {
-                putU32s(countAt, [1]);
+                guest.set32s(countAt, [1]);
                 return S_OK;
             }
-            if (u32(countAt) < 1)
+            if (guest.u32(countAt) < 1)
             {
                 return E_INVALIDARG;
             }
@@ -801,18 +802,18 @@ export function createDwriteFunctions(host){
             const table = face.tables.get(tagText(tag >>> 0));
             if (!table)
             {
-                putU32s(dataAt, [0]);
-                putU32s(sizeAt, [0]);
-                putU32s(contextAt, [0]);
-                putU32s(existsAt, [0]);
+                guest.set32s(dataAt, [0]);
+                guest.set32s(sizeAt, [0]);
+                guest.set32s(contextAt, [0]);
+                guest.set32s(existsAt, [0]);
                 return S_OK;
             }
             const at = inGuest(face.bytes) + table.byteOffset - face.bytes.byteOffset;
-            putU32s(dataAt, [at]);
-            putU32s(sizeAt, [table.length]);
+            guest.set32s(dataAt, [at]);
+            guest.set32s(sizeAt, [table.length]);
             // The whole file stays in memory while the face lives: nothing to release.
-            putU32s(contextAt, [0]);
-            putU32s(existsAt, [1]);
+            guest.set32s(contextAt, [0]);
+            guest.set32s(existsAt, [1]);
             return S_OK;
         } },
         /** void ReleaseFontTable(void *context) */
@@ -838,7 +839,7 @@ export function createDwriteFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                putU32s(out, [0]);
+                guest.set32s(out, [0]);
                 const values = (params >>> 0) === 0 ? null
                     : host.objectAt(params >>> 0)?.state?.values;
                 if (!values || (measuring >>> 0) > 2)
@@ -854,7 +855,7 @@ export function createDwriteFunctions(host){
                     : pixels >= ((measuring >>> 0) === 0 ? 100 : 350) ? 6
                         : (measuring >>> 0) === 1 ? 2 : (measuring >>> 0) === 2 ? 3
                             : pixels <= 20 ? 4 : 5;
-                putU32s(out, [mode]);
+                guest.set32s(out, [mode]);
                 return S_OK;
             } },
         /**
@@ -1010,7 +1011,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             const font = o.state.fonts[index >>> 0];
             if (!font)
             {
@@ -1087,8 +1088,8 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
-            putU32s(existsAt, [0]);
+            guest.set32s(out, [0]);
+            guest.set32s(existsAt, [0]);
             const nameId = INFORMATIONAL[id >>> 0];
             if (!nameId && (id >>> 0) !== 1)
             {
@@ -1099,7 +1100,7 @@ export function createDwriteFunctions(host){
             {
                 return S_OK;
             }
-            putU32s(existsAt, [1]);
+            guest.set32s(existsAt, [1]);
             return give(out, newStrings(strings), IID.LOCALIZED_STRINGS);
         } },
         { name: 'GetSimulations', argBytes: bytes(0), invoke: o=>
@@ -1115,7 +1116,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [faceOfFont(o.state.font).cmap.lookup(code >>> 0) ? 1 : 0]);
+            guest.set32s(out, [faceOfFont(o.state.font).cmap.lookup(code >>> 0) ? 1 : 0]);
             return S_OK;
         } },
         /** HRESULT CreateFontFace(IDWriteFontFace**) */
@@ -1144,7 +1145,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             const family = o.state.families[index >>> 0];
             return family ? give(out, newFamily(o, family), IID.FONT_FAMILY) : E_FAIL;
         } },
@@ -1154,9 +1155,9 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            const index = familyIndex(o.state.families, string(name, true, 256));
-            putU32s(indexAt, [index < 0 ? 0xffffffff : index]);
-            putU32s(existsAt, [index < 0 ? 0 : 1]);
+            const index = familyIndex(o.state.families, guest.wstr(name, 512));
+            guest.set32s(indexAt, [index < 0 ? 0xffffffff : index]);
+            guest.set32s(existsAt, [index < 0 ? 0 : 1]);
             return S_OK;
         } },
         /** HRESULT GetFontFromFontFace(IDWriteFontFace*, IDWriteFont**) */
@@ -1165,7 +1166,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             const face = faceAt(facePointer);
             if (!face)
             {
@@ -1250,7 +1251,7 @@ export function createDwriteFunctions(host){
             }
             const asked = readLogFont(cell);
             const length = call('GetTextFaceW', [hdc, 32, cell + 92]);
-            const name = length > 0 ? string(cell + 92, true, 32) : asked.name;
+            const name = length > 0 ? guest.wstr(cell + 92, 64) : asked.name;
             return { ...asked, name };
         }
         finally
@@ -1266,7 +1267,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             if ((logfont >>> 0) === 0)
             {
                 return E_INVALIDARG;
@@ -1295,7 +1296,7 @@ export function createDwriteFunctions(host){
                 return E_INVALIDARG;
             }
             host.writeMemory(wholeAddress(out), new Uint8Array(92));
-            putU32s(systemAt, [0]);
+            guest.set32s(systemAt, [0]);
             const font = (fontPointer >>> 0) === 0 ? null : host.objectAt(fontPointer >>> 0);
             if (!font?.state?.font)
             {
@@ -1303,7 +1304,7 @@ export function createDwriteFunctions(host){
             }
             const family = font.state.family.state.family;
             writeLogFont(out, font.state.font, family.names[0]?.[1] ?? '');
-            putU32s(systemAt, [font.state.family.state.collection.state.system ? 1 : 0]);
+            guest.set32s(systemAt, [font.state.family.state.collection.state.system ? 1 : 0]);
             return S_OK;
         } },
         /** HRESULT ConvertFontFaceToLOGFONT(IDWriteFontFace*, LOGFONTW*) */
@@ -1331,7 +1332,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             if ((hdc >>> 0) === 0)
             {
                 return E_INVALIDARG;
@@ -1360,7 +1361,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             if (!renderTargets)
             {
                 say('IDWriteGdiInterop::CreateBitmapRenderTarget', 'refused: no GDI to make'
@@ -1391,10 +1392,12 @@ export function createDwriteFunctions(host){
 
     // ----- The factory -----
 
-    const analysis = createAnalysis({ host, method, u32, putU32s, readU16s, scratch, say,
+    const analysis = createAnalysis({ host, method, u32: guest.u32, putU32s: guest.set32s, readU16s,
+        scratch, say,
         f32, bitsOf, faceAt, designMetrics });
     const gdi = host.gdi;
-    const renderTargets = gdi ? createRenderTargets({ host, gdi, u32, putU32s, scratch, f32,
+    const renderTargets = gdi ? createRenderTargets({ host, gdi, u32: guest.u32,
+        putU32s: guest.set32s, scratch, f32,
         bitsOf, floatAnswer, glyphRun: analysis.glyphRun, coverageOf: analysis.coverageOf })
         : null;
 
@@ -1402,7 +1405,7 @@ export function createDwriteFunctions(host){
     const notMade = (api, out)=>{
         if ((out >>> 0) !== 0)
         {
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
         }
         say(`IDWriteFactory::${api}`, 'refused: DirectWrite\'s text formats and layouts are'
             + ' not made here');
@@ -1455,7 +1458,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             if (!o.state.collectionLoaders.has(loader >>> 0))
             {
                 return E_INVALIDARG;
@@ -1474,17 +1477,17 @@ export function createDwriteFunctions(host){
                 {
                     return hr | 0;
                 }
-                const enumerator = u32(cell);
+                const enumerator = guest.u32(cell);
                 for (;;)
                 {
                     // IDWriteFontFileEnumerator: MoveNext 3, GetCurrentFontFile 4.
                     hr = await method(thread, enumerator, 3, [cell]);
-                    if (hr !== 0 || u32(cell) === 0)
+                    if (hr !== 0 || guest.u32(cell) === 0)
                     {
                         break;
                     }
                     hr = await method(thread, enumerator, 4, [cell + 4]);
-                    const filePointer = u32(cell + 4);
+                    const filePointer = guest.u32(cell + 4);
                     if (hr !== 0 || filePointer === 0)
                     {
                         break;
@@ -1537,19 +1540,19 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             if ((pathAt >>> 0) === 0)
             {
                 return E_INVALIDARG;
             }
-            const path = string(pathAt, true, 260);
+            const path = guest.wstr(pathAt, 520);
             // A file named with its last write need not exist yet.
             if ((timeAt >>> 0) === 0 && !systemFace(path) && !(await host.readFile(path)))
             {
                 return DWRITE_E_FILENOTFOUND;
             }
             const modified = (timeAt >>> 0) !== 0
-                ? BigInt(u32(timeAt)) | BigInt(u32(timeAt + 4)) << 32n
+                ? BigInt(guest.u32(timeAt)) | BigInt(guest.u32(timeAt + 4)) << 32n
                 : host.modified?.(path) ?? 0n;
             return give(out, newFile(fileRef(0, localKey(path, modified))), IID.FONT_FILE);
         } },
@@ -1563,7 +1566,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             if ((key >>> 0) === 0 || (loader >>> 0) === 0)
             {
                 return E_INVALIDARG;
@@ -1586,7 +1589,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             // Type 1, vector and bitmap faces are not DirectWrite's; a bare CFF
             // table is a face type it names and does not make.
             if ((count >>> 0) !== 1 || (filesAt >>> 0) === 0 || (simulations >>> 0) > 3
@@ -1598,7 +1601,7 @@ export function createDwriteFunctions(host){
             {
                 return DWRITE_E_UNSUPPORTEDOPERATION;
             }
-            const file = host.objectAt(u32(filesAt))?.state?.file;
+            const file = host.objectAt(guest.u32(filesAt))?.state?.file;
             if (!file)
             {
                 return E_INVALIDARG;
@@ -1642,7 +1645,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             return (monitor >>> 0) === 0 ? E_INVALIDARG
                 : give(out, newParams([1.8, 0.5, 1, 1, 0]), IID.RENDERING_PARAMS);
         } },
@@ -1658,7 +1661,7 @@ export function createDwriteFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                putU32s(out, [0]);
+                guest.set32s(out, [0]);
                 const values = [f32(gamma), f32(contrast), f32(level), geometry >>> 0, mode >>> 0];
                 if (!(values[0] > 0) || !(values[1] >= 0) || !(values[2] >= 0) || values[3] > 2
                 || values[4] > 6)
@@ -1721,8 +1724,8 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            putU32s(out, [0]);
-            const name = (locale >>> 0) === 0 ? null : string(locale, true, 85);
+            guest.set32s(out, [0]);
+            const name = (locale >>> 0) === 0 ? null : guest.wstr(locale, 170);
             // DWRITE_NUMBER_SUBSTITUTION_METHOD_NONE is the one that reads no locale.
             if ((kind >>> 0) > 4 || (kind >>> 0) !== 2 && (name === null
                 || !/^[a-z]{2,3}(-[a-z0-9]{2,8})*$/i.test(name)))
@@ -1745,7 +1748,7 @@ export function createDwriteFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                putU32s(out, [0]);
+                guest.set32s(out, [0]);
                 const made = analysis.glyphRun(args);
                 return typeof made === 'number' ? made : give(out, made, IID.GLYPH_RUN_ANALYSIS);
             } },
@@ -1765,7 +1768,7 @@ export function createDwriteFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                putU32s(out, [0]);
+                guest.set32s(out, [0]);
                 if ((type >>> 0) !== SHARED && (type >>> 0) !== ISOLATED)
                 {
                     return E_INVALIDARG;

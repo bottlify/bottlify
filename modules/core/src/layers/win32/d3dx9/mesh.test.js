@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMeshFunctions, indexBufferOf, singleStrip, vertexNormals } from './mesh.js';
 import { deviceRig } from './device.fixture.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const D3DERR_INVALIDCALL = 0x8876086c;
 const VERTICES = 0x100;
@@ -18,10 +19,7 @@ const OUT2 = 0x900;
 function flat(){
     const memory = new Uint8Array(0x10000);
     const host = {
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            memory.subarray(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, at),
+        guest: guestOver(memory),
     };
     /** @param {number} at @param {number[]} values */
     const putFloats = (at, values)=>new Float32Array(memory.buffer, at, values.length)

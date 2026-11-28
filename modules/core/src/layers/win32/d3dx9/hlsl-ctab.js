@@ -78,7 +78,7 @@ function buildConstantTable(options){
     }
 
     /** @param {string} text */
-    const stringAt = text=>{
+    const stringOffset = text=>{
         const known = strings.get(text);
         if (known !== undefined)
         {
@@ -99,13 +99,13 @@ function buildConstantTable(options){
     const records = [];
     /** @type {{ at: number, name: number, type: number }[]} */
     const memberRecords = [];
-    const creator = stringAt(options.creator);
-    const target = stringAt(options.target);
+    const creator = stringOffset(options.creator);
+    const target = stringOffset(options.target);
     /** @type {{ offset: number, values: number[] }[]} */
     const defaultBlocks = [];
     for (const constant of constants)
     {
-        const name = stringAt(constant.name);
+        const name = stringOffset(constant.name);
         let defaults = 0;
         if (constant.defaults && constant.defaults.length > 0)
         {
@@ -124,7 +124,7 @@ function buildConstantTable(options){
         }
         const base = membersAt.get(type) ?? 0;
         type.members.forEach((member, m)=>{
-            memberRecords.push({ at: base + m * MEMBER_INFO, name: stringAt(member.name),
+            memberRecords.push({ at: base + m * MEMBER_INFO, name: stringOffset(member.name),
                 type: typeAt.get(member.type) ?? 0 });
             nameMembers(member.type);
         });

@@ -44,6 +44,7 @@ const SLOT = Object.freeze({ QueryInterface: 0, AddRef: 1, Release: 2 });
 
 /**
  * @typedef {Object} MfHost
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} heap
@@ -102,7 +103,8 @@ export function drive(steps, input){
  * @param {MfHost} host
  */
 export function createMfKit(host){
-    const { u32, putU32s, method, string } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const port = host.guest;
     /** The objects this library made: the ones acted on directly. */
     const mine = new WeakSet();
     /** Foreign interfaces whose Release is owed. */
@@ -150,7 +152,7 @@ export function createMfKit(host){
     const guidOf = words=>formatGuid(
         new Uint8Array(Uint32Array.from(words.map(w=>w >>> 0)).buffer));
     /** @param {number} at */
-    const wideString = at=>string(at >>> 0, true, 1 << 20);
+    const wideString = at=>port.wstr(at, 2 << 20);
     /**
      * Task memory holding these bytes, as CoTaskMemAlloc would hand it out:
      * at least one byte, so an empty blob is a pointer all the same.
@@ -287,17 +289,17 @@ export function createMfKit(host){
         const id = guidAt(iid);
         if (!object.interfaceFor(id))
         {
-            putU32s(out, [0]);
+            port.set32s(out, [0]);
             return E_NOINTERFACE;
         }
         const at = host.vtables?.publish(object, id) ?? 0;
         if (at === 0)
         {
-            putU32s(out, [0]);
+            port.set32s(out, [0]);
             return E_OUTOFMEMORY;
         }
         object.addRef();
-        putU32s(out, [at]);
+        port.set32s(out, [at]);
         return S_OK;
     };
 
@@ -357,14 +359,15 @@ export function createMfKit(host){
         if (pointer === 0)
         {
             object.release();
-            putU32s(out, [0]);
+            port.set32s(out, [0]);
             return E_OUTOFMEMORY;
         }
-        putU32s(out, [pointer]);
+        port.set32s(out, [pointer]);
         return S_OK;
     };
 
-    return { u32, putU32s, u64, putU64, f64, putF64, guidAt, putGuid, wide, double, guidOf,
+    return { u32: port.u32, putU32s: port.set32s, u64, putU64, f64, putF64, guidAt, putGuid, wide,
+        double, guidOf,
         wideString, taskCopy, sayOnce, guest, ownAt, releaseOwn, addRef, release,
         settle, query, make, give, mine };
 }

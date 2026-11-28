@@ -116,10 +116,6 @@ function rig(){
     let published = 0x90000000;
     const host = {
         guest: guestOver(memory),
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            memory.subarray(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, at),
         heap, callGuest,
         vtables: { publish: ()=>(published += 4) },
         // A font engine whose every glyph is a 2x3 block, fully inked, 5 wide.
@@ -256,12 +252,7 @@ test('text to its NUL ending just short of the end of its memory is read without
         // that runs into it, as the memory layer refuses one past a region's end.
         const r = rig();
         const end = r.memory.length;
-        const read = r.host.readMemory;
-        r.host.readMemory = (/** @type {number} */ at, /** @type {number} */ length)=>{
-            assert.ok(at + length <= end,
-                `read of ${length} bytes at 0x${at.toString(16)} runs past the end of memory`);
-            return read(at, length);
-        };
+        // The guest's one region ends where its memory does: a read past it faults.
         const font = { state: { device: r.device, desc: { height: -10, weight: 400,
             italic: 0, charSet: 0, pitchAndFamily: 0, faceName: 'Arial' },
         logFont: {}, glyphs: new Map(), pages: [] } };

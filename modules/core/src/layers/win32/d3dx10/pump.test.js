@@ -14,6 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createThreadPumps, IID_ID3DX_THREAD_PUMP } from './pump.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const E_NOTIMPL = 0x80004001 | 0;
 const E_FAIL = 0x80004005 | 0;
@@ -49,6 +50,7 @@ function setup(){
     /** @type {string[]} */
     const threadsMade = [];
     const pumps = createThreadPumps({
+        guest: guestOver(bytes),
         readMemory: (at, length)=>bytes.slice(at, at + length),
         writeMemory: (at, data)=>bytes.set(data, at),
         heap: { allocate: size=>{
