@@ -41,9 +41,14 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const SRC = process.argv[2] ? resolve(process.argv[2]) : join(ROOT, 'modules', 'core', 'src');
 
-/** The guest reads a window can be made with, and the bytes in one element of each. */
+/**
+ * The guest reads a window can be made with, and the bytes in one element of
+ * each: the guest port's copy among them, which the readers before it moved
+ * onto (`system/port.js`).
+ */
 const READS = new Map([
     ['readMemory', 1], ['readBytes', 1], ['readDwords', 4], ['readWords', 2], ['readU32s', 4],
+    ['snapshot', 1],
 ]);
 const CALL = new RegExp(`(?<![\\w$])(${[...READS.keys()].join('|')})\\s*\\(`, 'g');
 
