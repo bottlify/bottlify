@@ -6,20 +6,22 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { recordingGuest } from '../common/guest.fixture.js';
 import { createResourceFunctions } from './resources.js';
 
 /** RT_STRING and RT_BITMAP, the two types these tests ask for. */
 const RT_BITMAP = 2;
 const RT_STRING = 6;
 
-/** Wide names at these addresses; any other address reads as OTHER. */
-const WIDE = new Map([[0x1a000, 'TestDll'], [0x1b000, 'TESTDLL'], [0x1c000, '#101']]);
+/** The names at these addresses, in either width; nothing is at the unmapped one. */
+const NAMES = new Map([[0x19000, 'MYNAME'], [0x19100, '#101'], [0x1a000, 'TestDll'],
+    [0x1b000, 'TESTDLL'], [0x1c000, '#101'], [0x2a000, 'OTHER']]);
+const UNMAPPED = 0x5dee7f10;
 
 /**
- * @param {{ reply?: (language: number) => number | Promise<number>, wide?: boolean }}
- *     [options]
+ * @param {{ reply?: (language: number) => number | Promise<number> }} [options]
  */
-function setup({ reply, wide = true } = {}){
+function setup({ reply } = {}){
     /** @type {any[]} */
     const asked = [];
     /** @type {number[]} */
@@ -30,16 +32,17 @@ function setup({ reply, wide = true } = {}){
     const placed = [];
     /** @type {number[]} */
     const freed = [];
+    const memory = recordingGuest({ names: NAMES });
+    const named = memory.guest.text;
+    memory.guest.text = (address, wide, limit, counted)=>{
+        if (address === UNMAPPED)
+        {
+            throw Object.assign(new Error('Unmapped read'), { code: 'GUEST_ACCESS' });
+        }
+        return named(address, wide, limit, counted);
+    };
     const fns = createResourceFunctions({
-        readCString: address=>{
-            if (address === 0x5dee7f10)
-            {
-                throw Object.assign(new Error('Unmapped read'), { code: 'GUEST_ACCESS' });
-            }
-            return address === 0x19000 ? 'MYNAME' : address === 0x19100 ? '#101' : 'OTHER';
-        },
-        ...wide ? { readWideString: (/** @type {number} */ address)=>
-            WIDE.get(address) ?? 'OTHER' } : {},
+        guest: memory.guest,
         setLastError: code=>{
             errors.push(code);
         },
@@ -71,14 +74,14 @@ function setup({ reply, wide = true } = {}){
             placed.push({ bytes });
             return 0x50000;
         },
-        writeMemory: (address, bytes)=>{
-            placed[placed.length - 1].text = String.fromCharCode(...bytes);
-        },
         free: address=>{
             freed.push(address);
         },
     });
-    return { fns, asked, errors, called, placed, freed };
+    // What was placed for a callback: the bytes written where it was allocated.
+    const text = ()=>placed.map(({ bytes })=>({ bytes,
+        text: String.fromCharCode(...memory.written.get(0x50000) ?? []) }));
+    return { fns, asked, errors, called, placed, freed, text };
 }
 
 test('the name comes before the type, which is the opposite of the tree', ()=>{
@@ -234,13 +237,6 @@ test('a failed lookup says whether the type, the name or the language was missin
     assert.deepEqual(errors, [1813, 1814, 1815]);
 });
 
-test('without a wide reader a W call still finds by integer, and a named one is not found', ()=>{
-    const { fns, errors } = setup({ wide: false });
-    assert.notEqual(fns.FindResourceW.handler([0, 101, RT_BITMAP]), 0);
-    assert.equal(fns.FindResourceW.handler([0, 0x2a000, 0x1a000]), 0);
-    assert.deepEqual(errors, [1813]);
-});
-
 test('EnumResourceLanguagesW reads the names wide and passes them on as given', ()=>{
     const { fns, called } = setup();
     assert.equal(fns.EnumResourceLanguagesW.handler([0, 0x1b000, 0x2a000, 0x401000, 5]), 1);
@@ -260,7 +256,7 @@ test('the names of a type are enumerated once each, a string name placed for its
     const named = setup();
     assert.equal(named.fns.EnumResourceNamesA.handler([0, RT_BITMAP, 0x401000, 0]), 1);
     assert.deepEqual(named.called.map(({ args })=>args[2]), [0x50000, 101]);
-    assert.deepEqual(named.placed, [{ bytes: 7, text: 'myname ' }]);
+    assert.deepEqual(named.text(), [{ bytes: 7, text: 'myname ' }]);
     assert.deepEqual(named.freed, [0x50000], 'the string lives for its callback only');
     assert.equal(placed.length + freed.length, 0);
     assert.equal(fns.EnumResourceNamesA.argBytes, 16);
@@ -276,12 +272,12 @@ test('a callback that says stop ends the name enumeration with FALSE', ()=>{
 });
 
 test('the types of an image are enumerated once each, a string type placed for its callback', ()=>{
-    const { fns, called, placed, freed } = setup();
+    const { fns, called, freed, text } = setup();
     assert.equal(fns.EnumResourceTypesA.handler([0, 0x401000, 0x77]), 1);
     assert.deepEqual(called.map(({ args })=>args),
         [[0, RT_STRING, 0x77], [0, RT_BITMAP, 0x77], [0, 0x50000, 0x77]],
         'a type with several names is one type');
-    assert.deepEqual(placed, [{ bytes: 8, text: 'TESTDLL\0' }]);
+    assert.deepEqual(text(), [{ bytes: 8, text: 'TESTDLL\0' }]);
     assert.deepEqual(freed, [0x50000], 'the string lives for its callback only');
     assert.equal(fns.EnumResourceTypesW.argBytes, 12);
 
@@ -313,7 +309,7 @@ test('a 64-bit caller\'s context past a dword reaches each enumeration\'s callba
 
 test('a name that is not there is ERROR_INVALID_PARAMETER, as the lookup catches the fault', ()=>{
     const { fns, errors, asked } = setup();
-    assert.equal(fns.FindResourceA.handler([0x00400000, 0x5dee7f10, RT_BITMAP]), 0);
+    assert.equal(fns.FindResourceA.handler([0x00400000, UNMAPPED, RT_BITMAP]), 0);
     assert.deepEqual(errors, [87]);
     assert.deepEqual(asked, [], 'and nothing was looked up');
 });

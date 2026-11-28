@@ -632,180 +632,42 @@
    "string readWide": 1
   },
   "win32/kernel32/actctx.js": {
-   "accessor pointer": 1,
-   "accessor readDword": 1,
-   "accessor readPointer": 1,
-   "accessor writeDword": 1,
-   "string readAnsi": 1,
-   "string readWide": 1
-  },
-  "win32/kernel32/comm.js": {
-   "string ansi": 1,
-   "string wide": 1
-  },
-  "win32/kernel32/critical.js": {
-   "accessor dword": 1,
-   "accessor readU32": 1
-  },
-  "win32/kernel32/debug-events.js": {
-   "accessor writeU32": 1
-  },
-  "win32/kernel32/drives.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1
-  },
-  "win32/kernel32/environment.js": {
-   "string writeAnsi": 1,
-   "string writeWideString": 1
+   "accessor pointer": 1
   },
   "win32/kernel32/files.js": {
-   "accessor qword": 1,
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "accessor writeQword": 1
+   "accessor qword": 1
   },
   "win32/kernel32/filetime.js": {
    "accessor word": 2
   },
-  "win32/kernel32/fls.js": {
-   "accessor dword": 1
-  },
-  "win32/kernel32/guest-heap-long.js": {
-   "accessor dword": 1
-  },
   "win32/kernel32/guest-heap.js": {
-   "accessor dword": 1,
    "copy readMemory().slice()": 1
   },
-  "win32/kernel32/heap.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "accessor writeWord": 1
-  },
-  "win32/kernel32/iocp.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1
-  },
-  "win32/kernel32/locale.js": {
-   "accessor readLong": 1,
-   "accessor writeLong": 1,
-   "string readWide": 1,
-   "string writeWide": 1
-  },
-  "win32/kernel32/lstr.js": {
-   "accessor dword": 1
-  },
-  "win32/kernel32/mailslots.js": {
-   "accessor dword": 1
-  },
   "win32/kernel32/mapping.js": {
-   "accessor readDword": 1,
    "accessor u16": 1,
-   "accessor u32": 1,
-   "accessor writeDword": 1
-  },
-  "win32/kernel32/modules.js": {
-   "string writeString": 1
-  },
-  "win32/kernel32/moveable.js": {
-   "accessor writeWord": 1
-  },
-  "win32/kernel32/object-attributes.js": {
-   "accessor word": 1
+   "accessor u32": 1
   },
   "win32/kernel32/object-directories.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
    "string string": 1
-  },
-  "win32/kernel32/pipes.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1
-  },
-  "win32/kernel32/pool.js": {
-   "accessor dword": 3
-  },
-  "win32/kernel32/process-policy.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "accessor writeQword": 1
-  },
-  "win32/kernel32/process.js": {
-   "accessor dword": 1,
-   "accessor readU32": 1,
-   "accessor writeU64": 1
   },
   "win32/kernel32/profile.js": {
    "accessor getInt": 1,
    "string getString": 1
   },
-  "win32/kernel32/resource-update.js": {
-   "accessor read32": 1,
-   "accessor write32": 1
-  },
   "win32/kernel32/seh.js": {
-   "accessor readU32": 1,
-   "accessor word": 1,
-   "accessor writeU32": 1
-  },
-  "win32/kernel32/seh64.js": {
-   "accessor readU32": 1
+   "accessor word": 1
   },
   "win32/kernel32/slimsync.js": {
-   "accessor dword": 1,
-   "accessor readWord": 1,
    "accessor writeWord": 1
-  },
-  "win32/kernel32/slist.js": {
-   "accessor read32": 1,
-   "accessor write32": 1
-  },
-  "win32/kernel32/spawn.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1
   },
   "win32/kernel32/startup-info.js": {
    "accessor u32": 1
-  },
-  "win32/kernel32/sync-natives.js": {
-   "accessor writeDword": 1
-  },
-  "win32/kernel32/sync.js": {
-   "accessor readI32": 1,
-   "accessor writeI32": 1
-  },
-  "win32/kernel32/system.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "string readAnsi": 1,
-   "string readWide": 1,
-   "string writeAnsi": 1
-  },
-  "win32/kernel32/teb.js": {
-   "accessor writePointer": 1
-  },
-  "win32/kernel32/thread-calls.js": {
-   "accessor dword": 1
   },
   "win32/kernel32/thread-info.js": {
    "accessor dword": 1
   },
   "win32/kernel32/threading.js": {
    "accessor readU32": 1
-  },
-  "win32/kernel32/threadpool-api.js": {
-   "accessor read32": 1,
-   "accessor write32": 1
-  },
-  "win32/kernel32/unwind.js": {
-   "accessor readU32": 1,
-   "accessor readU64": 1
-  },
-  "win32/kernel32/wait-one.js": {
-   "accessor dword": 1
-  },
-  "win32/kernel32/win9x.js": {
-   "accessor dword": 1
   },
   "win32/libcef/functions.js": {
    "accessor dword": 1,

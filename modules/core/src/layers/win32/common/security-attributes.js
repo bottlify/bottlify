@@ -23,21 +23,18 @@
 /**
  * The structure at `at`, read whole; null where `at` is null.
  *
- * @param {(address: number, length: number) => Uint8Array} readMemory
+ * @param {import('../../../system/port.js').Port} port
  * @param {number} at  The address, whole.
  * @param {number} [pointerSize]  4 or 8; 4 by default.
  * @returns {SecurityAttributes | null}
  */
-export function readSecurityAttributes(readMemory, at, pointerSize = 4){
+export function readSecurityAttributes(port, at, pointerSize = 4){
     if (at === 0)
     {
         return null;
     }
     const word = pointerSize === 8 ? 8 : 4;
-    const bytes = readMemory(at, 3 * word);
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const descriptor = word === 8
-        ? view.getUint32(8, true) + view.getUint32(12, true) * 2 ** 32
-        : view.getUint32(4, true);
-    return { descriptor, inherit: view.getUint32(2 * word, true) !== 0 };
+    const descriptor = word === 8 ? port.u32(at + 8) + port.u32(at + 12) * 2 ** 32
+        : port.u32(at + 4);
+    return { descriptor, inherit: port.u32(at + 2 * word) !== 0 };
 }

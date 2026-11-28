@@ -5,6 +5,7 @@
  */
 
 import { guestException } from '../common/raise.js';
+import { imm32 } from '../../../system/x86.js';
 
 /**
  * Critical sections that stay in the guest.
@@ -84,10 +85,6 @@ export const COUNTERS = {
     SIZE: 8,
 };
 
-/** @param {number} value @returns {number[]} */
-const dword = value=>[
-    value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-];
 
 /**
  * `jmp rel32` to an absolute target, from the instruction's own position.
@@ -96,7 +93,7 @@ const dword = value=>[
  * @param {number} to
  * @returns {number[]}
  */
-const jump = (from, to)=>[0xe9, ...dword((to - (from + 5)) | 0)];
+const jump = (from, to)=>[0xe9, ...imm32((to - (from + 5)) | 0)];
 
 /**
  * VOID EnterCriticalSection(LPCRITICAL_SECTION), as guest code.
@@ -125,12 +122,12 @@ const jump = (from, to)=>[0xe9, ...dword((to - (from + 5)) | 0)];
 export function enterCode(at, waitTrap, counters){
     const body = [
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
-        0x64, 0xa1, ...dword(TEB_THREAD_ID),                         // mov eax, fs:[0x24]
-        0xf0, 0xff, 0x05, ...dword(counters + COUNTERS.ENTERED),     // lock inc [entered]
+        0x64, 0xa1, ...imm32(TEB_THREAD_ID),                         // mov eax, fs:[0x24]
+        0xf0, 0xff, 0x05, ...imm32(counters + COUNTERS.ENTERED),     // lock inc [entered]
         0xf0, 0xff, 0x41, CS.LOCK_COUNT,                             // lock inc [ecx+4]
         0x75, 0x0d,                                                  // jnz taken (+13)
         0x89, 0x41, CS.OWNING_THREAD,                                // mov [ecx+12], eax
-        0xc7, 0x41, CS.RECURSION_COUNT, ...dword(1),                 // mov [ecx+8], 1
+        0xc7, 0x41, CS.RECURSION_COUNT, ...imm32(1),                 // mov [ecx+8], 1
         0xc2, 0x04, 0x00,                                            // ret 4
         // taken:
         0x39, 0x41, CS.OWNING_THREAD,                                // cmp [ecx+12], eax
@@ -167,10 +164,10 @@ export function enterCode(at, waitTrap, counters){
 export function leaveCode(at, wakeTrap, counters){
     const body = [
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
-        0xf0, 0xff, 0x05, ...dword(counters + COUNTERS.LEFT),        // lock inc [left]
+        0xf0, 0xff, 0x05, ...imm32(counters + COUNTERS.LEFT),        // lock inc [left]
         0xff, 0x49, CS.RECURSION_COUNT,                              // dec [ecx+8]
         0x75, 0x10,                                                  // jnz nested (+16)
-        0xc7, 0x41, CS.OWNING_THREAD, ...dword(0),                   // mov [ecx+12], 0
+        0xc7, 0x41, CS.OWNING_THREAD, ...imm32(0),                   // mov [ecx+12], 0
         0xf0, 0xff, 0x49, CS.LOCK_COUNT,                             // lock dec [ecx+4]
         0x7d, 0x0a,                                                  // jge wake (+10)
         0xc2, 0x04, 0x00,                                            // ret 4
@@ -222,25 +219,25 @@ export function leaveCode(at, wakeTrap, counters){
 export function tryEnterCode(counters){
     return new Uint8Array([
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
-        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // mov edx, fs:[0x24]
+        0x64, 0x8b, 0x15, ...imm32(TEB_THREAD_ID),                   // mov edx, fs:[0x24]
         0x53,                                                        // push ebx
         0x31, 0xdb,                                                  // xor ebx, ebx
-        0xb8, ...dword(-1),                                          // mov eax, -1
+        0xb8, ...imm32(-1),                                          // mov eax, -1
         0xf0, 0x0f, 0xb1, 0x59, CS.LOCK_COUNT,                       // lock cmpxchg [ecx+4], ebx
         0x5b,                                                        // pop ebx (flags kept)
         0x75, 0x19,                                                  // jnz held (+25)
         0x89, 0x51, CS.OWNING_THREAD,                                // mov [ecx+12], edx
-        0xc7, 0x41, CS.RECURSION_COUNT, ...dword(1),                 // mov [ecx+8], 1
-        0xf0, 0xff, 0x05, ...dword(counters + COUNTERS.ENTERED),     // lock inc [entered]
-        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc7, 0x41, CS.RECURSION_COUNT, ...imm32(1),                 // mov [ecx+8], 1
+        0xf0, 0xff, 0x05, ...imm32(counters + COUNTERS.ENTERED),     // lock inc [entered]
+        0xb8, ...imm32(1),                                           // mov eax, 1
         0xc2, 0x04, 0x00,                                            // ret 4
         // held:
         0x39, 0x51, CS.OWNING_THREAD,                                // cmp [ecx+12], edx
         0x75, 0x16,                                                  // jne no (+22)
         0xf0, 0xff, 0x41, CS.LOCK_COUNT,                             // lock inc [ecx+4]
         0xff, 0x41, CS.RECURSION_COUNT,                              // inc [ecx+8]
-        0xf0, 0xff, 0x05, ...dword(counters + COUNTERS.ENTERED),     // lock inc [entered]
-        0xb8, ...dword(1),                                           // mov eax, 1
+        0xf0, 0xff, 0x05, ...imm32(counters + COUNTERS.ENTERED),     // lock inc [entered]
+        0xb8, ...imm32(1),                                           // mov eax, 1
         0xc2, 0x04, 0x00,                                            // ret 4
         // no:
         0x31, 0xc0,                                                  // xor eax, eax
@@ -269,7 +266,7 @@ const absolute64 = (reg, address)=>{
         throw new Error(`critical sections: counters at 0x${(address >>> 0).toString(16)}, `
             + 'past what a disp32 reaches at 64 bits');
     }
-    return [reg << 3 | 0x04, 0x25, ...dword(address)];
+    return [reg << 3 | 0x04, 0x25, ...imm32(address)];
 };
 
 /**
@@ -303,7 +300,7 @@ export function enterLongCode(counters){
         0xf0, 0xff, 0x41, CS64.LOCK_COUNT,                           // lock inc [rcx+8]
         0x75, 0x0c,                                                  // jnz taken (+12)
         0x48, 0x89, 0x41, CS64.OWNING_THREAD,                        // mov [rcx+16], rax
-        0xc7, 0x41, CS64.RECURSION_COUNT, ...dword(1),               // mov [rcx+12], 1
+        0xc7, 0x41, CS64.RECURSION_COUNT, ...imm32(1),               // mov [rcx+12], 1
         0xc3,                                                        // ret
         // taken:
         0x48, 0x39, 0x41, CS64.OWNING_THREAD,                        // cmp [rcx+16], rax
@@ -312,7 +309,7 @@ export function enterLongCode(counters){
         0xc3,                                                        // ret
     ];
     // wait:
-    return { code: new Uint8Array([...body, 0xe9, ...dword(0)]), jump: body.length + 1 };
+    return { code: new Uint8Array([...body, 0xe9, ...imm32(0)]), jump: body.length + 1 };
 }
 
 /**
@@ -339,7 +336,7 @@ export function leaveLongCode(counters){
         0xf0, 0xff, ...absolute64(0, counters + COUNTERS.LEFT),      // lock inc [left]
         0xff, 0x49, CS64.RECURSION_COUNT,                            // dec [rcx+12]
         0x75, 0x0f,                                                  // jnz nested (+15)
-        0x48, 0xc7, 0x41, CS64.OWNING_THREAD, ...dword(0),           // mov qword [rcx+16], 0
+        0x48, 0xc7, 0x41, CS64.OWNING_THREAD, ...imm32(0),           // mov qword [rcx+16], 0
         0xf0, 0xff, 0x49, CS64.LOCK_COUNT,                           // lock dec [rcx+8]
         0x7d, 0x06,                                                  // jge wake (+6)
         0xc3,                                                        // ret
@@ -348,7 +345,7 @@ export function leaveLongCode(counters){
         0xc3,                                                        // ret
     ];
     // wake:
-    return { code: new Uint8Array([...body, 0xe9, ...dword(0)]), jump: body.length + 1 };
+    return { code: new Uint8Array([...body, 0xe9, ...imm32(0)]), jump: body.length + 1 };
 }
 
 /**
@@ -385,13 +382,13 @@ export function tryEnterLongCode(counters){
     return new Uint8Array([
         0x65, 0x8b, ...absolute64(2, TEB64_THREAD_ID),               // mov edx, gs:[0x48]
         0x45, 0x31, 0xc0,                                            // xor r8d, r8d
-        0xb8, ...dword(-1),                                          // mov eax, -1
+        0xb8, ...imm32(-1),                                          // mov eax, -1
         0xf0, 0x44, 0x0f, 0xb1, 0x41, CS64.LOCK_COUNT,               // lock cmpxchg [rcx+8], r8d
         0x75, 0x19,                                                  // jnz held (+25)
         0x48, 0x89, 0x51, CS64.OWNING_THREAD,                        // mov [rcx+16], rdx
-        0xc7, 0x41, CS64.RECURSION_COUNT, ...dword(1),               // mov [rcx+12], 1
+        0xc7, 0x41, CS64.RECURSION_COUNT, ...imm32(1),               // mov [rcx+12], 1
         0xf0, 0xff, ...entered,                                      // lock inc [entered]
-        0xb8, ...dword(1),                                           // mov eax, 1
+        0xb8, ...imm32(1),                                           // mov eax, 1
         0xc3,                                                        // ret
         // held:
         0x48, 0x39, 0x51, CS64.OWNING_THREAD,                        // cmp [rcx+16], rdx
@@ -399,7 +396,7 @@ export function tryEnterLongCode(counters){
         0xf0, 0xff, 0x41, CS64.LOCK_COUNT,                           // lock inc [rcx+8]
         0xff, 0x41, CS64.RECURSION_COUNT,                            // inc [rcx+12]
         0xf0, 0xff, ...entered,                                      // lock inc [entered]
-        0xb8, ...dword(1),                                           // mov eax, 1
+        0xb8, ...imm32(1),                                           // mov eax, 1
         0xc3,                                                        // ret
         // no:
         0x31, 0xc0,                                                  // xor eax, eax
@@ -409,8 +406,7 @@ export function tryEnterLongCode(counters){
 
 /**
  * @typedef {Object} CriticalHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => any} currentThread
  * @property {(thread: any, reason: string) => void} block
  * @property {(thread: any, result?: number) => boolean} wake
@@ -429,6 +425,7 @@ export function tryEnterLongCode(counters){
  * @param {CriticalHost} host
  */
 export function createCriticalSections(host){
+    const { guest } = host;
     const cs = criticalLayout(host.pointerSize);
     /**
      * @typedef {Object} Queue
@@ -452,14 +449,9 @@ export function createCriticalSections(host){
         if (counters === 0)
         {
             counters = host.allocate(COUNTERS.SIZE);
-            host.writeMemory(counters, new Uint8Array(COUNTERS.SIZE));
+            guest.fill(counters, 0, COUNTERS.SIZE);
         }
         return counters;
-    };
-    /** @param {number} at */
-    const readU32 = at=>{
-        const bytes = host.readMemory(at, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
     /** @param {number} address */
@@ -473,9 +465,6 @@ export function createCriticalSections(host){
         return queue;
     };
 
-    /** @param {number} value */
-    const dwordBytes = value=>new Uint8Array(dword(value));
-
     /**
      * Makes `thread` the owner in the structure, the way the fast path would
      * have for itself. Written by whoever hands over, because the thread
@@ -484,8 +473,8 @@ export function createCriticalSections(host){
      * @param {number} address @param {any} thread
      */
     const handOver = (address, thread)=>{
-        host.writeMemory(address + cs.OWNING_THREAD, dwordBytes(thread.id));
-        host.writeMemory(address + cs.RECURSION_COUNT, dwordBytes(1));
+        guest.set32(address + cs.OWNING_THREAD, thread.id);
+        guest.set32(address + cs.RECURSION_COUNT, 1);
         handoffs++;
     };
 
@@ -504,7 +493,7 @@ export function createCriticalSections(host){
             // The semaphore a contended entry waits on is made when first
             // needed, and one there that names nothing fails the wait, which
             // Windows raises (Wine's kernel32 sync.c test_crit_section).
-            const semaphore = readU32(address + cs.LOCK_SEMAPHORE);
+            const semaphore = guest.u32(address + cs.LOCK_SEMAPHORE);
             if (semaphore !== 0 && host.isHandle && !host.isHandle(semaphore))
             {
                 throw guestException(STATUS_INVALID_HANDLE, EXCEPTION_NONCONTINUABLE);
@@ -523,9 +512,9 @@ export function createCriticalSections(host){
             // The structure as the waiter saw it, for the report's blocked-thread
             // line: a wait with no owner names a lost release, not contention.
             host.block(thread, `critical section 0x${address.toString(16)}`
-                + ` (lock ${readU32(address + cs.LOCK_COUNT) | 0},`
-                + ` owner ${readU32(address + cs.OWNING_THREAD)},`
-                + ` recursion ${readU32(address + cs.RECURSION_COUNT) | 0}, me ${thread.id})`);
+                + ` (lock ${guest.u32(address + cs.LOCK_COUNT) | 0},`
+                + ` owner ${guest.u32(address + cs.OWNING_THREAD)},`
+                + ` recursion ${guest.u32(address + cs.RECURSION_COUNT) | 0}, me ${thread.id})`);
             return host.park(thread);
         },
 
@@ -591,8 +580,8 @@ export function createCriticalSections(host){
 
         diagnostics: ()=>({
             // What never crossed into the host, which is the point of all this.
-            entered: counters === 0 ? 0 : readU32(counters + COUNTERS.ENTERED),
-            left: counters === 0 ? 0 : readU32(counters + COUNTERS.LEFT),
+            entered: counters === 0 ? 0 : guest.u32(counters + COUNTERS.ENTERED),
+            left: counters === 0 ? 0 : guest.u32(counters + COUNTERS.LEFT),
             waits,
             wakes,
             handoffs,

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { VIRTUAL_MEMORY, accessibleSpan, createProcessMemory } from './process-memory.js';
 import { VIRTUAL_READ, VIRTUAL_WRITE } from './cross-process.js';
 
@@ -35,8 +36,7 @@ function processOf(protections, pointerSize = 4){
     const patched = [];
     const memory = createProcessMemory({
         pointerSize,
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         patchMemory: (address, data)=>{
             patched.push(address);
             bytes.set(data, address);
@@ -147,8 +147,7 @@ test('a child\'s memory is copied in the child, no more than the caller can take
     const view = new DataView(bytes.buffer);
     const caller = {};
     const memory = /** @type {any} */ (createProcessMemory({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         pageState: address=>({ state: MEM_COMMIT,
             protect: address >= 0x1000 && address < 0x2000 ? PAGE_NOACCESS : PAGE_READWRITE }),
         processTarget: ()=>({ child: { id: 8 } }),

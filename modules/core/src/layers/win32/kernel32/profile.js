@@ -51,13 +51,8 @@ const MAX_VALUE = 0x10000;
 
 /**
  * @typedef {Object} ProfileHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {import('./files.js').FileSystem} files
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- *           What a structure is written from. Without it a structure cannot
- *           be written, and the write says so.
  * @property {(code: number) => void} [setLastError]
  * @property {import('./ini-mapping.js').MappingRegistry} [registry]
  *           The run's registry, where IniFileMapping sends a section
@@ -67,7 +62,6 @@ const MAX_VALUE = 0x10000;
 /** Why a structure was not read back. */
 const ERROR_INVALID_DATA = 13;
 const ERROR_BAD_LENGTH = 24;
-const ERROR_INVALID_FUNCTION = 1;
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
@@ -188,6 +182,7 @@ const encodeIn = (encoding, text)=>{
  * @param {ProfileHost} host
  */
 export function createProfileFunctions(host){
+    const { guest } = host;
     const { files } = host;
     const mapping = host.registry ? createIniMapping(host.registry) : null;
 
@@ -225,12 +220,12 @@ export function createProfileFunctions(host){
     /** @param {number} pointer @param {number} limit @returns {string | null} */
     const text = (pointer, limit)=>((pointer >>> 0) === 0
         ? null
-        : host.readCString(wholeAddress(pointer), limit));
+        : guest.cstr(wholeAddress(pointer), limit));
 
     /** text for the wide entry points. @param {number} pointer @param {number} limit */
     const wideText = (pointer, limit)=>((pointer >>> 0) === 0
         ? null
-        : host.readWideString?.(pointer >>> 0, limit) ?? null);
+        : guest.wstr(pointer >>> 0, limit) ?? null);
 
     /**
      * Where the file named is. A bare name is in the Windows directory, a
@@ -396,12 +391,12 @@ export function createProfileFunctions(host){
         const whole = names.map(name=>`${name}\0`).join('');
         if (whole.length + 1 + spare <= room)
         {
-            host.writeMemory(wholeAddress(buffer), encode(`${whole}\0`));
+            guest.setBytes(wholeAddress(buffer), encode(`${whole}\0`));
             return whole.length;
         }
         // Cut two short: one NUL to end the name it cut, one to end the list.
         const kept = room >= 2 ? whole.slice(0, room - 2) : '';
-        host.writeMemory(wholeAddress(buffer), encode(`${kept}\0\0`.slice(0, room)));
+        guest.setBytes(wholeAddress(buffer), encode(`${kept}\0\0`.slice(0, room)));
         return Math.max(room - 2, 0);
     };
 
@@ -417,7 +412,7 @@ export function createProfileFunctions(host){
             return 0;
         }
         const kept = value.slice(0, room - 1);
-        host.writeMemory(wholeAddress(buffer), (wide ? utf16 : encodeAnsi)(`${kept}\0`));
+        guest.setBytes(wholeAddress(buffer), (wide ? utf16 : encodeAnsi)(`${kept}\0`));
         return kept.length;
     };
 
@@ -734,8 +729,8 @@ export function createProfileFunctions(host){
         for (let at = wholeAddress(list); ;)
         {
             const entry = wide
-                ? host.readWideString?.(at, MAX_VALUE * 2) ?? ''
-                : host.readCString(at, MAX_VALUE);
+                ? guest.wstr(at, MAX_VALUE * 2) ?? ''
+                : guest.cstr(at, MAX_VALUE);
             if (entry === '')
             {
                 return entries;
@@ -970,7 +965,7 @@ export function createProfileFunctions(host){
                         host.setLastError?.(ERROR_INVALID_DATA);
                         return 0;
                     }
-                    host.writeMemory(wholeAddress(buffer), data);
+                    guest.setBytes(wholeAddress(buffer), data);
                     return 1;
                 };
                 return withLines(path, answer);
@@ -991,12 +986,7 @@ export function createProfileFunctions(host){
                 {
                     return put(pathOf(file), section, key, 0);
                 }
-                if (!host.readMemory)
-                {
-                    host.setLastError?.(ERROR_INVALID_FUNCTION);
-                    return 0;
-                }
-                const value = structText(host.readMemory(wholeAddress(structure), size >>> 0));
+                const value = structText(guest.snapshot(wholeAddress(structure), size >>> 0));
                 return putText(pathOf(file), text(section, MAX_NAME), text(key, MAX_NAME), value);
             },
         },

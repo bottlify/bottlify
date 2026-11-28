@@ -16,6 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { runTables } from '../common/run-tables.js';
 import { roomy } from '../../cache/testing.fixture.js';
 import { COMPILED } from './inguest.x86.js';
@@ -107,18 +108,10 @@ const machine = guestCode=>{
     const bytes = new Uint8Array(0x2000);
     /** @type {number[]} */
     const errors = [];
-    const readMemory = (/** @type {number} */ at, /** @type {number} */ length)=>{
-        if (at < 0x10 || at + length > bytes.length)
-        {
-            throw new Error(`a read at 0x${at.toString(16)}`);
-        }
-        return bytes.slice(at, at + length);
-    };
-    const writeMemory = (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>{
-        bytes.set(data, at);
-    };
+    // Nothing below 0x10: a read there faults.
+    const guest = guestOver(bytes, 4, [], 0x10);
     const table = createLocaleFunctions(/** @type {any} */ ({ tables: runTables(roomy.api.space('tables', { idle: 'stay' })),
-        readMemory, writeMemory,
+        guest,
         stringLength: (/** @type {number} */ at, /** @type {number} */ unit)=>{
             let count = 0;
             while ((unit === 1 ? bytes[at + count]
@@ -131,7 +124,7 @@ const machine = guestCode=>{
         setLastError: (/** @type {number} */ code)=>errors.push(code),
     }));
     const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
-        guestCode ? conversionsInGuest(table, { readMemory, writeMemory }) : table);
+        guestCode ? conversionsInGuest(table, { guest }) : table);
     return { bytes, errors, fns };
 };
 

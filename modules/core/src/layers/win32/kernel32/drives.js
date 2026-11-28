@@ -254,10 +254,7 @@ export const COMPUTER_NAME = 'BOTTLIFY';
 
 /**
  * @typedef {Object} DriveHost
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError
  * @property {() => string[]} [drives]  Letters the filesystem has mounted.
  * @property {(letter: string) => { kind?: string, label?: string, serial?: number,
@@ -276,27 +273,15 @@ export const COMPUTER_NAME = 'BOTTLIFY';
  * @param {DriveHost} host
  */
 export function createDriveFunctions(host){
+    const { guest } = host;
     /** Every mounted letter, upper-cased. C is assumed when nothing says. */
     const letters = ()=>(host.drives?.() ?? ['C']).map(letter=>letter[0].toUpperCase());
-
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(address, new Uint8Array([
-            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-        ]));
-    };
 
     /** A NULL out-parameter is not an error here; every one of these is optional. */
     const writeDwordIf = (/** @type {number} */ address, /** @type {number} */ value)=>{
         if (address !== 0)
         {
-            writeDword(address, value);
+            guest.set32(address, value);
         }
     };
 
@@ -445,8 +430,8 @@ export function createDriveFunctions(host){
             const writeQwordIf = (address, value)=>{
                 if (address !== 0)
                 {
-                    writeDword(address, value >>> 0);
-                    writeDword(address + 4, Math.floor(value / 0x1_0000_0000));
+                    guest.set32(address, value >>> 0);
+                    guest.set32(address + 4, Math.floor(value / 0x1_0000_0000));
                 }
             };
             const disc = discAt(root);
@@ -570,7 +555,7 @@ export function createDriveFunctions(host){
         {
             return false;
         }
-        host.writeMemory(wholeAddress(buffer), encode(`${text}\0`));
+        guest.setBytes(wholeAddress(buffer), encode(`${text}\0`));
         return true;
     };
 
@@ -768,7 +753,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_FILENAME_EXCED_RANGE);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(buffer), encode(`${answer}\0`));
+                guest.setBytes(wholeAddress(buffer), encode(`${answer}\0`));
                 return 1;
             },
         },
@@ -803,7 +788,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_MORE_DATA);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(buffer), encode(list));
+                guest.setBytes(wholeAddress(buffer), encode(list));
                 return 1;
             },
         },
@@ -842,7 +827,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(labelBuffer), encode(label + '\0'));
+                guest.setBytes(wholeAddress(labelBuffer), encode(label + '\0'));
             }
             if (systemName !== 0)
             {
@@ -851,7 +836,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(systemName), encode(system + '\0'));
+                guest.setBytes(wholeAddress(systemName), encode(system + '\0'));
             }
             writeDwordIf(serial >>> 0, number);
             writeDwordIf(componentLength >>> 0, component);
@@ -1038,7 +1023,7 @@ export function createDriveFunctions(host){
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
             const stored = found.bytes.subarray(0, Math.min(found.bytes.length, length >>> 0));
-            host.writeMemory(wholeAddress(out), stored);
+            guest.setBytes(wholeAddress(out), stored);
             return report(stored.length < found.bytes.length ? STATUS_BUFFER_OVERFLOW : 0,
                 stored.length);
         },
@@ -1059,15 +1044,15 @@ export function createDriveFunctions(host){
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            const room = readDword(wholeAddress(size));
+            const room = guest.u32(wholeAddress(size));
             if (buffer === 0 || COMPUTER_NAME.length + 1 > room)
             {
-                writeDword(wholeAddress(size), COMPUTER_NAME.length + 1);
+                guest.set32(wholeAddress(size), COMPUTER_NAME.length + 1);
                 host.setLastError(ERROR_BUFFER_OVERFLOW);
                 return 0;
             }
-            host.writeMemory(wholeAddress(buffer), encode(COMPUTER_NAME + '\0'));
-            writeDword(wholeAddress(size), COMPUTER_NAME.length);
+            guest.setBytes(wholeAddress(buffer), encode(COMPUTER_NAME + '\0'));
+            guest.set32(wholeAddress(size), COMPUTER_NAME.length);
             return 1;
         },
     });
@@ -1092,15 +1077,15 @@ export function createDriveFunctions(host){
                 return 0;
             }
             const name = (format & 3) === 2 ? '' : COMPUTER_NAME;
-            const room = readDword(wholeAddress(size));
+            const room = guest.u32(wholeAddress(size));
             if ((buffer >>> 0) === 0 || name.length + 1 > room)
             {
-                writeDword(wholeAddress(size), name.length + 1);
+                guest.set32(wholeAddress(size), name.length + 1);
                 host.setLastError(ERROR_MORE_DATA);
                 return 0;
             }
-            host.writeMemory(wholeAddress(buffer), encode(`${name}\0`));
-            writeDword(wholeAddress(size), name.length);
+            guest.setBytes(wholeAddress(buffer), encode(`${name}\0`));
+            guest.set32(wholeAddress(size), name.length);
             return 1;
         },
     });
@@ -1155,7 +1140,7 @@ export function createDriveFunctions(host){
                 host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                 return 0;
             }
-            host.writeMemory(wholeAddress(target), encode(list));
+            guest.setBytes(wholeAddress(target), encode(list));
             return list.length;
         },
     });
@@ -1180,7 +1165,7 @@ export function createDriveFunctions(host){
             {
                 return needed;
             }
-            host.writeMemory(wholeAddress(buffer), encode(block + '\0'));
+            guest.setBytes(wholeAddress(buffer), encode(block + '\0'));
             return block.length;
         },
     });
@@ -1199,8 +1184,8 @@ export function createDriveFunctions(host){
         return 0;
     };
 
-    const ansiVolumes = volumeCalls(address=>host.readCString(address, WHOLE_NAME), encodeAnsi);
-    const wideVolumes = volumeCalls(address=>host.readWideString(address, WHOLE_NAME * 2),
+    const ansiVolumes = volumeCalls(address=>guest.cstr(address, WHOLE_NAME), encodeAnsi);
+    const wideVolumes = volumeCalls(address=>guest.wstr(address, WHOLE_NAME * 2),
         utf16);
 
     return {
@@ -1246,10 +1231,10 @@ export function createDriveFunctions(host){
         },
 
         /** DWORD QueryDosDeviceA(LPCSTR lpDeviceName, LPSTR lpTargetPath, DWORD ucchMax) */
-        QueryDosDeviceA: queryDosDevice(address=>host.readCString(address, WHOLE_NAME), encodeAnsi),
+        QueryDosDeviceA: queryDosDevice(address=>guest.cstr(address, WHOLE_NAME), encodeAnsi),
 
         /** DWORD QueryDosDeviceW(LPCWSTR lpDeviceName, LPWSTR lpTargetPath, DWORD ucchMax) */
-        QueryDosDeviceW: queryDosDevice(address=>host.readWideString(address, WHOLE_NAME * 2),
+        QueryDosDeviceW: queryDosDevice(address=>guest.wstr(address, WHOLE_NAME * 2),
             utf16),
 
         /**
@@ -1286,7 +1271,7 @@ export function createDriveFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>driveType(
-                path === 0 ? null : host.readCString(wholeAddress(path), WHOLE_NAME)),
+                path === 0 ? null : guest.cstr(wholeAddress(path), WHOLE_NAME)),
         },
 
         /** UINT GetDriveTypeW(LPCWSTR lpRootPathName) */
@@ -1294,7 +1279,7 @@ export function createDriveFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>driveType(
-                path === 0 ? null : host.readWideString(wholeAddress(path), WHOLE_NAME * 2)),
+                path === 0 ? null : guest.wstr(wholeAddress(path), WHOLE_NAME * 2)),
         },
 
         /**
@@ -1302,10 +1287,10 @@ export function createDriveFunctions(host){
          *                        LPDWORD lpBytesPerSector, LPDWORD lpNumberOfFreeClusters,
          *                        LPDWORD lpTotalNumberOfClusters)
          */
-        GetDiskFreeSpaceA: diskFreeSpace(address=>host.readCString(address, WHOLE_NAME)),
+        GetDiskFreeSpaceA: diskFreeSpace(address=>guest.cstr(address, WHOLE_NAME)),
 
         /** GetDiskFreeSpaceW: the same answers, the root read in UTF-16. */
-        GetDiskFreeSpaceW: diskFreeSpace(address=>host.readWideString(address, WHOLE_NAME * 2)),
+        GetDiskFreeSpaceW: diskFreeSpace(address=>guest.wstr(address, WHOLE_NAME * 2)),
 
         /**
          * BOOL GetDiskFreeSpaceExA(LPCSTR lpDirectoryName,
@@ -1316,10 +1301,10 @@ export function createDriveFunctions(host){
          * volume clamped. There is one user and no quota, so what is free is
          * what the caller may have.
          */
-        GetDiskFreeSpaceExA: diskFreeSpaceEx(address=>host.readCString(address, WHOLE_NAME)),
+        GetDiskFreeSpaceExA: diskFreeSpaceEx(address=>guest.cstr(address, WHOLE_NAME)),
 
         /** GetDiskFreeSpaceExW: the same answers, the directory read in UTF-16. */
-        GetDiskFreeSpaceExW: diskFreeSpaceEx(address=>host.readWideString(address, WHOLE_NAME * 2)),
+        GetDiskFreeSpaceExW: diskFreeSpaceEx(address=>guest.wstr(address, WHOLE_NAME * 2)),
 
         /**
          * BOOL GetVolumeInformationA(LPCSTR lpRootPathName, LPSTR lpVolumeNameBuffer,
@@ -1333,11 +1318,11 @@ export function createDriveFunctions(host){
          * where a size mismatch fails instead of reporting a size.
          */
         GetVolumeInformationA: volumeInformation(
-            address=>host.readCString(address, WHOLE_NAME), encodeAnsi),
+            address=>guest.cstr(address, WHOLE_NAME), encodeAnsi),
 
         /** GetVolumeInformationW: the same answers, the names in UTF-16 and sized in characters. */
         GetVolumeInformationW: volumeInformation(
-            address=>host.readWideString(address, WHOLE_NAME * 2), utf16),
+            address=>guest.wstr(address, WHOLE_NAME * 2), utf16),
 
         /**
          * BOOL GetVolumeInformationByHandleW(HANDLE, LPWSTR lpVolumeNameBuffer,
@@ -1373,7 +1358,7 @@ export function createDriveFunctions(host){
                         host.setLastError(ERROR_BAD_LENGTH);
                         return 0;
                     }
-                    host.writeMemory(wholeAddress(buffer), utf16(text + '\0'));
+                    guest.setBytes(wholeAddress(buffer), utf16(text + '\0'));
                 }
                 writeDwordIf(wholeAddress(serial), facts.serial);
                 writeDwordIf(wholeAddress(componentLength), facts.component);
@@ -1393,7 +1378,7 @@ export function createDriveFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([path, name])=>{
-                const root = path === 0 ? '' : host.readCString(wholeAddress(path), WHOLE_NAME);
+                const root = path === 0 ? '' : guest.cstr(wholeAddress(path), WHOLE_NAME);
                 const letter = letterOf(root);
                 if (letter === null || !known(root))
                 {
@@ -1405,7 +1390,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_WRITE_PROTECT);
                     return 0;
                 }
-                labels.set(letter, name === 0 ? '' : host.readCString(wholeAddress(name),
+                labels.set(letter, name === 0 ? '' : guest.cstr(wholeAddress(name),
                     WHOLE_NAME));
                 return 1;
             },

@@ -267,10 +267,7 @@ const CONTEXT_MAGIC = 0xc07e3e11;
 
 /**
  * @typedef {Object} ActCtxHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString  limit in bytes
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError
  * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose ACTCTX and answers are
  *           laid out with quadword pointers.
@@ -590,22 +587,13 @@ const storeDirectoryName = identity=>{
  * @param {ActCtxHost} host
  */
 export function createActivationContexts(host){
+    const { guest } = host;
     /** @type {Map<number, Context>} */
     const contexts = new Map();
     /** @type {Context | null} */
     let processDefault = null;
     let aliasCount = 0;
 
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(wholeAddress(address),
-            new Uint8Array(new Uint32Array([value >>> 0]).buffer));
-    };
     const width = pointerWidth(host.pointerSize === 8 ? 8 : 4);
     const { actctx: ACTCTX, ends, basic, detailed, assembly: ASSEMBLY, file: FILE } =
         STRUCTURES[width.size];
@@ -615,12 +603,9 @@ export function createActivationContexts(host){
     const writeSizeIf = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(address), width.bytes(value));
+            guest.setPtr(wholeAddress(address), value);
         }
     };
-    /** A pointer-sized field of the caller's. @param {number} address */
-    const readPointer = address=>width.get(new DataView(host.readMemory(wholeAddress(address),
-        width.size).buffer), 0);
     /** @param {number} code @param {number} [answer] */
     const fail = (code, answer = 0)=>{
         host.setLastError(code);
@@ -631,7 +616,7 @@ export function createActivationContexts(host){
         const at = host.allocate(size);
         if (at !== 0)
         {
-            host.writeMemory(at, new Uint8Array(size));
+            guest.setBytes(at, new Uint8Array(size));
         }
         return at;
     };
@@ -900,7 +885,7 @@ export function createActivationContexts(host){
         {
             return 'no memory for the context';
         }
-        writeDword(handle, CONTEXT_MAGIC);
+        guest.set32(handle, CONTEXT_MAGIC);
         /** @type {Context} */
         const context = { handle, references: 1, assemblies, appDirectory: where.appDirectory,
             rootManifestPath: where.manifestPath, sections: new Map(), aliases: new Map() };
@@ -1211,7 +1196,7 @@ export function createActivationContexts(host){
         {
             return null;
         }
-        host.writeMemory(base, image);
+        guest.setBytes(base, image);
         /** @type {Section} */
         const section = { base, size: image.length, global: globalLength === 0 ? 0 : global,
             globalLength, entries };
@@ -1232,13 +1217,13 @@ export function createActivationContexts(host){
         {
             return 0;
         }
-        let stack = readDword(teb + TEB_ACTIVATION_STACK);
+        let stack = guest.u32(teb + TEB_ACTIVATION_STACK);
         if (stack === 0 && make)
         {
             stack = allocate(STACK_SIZE);
             if (stack !== 0)
             {
-                writeDword(teb + TEB_ACTIVATION_STACK, stack);
+                guest.set32(teb + TEB_ACTIVATION_STACK, stack);
             }
         }
         return stack;
@@ -1247,8 +1232,8 @@ export function createActivationContexts(host){
     /** The context on top of the running thread's stack, or null for none. */
     const activeContext = ()=>{
         const stack = stackOf(false);
-        const frame = stack === 0 ? 0 : readDword(stack);
-        return frame === 0 ? null : contextOf(readDword(frame + 4));
+        const frame = stack === 0 ? 0 : guest.u32(stack);
+        return frame === 0 ? null : contextOf(guest.u32(frame + 4));
     };
 
     /**
@@ -1265,10 +1250,10 @@ export function createActivationContexts(host){
         {
             return 0;
         }
-        writeDword(frame, readDword(stack));
-        writeDword(frame + 4, handle);
-        writeDword(frame + 8, FRAME_HEAP_ALLOCATED);
-        writeDword(stack, frame);
+        guest.set32(frame, guest.u32(stack));
+        guest.set32(frame + 4, handle);
+        guest.set32(frame + 8, FRAME_HEAP_ALLOCATED);
+        guest.set32(stack, frame);
         addRef(contextOf(handle));
         return frame;
     };
@@ -1283,13 +1268,13 @@ export function createActivationContexts(host){
      */
     const deactivate = (cookie, teb, force = true)=>{
         const stack = stackOf(false, teb);
-        let frame = stack === 0 ? 0 : readDword(stack);
+        let frame = stack === 0 ? 0 : guest.u32(stack);
         /** @type {number[]} */
         const above = [];
         while (frame !== 0 && frame !== (cookie >>> 0))
         {
             above.push(frame);
-            frame = readDword(frame);
+            frame = guest.u32(frame);
         }
         if (frame === 0)
         {
@@ -1301,14 +1286,14 @@ export function createActivationContexts(host){
         }
         for (const popped of [...above, frame])
         {
-            const flags = readDword(popped + 8);
-            release(contextOf(readDword(popped + 4)));
+            const flags = guest.u32(popped + 8);
+            release(contextOf(guest.u32(popped + 4)));
             if ((flags & FRAME_HEAP_ALLOCATED) !== 0)
             {
                 host.free?.(popped);
             }
         }
-        writeDword(stack, readDword(frame));
+        guest.set32(stack, guest.u32(frame));
         return 'done';
     };
 
@@ -1352,7 +1337,7 @@ export function createActivationContexts(host){
      * @param {Exclude<ReturnType<typeof find>, { status: number }>} found
      */
     const fillKeyed = (data, flags, found)=>{
-        const size = readDword(data);
+        const size = guest.u32(data);
         const bytes = new Uint8Array(Math.min(size, KEYED_DATA_FULL) - 4);
         const view = new DataView(bytes.buffer);
         const put = (/** @type {number} */ offset, /** @type {number} */ value)=>{
@@ -1375,7 +1360,7 @@ export function createActivationContexts(host){
         {
             put(40, found.fallback ? KEYED_DATA_FLAG_FOUND_IN_PROCESS_DEFAULT : 0);
         }
-        host.writeMemory(data + 4, bytes);
+        guest.setBytes(data + 4, bytes);
         if (returnContext)
         {
             addRef(found.context);
@@ -1392,7 +1377,7 @@ export function createActivationContexts(host){
         const known = FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX | FIND_ACTCTX_SECTION_KEY_RETURN_FLAGS
             | FIND_ACTCTX_SECTION_KEY_RETURN_ASSEMBLY_METADATA;
         if ((flags & ~known) !== 0 || guid !== 0 || key === null
-            || (data !== 0 && readDword(data) < KEYED_DATA_MINIMUM))
+            || (data !== 0 && guest.u32(data) < KEYED_DATA_MINIMUM))
         {
             return STATUS_INVALID_PARAMETER;
         }
@@ -1417,7 +1402,7 @@ export function createActivationContexts(host){
      */
     const findGuid = (flags, extension, id, key, data)=>(key === 0
         ? STATUS_INVALID_PARAMETER
-        : findString(flags, extension, id, formatGuid(host.readMemory(key, GUID_SIZE)), data));
+        : findString(flags, extension, id, formatGuid(guest.snapshot(key, GUID_SIZE)), data));
 
     /** @param {number} status */
     const errorOf = status=>({
@@ -1532,7 +1517,7 @@ export function createActivationContexts(host){
                 return { bytes };
             }
             case ASSEMBLY_DETAILED_INFORMATION: {
-                const index = subInstance === 0 ? 0 : readDword(subInstance);
+                const index = subInstance === 0 ? 0 : guest.u32(subInstance);
                 const assembly = context?.assemblies[index - 1];
                 if (!assembly || index === 0)
                 {
@@ -1567,8 +1552,8 @@ export function createActivationContexts(host){
                 return { bytes };
             }
             case FILE_INFORMATION_IN_ASSEMBLY: {
-                const assemblyIndex = subInstance === 0 ? -1 : readDword(subInstance);
-                const fileIndex = subInstance === 0 ? -1 : readDword(subInstance + 4);
+                const assemblyIndex = subInstance === 0 ? -1 : guest.u32(subInstance);
+                const fileIndex = subInstance === 0 ? -1 : guest.u32(subInstance + 4);
                 const file = context?.assemblies[assemblyIndex]?.manifest.files[fileIndex];
                 if (!file)
                 {
@@ -1646,7 +1631,7 @@ export function createActivationContexts(host){
             writeSizeIf(written, result.bytes.length);
             return STATUS_BUFFER_TOO_SMALL;
         }
-        host.writeMemory(wholeAddress(buffer), result.bytes);
+        guest.setBytes(wholeAddress(buffer), result.bytes);
         writeSizeIf(written, result.written ?? result.bytes.length);
         if ((kind >>> 0) === BASIC_INFORMATION && (flags & QUERY_ACTCTX_FLAG_NO_ADDREF) === 0)
         {
@@ -1666,22 +1651,25 @@ export function createActivationContexts(host){
      * What CreateActCtx was asked, read from its ACTCTX, or the error it is
      * refused with before anything is looked for.
      *
-     * @param {number} actctx @param {(address: number) => string} readText
+     * @param {number} actctx @param {boolean} wide  the strings' width
      * @returns {Request | { error: number }}
      */
-    const readRequest = (actctx, readText)=>{
+    const readRequest = (actctx, wide)=>{
         if ((actctx >>> 0) === 0)
         {
             return { error: ERROR_INVALID_PARAMETER };
         }
-        const size = readDword(actctx + ACTCTX.cbSize);
-        const flags = readDword(actctx + ACTCTX.dwFlags);
+        const size = guest.u32(actctx + ACTCTX.cbSize);
+        const flags = guest.u32(actctx + ACTCTX.dwFlags);
         if (size < ACTCTX.wProcessorArchitecture
             || FIELD_ENDS.some(([flag, end])=>(flags & flag) !== 0 && size < end))
         {
             return { error: ERROR_INVALID_PARAMETER };
         }
-        const pointer = (/** @type {number} */ field)=>readPointer(actctx + field);
+        /** A pointer-sized field of the caller's. @param {number} field */
+        const pointer = field=>guest.ptr(wholeAddress(actctx + field));
+        /** @param {number} address */
+        const readText = address=>guest.text(address, wide, wide ? 0x20000 : 0x10000);
         const source = pointer(ACTCTX.lpSource);
         const named = (flags & ACTCTX_FLAG_RESOURCE_NAME_VALID) !== 0;
         const resource = named ? pointer(ACTCTX.lpResourceName) : 0;
@@ -1794,13 +1782,13 @@ export function createActivationContexts(host){
     /**
      * CreateActCtx in either width.
      *
-     * @param {(address: number) => string} readText
+     * @param {boolean} wide
      */
-    const createActCtx = readText=>({
+    const createActCtx = wide=>({
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([actctx])=>{
-            const request = readRequest(actctx >>> 0, readText);
+            const request = readRequest(actctx >>> 0, wide);
             if ('error' in request)
             {
                 return fail(request.error, INVALID_HANDLE_VALUE);
@@ -1814,8 +1802,6 @@ export function createActivationContexts(host){
     /** @type {Map<number, Context>} */
     const moduleContexts = new Map();
 
-    const readAnsi = (/** @type {number} */ address)=>host.readCString(address, 0x10000);
-    const readWide = (/** @type {number} */ address)=>host.readWideString(address, 0x20000);
 
     /** @param {number} address  a UNICODE_STRING */
     const readUnicodeString = address=>{
@@ -1823,9 +1809,9 @@ export function createActivationContexts(host){
         {
             return null;
         }
-        const length = readDword(address) & 0xffff;
-        const buffer = readDword(address + 4);
-        const bytes = host.readMemory(buffer, length);
+        const length = guest.u32(address) & 0xffff;
+        const buffer = guest.u32(address + 4);
+        const bytes = guest.snapshot(buffer, length);
         return String.fromCharCode(...new Uint16Array(bytes.slice().buffer, 0, length >>> 1));
     };
 
@@ -1852,7 +1838,7 @@ export function createActivationContexts(host){
                     const length = 1 + pushes.length + 1 + 5;
                     placed = (host.allocateCode ?? host.allocate)(length);
                     const relative = (trap - (placed + length)) | 0;
-                    host.writeMemory(placed, new Uint8Array([0x58, ...pushes, 0x50, 0xe9,
+                    guest.setBytes(placed, new Uint8Array([0x58, ...pushes, 0x50, 0xe9,
                         relative & 0xff, relative >>> 8 & 0xff, relative >>> 16 & 0xff,
                         relative >>> 24 & 0xff]));
                 }
@@ -1911,12 +1897,12 @@ export function createActivationContexts(host){
             2, ([extended, handle])=>{
                 const stack = stackOf(true);
                 const frame = (extended >>> 0) + EXTENDED_FRAME_AT;
-                writeDword(frame, stack === 0 ? 0 : readDword(stack));
-                writeDword(frame + 4, handle);
-                writeDword(frame + 8, 0);
+                guest.set32(frame, stack === 0 ? 0 : guest.u32(stack));
+                guest.set32(frame + 4, handle);
+                guest.set32(frame + 8, 0);
                 if (stack !== 0)
                 {
-                    writeDword(stack, frame);
+                    guest.set32(stack, frame);
                 }
                 addRef(contextOf(handle));
                 return frame;
@@ -1936,12 +1922,12 @@ export function createActivationContexts(host){
             argBytes: 0,
             handler: ()=>{
                 const stack = stackOf(false);
-                let frame = stack === 0 ? 0 : readDword(stack);
+                let frame = stack === 0 ? 0 : guest.u32(stack);
                 let bottom = 0;
                 while (frame !== 0)
                 {
                     bottom = frame;
-                    frame = readDword(frame);
+                    frame = guest.u32(frame);
                 }
                 if (bottom !== 0)
                 {
@@ -2028,8 +2014,8 @@ export function createActivationContexts(host){
     };
 
     const functions = {
-        CreateActCtxA: { ...createActCtx(readAnsi), natives },
-        CreateActCtxW: createActCtx(readWide),
+        CreateActCtxA: { ...createActCtx(false), natives },
+        CreateActCtxW: createActCtx(true),
 
         /**
          * BOOL ActivateActCtx(HANDLE hActCtx, ULONG_PTR *lpCookie)
@@ -2130,8 +2116,8 @@ export function createActivationContexts(host){
          * The key in the active context, then in the process default.
          */
         FindActCtxSectionStringA: findSectionString(address=>host.decodeAnsi(
-            host.encodeAnsi(readAnsi(address)))),
-        FindActCtxSectionStringW: findSectionString(readWide),
+            host.encodeAnsi(guest.cstr(address, 0x10000)))),
+        FindActCtxSectionStringW: findSectionString(address=>guest.wstr(address, 0x20000)),
 
         /**
          * BOOL FindActCtxSectionGuid(DWORD dwFlags, const GUID *, ULONG ulSectionId,

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createShlwapiFunctions } from './functions.js';
 import { shlwapiMachine } from './memory.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
@@ -468,6 +469,7 @@ function registryMachine(){
         return text;
     };
     const base = {
+        guest: guestOver(memory),
         readCString,
         readWideString,
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>

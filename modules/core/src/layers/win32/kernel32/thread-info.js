@@ -90,9 +90,7 @@ const errorOf = status=>(status === STATUS_INVALID_HANDLE ? ERROR_INVALID_HANDLE
 /**
  * @typedef {Object} ThreadInfoHost
  * @property {any} kernel                        The kernel layer's API.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- *           Throws where nothing is mapped.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park
  * @property {(code: number) => void} [setLastError]
@@ -112,6 +110,7 @@ const errorOf = status=>(status === STATUS_INVALID_HANDLE ? ERROR_INVALID_HANDLE
  * @param {ThreadInfoHost} host
  */
 export function createThreadInfoFunctions(host){
+    const { guest } = host;
     const { kernel, processors } = host;
 
     /** @param {number} handle */
@@ -142,7 +141,7 @@ export function createThreadInfoFunctions(host){
         }
         try
         {
-            return host.readMemory(wholeAddress(address), length);
+            return guest.snapshot(wholeAddress(address), length);
         }
         catch (e){
             void e;
@@ -158,7 +157,7 @@ export function createThreadInfoFunctions(host){
         }
         try
         {
-            host.writeMemory(wholeAddress(address), bytes);
+            guest.setBytes(wholeAddress(address), bytes);
             return true;
         }
         catch (e){
@@ -471,10 +470,10 @@ export function createThreadInfoFunctions(host){
                 const thread = host.currentThread();
                 const fields = host.pointerSize === 8 ? TEB64 : TEB;
                 const teb = thread?.tebAddress ?? 0;
-                const bytes = host.readMemory(wholeAddress(pointer), 4);
+                const bytes = guest.snapshot(wholeAddress(pointer), 4);
                 const asked = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
                 const had = teb === 0 ? 0 : tebDword(thread, fields.GUARANTEED_STACK_BYTES);
-                host.writeMemory(wholeAddress(pointer), dword(had));
+                guest.setBytes(wholeAddress(pointer), dword(had));
                 const pointerBytes = host.pointerSize === 8 ? 8 : 4;
                 const reserved = teb === 0 ? 0 : tebDword(thread, fields.STACK_BASE)
                     - tebDword(thread, fields.DEALLOCATION_STACK);
@@ -486,7 +485,7 @@ export function createThreadInfoFunctions(host){
                 const pages = Math.max(Math.ceil(asked / PAGE) * PAGE, PAGE * pointerBytes / 4);
                 if (asked !== 0 && pages > had)
                 {
-                    host.writeMemory(teb + fields.GUARANTEED_STACK_BYTES, dword(pages));
+                    guest.setBytes(teb + fields.GUARANTEED_STACK_BYTES, dword(pages));
                 }
                 return 1;
             },

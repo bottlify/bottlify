@@ -744,7 +744,6 @@ export function createVolume(fs, fetchBlocks, { now = Date.now, kept }){
          */
         refusal: ()=>refused,
 
-
         /**
          * @param {string} path
          * @param {any} mode

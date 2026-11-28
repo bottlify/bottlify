@@ -22,7 +22,7 @@ import { OBJ_INHERIT, OBJ_OPENIF, nameToWalk, readObjectAttributes } from './obj
 import { TAKEN } from './named-objects.js';
 import { KEYEDEVENT_WAIT, KEYEDEVENT_WAKE, MODIFY_STATE, QUERY_STATE, allows,
     grantedAccess } from './access.js';
-import { dueInMs, readLargeInteger, FILETIME_EPOCH_MS } from './due-time.js';
+import { dueInMs, FILETIME_EPOCH_MS } from './due-time.js';
 import { STATUS } from '../ntdll/status.js';
 import { wholeAddress } from '../common/pointers.js';
 
@@ -45,8 +45,7 @@ const TIMER_BASIC_SIZE = 12;
 
 /**
  * @typedef {Object} SyncNativesHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {any} kernel
  * @property {{ mutex: Function, event: Function, semaphore: Function, timer: Function,
  *     keyedEvent: Function }} creates
@@ -67,26 +66,21 @@ const TIMER_BASIC_SIZE = 12;
  * @param {SyncNativesHost} host
  */
 export function createSyncNatives(host){
+    const { guest } = host;
     const { kernel } = host;
 
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
     /** @param {number} address @param {number} value */
     const writeDwordIf = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            writeDword(address, value);
+            guest.set32(address, value);
         }
     };
     /** @param {number} address @param {number} value */
     const writeByteIf = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(address), new Uint8Array([value & 0xff]));
+            guest.setBytes(wholeAddress(address), new Uint8Array([value & 0xff]));
         }
     };
 
@@ -125,8 +119,8 @@ export function createSyncNatives(host){
         }
         // The handle's place is written first: a call that cannot answer
         // makes nothing.
-        writeDword(out, 0);
-        const given = readObjectAttributes(host.readMemory, attributes);
+        guest.set32(out, 0);
+        const given = readObjectAttributes(guest, attributes);
         const walked = nameToWalk(given, false);
         if ('status' in walked)
         {
@@ -152,7 +146,7 @@ export function createSyncNatives(host){
             // Not `make`: a create's own arguments do not apply to an object
             // that already was, and the status says it was.
             host.reference(found);
-            writeDword(out, kernel.handles.open(kind, found));
+            guest.set32(out, kernel.handles.open(kind, found));
             return STATUS.OBJECT_NAME_EXISTS;
         }
         if (found)
@@ -165,7 +159,7 @@ export function createSyncNatives(host){
         {
             return STATUS.INVALID_PARAMETER;
         }
-        writeDword(out, handle);
+        guest.set32(out, handle);
         return STATUS.SUCCESS;
     };
 
@@ -179,8 +173,8 @@ export function createSyncNatives(host){
         {
             return STATUS.ACCESS_VIOLATION;
         }
-        writeDword(out, 0);
-        const given = readObjectAttributes(host.readMemory, attributes);
+        guest.set32(out, 0);
+        const given = readObjectAttributes(guest, attributes);
         const walked = nameToWalk(given, true);
         if ('status' in walked || given === null)
         {
@@ -206,7 +200,7 @@ export function createSyncNatives(host){
             return STATUS.ACCESS_DENIED;
         }
         host.reference(found);
-        writeDword(out, kernel.handles.open(kind, found, granted.granted));
+        guest.set32(out, kernel.handles.open(kind, found, granted.granted));
         return STATUS.SUCCESS;
     };
 
@@ -229,7 +223,7 @@ export function createSyncNatives(host){
         {
             return STATUS.ACCESS_VIOLATION;
         }
-        host.writeMemory(wholeAddress(buffer), record());
+        guest.setBytes(wholeAddress(buffer), record());
         writeDwordIf(returned, size);
         return STATUS.SUCCESS;
     };
@@ -370,7 +364,7 @@ export function createSyncNatives(host){
         let deadline;
         if ((timeout >>> 0) !== 0)
         {
-            const ms = dueInMs(readLargeInteger(host.readMemory, timeout),
+            const ms = dueInMs(guest.i64(wholeAddress(timeout)),
                 kernel.clock.wallClock());
             if (ms <= 0)
             {
@@ -825,7 +819,7 @@ export function createSyncNatives(host){
                 }
                 const was = timer.signalled ? 1 : 0;
                 const due = kernel.clock.virtualTime() + dueInMs(
-                    readLargeInteger(host.readMemory, dueTime), kernel.clock.wallClock());
+                    guest.i64(wholeAddress(dueTime)), kernel.clock.wallClock());
                 const thread = host.currentThread();
                 const fired = wholeAddress(routine) === 0 || !host.queueApc ? null : ()=>{
                     const filetime = BigInt(Math.floor(kernel.clock.wallClock()

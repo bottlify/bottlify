@@ -198,10 +198,7 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
 
 /**
  * @typedef {Object} MappingHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
  *           The table a named mapping shares with a named mutex, event,
@@ -385,6 +382,7 @@ export function imageRefusal(kind, machine64){
  * @param {MappingHost} host
  */
 export function createMappingFunctions(host){
+    const { guest } = host;
     /**
      * The watch a view's copy-on-write pages are written under (heap.js's
      * `ViewRegion.copies`): begun at the mapping when the view has such pages,
@@ -472,23 +470,10 @@ export function createMappingFunctions(host){
     };
 
     /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(address, new Uint8Array([
-            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-        ]));
-    };
-
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-
-    /** @param {number} address @param {number} value */
     const writeDwordIf = (address, value)=>{
         if (address !== 0)
         {
-            writeDword(address, value);
+            guest.set32(address, value);
         }
     };
 
@@ -498,8 +483,8 @@ export function createMappingFunctions(host){
         {
             return null;
         }
-        return (wide ? host.readWideString(wholeAddress(pointer), WHOLE_NAME * 2)
-            : host.readCString(wholeAddress(pointer), WHOLE_NAME)) || null;
+        return (wide ? guest.wstr(wholeAddress(pointer), WHOLE_NAME * 2)
+            : guest.cstr(wholeAddress(pointer), WHOLE_NAME)) || null;
     };
 
     /**
@@ -784,20 +769,20 @@ export function createMappingFunctions(host){
                 {
                     return STATUS.INVALID_HANDLE;
                 }
-                if ((attributes >>> 0) !== 0 && readDword(wholeAddress(attributes) + 8) !== 0)
+                if ((attributes >>> 0) !== 0 && guest.u32(wholeAddress(attributes) + 8) !== 0)
                 {
                     host.divergence?.('NtCreateSection',
                         'a named section is made without its name');
                 }
                 const size = (maximum >>> 0) === 0 ? [0, 0]
-                    : [readDword(wholeAddress(maximum) + 4), readDword(wholeAddress(maximum))];
+                    : [guest.u32(wholeAddress(maximum) + 4), guest.u32(wholeAddress(maximum))];
                 return settle(makeSection(opened ? opened.node : null, page & PAGE_MASK,
                     flags || SEC_COMMIT, size[0], size[1]), made=>{
                     if ('status' in made)
                     {
                         return made.status;
                     }
-                    writeDword(wholeAddress(out), openSection(made));
+                    guest.set32(wholeAddress(out), openSection(made));
                     return STATUS.SUCCESS;
                 });
             },
@@ -823,7 +808,7 @@ export function createMappingFunctions(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                const given = readObjectAttributes(host.readMemory, attributes);
+                const given = readObjectAttributes(guest, attributes);
                 const walked = nameToWalk(given, true);
                 if ('status' in walked || given === null || walked.name === null)
                 {
@@ -847,7 +832,7 @@ export function createMappingFunctions(host){
                     }
                     if (found)
                     {
-                        writeDword(wholeAddress(out), openNamed(found));
+                        guest.set32(wholeAddress(out), openNamed(found));
                         return STATUS.SUCCESS;
                     }
                 }
@@ -901,7 +886,7 @@ export function createMappingFunctions(host){
                 {
                     info.set(sectionImageInformation(section.image));
                 }
-                host.writeMemory(wholeAddress(buffer), info);
+                guest.setBytes(wholeAddress(buffer), info);
                 writeDwordIf(wholeAddress(returned), size);
                 return STATUS.SUCCESS;
             },
@@ -941,13 +926,13 @@ export function createMappingFunctions(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                if (readDword(wholeAddress(base)) !== 0)
+                if (guest.u32(wholeAddress(base)) !== 0)
                 {
                     host.divergence?.('NtMapViewOfSection',
                         'a view goes where there is room, not at the address asked for');
                 }
-                const offset = wholeAddress(offsetAt) === 0 ? 0 : readDword(wholeAddress(offsetAt));
-                const length = readDword(wholeAddress(sizeAt)) || section.size - offset;
+                const offset = wholeAddress(offsetAt) === 0 ? 0 : guest.u32(wholeAddress(offsetAt));
+                const length = guest.u32(wholeAddress(sizeAt)) || section.size - offset;
                 if (length <= 0 || offset + length > section.size)
                 {
                     return STATUS.INVALID_VIEW_SIZE;
@@ -960,8 +945,8 @@ export function createMappingFunctions(host){
                     {
                         return STATUS.NO_MEMORY;
                     }
-                    writeDword(wholeAddress(base), address);
-                    writeDword(wholeAddress(sizeAt), pageRound(length));
+                    guest.set32(wholeAddress(base), address);
+                    guest.set32(wholeAddress(sizeAt), pageRound(length));
                     return section.image && address !== section.image.image.imageBase
                         ? STATUS.IMAGE_NOT_AT_BASE : STATUS.SUCCESS;
                 });
@@ -985,7 +970,7 @@ export function createMappingFunctions(host){
                 }
                 if (!('here' in target))
                 {
-                    const asked = askChild({ askChild: host.askChild, writeMemory: host.writeMemory,
+                    const asked = askChild({ askChild: host.askChild, guest,
                         currentThread: host.currentThread ?? (()=>null),
                         setLastErrorFor: host.setLastErrorFor ?? (()=>{}) },
                     target.child, { call: 'NtUnmapViewOfSection',
@@ -1089,7 +1074,7 @@ export function createMappingFunctions(host){
                 const put = (bytes, at)=>{
                     if (bytes.length > 0)
                     {
-                        host.writeMemory(address + at, bytes);
+                        guest.setBytes(address + at, bytes);
                     }
                 };
                 /** The view made, its first `filled` bytes put. @param {number} filled */
@@ -1109,17 +1094,17 @@ export function createMappingFunctions(host){
                     if (!mapping.node && host.sharedViews)
                     {
                         view.shared = { process: host.sharedViews.process, address,
-                            offset, length: wanted, read: host.readMemory,
-                            write: host.writeMemory };
+                            offset, length: wanted, read: guest.snapshot,
+                            write: guest.setBytes };
                         host.sharedViews.shared.attach(mapping, mapping.size, view.shared);
                     }
                     // A section a service of the run owns (the Steam client's)
                     // is watched by it while the view stands.
                     view.unwatch = mapping.watch?.({
                         read: (/** @type {number} */ at, /** @type {number} */ count)=>
-                            host.readMemory(address + at, count),
+                            guest.snapshot(address + at, count),
                         write: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-                            host.writeMemory(address + at, data),
+                            guest.setBytes(address + at, data),
                         event: (/** @type {number} */ held)=>object(held, 'event'),
                         every: (/** @type {number} */ ms, /** @type {() => void} */ tick)=>
                             host.every?.(ms, tick) ?? (()=>{}),
@@ -1247,7 +1232,7 @@ export function createMappingFunctions(host){
                 if (view.writable && view.mapping.node)
                 {
                     host.files.write(view.mapping.node, view.offset,
-                        host.readMemory(wholeAddress(address), view.length));
+                        guest.snapshot(wholeAddress(address), view.length));
                 }
                 if (view.mapping.node)
                 {
@@ -1292,7 +1277,7 @@ export function createMappingFunctions(host){
                     if (view.writable && view.mapping.node)
                     {
                         host.files.write(view.mapping.node, view.offset + (at - base),
-                            host.readMemory(at, end - at));
+                            guest.snapshot(at, end - at));
                     }
                     return 1;
                 }
@@ -1322,14 +1307,14 @@ export function createMappingFunctions(host){
                     (size >>> 0) || 4096);
                 if (made)
                 {
-                    writeDword(wholeAddress(readHandle), made.read);
-                    writeDword(wholeAddress(writeHandle), made.write);
+                    guest.set32(wholeAddress(readHandle), made.read);
+                    guest.set32(wholeAddress(writeHandle), made.write);
                     return 1;
                 }
                 /** @type {{ buffered: number[], writersOpen: boolean }} */
                 const pipe = { buffered: [], writersOpen: true };
-                writeDword(wholeAddress(readHandle), host.handles.open('pipe-read', pipe));
-                writeDword(wholeAddress(writeHandle), host.handles.open('pipe-write', pipe));
+                guest.set32(wholeAddress(readHandle), host.handles.open('pipe-read', pipe));
+                guest.set32(wholeAddress(writeHandle), host.handles.open('pipe-write', pipe));
                 return 1;
             },
         },
@@ -1361,7 +1346,7 @@ export function createMappingFunctions(host){
                 const copied = Math.min(total, size >>> 0);
                 if (buffer !== 0 && copied > 0)
                 {
-                    host.writeMemory(wholeAddress(buffer),
+                    guest.setBytes(wholeAddress(buffer),
                         new Uint8Array(pipe.buffered.slice(0, copied)));
                 }
                 writeDwordIf(wholeAddress(read), copied);

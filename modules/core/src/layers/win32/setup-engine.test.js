@@ -14,6 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from './common/guest.fixture.js';
 import { createUserenvFunctions } from './kernel32/environment.js';
 import { createWinhttpFunctions } from './winhttp/functions.js';
 import { createSecur32Functions } from './secur32/functions.js';
@@ -26,6 +27,7 @@ function memory(){
     const errors = [];
     return {
         bytes, view, errors,
+        guest: guestOver(bytes),
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             bytes.subarray(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>bytes.set(data, at),
@@ -37,7 +39,7 @@ test('ExpandEnvironmentStringsForUserW expands as the process\'s variables do', 
     const m = memory();
     let needed = 12;
     const fns = createUserenvFunctions({ block: ()=>0, free: ()=>1, expand: ()=>needed,
-        writeMemory: m.writeMemory, setLastError: m.setLastError });
+        guest: m.guest, setLastError: m.setLastError });
     assert.equal(fns.ExpandEnvironmentStringsForUserW.handler([0, 0x100, 0x200, 64]), 1);
     needed = 80;
     assert.equal(fns.ExpandEnvironmentStringsForUserW.handler([0, 0x100, 0x200, 64]), 0);

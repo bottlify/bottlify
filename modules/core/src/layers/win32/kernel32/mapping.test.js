@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { recordingGuest } from '../common/guest.fixture.js';
 import { createMappingFunctions, imageRefusal, imageSections, imageViewAt } from './mapping.js';
 import { mapImage } from '../../loader/internal/image.js';
 import { imageKind } from '../../loader/internal/pe.js';
@@ -48,12 +49,12 @@ function setup(names = {}, extra = {}){
 
     /** @type {string[]} */
     const said = [];
+    // A name the test hands reads as its text, in either width.
+    const memory = recordingGuest({ names });
+    memory.use(bytes);
     const fns = createMappingFunctions({
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: pointer=>names[pointer] ?? '',
-        readWideString: pointer=>names[pointer] ?? '',
+        guest: memory.guest,
         namedObjects: createNamedObjects(),
         setLastError: code=>{
             errors.push(code);

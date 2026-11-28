@@ -14,6 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver, recordingGuest } from '../common/guest.fixture.js';
 import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from './vfs.js';
@@ -76,7 +77,7 @@ async function setup(){
     const fns = createChangeNotifications({
         kernel,
         volume,
-        readMemory: (at, length)=>memory.slice(at, at + length),
+        guest: guestOver(memory),
         setLastError: code=>errors.push(code),
         divergence: api=>said.push(api),
     });
@@ -219,9 +220,11 @@ test('with no volume handed over, the watch is refused and said', ()=>{
     const errors = [];
     /** @type {string[]} */
     const said = [];
+    // 'C' at the path asked for.
+    const memory = recordingGuest({ names: { 0x100: 'C' } });
     const fns = createChangeNotifications({
         kernel: fakeKernel(),
-        readMemory: ()=>new Uint8Array([0x43, 0]),
+        guest: memory.guest,
         setLastError: code=>errors.push(code),
         divergence: api=>said.push(api),
     });

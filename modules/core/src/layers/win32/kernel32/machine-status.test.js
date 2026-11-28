@@ -5,12 +5,20 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { recordingGuest } from '../common/guest.fixture.js';
 import { CR0, privilegedAt, storeMachineStatus } from './machine-status.js';
 import { createSeh } from './seh.js';
 
 /** @param {number[]} code */
 const at = code=>(/** @type {number} */ address, /** @type {number} */ length)=>
     Uint8Array.from({ length }, (_, index)=>code[address - 0x401000 + index] ?? 0);
+
+/** A guest whose code at 0x401000 is `code`. @param {number[]} code */
+const codeAt = code=>{
+    const memory = recordingGuest();
+    memory.plant(0x401000, code);
+    return memory.guest;
+};
 
 const registers = { eax: 0x12345678, ecx: 0xaaaabbbb, edx: 0, ebx: 0, esp: 0x60000,
     ebp: 0, esi: 0, edi: 0, eip: 0x401000, eflags: 0x202 };
@@ -41,7 +49,7 @@ test('anything else in the 0F 01 group, and SMSW to memory, is left to fault', (
 test('an invalid-opcode fault on SMSW goes on after it without a handler', async()=>{
     const code = [0x0f, 0x01, 0xe0];
     const seh = createSeh(/** @type {any} */ ({
-        readMemory: at(code), writeMemory: ()=>{}, isMapped: ()=>true, teb: ()=>0,
+        guest: codeAt(code), isMapped: ()=>true, teb: ()=>0,
         registers: ()=>({ ...registers }), answerWith: (/** @type {number} */ value)=>value,
         callGuest: async()=>assert.fail('no handler runs'),
     }));
@@ -77,7 +85,7 @@ test('a fault on a privileged instruction is STATUS_PRIVILEGED_INSTRUCTION, not 
         /** @type {string[]} */
         const said = [];
         const seh = createSeh(/** @type {any} */ ({
-            readMemory: at([0x6f]), writeMemory: ()=>{}, isMapped: ()=>true, teb: ()=>0,
+            guest: codeAt([0x6f]), isMapped: ()=>true, teb: ()=>0,
             registers: ()=>({ ...registers }), answerWith: (/** @type {number} */ value)=>value,
             callGuest: async()=>assert.fail('no handler runs'),
             trace: (/** @type {string} */ text)=>said.push(text),

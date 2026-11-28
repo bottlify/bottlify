@@ -726,11 +726,10 @@ export const mapCaseAnsi = (bytes, upper)=>{
 
 /**
  * @typedef {Object} LocaleHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, unit: number) => number} stringLength
  *           The code units of a NUL-terminated string of 1- or 2-byte units
  *           before its terminator.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {() => number} [systemTimeMs]
  *           The guest wall clock, for a date or time format given no
@@ -762,6 +761,7 @@ export function compareStrings(first, second, flags){
  * @param {LocaleHost} host
  */
 export function createLocaleFunctions(host){
+    const { guest } = host;
     const codePage = codePages(host.tables);
     const stringType = stringTypes(host.tables);
     /**
@@ -803,22 +803,6 @@ export function createLocaleFunctions(host){
         return { length: host.stringLength(address, unit) + 1, terminated: true };
     };
 
-    /** @param {number} address @param {number} count */
-    const readWide = (address, count)=>{
-        const bytes = host.readMemory(address, count * 2);
-        let text = '';
-        for (let at = 0; at < count; at++)
-        {
-            text += String.fromCharCode(bytes[at * 2] | bytes[at * 2 + 1] << 8);
-        }
-        return text;
-    };
-
-    /** @param {number} address @param {string} text */
-    const writeWide = (address, text)=>{
-        host.writeMemory(address, utf16(text));
-    };
-
     /**
      * A span of eight-bit text. A length of -1 means NUL-terminated, and unlike
      * the conversion functions above the terminator is *not* part of what is
@@ -829,14 +813,14 @@ export function createLocaleFunctions(host){
     const readAnsiSpan = (address, declared)=>{
         const { length } = sourceSpan(address, declared, 1);
         const wanted = (declared | 0) === -1 ? Math.max(length - 1, 0) : length;
-        return decodeSingleByte(host.readMemory(address, wanted), ANSI_CODE_PAGE);
+        return decodeSingleByte(guest.snapshot(address, wanted), ANSI_CODE_PAGE);
     };
 
     /** @param {number} address @param {number} declared */
     const readWideSpan = (address, declared)=>{
         const { length } = sourceSpan(address, declared, 2);
         const wanted = (declared | 0) === -1 ? Math.max(length - 1, 0) : length;
-        return readWide(address, wanted);
+        return guest.text(address, true, wanted * 2, true);
     };
 
     /**
@@ -854,7 +838,7 @@ export function createLocaleFunctions(host){
         {
             try
             {
-                text += readWide(address + at * 2, Math.min(512, wanted - at));
+                text += guest.text(address + at * 2, true, Math.min(512, wanted - at) * 2, true);
             }
             catch (e){
                 void e;
@@ -862,7 +846,7 @@ export function createLocaleFunctions(host){
                 {
                     try
                     {
-                        text += readWide(address + unit * 2, 1);
+                        text += guest.text(address + unit * 2, true, 2, true);
                     }
                     catch (_e){
                         void _e;
@@ -881,7 +865,7 @@ export function createLocaleFunctions(host){
      * @param {number} address @param {number} count @param {number} page
      */
     const readAnsiIn = (address, count, page)=>{
-        const bytes = host.readMemory(address, count < 0 ? host.stringLength(address, 1) : count);
+        const bytes = guest.snapshot(address, count < 0 ? host.stringLength(address, 1) : count);
         return codePage(page)?.decode(bytes, false) ?? decodeSingleByte(bytes, page);
     };
 
@@ -914,7 +898,7 @@ export function createLocaleFunctions(host){
         const page = (flags & LOCALE_USE_CP_ACP) !== 0 ? ANSI_CODE_PAGE
             : record.ansi || ANSI_CODE_PAGE;
         const span = sourceSpan(source, anyNegative(sourceChars), wide ? 2 : 1);
-        const text = wide ? readWide(source, span.length)
+        const text = wide ? guest.text(source, true, span.length * 2, true)
             : readAnsiIn(source, span.length, page);
         if ((flags & LCMAP_SORTKEY) !== 0)
         {
@@ -932,10 +916,10 @@ export function createLocaleFunctions(host){
                         fits = at + 1;
                     }
                 });
-                host.writeMemory(destination, key.subarray(0, fits));
+                guest.setBytes(destination, key.subarray(0, fits));
                 return refuse(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory(destination, key);
+            guest.setBytes(destination, key);
             return key.length;
         }
         const turkish = /^(tr|az)(-|$)/.test(record.name);
@@ -952,11 +936,11 @@ export function createLocaleFunctions(host){
         }
         if (bytes === null)
         {
-            writeWide(destination, mapped);
+            guest.setBytes(destination, utf16(mapped));
         }
         else
         {
-            host.writeMemory(destination, bytes);
+            guest.setBytes(destination, bytes);
         }
         return length;
     };
@@ -1018,7 +1002,7 @@ export function createLocaleFunctions(host){
         {
             return { ...encodeUtf7(text), usedDefault: ()=>false };
         }
-        const given = defaultChar === 0 ? null : Array.from(host.readMemory(defaultChar, 2));
+        const given = defaultChar === 0 ? null : Array.from(guest.snapshot(defaultChar, 2));
         const bestFits = (flags & WC_NO_BEST_FIT_CHARS) === 0;
         const table = codePage(page);
         if (table !== null)
@@ -1086,11 +1070,11 @@ export function createLocaleFunctions(host){
         {
             if (encoded === null)
             {
-                writeWide(buffer, `${text}\0`.slice(0, room));
+                guest.setBytes(buffer, utf16(`${text}\0`.slice(0, room)));
             }
             else
             {
-                host.writeMemory(buffer, encoded.bytes.subarray(0, encoded.fit(room)));
+                guest.setBytes(buffer, encoded.bytes.subarray(0, encoded.fit(room)));
             }
         }
         if (buffer === 0 || needed > count)
@@ -1133,12 +1117,12 @@ export function createLocaleFunctions(host){
                 const text = format + String.fromCharCode(0);
                 if (wide)
                 {
-                    writeWide(block, text);
+                    guest.setBytes(block, utf16(text));
                 }
                 else
                 {
                     const { bytes } = encodeSingleByte(text, ANSI_CODE_PAGE);
-                    host.writeMemory(block, bytes);
+                    guest.setBytes(block, bytes);
                 }
                 answer = (await call(wholeAddress(proc), [block, ...after], thread)) | 0;
                 if (answer === 0)
@@ -1199,7 +1183,7 @@ export function createLocaleFunctions(host){
                 thousand: text(LCTYPE.STHOUSAND), negativeOrder: number(LCTYPE.INEGNUMBER),
             };
         }
-        const view = new DataView(host.readMemory(address,
+        const view = new DataView(guest.snapshot(address,
             currency ? CURRENCYFMTA_SIZE : NUMBERFMTA_SIZE).buffer);
         const strings = (currency ? [12, 16, 28] : [12, 16]).map(at=>view.getUint32(at, true));
         const negativeOrder = view.getUint32(20, true);
@@ -1433,7 +1417,7 @@ export function createLocaleFunctions(host){
             }
             const value = new Uint8Array(bytes);
             new DataView(value.buffer).setUint32(0, answer, true);
-            host.writeMemory(buffer, value);
+            guest.setBytes(buffer, value);
             return needed;
         }
         return writeAnswer(answer, buffer, count, isWide, record.ansi || ANSI_CODE_PAGE);
@@ -1450,7 +1434,7 @@ export function createLocaleFunctions(host){
     const timeOf = address=>{
         if (address !== 0)
         {
-            const bytes = host.readMemory(address, SYSTEMTIME_SIZE);
+            const bytes = guest.snapshot(address, SYSTEMTIME_SIZE);
             const view = new DataView(bytes.buffer, bytes.byteOffset, SYSTEMTIME_SIZE);
             const [year, month, day] = [0, 2, 6].map(at=>view.getUint16(at, true));
             return {
@@ -1478,17 +1462,6 @@ export function createLocaleFunctions(host){
             minute: now.getUTCMinutes(),
             second: now.getUTCSeconds(),
         };
-    };
-
-    /** @param {number} address */
-    const readLong = address=>
-        new DataView(host.readMemory(address, 4).buffer).getUint32(0, true);
-
-    /** @param {number} address @param {number} value */
-    const writeLong = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
     };
 
     /**
@@ -1568,23 +1541,23 @@ export function createLocaleFunctions(host){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const room = readLong(sizeAddress);
+        const room = guest.u32(sizeAddress);
         if (buffer === 0 && room !== 0)
         {
             return ERROR_INVALID_PARAMETER;
         }
         const text = languages.length === 0 ? '\0\0'
             : `${languages.map(id=>`${languageText(id, flags)}\0`).join('')}\0`;
-        writeLong(sizeAddress, text.length);
+        guest.set32(sizeAddress, text.length);
         if (buffer !== 0 && room < text.length)
         {
             return ERROR_INSUFFICIENT_BUFFER;
         }
         if (buffer !== 0)
         {
-            writeWide(buffer, text);
+            guest.setBytes(buffer, utf16(text));
         }
-        writeLong(countAddress, languages.length);
+        guest.set32(countAddress, languages.length);
         return 0;
     };
 
@@ -1751,7 +1724,7 @@ export function createLocaleFunctions(host){
             }
             const bytes = new Uint8Array(4);
             new DataView(bytes.buffer).setUint32(0, Number(text), true);
-            host.writeMemory(wholeAddress(value), bytes);
+            guest.setBytes(wholeAddress(value), bytes);
             return wide ? 2 : 4;
         },
     });
@@ -1810,11 +1783,11 @@ export function createLocaleFunctions(host){
             {
                 if (wide)
                 {
-                    writeWide(wholeAddress(buffer), written);
+                    guest.setBytes(wholeAddress(buffer), utf16(written));
                 }
                 else
                 {
-                    host.writeMemory(wholeAddress(buffer),
+                    guest.setBytes(wholeAddress(buffer),
                         encodeSingleByte(written, ANSI_CODE_PAGE).bytes);
                 }
             }
@@ -1856,8 +1829,8 @@ export function createLocaleFunctions(host){
                 return refuse(ERROR_INVALID_PARAMETER);
             }
             const span = sourceSpan(wholeAddress(source), sourceChars, wide ? 2 : 1);
-            const folded = fold(wide ? readWide(wholeAddress(source), span.length)
-                : decodeSingleByte(host.readMemory(wholeAddress(source), span.length),
+            const folded = fold(wide ? guest.text(wholeAddress(source), true, span.length * 2, true)
+                : decodeSingleByte(guest.snapshot(wholeAddress(source), span.length),
                     ANSI_CODE_PAGE),
             asked);
             // Back to the ANSI page as WideCharToMultiByte with no flags writes
@@ -1875,11 +1848,11 @@ export function createLocaleFunctions(host){
             }
             if (bytes)
             {
-                host.writeMemory(wholeAddress(destination), bytes);
+                guest.setBytes(wholeAddress(destination), bytes);
             }
             else
             {
-                writeWide(wholeAddress(destination), folded);
+                guest.setBytes(wholeAddress(destination), utf16(folded));
             }
             return length;
         },
@@ -1920,7 +1893,7 @@ export function createLocaleFunctions(host){
                 ? view.setUint16(CPINFOEX_NAME + at * 2, character.charCodeAt(0), true)
                 : view.setUint8(CPINFOEX_NAME + at, character.charCodeAt(0))));
         }
-        host.writeMemory(info, bytes);
+        guest.setBytes(info, bytes);
         return 1;
     };
 
@@ -1969,7 +1942,7 @@ export function createLocaleFunctions(host){
      * @param {number} address @param {number} page
      */
     const readTextIn = (address, page)=>{
-        const bytes = host.readMemory(address, host.stringLength(address, 1));
+        const bytes = guest.snapshot(address, host.stringLength(address, 1));
         return codePage(page)?.decode(bytes, false) ?? decodeSingleByte(bytes, page);
     };
 
@@ -2178,7 +2151,7 @@ export function createLocaleFunctions(host){
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                writeWide(wholeAddress(buffer), `${name}\0`);
+                guest.setBytes(wholeAddress(buffer), utf16(`${name}\0`));
                 return name.length + 1;
             },
         },
@@ -2197,8 +2170,8 @@ export function createLocaleFunctions(host){
                 {
                     return LCID_EN_US;
                 }
-                const asked = readWide(wholeAddress(name), host.stringLength(wholeAddress(name),
-                    2));
+                const asked = guest.text(wholeAddress(name), true,
+                    host.stringLength(wholeAddress(name), 2) * 2, true);
                 if (asked === '')
                 {
                     return LOCALE_INVARIANT;
@@ -2230,8 +2203,8 @@ export function createLocaleFunctions(host){
                 {
                     return 0;
                 }
-                const asked = readWide(wholeAddress(name), host.stringLength(wholeAddress(name),
-                    2));
+                const asked = guest.text(wholeAddress(name), true,
+                    host.stringLength(wholeAddress(name), 2) * 2, true);
                 return asked === '' || lcidOfName(asked, true) !== 0 ? 1 : 0;
             },
         },
@@ -2344,7 +2317,7 @@ export function createLocaleFunctions(host){
                 for (let at = wholeAddress(list), length; at !== 0
                     && (length = host.stringLength(at, 2)) !== 0; at += (length + 1) * 2)
                 {
-                    named.push(readWide(at, length));
+                    named.push(guest.text(at, true, length * 2, true));
                 }
                 const state = languagesOf();
                 const known = [...new Set(named.map(text=>languageOf(text, asked)))]
@@ -2358,7 +2331,7 @@ export function createLocaleFunctions(host){
                 state.ui = 0;
                 if (known.length !== 0 && wholeAddress(count) !== 0)
                 {
-                    writeLong(wholeAddress(count), known.length);
+                    guest.set32(wholeAddress(count), known.length);
                 }
                 return 1;
             },
@@ -2725,7 +2698,7 @@ export function createLocaleFunctions(host){
                     host.setLastError(ERROR_INVALID_FLAGS);
                     return 0;
                 }
-                const raw = host.readMemory(wholeAddress(source), span.length);
+                const raw = guest.snapshot(wholeAddress(source), span.length);
                 let text;
                 let invalid = false;
                 if (resolved === CP_UTF8)
@@ -2767,11 +2740,12 @@ export function createLocaleFunctions(host){
                 // and nothing written leaves it holding an empty string.
                 if (text.length > (destinationChars | 0))
                 {
-                    writeWide(wholeAddress(destination), text.slice(0, destinationChars | 0));
+                    guest.setBytes(wholeAddress(destination),
+                        utf16(text.slice(0, destinationChars | 0)));
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                writeWide(wholeAddress(destination), text);
+                guest.setBytes(wholeAddress(destination), utf16(text));
                 return invalid ? noTranslation() : text.length;
             },
         },
@@ -2806,7 +2780,7 @@ export function createLocaleFunctions(host){
                     host.setLastError(ERROR_INVALID_FLAGS);
                     return 0;
                 }
-                const text = readWide(wholeAddress(source), span.length);
+                const text = guest.text(wholeAddress(source), true, span.length * 2, true);
                 // Half a surrogate pair is no character: WC_ERR_INVALID_CHARS
                 // fails on it, the text written all the same with U+FFFD.
                 const invalid = resolved === CP_UTF8 && (flags & WC_ERR_INVALID_CHARS) !== 0
@@ -2821,7 +2795,7 @@ export function createLocaleFunctions(host){
                 // ends before the character the page lacks never used it.
                 if (usedDefaultOut !== 0)
                 {
-                    host.writeMemory(usedDefaultOut,
+                    guest.setBytes(usedDefaultOut,
                         new Uint8Array([encoded.usedDefault(written) ? 1 : 0, 0, 0, 0]));
                 }
                 if (room === 0)
@@ -2832,11 +2806,11 @@ export function createLocaleFunctions(host){
                 // gives -- but never with half a character.
                 if (short)
                 {
-                    host.writeMemory(wholeAddress(destination), encoded.bytes.subarray(0, written));
+                    guest.setBytes(wholeAddress(destination), encoded.bytes.subarray(0, written));
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(destination), encoded.bytes);
+                guest.setBytes(wholeAddress(destination), encoded.bytes);
                 return invalid ? noTranslation() : encoded.bytes.length;
             },
         },
@@ -2857,9 +2831,9 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 const span = sourceSpan(wholeAddress(source), count, 1);
-                const raw = host.readMemory(wholeAddress(source), span.length);
+                const raw = guest.snapshot(wholeAddress(source), span.length);
                 const text = decodeSingleByte(raw, ANSI_CODE_PAGE);
-                host.writeMemory(wholeAddress(types),
+                guest.setBytes(wholeAddress(types),
                     bytesOfUnits(/** @type {Uint16Array} */ (stringType(infoType >>> 0, text))));
                 return 1;
             },
@@ -2883,8 +2857,8 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 const span = sourceSpan(wholeAddress(source), count, 2);
-                const text = readWide(wholeAddress(source), span.length);
-                host.writeMemory(wholeAddress(types),
+                const text = guest.text(wholeAddress(source), true, span.length * 2, true);
+                guest.setBytes(wholeAddress(types),
                     bytesOfUnits(/** @type {Uint16Array} */ (stringType(infoType >>> 0, text))));
                 return 1;
             },
@@ -2951,8 +2925,8 @@ export function createLocaleFunctions(host){
          * the language's name (`languages.js`), version.dll's call as well.
          */
         VerLanguageNameA: verLanguageName((address, text)=>
-            host.writeMemory(address, encodeSingleByte(text, ANSI_CODE_PAGE).bytes)),
-        VerLanguageNameW: verLanguageName(writeWide),
+            guest.setBytes(address, encodeSingleByte(text, ANSI_CODE_PAGE).bytes)),
+        VerLanguageNameW: verLanguageName((address, text)=>guest.setBytes(address, utf16(text))),
 
         /**
          * BOOL EnumUILanguagesA/W(UILANGUAGE_ENUMPROC lpUILanguageEnumProc,
@@ -3073,7 +3047,7 @@ export function createLocaleFunctions(host){
         const run = async()=>{
             for (const locale of listed)
             {
-                writeWide(block, `${locale.name}\0`);
+                guest.setBytes(block, utf16(`${locale.name}\0`));
                 const kind = LOCALE_WINDOWS
                     | (locale.neutral ? LOCALE_NEUTRALDATA : LOCALE_SPECIFICDATA);
                 if (((await call(wholeAddress(proc), [block, kind, parameter], thread)) | 0) === 0)
@@ -3192,11 +3166,12 @@ export function createLocaleFunctions(host){
                 {
                     if ((room | 0) > 0)
                     {
-                        writeWide(wholeAddress(buffer), `${resolved.slice(0, (room | 0) - 1)}\0`);
+                        guest.setBytes(wholeAddress(buffer),
+                            utf16(`${resolved.slice(0, (room | 0) - 1)}\0`));
                     }
                     return refuse(ERROR_INSUFFICIENT_BUFFER);
                 }
-                writeWide(wholeAddress(buffer), `${resolved}\0`);
+                guest.setBytes(wholeAddress(buffer), utf16(`${resolved}\0`));
                 return resolved.length + 1;
             },
         },

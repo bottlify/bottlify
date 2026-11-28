@@ -3119,7 +3119,7 @@ async function buildApp(options){
             allocate: bytes=>win32.heap().allocate(bytes, { alignment: 16 }),
             free: address=>win32.heap().free(address),
         },
-        writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+        guest: memory.port(pointerSize),
         processId: options.processId ?? FIRST_PROCESS_ID,
         version: windowsVersion(options.windows),
         // One for each executor, as every other road to the count says.

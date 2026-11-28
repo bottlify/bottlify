@@ -27,7 +27,7 @@
 
 import { DEBUG_ATTACH, DEBUG_BREAK, askChild, childThread } from './cross-process.js';
 import { untagged } from './handle-tags.js';
-import { dueInMs, readLargeInteger } from './due-time.js';
+import { dueInMs } from './due-time.js';
 import { wholeAddress } from '../common/pointers.js';
 
 /** dwDebugEventCode (winbase.h). */
@@ -289,7 +289,7 @@ function convertStateChange(state){
 /**
  * @typedef {Object} DebuggerHost
  * @property {any} kernel
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} [setLastError]
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {() => any} currentThread
@@ -306,13 +306,13 @@ function convertStateChange(state){
  *           where it runs, as TerminateProcess does.
  * @property {{ get: () => number, set: (handle: number) => void }} [threadDebugObject]
  *           The debug object handle the calling thread's block keeps.
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
  */
 
 /**
  * @param {DebuggerHost} host
  */
 export function createDebuggerFunctions(host){
+    const { guest } = host;
     const { kernel } = host;
     /**
      * The threads waiting on a debug object, each with how its event is
@@ -346,7 +346,7 @@ export function createDebuggerFunctions(host){
      * @param {any} child @param {string} call
      */
     const ask = (child, call)=>(host.setLastErrorFor ? askChild({ askChild: host.askChild,
-        writeMemory: host.writeMemory, currentThread: host.currentThread,
+        guest, currentThread: host.currentThread,
         setLastErrorFor: host.setLastErrorFor }, child, { call, args: [] }, []) : null);
 
     /** @returns {any[]} */
@@ -454,13 +454,6 @@ export function createDebuggerFunctions(host){
     const processHandle = handle=>{
         const plain = untagged(handle >>> 0);
         return kernel.handles.typeOf(plain) === 'process' ? kernel.handles.resolve(plain) : null;
-    };
-
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -638,17 +631,13 @@ export function createDebuggerFunctions(host){
         return true;
     };
 
-    /** @param {number} address @param {number} length */
-    const read = (address, length)=>/** @type {NonNullable<DebuggerHost['readMemory']>} */ (
-        host.readMemory)(address >>> 0, length).slice();
-
     /**
      * A native timeout (a LARGE_INTEGER, NULL for none) in milliseconds.
      *
      * @param {number} pointer
      */
     const timeoutAt = pointer=>((pointer >>> 0) === 0 ? INFINITE
-        : Math.min(Math.ceil(dueInMs(readLargeInteger(read, pointer),
+        : Math.min(Math.ceil(dueInMs(guest.i64(wholeAddress(pointer)),
             kernel.clock.wallClock())), INFINITE - 1));
 
     /**
@@ -664,7 +653,7 @@ export function createDebuggerFunctions(host){
         {
             host.divergence?.('NtWaitForDebugEvent', 'an alertable wait is not ended by an APC');
         }
-        return waitOn(object, timeoutAt(timeout), state=>host.writeMemory(wholeAddress(out), state),
+        return waitOn(object, timeoutAt(timeout), state=>guest.setBytes(wholeAddress(out), state),
             { woken: STATUS_SUCCESS, expired: STATUS_TIMEOUT, win32: false });
     };
 
@@ -679,8 +668,8 @@ export function createDebuggerFunctions(host){
         {
             return STATUS_INVALID_PARAMETER;
         }
-        const view = new DataView(read(client, 8).buffer);
-        return continueEvent(object, view.getUint32(0, true), view.getUint32(4, true),
+        const at = wholeAddress(client);
+        return continueEvent(object, guest.u32(at), guest.u32(at + 4),
             status >>> 0) ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
     };
 
@@ -772,7 +761,7 @@ export function createDebuggerFunctions(host){
                         host.setLastError?.(ERROR_SEM_TIMEOUT);
                         return 0;
                     }
-                    return waitOn(object, timeout >>> 0, state=>host.writeMemory(wholeAddress(out),
+                    return waitOn(object, timeout >>> 0, state=>guest.setBytes(wholeAddress(out),
                         /** @type {Uint8Array} */ (convertStateChange(state))),
                     { woken: 1, expired: 0, win32: true });
                 },
@@ -955,7 +944,7 @@ export function createDebuggerFunctions(host){
                             {
                                 return STATUS_ACCESS_VIOLATION;
                             }
-                            writeU32(out, kernel.handles.open('debug-object',
+                            guest.set32(out, kernel.handles.open('debug-object',
                                 { killOnClose: ((flags >>> 0) & DEBUG_KILL_ON_CLOSE) !== 0 }));
                             return STATUS_SUCCESS;
                         },
@@ -980,7 +969,7 @@ export function createDebuggerFunctions(host){
                             {
                                 if (wholeAddress(returned) !== 0)
                                 {
-                                    writeU32(returned, 4);
+                                    guest.set32(returned, 4);
                                 }
                                 return STATUS_INFO_LENGTH_MISMATCH;
                             }
@@ -989,7 +978,7 @@ export function createDebuggerFunctions(host){
                             {
                                 return STATUS_INVALID_HANDLE;
                             }
-                            const bytes = host.readMemory?.(wholeAddress(info),
+                            const bytes = guest.snapshot(wholeAddress(info),
                                 4) ?? new Uint8Array(4);
                             const value = new DataView(bytes.slice().buffer).getUint32(0, true);
                             if ((value & ~DEBUG_KILL_ON_CLOSE) !== 0)
@@ -1147,12 +1136,13 @@ export function createDebuggerFunctions(host){
                         argBytes: 8,
                         /** @param {number[]} args */
                         handler: ([state, out])=>{
-                            const event = convertStateChange(read(state, STATE_CHANGE_SIZE));
+                            const event = convertStateChange(
+                                guest.snapshot(wholeAddress(state), STATE_CHANGE_SIZE));
                             if (!event)
                             {
                                 return STATUS_UNSUCCESSFUL;
                             }
-                            host.writeMemory(wholeAddress(out), event);
+                            guest.setBytes(wholeAddress(out), event);
                             return STATUS_SUCCESS;
                         },
                     },

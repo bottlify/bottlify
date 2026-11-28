@@ -22,6 +22,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { accessorsOver } from './common/guest.fixture.js';
 import { win32Module } from './module.js';
 import { noCache } from '../cache/module.js';
 import { memoryLayerAnswers } from './memory.fixture.js';
@@ -61,8 +62,8 @@ function stubHost(){
             ...memoryLayerAnswers,
             readBytes: ()=>new Uint8Array(0),
             writeBytes: ()=>{},
-            readCString: ()=>'',
-            readWideString: ()=>'',
+            scanCString: ()=>({ index: 0 }),
+            scanWideString: ()=>0,
             readU32: ()=>0,
         },
         kernel: {
@@ -404,12 +405,7 @@ test('comctl32\'s _TrackMouseEvent is user32\'s TrackMouseEvent', async()=>{
     const host = stubHost();
     const memory = {
         ...memoryLayerAnswers,
-        readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.slice(at, at + length),
-        writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>bytes.set(data, at),
-        readCString: ()=>'',
-        readWideString: ()=>'',
-        readU32: (/** @type {number} */ at)=>view.getUint32(at, true),
+        ...accessorsOver(bytes),
     };
     const api = await win32Module.create({}, /** @type {any} */ ({
         ...host,
@@ -449,13 +445,7 @@ function hostWithMemory(){
     };
     const memory = {
         ...memoryLayerAnswers,
-        readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.slice(at, at + length),
-        writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>bytes.set(data, at),
-        readCString: (/** @type {number} */ at, /** @type {number} */ limit)=>text(at, limit, 1),
-        readWideString: (/** @type {number} */ at, /** @type {number} */ limit)=>
-            text(at, limit, 2),
-        readU32: (/** @type {number} */ at)=>view.getUint32(at, true),
+        ...accessorsOver(bytes),
     };
     return {
         bytes,

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import {
     createSeh, RECORD, CONTEXT, Disposition, EFLAGS_AC, EFLAGS_DF, EFLAGS_TF, END_OF_CHAIN,
     EH_UNWINDING, SELECTORS, STATUS,
@@ -22,7 +23,8 @@ const STACK = 0x40000;
  * @param {(entry: number, args: number[]) => number} [options.answer]
  */
 function machine(options = {}){
-    const bytes = new Uint8Array(0x80000);
+    // To the code the registers stand at, which an invalid-opcode fault reads.
+    const bytes = new Uint8Array(0x402000);
     const view = new DataView(bytes.buffer);
     /** @type {{ entry: number, args: number[] }[]} */
     const called = [];
@@ -37,9 +39,8 @@ function machine(options = {}){
 
     const host = {
         /** @param {number} at @param {number} length */
-        readMemory: (at, length)=>bytes.slice(at, at + length),
+        guest: guestOver(bytes),
         /** @param {number} at @param {Uint8Array} value */
-        writeMemory: (at, value)=>bytes.set(value, at),
         // Everything inside the buffer is there; nothing outside is. A bounds
         // test and nothing else, because images are readable rather than
         // executable and asking for execute rejects a real handler.
@@ -312,13 +313,13 @@ test("a handler's context carries the thread's x87 and SSE state, and continuing
         load(6, 1.5, 0x22);
         const saved = new Uint8Array(CONTEXT.SIZE);
         m.host.callGuest = async call=>{
-            saved.set(m.host.readMemory(call.args[2], CONTEXT.SIZE));
+            saved.set(m.host.guest.snapshot(call.args[2], CONTEXT.SIZE));
             return Disposition.CONTINUE_SEARCH;
         };
         await m.seh.dispatch({ code: 1, address: 0x401000 });
         load(0, -3, 0x55);
         m.host.callGuest = async call=>{
-            m.host.writeMemory(call.args[2], saved);
+            m.host.guest.setBytes(call.args[2], saved);
             return original(call);
         };
         resume(await m.seh.dispatch({ code: 1, address: 0x401000 }));
@@ -513,7 +514,8 @@ test('an instruction the processor refused is traced with its bytes', async()=>{
     const said = [];
     const seh = createSeh({ ...m.host, trace: (/** @type {string} */ line)=>said.push(line) });
     m.registerFrames([0x51000]);
-    m.host.writeMemory(0x41000, new Uint8Array([0x0f, 0x0b, 0xeb, 0x07, 0x22, 0x22, 0x22, 0x00]));
+    m.host.guest.setBytes(0x41000,
+        new Uint8Array([0x0f, 0x0b, 0xeb, 0x07, 0x22, 0x22, 0x22, 0x00]));
 
     await seh.onFault({ vector: 6, eip: 0x41000, errorCode: null },
         { ...m.registers(), eip: 0x41000 });
@@ -531,9 +533,9 @@ test('an access the program\'s own code was refused is traced with its registers
         const said = [];
         const seh = createSeh({ ...m.host, trace: (/** @type {string} */ line)=>said.push(line) });
         m.registerFrames([0x51000]);
-        m.host.writeMemory(0x41000,
+        m.host.guest.setBytes(0x41000,
             new Uint8Array([0x8b, 0x46, 0x0c, 0x90, 0x90, 0x90, 0x90, 0x90]));
-        m.host.writeMemory(0x60000, new Uint8Array([0x78, 0x56, 0x34, 0x12]));
+        m.host.guest.setBytes(0x60000, new Uint8Array([0x78, 0x56, 0x34, 0x12]));
         await seh.onFault({ vector: 14, eip: 0x41000, errorCode: 0, address: 0xc },
             { ...m.registers(), eip: 0x41000, esi: 0, eax: 1, esp: 0x60000 });
         const line = said.find(one=>one.includes('reading 0xc')) ?? '';
@@ -1033,15 +1035,17 @@ test('the last-chance trace reads nothing below a small register, and never fail
         const m = machine({ answer: ()=>1 });
         /** @type {string[]} */
         const said = [];
+        /** Nothing at the top of the address space. @param {number} at @param {number} length */
+        const unmappedHigh = (at, length)=>{
+            if ((at >>> 0) >= 0xffffff00)
+            {
+                throw new Error('access violation');
+            }
+            return m.host.guest.snapshot(at, length);
+        };
         const seh = createSeh({ ...m.host,
             isMapped: (/** @type {number} */ at)=>m.host.isMapped(at) || (at >>> 0) >= 0xffffff00,
-            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
-                if ((at >>> 0) >= 0xffffff00)
-                {
-                    throw new Error('access violation');
-                }
-                return m.host.readMemory(at, length);
-            },
+            guest: { ...m.host.guest, snapshot: unmappedHigh },
             trace: (/** @type {string} */ line)=>said.push(line) });
         m.put(0x30000, 0xc0000409);
         m.put(0x31000 + 0xb0, 3);

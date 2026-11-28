@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createLocaleFunctions } from './locale.js';
 import { UI_LANGUAGE } from '../../loader/internal/resources.js';
 import { runTables } from '../common/run-tables.js';
@@ -43,7 +44,7 @@ function fakeHost(){
         errors,
         tables,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} unit */
         stringLength(address, unit){
             let count = 0;
@@ -53,10 +54,6 @@ function fakeHost(){
                 count++;
             }
             return count;
-        },
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory(address, data){
-            bytes.set(data, address);
         },
         /** @param {number} code */
         setLastError: code=>errors.push(code),

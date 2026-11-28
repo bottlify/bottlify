@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComRegistry } from './objects.js';
 import { createGlobalMemory } from '../kernel32/moveable.js';
@@ -1296,7 +1297,7 @@ test('a memory stream over a moveable handle grows its block under the same hand
             return moved;
         },
         zero: (address, length)=>host.bytes.fill(0, address, address + length),
-        writeMemory: (address, data)=>host.bytes.set(data, address),
+        guest: guestOver(host.bytes),
         setLastError: ()=>{},
         userInfo: new Map(),
     });

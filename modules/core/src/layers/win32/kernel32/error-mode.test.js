@@ -16,12 +16,7 @@ test('a thread\'s error mode is its own, in its block, read alike by kernel32 an
     const bytes = new Uint8Array(0x3000);
     /** @type {number[]} */
     const errors = [];
-    const memory = {
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.slice(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, at),
-    };
+    const memory = { guest: guestOver(bytes) };
     const thread = { tebAddress: 0x1000 };
     const kernel32 = createSystemFunctions(/** @type {any} */ ({ ...memory,
         setLastError: (/** @type {number} */ code)=>errors.push(code), currentThread: ()=>thread,
@@ -57,9 +52,7 @@ test('a thread\'s error mode is its own, in its block, read alike by kernel32 an
 test('GetErrorMode reads back what SetErrorMode set, and sets nothing', ()=>{
     const bytes = new Uint8Array(0x100);
     const kernel32 = createSystemFunctions(/** @type {any} */ ({
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.slice(at, at + length),
-        writeMemory: ()=>{},
+        guest: guestOver(bytes),
         setLastError: ()=>{}, currentThread: ()=>null, resolveHandle: ()=>null,
         systemTimeMs: ()=>0 }));
     assert.equal(kernel32.GetErrorMode.handler(), 0);

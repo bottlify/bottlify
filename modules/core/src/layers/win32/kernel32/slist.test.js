@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createSListFunctions } from './slist.js';
 
 const HEADER = 0x100;
@@ -18,8 +19,7 @@ const TRAP = 0x1000;
 function setup(){
     const bytes = new Uint8Array(0x400);
     const fns = createSListFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         allocate: ()=>CODE,
     });
     const view = new DataView(bytes.buffer);
@@ -107,8 +107,7 @@ test('a push that another thread\'s change overtakes looks again, and loses neit
     /** @type {(() => void) | null} */
     let meanwhile = null;
     const fns = createSListFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         compareExchangeU64: (address, expected, value)=>{
             const other = meanwhile;
             meanwhile = null;

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createProfileFunctions } from './profile.js';
 import { decodeAnsi } from './locale.js';
 import { readIntoBy } from './vfs.js';
@@ -22,22 +23,7 @@ function fakeMemory(){
     const bytes = new Uint8Array(0x1000);
     return {
         bytes,
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-        /**
-         * As the memory layer reads an ANSI string: in Windows-1252, which is
-         * what the Encoding standard calls latin1.
-         *
-         * @param {number} address @param {number} maxLength
-         */
-        readCString(address, maxLength){
-            let end = address;
-            while (end - address < maxLength && bytes[end] !== 0)
-            {
-                end++;
-            }
-            return decodeAnsi(bytes.subarray(address, end));
-        },
+        guest: guestOver(bytes),
         /** @param {number} address @param {string} text */
         put(address, text){
             for (let i = 0; i < text.length; i++)
@@ -137,8 +123,7 @@ function setup(){
     /** @type {number[]} */
     const errors = [];
     const fns = createProfileFunctions({
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        guest: memory.guest,
         files,
         setLastError: code=>{
             errors.push(code);
@@ -170,19 +155,19 @@ test('a value is found by section and key, folded, stripped of blanks and one pa
     memory.put(SECTION, 'startup');
     memory.put(KEY, 'enginedir');
     assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, DEFAULT, OUT, 64, FILE]), 13);
-    assert.equal(memory.readCString(OUT, 64), 'C:\\Temp\\_is12');
+    assert.equal(memory.guest.cstr(OUT, 64), 'C:\\Temp\\_is12');
 
     memory.put(KEY, 'Quoted');
     assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, DEFAULT, OUT, 64, FILE]), 1);
-    assert.equal(memory.readCString(OUT, 64), 'x');
+    assert.equal(memory.guest.cstr(OUT, 64), 'x');
 
     memory.put(KEY, 'Missing');
     assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, DEFAULT, OUT, 64, FILE]), 4);
-    assert.equal(memory.readCString(OUT, 64), 'dflt', 'the default, less its trailing blanks');
+    assert.equal(memory.guest.cstr(OUT, 64), 'dflt', 'the default, less its trailing blanks');
 
     memory.put(SECTION, 'Nowhere');
     assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, 0, OUT, 64, FILE]), 0);
-    assert.equal(memory.readCString(OUT, 64), '', 'a NULL default is the empty string');
+    assert.equal(memory.guest.cstr(OUT, 64), '', 'a NULL default is the empty string');
 });
 
 test('a buffer too small is cut one short for a value and two short for a list', ()=>{
@@ -236,7 +221,7 @@ test('a bare file name lives in the Windows directory and a missing file is all 
     memory.put(SECTION, 'Fonts');
     memory.put(KEY, 'Face');
     assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, 0, OUT, 64, FILE]), 5);
-    assert.equal(memory.readCString(OUT, 64), 'Arial');
+    assert.equal(memory.guest.cstr(OUT, 64), 'Arial');
 
     memory.put(FILE, 'nothing.ini');
     memory.put(DEFAULT, 'd');
@@ -263,7 +248,7 @@ test('a write replaces a key in place, adds what is missing, and removes with NU
     memory.put(VALUE, 'C:\\Temp\\a.tmp');
     assert.equal(fns.WritePrivateProfileStringA.handler([SECTION, KEY, VALUE, FILE]), 1);
     assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, 0, OUT, 64, FILE]), 13);
-    assert.equal(memory.readCString(OUT, 64), 'C:\\Temp\\a.tmp');
+    assert.equal(memory.guest.cstr(OUT, 64), 'C:\\Temp\\a.tmp');
     assert.match(files.text('C:\\WINDOWS\\TEMP\\_isdelet.ini'),
         /File0=C:\\Temp\\a\.tmp\r\n\[Other\]/, 'a new key goes at the end of its section');
 
@@ -331,7 +316,7 @@ test('a section is read back as its entries, key=value each, and win.ini is a fi
     assert.equal(fns.WriteProfileStringA.handler([SECTION, KEY, VALUE]), 1);
     assert.equal(files.text('C:\\WINDOWS\\win.ini'), '[Desktop]\r\nWallpaper=none\r\n');
     assert.equal(fns.GetProfileStringA.handler([SECTION, KEY, 0, OUT, 64]), 4);
-    assert.equal(memory.readCString(OUT, 64), 'none');
+    assert.equal(memory.guest.cstr(OUT, 64), 'none');
     assert.equal(fns.GetProfileIntA.handler([SECTION, KEY, 7]), 0, 'a word is zero');
     assert.equal(fns.GetProfileStringA.argBytes, 20);
     assert.equal(fns.GetProfileIntA.argBytes, 12);
@@ -349,10 +334,7 @@ test('a structure is kept as hex with a checksum, and read back only whole and i
     /** @type {number[]} */
     const errors = [];
     const fns = createProfileFunctions({
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>memory.bytes.slice(address, address + length),
+        guest: memory.guest,
         setLastError: code=>errors.push(code),
         files,
     });
@@ -371,7 +353,7 @@ test('a structure is kept as hex with a checksum, and read back only whole and i
     assert.equal(errors.at(-1), ERROR_BAD_LENGTH);
     assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 8, FILE]), 0);
     assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 7, FILE]), 1);
-    assert.equal(memory.readCString(OUT, 16), 'abacus');
+    assert.equal(memory.guest.cstr(OUT, 16), 'abacus');
 
     memory.put(DEFAULT, '636163747573006F');
     fns.WritePrivateProfileStringA.handler([SECTION, KEY, DEFAULT, FILE]);
@@ -382,7 +364,7 @@ test('a structure is kept as hex with a checksum, and read back only whole and i
     fns.WritePrivateProfileStringA.handler([SECTION, KEY, DEFAULT, FILE]);
     assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 7, FILE]), 1,
         'lower or upper case alike');
-    assert.equal(memory.readCString(OUT, 16), 'cactus');
+    assert.equal(memory.guest.cstr(OUT, 16), 'cactus');
     memory.put(DEFAULT, '636163747573008Q');
     fns.WritePrivateProfileStringA.handler([SECTION, KEY, DEFAULT, FILE]);
     assert.equal(fns.GetPrivateProfileStructA.handler([SECTION, KEY, OUT, 7, FILE]), 0);
@@ -440,7 +422,7 @@ test('a section written whole replaces every line it had, is added when missing,
         assert.equal(fns.WritePrivateProfileSectionA.handler([SECTION, VALUE, FILE]), 1);
         assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT, 64, FILE]),
             'First=1\0Second=2\0plain line\0'.length);
-        assert.equal(memory.readCString(OUT, 64), 'First=1');
+        assert.equal(memory.guest.cstr(OUT, 64), 'First=1');
         memory.put(KEY, 'Key');
         assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, 0, OUT, 64, FILE]), 0,
             'the key it had is gone');
@@ -467,21 +449,7 @@ test('WritePrivateProfileStringW writes what the A call writes, read from UTF-16
         return at;
     };
     const fns = createProfileFunctions({
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; text.length < maxLength; at += 2)
-            {
-                const unit = memory.bytes[at] | memory.bytes[at + 1] << 8;
-                if (unit === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(unit);
-            }
-            return text;
-        },
+        guest: memory.guest,
         files,
     });
     assert.equal(fns.WritePrivateProfileStringW.argBytes, 16);
@@ -507,21 +475,7 @@ test('the wide reads answer what the A reads answer, in UTF-16 and counted in ch
     const readBack = (at, units)=>String.fromCharCode(
         ...new Uint16Array(memory.bytes.slice(at, at + units * 2).buffer));
     const fns = createProfileFunctions({
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; text.length < maxLength; at += 2)
-            {
-                const unit = memory.bytes[at] | memory.bytes[at + 1] << 8;
-                if (unit === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(unit);
-            }
-            return text;
-        },
+        guest: memory.guest,
         files,
     });
     files.put('C:\\WINDOWS\\TEMP\\setup.ini', INI);
@@ -592,21 +546,7 @@ test('win.ini read and written in UTF-16 is the file the A calls read and write'
     const readBack = (at, units)=>String.fromCharCode(
         ...new Uint16Array(memory.bytes.slice(at, at + units * 2).buffer));
     const fns = createProfileFunctions({
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; text.length < maxLength; at += 2)
-            {
-                const unit = memory.bytes[at] | memory.bytes[at + 1] << 8;
-                if (unit === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(unit);
-            }
-            return text;
-        },
+        guest: memory.guest,
         files,
     });
     assert.equal(fns.WriteProfileStringW.argBytes, 12);
@@ -620,7 +560,7 @@ test('win.ini read and written in UTF-16 is the file the A calls read and write'
     memory.put(KEY, 'WALLPAPER');
     assert.equal(fns.GetProfileStringA.handler([SECTION, KEY, 0, OUT, 64]), 20,
         'what the W call wrote, the A call reads');
-    assert.equal(memory.readCString(OUT, 64), 'C:\\WINDOWS\\Bliss.bmp');
+    assert.equal(memory.guest.cstr(OUT, 64), 'C:\\WINDOWS\\Bliss.bmp');
 
     wide(SECTION, 'DESKTOP');
     wide(KEY, 'wallpaper');
@@ -658,21 +598,7 @@ test('the win.ini section calls are the private ones on win.ini, in both widths'
         return at;
     };
     const fns = createProfileFunctions({
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; text.length < maxLength; at += 2)
-            {
-                const unit = memory.bytes[at] | memory.bytes[at + 1] << 8;
-                if (unit === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(unit);
-            }
-            return text;
-        },
+        guest: memory.guest,
         files,
     });
     assert.deepEqual([fns.GetProfileSectionA.argBytes, fns.GetProfileSectionW.argBytes,
@@ -741,7 +667,7 @@ test('a file that begins with a byte order mark is read in its encoding and writ
             memory.put(FILE, file);
             assert.equal(fns.GetPrivateProfileStringA.handler(
                 [SECTION, KEY, DEFAULT, OUT, 64, FILE]), value.length, file);
-            assert.equal(memory.readCString(OUT, 64), value, file);
+            assert.equal(memory.guest.cstr(OUT, 64), value, file);
         }
 
         memory.put(FILE, 'C:\\setup.sdb');
@@ -762,7 +688,7 @@ test('a line ends at a bare CR as at CRLF or LF', ()=>{
     memory.put(KEY, 'name2');
     memory.put(DEFAULT, 'default');
     assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, DEFAULT, OUT, 64, FILE]), 4);
-    assert.equal(memory.readCString(OUT, 64), 'val2');
+    assert.equal(memory.guest.cstr(OUT, 64), 'val2');
     assert.equal(fns.GetPrivateProfileSectionNamesA.handler([OUT, 64, FILE]), 8);
     assert.equal(memory.raw(OUT, 9), 'one\0two\0\0');
 });

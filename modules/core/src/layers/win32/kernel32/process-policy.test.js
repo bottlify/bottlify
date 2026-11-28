@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createProcessPolicyFunctions } from './process-policy.js';
 import { createHandleTable } from '../../kernel/internal/handles.js';
 import { createNamedObjects } from './named-objects.js';
@@ -63,8 +64,7 @@ function machine(given = {}){
     const fns = /** @type {Record<string, { argBytes: number, handler: Function }>} */ (
         createProcessPolicyFunctions({
             kernel,
-            readMemory: (address, length)=>bytes.slice(address, address + length),
-            writeMemory: (address, data)=>bytes.set(data, address),
+            guest: guestOver(bytes),
             setLastError: code=>errors.push(code),
             currentThread: ()=>thread,
             registers: ()=>({ eax: 1, ecx: 2, edx: 3, ebx: 4, esi: 5, edi: 6, eflags: 0x246,

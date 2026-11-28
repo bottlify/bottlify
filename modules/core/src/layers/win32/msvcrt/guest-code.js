@@ -346,8 +346,8 @@ function rawView(host){
         // program's, and no buffer of it is made on the host.
         fillBytes: host.fillMemory ?? ((address, value, length)=>writeMade(writeMemory, address,
             length, chunk=>void chunk.fill(value & 0xff))),
-        readCString: noStrings,
-        readWideString: noStrings,
+        scanCString: noStrings,
+        scanWideString: noStrings,
     }, host.pointerSize === 8 ? 8 : 4);
 }
 

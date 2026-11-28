@@ -32,6 +32,7 @@
 import { createThreadpoolApi } from './threadpool-api.js';
 import { wholeAddress } from '../common/pointers.js';
 import { createDeadlines } from '../../../system/deadlines.js';
+import { imm32 } from '../../../system/x86.js';
 
 /** A pool this size runs more callbacks at once than a program has reason to ask for. */
 const MAX_THREADS = 32;
@@ -127,18 +128,16 @@ const CURRENT_THREAD = 0xfffffffe;
 export function poolLoopCode(fetch, at){
     const relative = (fetch - (at + 19)) | 0;
     /** @param {number} value */
-    const dword = value=>
-        [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
     return new Uint8Array([
         0x83, 0xec, RECORD.SIZE,
-        0xb8, ...dword(RAN),
+        0xb8, ...imm32(RAN),
         0x50,
         0x8d, 0x4c, 0x24, 0x04,
         0x51,
-        0xe8, ...dword(relative),
+        0xe8, ...imm32(relative),
         0x85, 0xc0,
         0x74, 0x26,
-        0x3d, ...dword(RUN),
+        0x3d, ...imm32(RUN),
         0x75, 0xea,
         0x89, 0xe3,
         0xff, 0x73, 0x18,
@@ -149,7 +148,7 @@ export function poolLoopCode(fetch, at){
         0xff, 0x73, 0x04,
         0xff, 0x13,
         0x89, 0xdc,
-        0xb8, ...dword(RAN),
+        0xb8, ...imm32(RAN),
         0xeb, 0xcb,
         0x83, 0xc4, RECORD.SIZE,
         0xc2, 0x04, 0x00,
@@ -175,15 +174,13 @@ export function poolLoopCode(fetch, at){
  */
 function waitLoopCode(wait, after, at){
     /** @param {number} value */
-    const dword = value=>
-        [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
     return new Uint8Array([
         0x8b, 0x5c, 0x24, 0x04,
         0x53,
-        0xe8, ...dword((wait - (at + 10)) | 0),
+        0xe8, ...imm32((wait - (at + 10)) | 0),
         0x50,
         0x53,
-        0xe8, ...dword((after - (at + 17)) | 0),
+        0xe8, ...imm32((after - (at + 17)) | 0),
         0x85, 0xc0,
         0x75, 0xef,
         0xc2, 0x04, 0x00,
@@ -218,6 +215,7 @@ function waitLoopCode(wait, after, at){
  * @param {ThreadPoolHost} host
  */
 export function createThreadPool(host){
+    const { guest } = host;
     const { kernel } = host;
 
     /** @param {string} name @param {number} max @returns {Lane} */
@@ -246,20 +244,14 @@ export function createThreadPool(host){
     };
     let ran = 0;
 
-    /** @param {number} value */
-    const dword = value=>new Uint8Array([
-        value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-    ]);
-
     /** @param {Worker} worker @param {Job} job */
     const give = (worker, job)=>{
         worker.job = job;
         const args = job.instanced ? [worker.record, ...job.args] : job.args;
-        host.writeMemory(worker.record + RECORD.ENTRY, dword(job.entry));
+        guest.set32(worker.record + RECORD.ENTRY, job.entry);
         for (let index = 0; index < RECORD.COUNT; index++)
         {
-            host.writeMemory(worker.record + RECORD.ARGS + index * 4,
-                dword(args[index] ?? 0));
+            guest.set32(worker.record + RECORD.ARGS + index * 4, args[index] ?? 0);
         }
     };
 
@@ -434,7 +426,7 @@ export function createThreadPool(host){
             {
                 return false;
             }
-            host.writeMemory(at, poolLoopCode(trap, at));
+            guest.setBytes(at, poolLoopCode(trap, at));
             loop = at;
         }
         const thread = makeThread({ entry: loop, name: lane.name,
@@ -951,7 +943,7 @@ export function createThreadPool(host){
         const bytes = new Uint8Array(objects.length * 4);
         const view = new DataView(bytes.buffer);
         objects.forEach((object, index)=>view.setUint32(index * 4, object, true));
-        host.writeMemory(home.handles, bytes);
+        guest.setBytes(home.handles, bytes);
         return /** @type {NonNullable<ThreadPoolHost['waitFor']>} */ (host.waitFor)(
             objects.length, home.handles,
             nearest === Infinity ? INFINITE : Math.max(0, Math.ceil(nearest - now)));
@@ -1084,7 +1076,7 @@ export function createThreadPool(host){
             {
                 return null;
             }
-            host.writeMemory(at, waitLoopCode(step, done, at));
+            guest.setBytes(at, waitLoopCode(step, done, at));
             waitLoop = at;
         }
         const id = host.allocate(4);
@@ -1184,11 +1176,7 @@ export function createThreadPool(host){
      * @param {number} pointer
      */
     const dueIn = pointer=>{
-        if (!host.readMemory)
-        {
-            return 0;
-        }
-        const bytes = host.readMemory(pointer, 8);
+        const bytes = guest.snapshot(pointer, 8);
         const value = new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true);
         if (value <= 0n)
         {
@@ -1307,7 +1295,7 @@ export function createThreadPool(host){
                     {
                         return fail(made);
                     }
-                    host.writeMemory(wholeAddress(out), dword(made.handle));
+                    guest.set32(wholeAddress(out), made.handle);
                     return 1;
                 },
             },
@@ -1418,7 +1406,7 @@ export function createThreadPool(host){
                     {
                         return fail(made);
                     }
-                    host.writeMemory(wholeAddress(out), dword(made.handle));
+                    guest.set32(wholeAddress(out), made.handle);
                     return 1;
                 },
             },

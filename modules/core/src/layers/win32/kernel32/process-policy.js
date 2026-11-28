@@ -162,8 +162,7 @@ const FIRMWARE_TYPE_UEFI = 2;
 /**
  * @typedef {Object} ProcessPolicyHost
  * @property {any} kernel
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} [setLastError]
  * @property {() => any} currentThread
  * @property {() => Record<string, number>} [registers]
@@ -199,6 +198,7 @@ const FIRMWARE_TYPE_UEFI = 2;
 
 /** @param {ProcessPolicyHost} host */
 export function createProcessPolicyFunctions(host){
+    const { guest } = host;
     const { kernel } = host;
     const wide = host.pointerSize === 8;
 
@@ -207,27 +207,10 @@ export function createProcessPolicyFunctions(host){
         host.setLastError?.(code);
         return 0;
     };
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
-    };
     /** The machine's processors, all on node 0: one when nothing says. */
     const processorCount = ()=>host.processors?.count() ?? 1;
     /** The processors node 0 holds, as an affinity mask. */
     const nodeMask = ()=>host.processors?.systemMask() ?? 1;
-    /** @param {number} address @param {bigint} value */
-    const writeQword = (address, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
-        host.writeMemory(address, bytes);
-    };
 
     /**
      * The process a handle names: this one for the pseudo-handle, a child for
@@ -273,13 +256,13 @@ export function createProcessPolicyFunctions(host){
         put(0xac, registers.ecx);
         put(0xb0, registers.eax);
         put(0xb4, registers.ebp);
-        put(0xb8, esp === 0 ? 0 : readDword(esp));
+        put(0xb8, esp === 0 ? 0 : guest.u32(esp));
         put(0xbc, SELECTORS.CODE);
         put(0xc0, registers.eflags ?? 0x202);
         put(0xc4, esp + 8);
         put(0xc8, SELECTORS.DATA);
-        host.writeMemory(out, bytes.subarray(0, 4));
-        host.writeMemory(out + CONTEXT_CAPTURED_FROM,
+        guest.setBytes(out, bytes.subarray(0, 4));
+        guest.setBytes(out + CONTEXT_CAPTURED_FROM,
             bytes.subarray(CONTEXT_CAPTURED_FROM, CONTEXT_CAPTURED_END));
     };
 
@@ -297,8 +280,8 @@ export function createProcessPolicyFunctions(host){
         const registers = host.registers?.() ?? {};
         const teb = (host.currentThread()?.tebAddress ?? 0) >>> 0;
         const layout = blockLayouts(host.pointerSize).teb;
-        const base = teb === 0 ? 0xffffffff : readDword(teb + layout.STACK_BASE);
-        const limit = teb === 0 ? 0 : readDword(teb + layout.STACK_LIMIT);
+        const base = teb === 0 ? 0xffffffff : guest.u32(teb + layout.STACK_BASE);
+        const limit = teb === 0 ? 0 : guest.u32(teb + layout.STACK_LIMIT);
         const within = (/** @type {number} */ at)=>at >= limit && at + 8 <= base
             && (at & 3) === 0;
         /** @type {number[]} */
@@ -306,18 +289,18 @@ export function createProcessPolicyFunctions(host){
         const esp = (registers.esp ?? 0) >>> 0;
         if (within(esp))
         {
-            frames.push(readDword(esp));
+            frames.push(guest.u32(esp));
         }
         let frame = (registers.ebp ?? 0) >>> 0;
         while (frames.length < skip + wanted && within(frame))
         {
-            const returnTo = readDword(frame + 4);
+            const returnTo = guest.u32(frame + 4);
             if (returnTo === 0)
             {
                 break;
             }
             frames.push(returnTo);
-            const next = readDword(frame);
+            const next = guest.u32(frame);
             if (next <= frame)
             {
                 break;
@@ -473,7 +456,7 @@ export function createProcessPolicyFunctions(host){
         let name = '';
         for (let at = namePointer >>> 0, units = 0; units < 260; units++)
         {
-            const unit = wideName ? host.readMemory(at, 2) : host.readMemory(at, 1);
+            const unit = wideName ? guest.snapshot(at, 2) : guest.snapshot(at, 1);
             const code = wideName ? unit[0] | unit[1] << 8 : unit[0];
             if (code === 0)
             {
@@ -769,16 +752,16 @@ export function createProcessPolicyFunctions(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                writeDword(wholeAddress(block), 0);
+                guest.set32(wholeAddress(block), 0);
                 const status = (host.cancelSynchronous?.(thread, wholeAddress(request)) ?? 0) > 0
                     ? STATUS.SUCCESS : STATUS.NOT_FOUND;
                 // Status and Information, each a pointer wide.
-                writeDword(wholeAddress(block), status);
-                writeDword(wholeAddress(block) + 4, 0);
+                guest.set32(wholeAddress(block), status);
+                guest.set32(wholeAddress(block) + 4, 0);
                 if (wide)
                 {
-                    writeDword(wholeAddress(block) + 8, 0);
-                    writeDword(wholeAddress(block) + 12, 0);
+                    guest.set32(wholeAddress(block) + 8, 0);
+                    guest.set32(wholeAddress(block) + 12, 0);
                 }
                 return status;
             },
@@ -798,7 +781,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                const given = readObjectAttributes(host.readMemory, attributes, wide ? 8 : 4);
+                const given = readObjectAttributes(guest, attributes, wide ? 8 : 4);
                 const walked = nameToWalk(given, false);
                 if ('status' in walked)
                 {
@@ -824,7 +807,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return STATUS.OBJECT_TYPE_MISMATCH;
                 }
-                writeDword(wholeAddress(out), made.handle);
+                guest.set32(wholeAddress(out), made.handle);
                 return made.reused ? STATUS.OBJECT_NAME_EXISTS : STATUS.SUCCESS;
             },
         },
@@ -837,7 +820,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                const given = readObjectAttributes(host.readMemory, attributes, wide ? 8 : 4);
+                const given = readObjectAttributes(guest, attributes, wide ? 8 : 4);
                 const walked = nameToWalk(given, true);
                 if ('status' in walked || given === null)
                 {
@@ -859,7 +842,7 @@ export function createProcessPolicyFunctions(host){
                     return STATUS.OBJECT_NAME_NOT_FOUND;
                 }
                 host.namedObjects?.reference(found);
-                writeDword(wholeAddress(out), kernel.handles.open('job', found));
+                guest.set32(wholeAddress(out), kernel.handles.open('job', found));
                 return STATUS.SUCCESS;
             },
         },
@@ -900,7 +883,7 @@ export function createProcessPolicyFunctions(host){
             {
                 return STATUS_ACCESS_VIOLATION;
             }
-            const flags = readDword(at);
+            const flags = guest.u32(at);
             /** @type {Record<string, number>} */
             const values = {};
             for (const [group, fields] of /** @type {const} */ ([
@@ -908,13 +891,13 @@ export function createProcessPolicyFunctions(host){
             {
                 for (const [name, offset] of (flags & group) === 0 ? [] : fields)
                 {
-                    values[name] = readDword(at + offset);
+                    values[name] = guest.u32(at + offset);
                 }
             }
             // The floating-point groups go back with the rest, as Windows
             // continues from the whole record.
             // On the calling thread, whose call this is: its own registers now.
-            const bytes = host.readMemory(at, CONTEXT_BYTES);
+            const bytes = guest.snapshot(at, CONTEXT_BYTES);
             const debug = debugGroupOf(bytes, flags);
             if (debug !== null)
             {
@@ -970,12 +953,12 @@ export function createProcessPolicyFunctions(host){
                     const frames = backTrace(skip >>> 0, Math.min(wanted >>> 0, 0xffff));
                     let sum = 0;
                     frames.forEach((address, index)=>{
-                        writeDword(wholeAddress(out) + index * 4, address);
+                        guest.set32(wholeAddress(out) + index * 4, address);
                         sum = (sum + address) >>> 0;
                     });
                     if (wholeAddress(hash) !== 0)
                     {
-                        writeDword(wholeAddress(hash), sum);
+                        guest.set32(wholeAddress(hash), sum);
                     }
                     return frames.length;
                 },
@@ -1063,7 +1046,7 @@ export function createProcessPolicyFunctions(host){
                     }
                     inJob = job.processes.has(process);
                 }
-                writeDword(wholeAddress(out), inJob ? 1 : 0);
+                guest.set32(wholeAddress(out), inJob ? 1 : 0);
                 return 1;
             },
         },
@@ -1097,9 +1080,9 @@ export function createProcessPolicyFunctions(host){
                 }
                 if ((type >>> 0) === JOB.ASSOCIATE_COMPLETION_PORT)
                 {
-                    return associatePort(job, host.readMemory(wholeAddress(from), record.length));
+                    return associatePort(job, guest.snapshot(wholeAddress(from), record.length));
                 }
-                record.set(host.readMemory(wholeAddress(from), record.length));
+                record.set(guest.snapshot(wholeAddress(from), record.length));
                 return 1;
             },
         },
@@ -1165,10 +1148,10 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_BAD_LENGTH);
                 }
-                host.writeMemory(wholeAddress(to), answer);
+                guest.setBytes(wholeAddress(to), answer);
                 if (wholeAddress(returned) !== 0)
                 {
-                    writeDword(wholeAddress(returned), answer.length);
+                    guest.set32(wholeAddress(returned), answer.length);
                 }
                 return more ? fail(ERROR_MORE_DATA) : 1;
             },
@@ -1232,11 +1215,11 @@ export function createProcessPolicyFunctions(host){
                 }
                 if (which === DEP_POLICY)
                 {
-                    writeDword(wholeAddress(to), depFlags);
-                    writeDword(wholeAddress(to) + 4, depPermanent ? 1 : 0);
+                    guest.set32(wholeAddress(to), depFlags);
+                    guest.set32(wholeAddress(to) + 4, depPermanent ? 1 : 0);
                     return 1;
                 }
-                writeDword(wholeAddress(to), mitigations.get(which) ?? 0);
+                guest.set32(wholeAddress(to), mitigations.get(which) ?? 0);
                 return 1;
             },
         },
@@ -1260,11 +1243,11 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const flags = readDword(wholeAddress(from));
+                const flags = guest.u32(wholeAddress(from));
                 if (which === DEP_POLICY)
                 {
                     depFlags |= flags;
-                    depPermanent ||= readDword(wholeAddress(from) + 4) !== 0;
+                    depPermanent ||= guest.u32(wholeAddress(from) + 4) !== 0;
                     return 1;
                 }
                 mitigations.set(which, (mitigations.get(which) ?? 0) | flags);
@@ -1321,11 +1304,11 @@ export function createProcessPolicyFunctions(host){
                 }
                 if (wholeAddress(flags) !== 0)
                 {
-                    writeDword(wholeAddress(flags), depFlags);
+                    guest.set32(wholeAddress(flags), depFlags);
                 }
                 if (wholeAddress(permanent) !== 0)
                 {
-                    writeDword(wholeAddress(permanent), depPermanent ? 1 : 0);
+                    guest.set32(wholeAddress(permanent), depPermanent ? 1 : 0);
                 }
                 return 1;
             },
@@ -1352,7 +1335,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                processInformation.set(wholeAddress(type), host.readMemory(wholeAddress(from),
+                processInformation.set(wholeAddress(type), guest.snapshot(wholeAddress(from),
                     size));
                 return 1;
             },
@@ -1393,7 +1376,7 @@ export function createProcessPolicyFunctions(host){
                         bytes[0] = 1;
                     }
                 }
-                host.writeMemory(wholeAddress(into), bytes);
+                guest.setBytes(wholeAddress(into), bytes);
                 return 1;
             },
         },
@@ -1428,7 +1411,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeQword(wholeAddress(out), cyclesOf(thread));
+                guest.set64(wholeAddress(out), cyclesOf(thread));
                 return 1;
             },
         },
@@ -1449,7 +1432,7 @@ export function createProcessPolicyFunctions(host){
                     return fail(ERROR_INVALID_HANDLE);
                 }
                 const ms = process === SELF ? kernel.processCpuMs() : 0;
-                writeQword(wholeAddress(out), BigInt(Math.round(ms * PROCESSOR.mhz * 1000)));
+                guest.set64(wholeAddress(out), BigInt(Math.round(ms * PROCESSOR.mhz * 1000)));
                 return 1;
             },
         },
@@ -1467,7 +1450,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(wholeAddress(out), handleCount());
+                guest.set32(wholeAddress(out), handleCount());
                 return 1;
             },
         },
@@ -1518,7 +1501,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeDword(wholeAddress(out), (process === SELF ? host.debugged?.() === true
+                guest.set32(wholeAddress(out), (process === SELF ? host.debugged?.() === true
                     : Boolean(process.debugged)) ? 1 : 0);
                 return 1;
             },
@@ -1611,7 +1594,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(wholeAddress(out), event.signalled ? 1 : 0);
+                guest.set32(wholeAddress(out), event.signalled ? 1 : 0);
                 return 1;
             },
         },
@@ -1629,7 +1612,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeQword(wholeAddress(out), BigInt(nodeMask() >>> 0));
+                guest.set64(wholeAddress(out), BigInt(nodeMask() >>> 0));
                 return 1;
             },
         },
@@ -1648,7 +1631,7 @@ export function createProcessPolicyFunctions(host){
                 }
                 const record = new Uint8Array(wide ? 16 : 12);
                 new DataView(record.buffer).setUint32(0, nodeMask(), true);
-                host.writeMemory(wholeAddress(out), record);
+                guest.setBytes(wholeAddress(out), record);
                 return 1;
             },
         },
@@ -1667,7 +1650,7 @@ export function createProcessPolicyFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const known = (processor & 0xff) < processorCount();
-                host.writeMemory(wholeAddress(out), new Uint8Array([known ? 0 : 0xff]));
+                guest.setBytes(wholeAddress(out), new Uint8Array([known ? 0 : 0xff]));
                 return known ? 1 : fail(ERROR_INVALID_PARAMETER);
             },
         },
@@ -1685,10 +1668,10 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const named = host.readMemory(wholeAddress(processor), 4);
+                const named = guest.snapshot(wholeAddress(processor), 4);
                 const group = named[0] | named[1] << 8;
                 const known = group === 0 && named[2] < processorCount();
-                host.writeMemory(wholeAddress(out), known ? new Uint8Array([0, 0])
+                guest.setBytes(wholeAddress(out), known ? new Uint8Array([0, 0])
                     : new Uint8Array([0xff, 0xff]));
                 return known ? 1 : fail(ERROR_INVALID_PARAMETER);
             },
@@ -1706,7 +1689,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(wholeAddress(out), 0);
+                guest.set32(wholeAddress(out), 0);
                 return 1;
             },
         },
@@ -1720,7 +1703,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(wholeAddress(out), FIRMWARE_TYPE_UEFI);
+                guest.set32(wholeAddress(out), FIRMWARE_TYPE_UEFI);
                 return 1;
             },
         },
@@ -1793,7 +1776,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeDword(wholeAddress(out), werFlags);
+                guest.set32(wholeAddress(out), werFlags);
                 return 0;
             },
         },

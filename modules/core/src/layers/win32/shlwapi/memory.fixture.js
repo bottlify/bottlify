@@ -11,6 +11,7 @@
  */
 
 import { createShlwapiFunctions } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /**
@@ -60,6 +61,7 @@ export function shlwapiMachine(extra = {}){
         return text;
     };
     const base = {
+        guest: guestOver(memory),
         readCString,
         readWideString,
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>

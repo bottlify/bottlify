@@ -27,7 +27,6 @@
  * ones where they belong.
  */
 
-import { pointerWidth } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
 /** Field offsets in the thread block, and the size a whole one occupies. */
@@ -368,7 +367,7 @@ export const TLS_SLOTS = 1088;
  *        Guest memory a thread's blocks are taken from and given back to,
  *        `allocate` answering zero when it has no room. Without it they come
  *        from `options.allocate` and are never given back.
- * @param {(address: number, bytes: Uint8Array) => void} options.writeMemory
+ * @param {import('../../../system/port.js').Port} options.guest  the process's memory
  * @param {number} options.processId
  * @param {{ major: number, minor: number, build: number, servicePackMajor?: number,
  *     servicePackMinor?: number, csdVersion?: string }} options.version
@@ -395,7 +394,7 @@ export const TLS_SLOTS = 1088;
  * @returns {any}
  */
 export function createProcessBlocks(options){
-    const { allocate, writeMemory, processId, version, imageBase } = options;
+    const { allocate, guest, processId, version, imageBase } = options;
     const { pointer, teb: tebFields, peb: pebFields, ldr: ldrFields, entry: entryFields,
         params: paramsFields } = blockLayouts(options.pointerSize);
     // A UNICODE_STRING is two 16-bit counts and a pointer, which is aligned:
@@ -411,39 +410,32 @@ export function createProcessBlocks(options){
     const paramsOffset = pointer === 8 ? PARAMS_OFFSET64 : PARAMS_OFFSET;
     const peb = allocate(paramsOffset + paramsFields.SIZE + STRING_ARENA);
     const params = peb + paramsOffset;
-    const write =(/** @type {number} */ at, /** @type {number} */ value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        writeMemory(at, bytes);
-    };
-    /** A pointer-sized field, written whole. @param {number} at @param {number} value */
-    const writePointer = (at, value)=>writeMemory(at, pointerWidth(pointer).bytes(value));
 
-    writeMemory(peb, new Uint8Array(paramsOffset + paramsFields.SIZE + STRING_ARENA));
-    writePointer(peb + pebFields.IMAGE_BASE_ADDRESS, imageBase);
-    writePointer(peb + pebFields.PROCESS_PARAMETERS, params);
+    guest.fill(peb, 0, paramsOffset + paramsFields.SIZE + STRING_ARENA);
+    guest.setPtr(peb + pebFields.IMAGE_BASE_ADDRESS, imageBase);
+    guest.setPtr(peb + pebFields.PROCESS_PARAMETERS, params);
     // Read without a call wherever GetProcessHeap is compiled inline, as
     // NtCurrentTeb()->Peb->ProcessHeap: a null here is a heap nothing can
     // allocate from, and a program that tests the pointer it gets back takes
     // every allocation as out of memory.
-    writePointer(peb + pebFields.PROCESS_HEAP, options.processHeap ?? 0);
-    write(peb + pebFields.OS_MAJOR_VERSION, version.major);
-    write(peb + pebFields.OS_MINOR_VERSION, version.minor);
+    guest.setPtr(peb + pebFields.PROCESS_HEAP, options.processHeap ?? 0);
+    guest.set32(peb + pebFields.OS_MAJOR_VERSION, version.major);
+    guest.set32(peb + pebFields.OS_MINOR_VERSION, version.minor);
     // Two WORDs, written as the DWORD they make up: the build, then the
     // service pack with its major number in the high byte.
-    write(peb + pebFields.OS_BUILD_NUMBER, (version.build & 0xffff
+    guest.set32(peb + pebFields.OS_BUILD_NUMBER, (version.build & 0xffff
         | ((version.servicePackMajor ?? 0) & 0xff) << 24
         | ((version.servicePackMinor ?? 0) & 0xff) << 16) >>> 0);
-    write(peb + pebFields.OS_PLATFORM_ID, 2); // VER_PLATFORM_WIN32_NT
+    guest.set32(peb + pebFields.OS_PLATFORM_ID, 2); // VER_PLATFORM_WIN32_NT
     // Read directly by a runtime sizing its thread pool, without a call.
-    write(peb + pebFields.NUMBER_OF_PROCESSORS, options.processors ?? 1);
+    guest.set32(peb + pebFields.NUMBER_OF_PROCESSORS, options.processors ?? 1);
     // Read straight from the block by code naming its session's objects.
-    write(peb + pebFields.SESSION_ID, INTERACTIVE_SESSION);
+    guest.set32(peb + pebFields.SESSION_ID, INTERACTIVE_SESSION);
     // The loader's lock, which code asking whether its thread is inside a
     // DLL's initialisation reads without a call: its owner against its own id.
     if (options.loaderLock)
     {
-        writePointer(peb + pebFields.LOADER_LOCK, options.loaderLock);
+        guest.setPtr(peb + pebFields.LOADER_LOCK, options.loaderLock);
     }
     // Thirty days in 100-nanosecond units, relative (negative), as the
     // session manager's default sets it; the i386 block only, the x64 one
@@ -451,8 +443,7 @@ export function createProcessBlocks(options){
     if (pointer === 4)
     {
         const timeout = -CRITICAL_SECTION_DAYS * 24n * 3600n * 10_000_000n;
-        write(peb + PEB.CRITICAL_SECTION_TIMEOUT, Number(BigInt.asUintN(32, timeout)));
-        write(peb + PEB.CRITICAL_SECTION_TIMEOUT + 4, Number(BigInt.asUintN(32, timeout >> 32n)));
+        guest.set64(peb + PEB.CRITICAL_SECTION_TIMEOUT, timeout);
     }
 
     // Strings are laid out after the parameter block, in the same allocation.
@@ -467,7 +458,7 @@ export function createProcessBlocks(options){
      */
     const writeUnicodeString = (at, text)=>{
         const bytes = utf16z(text);
-        writeMemory(strings, bytes);
+        guest.setBytes(strings, bytes);
 
         const descriptor = new Uint8Array(stringSize);
         const fields = new DataView(descriptor.buffer);
@@ -476,7 +467,7 @@ export function createProcessBlocks(options){
         fields.setUint16(0, text.length * 2, true);
         fields.setUint16(2, bytes.length, true);
         fields.setUint32(pointer, strings, true);
-        writeMemory(at, descriptor);
+        guest.setBytes(at, descriptor);
         strings += bytes.length + 2 & ~1;
     };
 
@@ -485,16 +476,16 @@ export function createProcessBlocks(options){
     // Empty when there is none: a reader copies it without looking first.
     const csdVersion = version.csdVersion ?? '';
     const csdText = utf16z(csdVersion);
-    writeMemory(peb + pebFields.SIZE, csdText);
-    write(peb + pebFields.CSD_VERSION, (csdVersion.length * 2 | csdText.length << 16) >>> 0);
-    writePointer(peb + pebFields.CSD_VERSION + pointer, peb + pebFields.SIZE);
+    guest.setBytes(peb + pebFields.SIZE, csdText);
+    guest.set32(peb + pebFields.CSD_VERSION, (csdVersion.length * 2 | csdText.length << 16) >>> 0);
+    guest.setPtr(peb + pebFields.CSD_VERSION + pointer, peb + pebFields.SIZE);
 
-    write(params + paramsFields.MAXIMUM_LENGTH, paramsFields.SIZE + STRING_ARENA);
-    write(params + paramsFields.LENGTH, paramsFields.SIZE);
-    write(params + paramsFields.FLAGS, PARAMS_NORMALIZED);
-    writePointer(params + paramsFields.STANDARD_INPUT, standardHandles.input);
-    writePointer(params + paramsFields.STANDARD_OUTPUT, standardHandles.output);
-    writePointer(params + paramsFields.STANDARD_ERROR, standardHandles.error);
+    guest.set32(params + paramsFields.MAXIMUM_LENGTH, paramsFields.SIZE + STRING_ARENA);
+    guest.set32(params + paramsFields.LENGTH, paramsFields.SIZE);
+    guest.set32(params + paramsFields.FLAGS, PARAMS_NORMALIZED);
+    guest.setPtr(params + paramsFields.STANDARD_INPUT, standardHandles.input);
+    guest.setPtr(params + paramsFields.STANDARD_OUTPUT, standardHandles.output);
+    guest.setPtr(params + paramsFields.STANDARD_ERROR, standardHandles.error);
     writeUnicodeString(params + paramsFields.IMAGE_PATH_NAME, imagePath);
     writeUnicodeString(params + paramsFields.COMMAND_LINE, commandLine);
     writeUnicodeString(params + paramsFields.CURRENT_DIRECTORY, currentDirectory);
@@ -504,10 +495,10 @@ export function createProcessBlocks(options){
     // plugin loader enumerating what is already there -- has every right to a
     // real circular list, the way any other process's loader leaves it.
     const ldr = allocate(ldrFields.SIZE);
-    writeMemory(ldr, new Uint8Array(ldrFields.SIZE));
-    writePointer(peb + pebFields.LDR, ldr);
-    write(ldr + ldrFields.LENGTH, ldrFields.SIZE);
-    write(ldr + ldrFields.INITIALIZED, 1);
+    guest.fill(ldr, 0, ldrFields.SIZE);
+    guest.setPtr(peb + pebFields.LDR, ldr);
+    guest.set32(ldr + ldrFields.LENGTH, ldrFields.SIZE);
+    guest.set32(ldr + ldrFields.INITIALIZED, 1);
 
     const loadHead = ldr + ldrFields.IN_LOAD_ORDER_MODULE_LIST;
     const memoryHead = ldr + ldrFields.IN_MEMORY_ORDER_MODULE_LIST;
@@ -517,8 +508,8 @@ export function createProcessBlocks(options){
     // head" never does.
     for (const head of [loadHead, memoryHead, initHead])
     {
-        writePointer(head, head);
-        writePointer(head + pointer, head);
+        guest.setPtr(head, head);
+        guest.setPtr(head + pointer, head);
     }
     /**
      * Each list's nodes after its head, in order: what linking and unlinking
@@ -543,10 +534,10 @@ export function createProcessBlocks(options){
     const insertTail = (head, node)=>{
         const nodes = /** @type {number[]} */ (lists.get(head));
         const tail = nodes.at(-1) ?? head;
-        writePointer(node, head);
-        writePointer(node + pointer, tail);
-        writePointer(tail, node);
-        writePointer(head + pointer, node);
+        guest.setPtr(node, head);
+        guest.setPtr(node + pointer, tail);
+        guest.setPtr(tail, node);
+        guest.setPtr(head + pointer, node);
         nodes.push(node);
     };
 
@@ -564,8 +555,8 @@ export function createProcessBlocks(options){
         }
         const before = at > 0 ? nodes[at - 1] : head;
         const after = at + 1 < nodes.length ? nodes[at + 1] : head;
-        writePointer(before, after);
-        writePointer(after + pointer, before);
+        guest.setPtr(before, after);
+        guest.setPtr(after + pointer, before);
         nodes.splice(at, 1);
     };
 
@@ -578,13 +569,13 @@ export function createProcessBlocks(options){
      */
     const writeEntryString = (descriptorAt, bufferAt, text)=>{
         const bytes = utf16z(text);
-        writeMemory(bufferAt, bytes);
+        guest.setBytes(bufferAt, bytes);
         const descriptor = new Uint8Array(stringSize);
         const fields = new DataView(descriptor.buffer);
         fields.setUint16(0, text.length * 2, true);
         fields.setUint16(2, bytes.length, true);
         fields.setUint32(pointer, bufferAt, true);
-        writeMemory(descriptorAt, descriptor);
+        guest.setBytes(descriptorAt, descriptor);
     };
 
     /**
@@ -611,10 +602,10 @@ export function createProcessBlocks(options){
         {
             freeable.add(entry);
         }
-        writeMemory(entry, new Uint8Array(entryFields.SIZE));
-        writePointer(entry + entryFields.DLL_BASE, module.base);
-        writePointer(entry + entryFields.ENTRY_POINT, module.entryPoint ?? 0);
-        write(entry + entryFields.SIZE_OF_IMAGE, module.size ?? 0);
+        guest.fill(entry, 0, entryFields.SIZE);
+        guest.setPtr(entry + entryFields.DLL_BASE, module.base);
+        guest.setPtr(entry + entryFields.ENTRY_POINT, module.entryPoint ?? 0);
+        guest.set32(entry + entryFields.SIZE_OF_IMAGE, module.size ?? 0);
 
         const fullNameBuffer = entry + entryFields.SIZE;
         const baseNameBuffer = fullNameBuffer + fullName.length * 2 + 2;
@@ -675,9 +666,9 @@ export function createProcessBlocks(options){
      * @param {number} tls @param {ThreadLocal} local @param {number} at
      */
     const copyLocal = (tls, { slot, template, size }, at)=>{
-        writeMemory(at, new Uint8Array(size));
-        writeMemory(at, template);
-        writePointer(tls + (slot >>> 0) * pointer, at);
+        guest.fill(at, 0, size);
+        guest.setBytes(at, template);
+        guest.setPtr(tls + (slot >>> 0) * pointer, at);
     };
 
     return {
@@ -706,7 +697,7 @@ export function createProcessBlocks(options){
             // The i386 entry's field; the x86-64 entry is laid out without it yet.
             if (entry !== undefined && 'TLS_INDEX' in entryFields)
             {
-                writeMemory(entry + entryFields.TLS_INDEX, new Uint8Array([0xff, 0xff]));
+                guest.set16(entry + entryFields.TLS_INDEX, 0xffff);
             }
         },
 
@@ -758,8 +749,8 @@ export function createProcessBlocks(options){
             {
                 return refused();
             }
-            writeMemory(teb, new Uint8Array(tebFields.SIZE));
-            writeMemory(tls, new Uint8Array(TLS_SLOTS * pointer));
+            guest.fill(teb, 0, tebFields.SIZE);
+            guest.fill(tls, 0, TLS_SLOTS * pointer);
             /** @type {Map<number, number>} */
             const copies = new Map();
             for (const local of locals)
@@ -783,29 +774,29 @@ export function createProcessBlocks(options){
             // unwind tables, and the field is zero.
             if (pointer === 4)
             {
-                write(teb + tebFields.EXCEPTION_LIST, END_OF_EXCEPTION_LIST);
+                guest.set32(teb + tebFields.EXCEPTION_LIST, END_OF_EXCEPTION_LIST);
             }
-            writePointer(teb + tebFields.STACK_BASE, stackBase);
-            writePointer(teb + tebFields.STACK_LIMIT, stackLimit);
-            writePointer(teb + tebFields.FIBER_DATA, NO_FIBER);
+            guest.setPtr(teb + tebFields.STACK_BASE, stackBase);
+            guest.setPtr(teb + tebFields.STACK_LIMIT, stackLimit);
+            guest.setPtr(teb + tebFields.FIBER_DATA, NO_FIBER);
             // The whole stack is committed here, so its reservation begins
             // where its limit is.
-            writePointer(teb + tebFields.DEALLOCATION_STACK, stackLimit);
+            guest.setPtr(teb + tebFields.DEALLOCATION_STACK, stackLimit);
             // Programs read this to get the block's own address, because FS
             // cannot be turned into a pointer any other way.
-            writePointer(teb + tebFields.SELF, teb);
-            writePointer(teb + tebFields.PROCESS_ID, processId);
-            writePointer(teb + tebFields.THREAD_ID, id);
-            writePointer(teb + tebFields.TLS_POINTER, tls);
-            writePointer(teb + tebFields.PEB, peb);
+            guest.setPtr(teb + tebFields.SELF, teb);
+            guest.setPtr(teb + tebFields.PROCESS_ID, processId);
+            guest.setPtr(teb + tebFields.THREAD_ID, id);
+            guest.setPtr(teb + tebFields.TLS_POINTER, tls);
+            guest.setPtr(teb + tebFields.PEB, peb);
             // The i386 block's names as Windows makes them before the thread
             // runs; the x64 block keeps these fields zero.
             if (pointer === 4)
             {
-                write(teb + TEB.REAL_CLIENT_ID, processId);
-                write(teb + TEB.REAL_CLIENT_ID + 4, id);
-                write(teb + TEB.STATIC_UNICODE_STRING, STATIC_UNICODE_BYTES << 16);
-                write(teb + TEB.STATIC_UNICODE_STRING + 4, teb + TEB.STATIC_UNICODE_BUFFER);
+                guest.set32(teb + TEB.REAL_CLIENT_ID, processId);
+                guest.set32(teb + TEB.REAL_CLIENT_ID + 4, id);
+                guest.set32(teb + TEB.STATIC_UNICODE_STRING, STATIC_UNICODE_BYTES << 16);
+                guest.set32(teb + TEB.STATIC_UNICODE_STRING + 4, teb + TEB.STATIC_UNICODE_BUFFER);
             }
 
             threadHeld.set(teb, { tls, blocks: [teb, tls], locals: copies });
@@ -863,7 +854,7 @@ export function createProcessBlocks(options){
                     {
                         threadMemory.free(copy);
                         each.locals.delete(slot);
-                        writePointer(each.tls + slot * pointer, 0);
+                        guest.setPtr(each.tls + slot * pointer, 0);
                     }
                     return false;
                 }
@@ -889,7 +880,7 @@ export function createProcessBlocks(options){
                 {
                     held.locals.delete(slot >>> 0);
                     threadMemory.free(at);
-                    writePointer(held.tls + (slot >>> 0) * pointer, 0);
+                    guest.setPtr(held.tls + (slot >>> 0) * pointer, 0);
                 }
             }
         },

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import {
     COUNTERS, CS, createCriticalSections, enterCode, leaveCode, tryEnterCode,
 } from './critical.js';
@@ -76,8 +77,7 @@ function machine(){
     /** @type {any} */
     let current = { id: 7, name: 'main' };
     const sections = createCriticalSections({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         currentThread: ()=>current,
         block: (thread, reason)=>{
             blocked.push({ thread, reason });

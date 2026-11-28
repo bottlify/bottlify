@@ -59,7 +59,7 @@ const MAX_PATH_READ = 0x8000;
 /**
  * @typedef {Object} ChangeHost
  * @property {any} kernel  createEvent, setEvent, resetEvent and the handle table.
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {WatchedVolume} [volume]
@@ -71,6 +71,7 @@ const MAX_PATH_READ = 0x8000;
  * @param {ChangeHost} host
  */
 export function createChangeNotifications(host){
+    const { guest } = host;
     const { kernel } = host;
     const refuse = createRefusals(host);
     const noVolume = refuse('FindFirstChangeNotification', {
@@ -90,28 +91,6 @@ export function createChangeNotifications(host){
     const fail = (code, answer = 0)=>{
         host.setLastError?.(code);
         return answer;
-    };
-
-    /**
-     * A string in guest memory, a unit at a time: a path is short, and a
-     * read that stops at its terminator cannot run into a page past it.
-     *
-     * @param {number} address @param {boolean} wide
-     */
-    const readText = (address, wide)=>{
-        const width = wide ? 2 : 1;
-        let text = '';
-        for (let at = address; text.length < MAX_PATH_READ; at += width)
-        {
-            const unit = host.readMemory(at, width);
-            const code = wide ? unit[0] | unit[1] << 8 : unit[0];
-            if (code === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(code);
-        }
-        return text;
     };
 
     /** @param {number} handle */
@@ -153,7 +132,8 @@ export function createChangeNotifications(host){
             {
                 return noVolume.handler();
             }
-            const path = readText(wholeAddress(pointer), wide).replace(/\//g, '\\');
+            const path = guest.text(wholeAddress(pointer), wide, MAX_PATH_READ * (wide ? 2 : 1))
+                .replace(/\//g, '\\');
             const entry = volume.stat(path);
             if (!entry || !entry.exists)
             {

@@ -111,7 +111,7 @@ test('RtlGetVersion answers each Windows the process block was built for', ()=>{
                 next += size + 15 & ~15;
                 return at;
             },
-            writeMemory: (at, data)=>bytes.set(data, at),
+            guest: guestOver(bytes),
             processId: 0x1234,
             version,
             imageBase: 0x400000,
@@ -416,7 +416,7 @@ test('RtlVerifyVersionInfo compares against the version the process block holds'
             next += size + 15 & ~15;
             return at;
         },
-        writeMemory: (at, data)=>bytes.set(data, at),
+        guest: guestOver(bytes),
         processId: 0x1234,
         version,
         imageBase: 0x400000,

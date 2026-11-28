@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { buildIso } from '../../filesystem/internal/iso/build.js';
@@ -66,17 +67,7 @@ async function setup(){
     /** @type {number[]} */
     const errors = [];
     const files = createFileFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString(address, maxLength){
-            let text = '';
-            for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[address + at]);
-            }
-            return text;
-        },
-        readWideString: ()=>'',
+        guest: guestOver(bytes),
         files: /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') })),
         setLastError: code=>{
             errors.push(code);

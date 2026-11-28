@@ -55,43 +55,41 @@ const LONGEST_NAME = 0xfffc;
  * character's boundary is STATUS_DATATYPE_MISALIGNMENT. A pointer it cannot
  * reach faults, which a native call answers as STATUS_ACCESS_VIOLATION.
  *
- * @param {(address: number, length: number) => Uint8Array} readMemory
+ * A pointer field is read by its low dword, where it lies at either width.
+ *
+ * @param {import('../common/guest.js').Guest} port
  * @param {number} pointer
  * @param {4 | 8} [pointerSize]
  * @returns {ObjectAttributes | null}
  */
-export function readObjectAttributes(readMemory, pointer, pointerSize = 4){
+export function readObjectAttributes(port, pointer, pointerSize = 4){
     if ((pointer >>> 0) === 0)
     {
         return null;
     }
     const size = pointerSize === 8 ? 48 : 24;
-    const bytes = readMemory(wholeAddress(pointer), size);
-    const view = new DataView(bytes.buffer, bytes.byteOffset, size);
-    /** @param {number} at */
-    const word = at=>(pointerSize === 8 ? Number(view.getBigUint64(at, true) & 0xffffffffn)
-        : view.getUint32(at, true));
+    const base = wholeAddress(pointer);
     const p = pointerSize;
+    // The structure is checked whole before a field is taken, as the kernel probes it.
+    port.view(base, size);
     const read = {
-        root: word(p),
+        root: port.u32(base + p),
         name: /** @type {string | null} */ (null),
-        attributes: view.getUint32(p * 3, true),
-        security: word(p * 4),
+        attributes: port.u32(base + p * 3),
+        security: port.u32(base + p * 4),
         invalid: 0,
     };
-    if (view.getUint32(0, true) !== size)
+    if (port.u32(base) !== size)
     {
         read.invalid = STATUS_INVALID_PARAMETER;
         return read;
     }
-    const string = word(p * 2);
+    const string = port.u32(base + p * 2);
     if (string !== 0)
     {
-        const head = readMemory(string, pointerSize === 8 ? 16 : 8);
-        const length = head[0] | head[1] << 8;
-        const buffer = new DataView(head.buffer, head.byteOffset, head.length);
-        const at = pointerSize === 8 ? Number(buffer.getBigUint64(8, true) & 0xffffffffn)
-            : buffer.getUint32(4, true);
+        port.view(string, pointerSize === 8 ? 16 : 8);
+        const length = port.u16(string);
+        const at = port.u32(string + p);
         if ((length & 1) !== 0 || length > LONGEST_NAME)
         {
             read.invalid = STATUS_OBJECT_NAME_INVALID;
@@ -103,13 +101,7 @@ export function readObjectAttributes(readMemory, pointer, pointerSize = 4){
             return read;
         }
         // An empty name may have no buffer at all: nothing is read of it.
-        const units = length === 0 ? new Uint8Array(0) : readMemory(at, length);
-        let name = '';
-        for (let unit = 0; unit + 1 < units.length; unit += 2)
-        {
-            name += String.fromCharCode(units[unit] | units[unit + 1] << 8);
-        }
-        read.name = name;
+        read.name = length === 0 ? '' : port.text(at, true, length, true);
     }
     return read;
 }

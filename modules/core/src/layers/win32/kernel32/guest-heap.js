@@ -47,6 +47,7 @@
  */
 
 import { assembleTo } from './code-arena.js';
+import { imm32 } from '../../../system/x86.js';
 
 /** The largest block the guest's own path hands out. */
 export const SMALL_LIMIT = 1024;
@@ -757,8 +758,6 @@ export function createGuestHeap({ allocator, arena, memory, alignment = 8 }){
  * @property {number} classMap   A size's class, at its size in eighths rounded up.
  */
 
-/** @param {number} value @returns {number[]} */
-const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 const JZ = [0x0f, 0x84];
 const JNZ = [0x0f, 0x85];
@@ -781,11 +780,11 @@ function locate(p){
     return [
         [0x56],                                              // push esi
         [0x89, 0xc6],                                        // mov esi, eax
-        [0x8d, 0x88, ...dword(-p.dirBase)],                  // lea ecx, [eax - dirBase]
-        [0x81, 0xf9, ...dword(p.dirSpan)],                   // cmp ecx, dirSpan
+        [0x8d, 0x88, ...imm32(-p.dirBase)],                  // lea ecx, [eax - dirBase]
+        [0x81, 0xf9, ...imm32(p.dirSpan)],                   // cmp ecx, dirSpan
         { jump: JAE, to: 'bad' },
         [0xc1, 0xe9, SLAB_SHIFT],                            // shr ecx, 14
-        [0x8b, 0x0c, 0x8d, ...dword(p.directory)],           // mov ecx, [directory + ecx*4]
+        [0x8b, 0x0c, 0x8d, ...imm32(p.directory)],           // mov ecx, [directory + ecx*4]
         [0x85, 0xc9],                                        // test ecx, ecx
         { jump: JZ, to: 'bad' },
         [0x2b, 0x41, RECORD.BASE],                           // sub eax, [ecx + base]
@@ -819,10 +818,10 @@ function allocBody(p, zero, pop){
         [0x89, 0xce],                                        // mov esi, ecx
         [0x83, 0xc1, 0x07],                                  // add ecx, 7
         [0xc1, 0xe9, 0x03],                                  // shr ecx, 3
-        [0x0f, 0xb6, 0x81, ...dword(p.classMap)],            // movzx eax, byte [classMap + ecx]
+        [0x0f, 0xb6, 0x81, ...imm32(p.classMap)],            // movzx eax, byte [classMap + ecx]
         [0xc1, 0xe0, CONTROL.CLASS_SHIFT],                   // shl eax, 10
         [0x8d, 0x44, 0x02, CONTROL.CLASSES],                 // lea eax, [edx + eax + classes]
-        [0xb9, ...dword(1)],                                 // mov ecx, 1
+        [0xb9, ...imm32(1)],                                 // mov ecx, 1
         [0x87, 0x0a],                                        // xchg [edx], ecx: the lock
         [0x85, 0xc9],                                        // test ecx, ecx
         { jump: JNZ, to: 'busy' },
@@ -900,14 +899,14 @@ export function heapAllocCode(p, at, trap){
     return assembleTo([
         [0x8b, 0x54, 0x24, 0x04],                            // mov edx, [esp + 4]
         [0x8b, 0x4c, 0x24, 0x0c],                            // mov ecx, [esp + 12]
-        [0xf7, 0x44, 0x24, 0x08, ...dword(~ALLOC_FLAGS)],    // test dword [esp + 8], ~flags
+        [0xf7, 0x44, 0x24, 0x08, ...imm32(~ALLOC_FLAGS)],    // test dword [esp + 8], ~flags
         { jump: JNZ, to: 'slow' },
-        [0x81, 0xf9, ...dword(SMALL_LIMIT)],                 // cmp ecx, 1024
+        [0x81, 0xf9, ...imm32(SMALL_LIMIT)],                 // cmp ecx, 1024
         { jump: JA, to: 'slow' },
-        [0x8d, 0x82, ...dword(-p.dirBase)],                  // lea eax, [edx - dirBase]
-        [0x3d, ...dword(p.dirSpan - CONTROL.SIZE)],          // cmp eax, dirSpan - control
+        [0x8d, 0x82, ...imm32(-p.dirBase)],                  // lea eax, [edx - dirBase]
+        [0x3d, ...imm32(p.dirSpan - CONTROL.SIZE)],          // cmp eax, dirSpan - control
         { jump: JA, to: 'slow' },
-        [0x81, 0x7a, CONTROL.MAGIC, ...dword(HEAP_MAGIC)],   // cmp dword [edx + 4], 'HEAP'
+        [0x81, 0x7a, CONTROL.MAGIC, ...imm32(HEAP_MAGIC)],   // cmp dword [edx + 4], 'HEAP'
         { jump: JNZ, to: 'slow' },
         ...allocBody(p, 'flag', 12),
     ], at, trap);
@@ -921,9 +920,9 @@ export function heapAllocCode(p, at, trap){
 export function mallocCode(p, at, trap, heap){
     return assembleTo([
         [0x8b, 0x4c, 0x24, 0x04],                            // mov ecx, [esp + 4]
-        [0x81, 0xf9, ...dword(SMALL_LIMIT)],                 // cmp ecx, 1024
+        [0x81, 0xf9, ...imm32(SMALL_LIMIT)],                 // cmp ecx, 1024
         { jump: JA, to: 'slow' },
-        [0xba, ...dword(heap)],                              // mov edx, heap
+        [0xba, ...imm32(heap)],                              // mov edx, heap
         ...allocBody(p, 'never', 0),
     ], at, trap);
 }
@@ -939,10 +938,10 @@ export function callocCode(p, at, trap, heap){
         [0x8b, 0x44, 0x24, 0x04],                            // mov eax, [esp + 4]
         [0xf7, 0x64, 0x24, 0x08],                            // mul dword [esp + 8]
         { jump: JB, to: 'slow' },                            // jc: past 32 bits
-        [0x3d, ...dword(SMALL_LIMIT)],                       // cmp eax, 1024
+        [0x3d, ...imm32(SMALL_LIMIT)],                       // cmp eax, 1024
         { jump: JA, to: 'slow' },
         [0x89, 0xc1],                                        // mov ecx, eax
-        [0xba, ...dword(heap)],                              // mov edx, heap
+        [0xba, ...imm32(heap)],                              // mov edx, heap
         ...allocBody(p, 'always', 0),
     ], at, trap);
 }
@@ -961,7 +960,7 @@ function freeBody(pop, answer){
     const ret = pop === 0 ? [0xc3] : [0xc2, pop, 0];
     return [
         [0x8d, 0x54, 0x51, RECORD.SIZES],                    // lea edx, [ecx + edx*2 + sizes]
-        [0xb8, ...dword(1)],                                 // mov eax, 1
+        [0xb8, ...imm32(1)],                                 // mov eax, 1
         [0x87, 0x03],                                        // xchg [ebx], eax: the lock
         [0x85, 0xc0],                                        // test eax, eax
         { jump: JNZ, to: 'held' },
@@ -982,7 +981,7 @@ function freeBody(pop, answer){
         [0x5b],                                              // pop ebx
         [0x5e],                                              // pop esi
         'done',
-        ...answer ? [[0xb8, ...dword(1)]] : [],              // mov eax, 1
+        ...answer ? [[0xb8, ...imm32(1)]] : [],              // mov eax, 1
         ret,
         'unlock',
         [0xf0, 0x83, 0x23, 0x00],                            // lock and dword [ebx], 0
@@ -1138,7 +1137,7 @@ function resizeBody(pop, zeroFlag){
  */
 export function heapReAllocCode(p, at, trap){
     return assembleTo([
-        [0xf7, 0x44, 0x24, 0x08, ...dword(~REALLOC_FLAGS)],  // test dword [esp + 8], ~flags
+        [0xf7, 0x44, 0x24, 0x08, ...imm32(~REALLOC_FLAGS)],  // test dword [esp + 8], ~flags
         { jump: JNZ, to: 'slow' },
         [0x8b, 0x44, 0x24, 0x0c],                            // mov eax, [esp + 12]
         ...locate(p),
@@ -1210,10 +1209,10 @@ export function globalAllocCode(at, trap, heap, alloc){
         0xc1, 0xe9, 0x03,                                    // 20: shr ecx, 3
         0x50,                                                // 23: push eax
         0x51,                                                // 24: push ecx
-        0x68, ...dword(heap),                                // 25: push heap
-        0xe8, ...dword(alloc - (at + 35)),                   // 30: call alloc
+        0x68, ...imm32(heap),                                // 25: push heap
+        0xe8, ...imm32(alloc - (at + 35)),                   // 30: call alloc
         0xc2, 0x08, 0x00,                                    // 35: ret 8
-        0xe9, ...dword(trap - (at + slow + 5)),              // 38: jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),              // 38: jmp trap
     ]);
 }
 
@@ -1256,12 +1255,12 @@ export function globalFreeCode(at, trap, heap, free){
         0x75, slow - 12,                                     // 10: jnz slow
         0x50,                                                // 12: push eax
         0x6a, 0x00,                                          // 13: push 0
-        0x68, ...dword(heap),                                // 15: push heap
-        0xe8, ...dword(free - (at + 25)),                    // 20: call free
+        0x68, ...imm32(heap),                                // 15: push heap
+        0xe8, ...imm32(free - (at + 25)),                    // 20: call free
         0x85, 0xc0,                                          // 25: test eax, eax
         0x74, slow - 29,                                     // 27: jz slow
         0x31, 0xc0,                                          // 29: xor eax, eax
         0xc2, 0x04, 0x00,                                    // 31: ret 4
-        0xe9, ...dword(trap - (at + slow + 5)),              // 34: jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),              // 34: jmp trap
     ]);
 }

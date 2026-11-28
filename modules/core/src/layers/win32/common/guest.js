@@ -30,12 +30,17 @@ import { createPort } from '../../../system/port.js';
  * What the view is made over: the memory layer's api, or its accessors.
  *
  * @typedef {import('../../../system/port.js').PortMemory & {
- *     readCString: (address: number, limit?: number) => string,
- *     readWideString: (address: number, limit?: number) => string }} GuestMemory
+ *     scanCString: (address: number, limit?: number) => { index: number },
+ *     scanWideString: (address: number, limit?: number) => number }} GuestMemory
  */
 
 /**
  * @typedef {Object} GuestText
+ * @property {(address: number, wide: boolean, limit?: number) => Uint8Array} stringBytes
+ *     A string's bytes before its terminator, or its first `limit` bytes (a
+ *     whole number of units) where none comes first, in place: read before
+ *     anything else runs, as `view` is. What `text` decodes, for a caller
+ *     that decodes in a page of its own.
  * @property {(address: number, wide: boolean, limit?: number, counted?: boolean) => string} text
  *     A string in the ANSI page or, `wide`, in UTF-16: up to its terminator
  *     or `limit` bytes (not units), whichever comes first; `counted`, the
@@ -90,9 +95,14 @@ function unitBytes(text, count){
     return units.subarray(0, (count + 1) * 2);
 }
 
+/** Units decoded at once: few enough for `String.fromCharCode`'s arguments. */
+const TEXT_CHUNK = 4096;
+/** Units put together where the bytes are not on a unit's boundary. */
+const unitScratch = new Uint16Array(TEXT_CHUNK);
+
 /**
- * Bytes as text of a width: the ANSI page's, or UTF-16 unit for unit, as the
- * memory layer reads a terminated one (half a surrogate pair is a unit).
+ * Bytes as text of a width: the ANSI page's, or UTF-16 unit for unit (half a
+ * surrogate pair is a unit of a Windows string, which a decoder would replace).
  *
  * @param {Uint8Array} bytes @param {boolean} wide
  */
@@ -101,10 +111,22 @@ function decode(bytes, wide){
     {
         return decodeAnsi(bytes);
     }
+    const count = bytes.length >> 1;
+    const aligned = (bytes.byteOffset & 1) === 0
+        ? new Uint16Array(bytes.buffer, bytes.byteOffset, count) : null;
     let text = '';
-    for (let at = 0; at + 1 < bytes.length; at += 2)
+    for (let at = 0; at < count; at += TEXT_CHUNK)
     {
-        text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
+        const end = Math.min(count, at + TEXT_CHUNK);
+        if (!aligned)
+        {
+            for (let i = at; i < end; i++)
+            {
+                unitScratch[i - at] = bytes[i * 2] | bytes[i * 2 + 1] << 8;
+            }
+        }
+        text += String.fromCharCode.apply(null, /** @type {any} */ (aligned
+            ? aligned.subarray(at, end) : unitScratch.subarray(0, end - at)));
     }
     return text;
 }
@@ -119,26 +141,32 @@ const unterminated = e=>/** @type {{ code?: unknown }} */ (e)?.code === 'UNTERMI
  */
 export function createGuest(memory, pointerSize = 4){
     const { writeU8, writeBytes } = memory;
-    /** @type {GuestText['text']} */
-    const text = (address, wide, limit, counted = false)=>{
+    /** @type {GuestText['stringBytes']} */
+    const stringBytes = (address, wide, limit = wide ? 8192 : 4096)=>{
         // A whole number of units: a wide string's odd last byte is no unit.
-        const span = wide ? /** @type {number} */ (limit) & ~1 : /** @type {number} */ (limit);
-        if (counted)
-        {
-            return span > 0 ? decode(memory.window(address, span), wide) : '';
-        }
+        const most = wide ? /** @type {number} */ (limit) & ~1 : /** @type {number} */ (limit);
+        let length = most;
         try
         {
-            return wide ? memory.readWideString(address, limit)
-                : memory.readCString(address, limit);
+            length = wide ? memory.scanWideString(address, limit) * 2
+                : memory.scanCString(address, limit).index;
         }
         catch (e){
             if (!unterminated(e))
             {
                 throw e;
             }
-            return decode(memory.window(address, span), wide);
         }
+        return memory.window(address, length);
+    };
+    /** @type {GuestText['text']} */
+    const text = (address, wide, limit, counted = false)=>{
+        if (!counted)
+        {
+            return decode(stringBytes(address, wide, limit), wide);
+        }
+        const span = wide ? /** @type {number} */ (limit) & ~1 : /** @type {number} */ (limit);
+        return span > 0 ? decode(memory.window(address, span), wide) : '';
     };
     /** @type {GuestText['setText']} */
     const setText = (address, value, wide, room = Infinity)=>{
@@ -161,6 +189,7 @@ export function createGuest(memory, pointerSize = 4){
     /** @type {Guest} */
     const guest = {
         ...createPort(memory, pointerSize),
+        stringBytes,
         text,
         setText,
         cstr: (address, limit)=>text(address, false, limit),

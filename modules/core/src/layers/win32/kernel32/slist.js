@@ -31,8 +31,7 @@ const HEADER = Object.freeze({
 
 /**
  * @typedef {Object} SListHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, expected: bigint, value: bigint) => bigint} [compareExchangeU64]
  *           A quadword swapped only if it holds `expected`, indivisible against
  *           the guest's threads on the process's other executors; answers what it held.
@@ -56,13 +55,11 @@ const FAST_PUSH_LENGTH = 9;
  * @param {SListHost} host
  */
 export function createSListFunctions(host){
-    /** @param {number} address */
-    const read32 = address=>new DataView(host.readMemory(address, 4).buffer)
-        .getUint32(0, true);
+    const { guest } = host;
 
     /** @param {number} header */
     const readHeader = header=>{
-        const view = new DataView(host.readMemory(header, HEADER.SIZE).buffer);
+        const view = new DataView(guest.snapshot(header, HEADER.SIZE).buffer);
         return {
             next: view.getUint32(HEADER.NEXT, true),
             depth: view.getUint16(HEADER.DEPTH, true),
@@ -80,14 +77,7 @@ export function createSListFunctions(host){
         view.setUint32(HEADER.NEXT, next >>> 0, true);
         view.setUint16(HEADER.DEPTH, depth & 0xffff, true);
         view.setUint16(HEADER.SEQUENCE, sequence & 0xffff, true);
-        host.writeMemory(header, bytes);
-    };
-
-    /** @param {number} address @param {number} value */
-    const write32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
+        guest.setBytes(header, bytes);
     };
 
     /**
@@ -103,7 +93,7 @@ export function createSListFunctions(host){
     const change = (header, step)=>{
         for (;;)
         {
-            const view = new DataView(host.readMemory(header, HEADER.SIZE).buffer);
+            const view = new DataView(guest.snapshot(header, HEADER.SIZE).buffer);
             const was = view.getBigUint64(0, true);
             const { header: next, answer } = step({
                 next: view.getUint32(HEADER.NEXT, true),
@@ -136,7 +126,7 @@ export function createSListFunctions(host){
      * @param {number} header @param {number} first @param {number} last @param {number} count
      */
     const pushList = (header, first, last, count)=>change(header, now=>{
-        write32(last, now.next);
+        guest.set32(last, now.next);
         return { header: [first, now.depth + count, now.sequence + 1], answer: now.next };
     });
 
@@ -172,7 +162,7 @@ export function createSListFunctions(host){
                 });
                 fastPush = (host.allocateCode ?? host.allocate)(FAST_PUSH_LENGTH);
                 const relative = (trap - (fastPush + FAST_PUSH_LENGTH)) | 0;
-                host.writeMemory(fastPush, new Uint8Array([
+                guest.setBytes(fastPush, new Uint8Array([
                     0x58, 0x52, 0x51, 0x50, 0xe9,
                     relative & 0xff, relative >>> 8 & 0xff,
                     relative >>> 16 & 0xff, relative >>> 24 & 0xff,
@@ -188,7 +178,7 @@ export function createSListFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([header])=>{
-                host.writeMemory(wholeAddress(header), new Uint8Array(HEADER.SIZE));
+                guest.setBytes(wholeAddress(header), new Uint8Array(HEADER.SIZE));
                 return 0;
             },
         },
@@ -233,7 +223,7 @@ export function createSListFunctions(host){
             /** @param {number[]} args */
             handler: ([header])=>change(wholeAddress(header), now=>(now.next === 0
                 ? { answer: 0 }
-                : { header: [read32(now.next), now.depth - 1, now.sequence + 1],
+                : { header: [guest.u32(now.next), now.depth - 1, now.sequence + 1],
                     answer: now.next })),
         },
 

@@ -53,10 +53,7 @@ const MAX_NAME = 260;
 
 /**
  * @typedef {Object} ResourceHost
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} [readWideString]
- *           For the W calls' names. Absent, a W call finds by integer
- *           identifier alone.
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError
  * @property {(instance: number, type: number | string, name: number | string,
  *            language?: number | null) => { rva: number, size: number } | null} findResource
@@ -76,15 +73,13 @@ const MAX_NAME = 260;
  *           after the first because the bridge has let the call go by then.
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
- * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
- *           Where a string name is put for EnumResourceNames' callback, which
- *           takes it as a pointer. Absent, only integer names are handed over.
  */
 
 /**
  * @param {ResourceHost} host
  */
 export function createResourceFunctions(host){
+    const { guest } = host;
     /**
      * Everything FindResource hands out, by the number the guest holds.
      *
@@ -115,14 +110,7 @@ export function createResourceFunctions(host){
         {
             return raw;
         }
-        if (wide && !host.readWideString)
-        {
-            return null;
-        }
-        const text = wide
-            ? /** @type {NonNullable<typeof host.readWideString>} */ (host.readWideString)(
-                raw, MAX_NAME)
-            : host.readCString(raw, MAX_NAME);
+        const text = guest.text(raw, wide, MAX_NAME);
         const numbered = /^#(\d+)$/.exec(text);
         if (numbered)
         {
@@ -277,13 +265,13 @@ export function createResourceFunctions(host){
             let pointer = 0;
             if (typeof key === 'string')
             {
-                if (!host.allocate || !host.writeMemory)
+                if (!host.allocate)
                 {
                     return next(at + 1);
                 }
                 const bytes = encodeName(key, wide);
                 pointer = host.allocate(bytes.length);
-                host.writeMemory(pointer, bytes);
+                guest.setBytes(pointer, bytes);
             }
             const answer = call(callback >>> 0, argsOf(pointer || Number(key)), thread);
             /** @param {number} went */

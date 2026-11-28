@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { THREAD_INFO, createThreadInfoFunctions } from './thread-info.js';
 import { testProcessors } from '../kernel.fixture.js';
 import { TEB } from './teb.js';
@@ -37,13 +38,6 @@ const CHILD_LIMITED = 0x4c;
 function setup({ processors: count = 4, onChildThread } = {}){
     const bytes = new Uint8Array(0x4000);
     const view = new DataView(bytes.buffer);
-    /** @param {number} address @param {number} length */
-    const check = (address, length)=>{
-        if (address < 0x1000 || address + length > bytes.length)
-        {
-            throw new Error(`unmapped ${address}`);
-        }
-    };
     const self = { id: 0x104, tebAddress: 0x3000, state: 'running', priority: 0 };
     const other = { id: 0x108, tebAddress: 0, state: 'ready', priority: 2 };
     view.setUint32(self.tebAddress + TEB.PROCESS_ID, 0x2a4, true);
@@ -70,14 +64,8 @@ function setup({ processors: count = 4, onChildThread } = {}){
     const fns = /** @type {Record<string, any>} */ (createThreadInfoFunctions({
         kernel,
         processors,
-        readMemory: (address, length)=>{
-            check(address, length);
-            return bytes.slice(address, address + length);
-        },
-        writeMemory: (address, data)=>{
-            check(address, data.length);
-            bytes.set(data, address);
-        },
+        // Nothing below 0x1000 is mapped.
+        guest: guestOver(bytes, 4, [], 0x1000),
         currentThread: ()=>self,
         park: ()=>'parked',
         setLastError: code=>errors.push(code),

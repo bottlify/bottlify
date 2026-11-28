@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { recordingGuest } from '../common/guest.fixture.js';
 import test from 'node:test';
 
 import {
@@ -22,8 +23,10 @@ const TEB_AT = 0x7ffd0000;
 const ERROR_INVALID_PARAMETER = 87;
 
 function setup(){
-    /** @type {Map<number, number>} */
-    const words = new Map();
+    // The guest's memory, a word at a time as the test reads it.
+    const { guest } = recordingGuest();
+    const words = { get: (/** @type {number} */ at)=>guest.u32(at),
+        set: (/** @type {number} */ at, /** @type {number} */ value)=>guest.set32(at, value) };
     let heap = 0x00900000;
     /** @type {number[]} */
     const errors = [];
@@ -35,10 +38,7 @@ function setup(){
     const threads = { running: 'caller', switching: false, on: /** @type {unknown[]} */ ([]) };
     const storage = createFiberLocalStorage({
         callerThread: ()=>threads.running,
-        readPointer: at=>words.get(at) ?? 0,
-        writePointer: (at, value)=>{
-            words.set(at, value);
-        },
+        guest,
         teb: ()=>TEB_AT,
         allocate: bytes=>{
             const at = heap;

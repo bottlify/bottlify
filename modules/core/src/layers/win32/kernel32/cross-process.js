@@ -82,8 +82,7 @@ const CROSS_CALLS = new Set([
  *           the ntdll calls of CROSS_CALLS.
  * @property {(bytes: number) => number} allocate  Scratch in the child's memory; 0 for none.
  * @property {(address: number) => void} free
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../../../system/port.js').Port} guest  the child's memory
  */
 
 /**
@@ -150,7 +149,7 @@ export function serveCall(request, host){
             }
             const bytes = 'out' in arg ? new Uint8Array(arg.out >>> 0)
                 : 'in' in arg ? arg.in : arg.inout;
-            host.writeMemory(at, bytes);
+            host.guest.setBytes(at, bytes);
             values.push(at);
             places.push('in' in arg ? null : at);
             at += (bytes.length + 3) & ~3;
@@ -168,7 +167,7 @@ export function serveCall(request, host){
             const place = places[index];
             if (place !== null)
             {
-                outs[index] = host.readMemory(place, size(arg));
+                outs[index] = host.guest.snapshot(place, size(arg));
             }
         });
         return { result: result >>> 0, error, outs };
@@ -195,15 +194,14 @@ export function serveCall(request, host){
  * @param {CrossAnswer} answer
  * @param {(number | null)[]} into  The parent's address for each argument's
  *        bytes, null where none goes back.
- * @param {{ writeMemory: (address: number, bytes: Uint8Array) => void,
- *     setLastError: (code: number) => void }} host
+ * @param {{ guest: import('../../../system/port.js').Port, setLastError: (code: number) => void }} host
  */
 export function takeAnswer(answer, into, host){
     answer.outs.forEach((bytes, index)=>{
         const address = into[index];
         if (bytes && address !== null && address !== undefined && address !== 0)
         {
-            host.writeMemory(wholeAddress(address), bytes);
+            host.guest.setBytes(wholeAddress(address), bytes);
         }
     });
     if (answer.error !== null)
@@ -219,7 +217,7 @@ const ERROR_ACCESS_DENIED = 5;
 /**
  * @typedef {Object} AskHost
  * @property {(record: any, call: CrossCall) => Promise<CrossAnswer | null> | null} [askChild]
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../../../system/port.js').Port} guest
  * @property {() => any} currentThread
  * @property {(thread: any, code: number) => void} setLastErrorFor
  */
@@ -248,7 +246,7 @@ export function askChild(host, record, call, into, adopt){
     return asked.then(given=>{
         const answer = given ?? { result: 0, error: ERROR_ACCESS_DENIED, outs: [] };
         const result = takeAnswer(answer, into, {
-            writeMemory: host.writeMemory,
+            guest: host.guest,
             setLastError: code=>host.setLastErrorFor(thread, code),
         });
         return adopt ? adopt(answer, result) >>> 0 : result;

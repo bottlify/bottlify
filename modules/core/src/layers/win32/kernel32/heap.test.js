@@ -8,6 +8,8 @@ import { imageHeaders } from './image-protection.fixture.js';
 import { createWriteClock } from '../../cpu/internal/write-clock.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { accessorsOver } from '../common/guest.fixture.js';
+import { createGuest } from '../common/guest.js';
 import {
     GUARD_PAGES, IMAGE_MAPPED, RELEASE_PART, TABLES, arenaRegion, createAddressIndex,
     createHeapAllocator, createHeapFunctions,
@@ -61,10 +63,42 @@ const RESERVING_ARENA = { base: GRANULARITY, size: 4 * GRANULARITY };
  * It is split by how they got there: `copied` came through a buffer built on
  * the host, `filled` went into the guest's own memory in place.
  */
-function fakeHost(arena = ARENA){
-    const bytes = new Uint8Array(arena.base + arena.size);
+function fakeHost(arena = ARENA, size = arena.base + arena.size, pointerSize = /** @type {4 | 8} */ (4)){
+    const bytes = new Uint8Array(size);
     let copied = 0;
     let filled = 0;
+    const memory = accessorsOver(bytes);
+    /** @type {(address: number, length: number) => void} what a test is told of each write */
+    let told = ()=>{};
+    /** @param {number} address @param {number} length  a write carried across from the host */
+    const copy = (address, length)=>{
+        copied += length;
+        told(address, length);
+    };
+    const guest = createGuest({
+        ...memory,
+        writeU8: (address, value)=>{
+            copy(address, 1);
+            memory.writeU8(address, value);
+        },
+        writeU16: (address, value)=>{
+            copy(address, 2);
+            memory.writeU16(address, value);
+        },
+        writeU32: (address, value)=>{
+            copy(address, 4);
+            memory.writeU32(address, value);
+        },
+        writeBytes: (address, data)=>{
+            copy(address, data.length);
+            memory.writeBytes(address, data);
+        },
+        fillBytes: (address, value, length)=>{
+            filled += length;
+            told(address, length);
+            memory.fillBytes(address, value, length);
+        },
+    }, pointerSize);
 
     return {
         bytes,
@@ -81,21 +115,23 @@ function fakeHost(arena = ARENA){
         dirty(address, length){
             bytes.fill(0xaa, address, address + length);
         },
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
+        guest,
         setLastError: ()=>{},
-        /** @param {number} address @param {Uint8Array} data */
+        /**
+         * A test's bytes put in memory as the program's, no write of the host's.
+         *
+         * @param {number} address @param {Uint8Array} data
+         */
         writeMemory(address, data){
-            copied += data.length;
-            for (let i = 0; i < data.length; i++)
-            {
-                bytes[address + i] = data[i];
-            }
+            bytes.set(data, address);
         },
-        /** @param {number} address @param {number} value @param {number} length */
-        fillMemory(address, value, length){
-            filled += length;
-            bytes.fill(value, address, address + length);
+        /**
+         * What each host write reaches, told as it is made, as cork's watch is.
+         *
+         * @param {(address: number, length: number) => void} tell
+         */
+        onWrite(tell){
+            told = tell;
         },
     };
 }
@@ -112,9 +148,11 @@ function setup(arena = ARENA){
  *
  * @param {{ base: number, size: number, kind?: string }[]} regions
  */
-function regionHost(regions){
+function regionHost(regions, pointerSize = /** @type {4 | 8} */ (4)){
+    // Memory to the end of the last span: an image's headers are read where it lies.
     return {
-        ...fakeHost(),
+        ...fakeHost(ARENA, Math.max(ARENA.base + ARENA.size,
+            ...regions.map(({ base, size })=>base + size)), pointerSize),
         /** @param {number} address */
         regionAt: address=>
             regions.find(region=>address >= region.base && address < region.base + region.size)
@@ -1328,10 +1366,7 @@ test('a loaded image answers each section\'s protection, and keeps what VirtualP
         const headers = imageHeaders(0x5000, [[0x1000, 0x1000, 0x60000020],
             [0x3000, 0x1800, 0xc0000040]]);
         const host = regionHost([{ base, size: 0x5000, kind: 'image' }]);
-        const read = host.readMemory;
-        host.readMemory = (/** @type {number} */ at, /** @type {number} */ length)=>(
-            at >= base && at < base + 0x1000 ? headers.slice(at - base, at - base + length)
-                : read(at, length));
+        host.bytes.set(headers.subarray(0, 0x1000), base);
         const fns = createHeapFunctions(host);
         const buffer = host.arena.base;
         const view = new DataView(host.bytes.buffer);
@@ -1465,7 +1500,7 @@ test('a 64-bit VirtualQuery past 4 GiB answers whole addresses, its walk reachin
         const regions = [{ base: 0x10000, size: 0x1000 },
             { base: 0x40000000, size: 0x20000, kind: 'reserved' },
             { base: 0x140000000, size: 0x20000, kind: 'image' }];
-        const host = { ...regionHost(regions), pointerSize: 8,
+        const host = { ...regionHost(regions, 8), pointerSize: 8,
             mappedTop: ()=>0x140020000 };
         const fns = createHeapFunctions(host);
         const buffer = host.arena.base;
@@ -2191,7 +2226,7 @@ test('GetWriteWatch in a 64-bit process writes its PVOID array and ULONG_PTR cou
     // both starts as 0xAA, so a dword write leaves the upper halves as garbage a collector reads
     // as addresses and as a count (the Boehm collector Unity's Mono builds on watches its heap).
     const MEM_WRITE_WATCH = 0x200000;
-    const host = { ...fakeHost(RESERVING_ARENA), pointerSize: 8, setLastError: ()=>{},
+    const host = { ...fakeHost(RESERVING_ARENA, undefined, 8), pointerSize: 8, setLastError: ()=>{},
         watchWrites: ()=>({ take: (/** @type {number} */ address)=>[(address >>> 12) + 1] }) };
     const fns = createHeapFunctions(host);
     const view = new DataView(host.bytes.buffer);
@@ -2214,7 +2249,7 @@ test('a 64-bit process\'s SIZE_T past 4 GiB is refused whole, not taken by its l
     // VirtualAlloc(4 GiB + 64 KiB) was a 64 KiB reservation, HeapAlloc of 4 GiB + 16 a block of 16.
     /** @type {number[]} */
     const errors = [];
-    const host = { ...fakeHost(RESERVING_ARENA), pointerSize: 8,
+    const host = { ...fakeHost(RESERVING_ARENA, undefined, 8), pointerSize: 8,
         setLastError: (/** @type {number} */ code)=>errors.push(code) };
     const fns = createHeapFunctions(host);
     /** @param {number[]} words @param {number} at @returns {number[] & { high: number[] }} */
@@ -2256,7 +2291,13 @@ test('GetWriteWatch over the write clock: every page written since its last repo
         /** @param {number} page */
         const store = page=>armed.delete(page);
         const host = fakeHost(RESERVING_ARENA);
-        const plain = { writeMemory: host.writeMemory, fillMemory: host.fillMemory };
+        // The host's own writes mark what they reach, as cork's do.
+        host.onWrite((address, length)=>{
+            for (let page = address >>> 12; page <= (address + length - 1) >>> 12; page++)
+            {
+                store(page);
+            }
+        });
         const clock = createWriteClock({
             take: (from, bytes)=>{
                 /** @type {number[]} */
@@ -2274,21 +2315,6 @@ test('GetWriteWatch over the write clock: every page written since its last repo
             epochs: ()=>[],
         });
         const fns = createHeapFunctions({ ...host, setLastError: ()=>{},
-            // The host's own writes mark what they reach, as cork's do.
-            writeMemory: (address, data)=>{
-                for (let page = address >>> 12; page <= (address + data.length - 1) >>> 12; page++)
-                {
-                    store(page);
-                }
-                plain.writeMemory(address, data);
-            },
-            fillMemory: (address, value, length)=>{
-                for (let page = address >>> 12; page <= (address + length - 1) >>> 12; page++)
-                {
-                    store(page);
-                }
-                plain.fillMemory(address, value, length);
-            },
             watchWrites: (from, length)=>clock.watch(from, length) });
         const view = new DataView(host.bytes.buffer);
         const pages = 12;

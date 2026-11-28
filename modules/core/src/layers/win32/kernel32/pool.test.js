@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createThreadPool, poolLoopCode } from './pool.js';
 
 const PARKED = Object.freeze({ parked: true });
@@ -107,8 +108,7 @@ function machine(given = {}){
         },
         free: address=>freed.push(address),
         ...given.processHeap ? { processHeap: given.processHeap } : {},
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
-        readMemory: (address, length)=>memory.slice(address, address + length),
+        guest: guestOver(memory),
         threadBlock: thread=>{
             thread.block = true;
         },
@@ -537,8 +537,7 @@ function waitMachine({ divergence } = {}){
             return at;
         },
         free: address=>freed.push(address),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
-        readMemory: (address, length)=>memory.slice(address, address + length),
+        guest: guestOver(memory),
         park: ()=>PARKED,
         setLastError: code=>errors.push(code),
         ...divergence ? { divergence } : {},

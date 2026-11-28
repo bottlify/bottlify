@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import {
     ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
     machineArchitecture, sessionEnvironment,
@@ -36,32 +37,7 @@ function fakeHost(overrides = {}){
         environment: ()=>({ PATH: 'C:\\WINDOWS', TEMP: 'C:\\TEMP' }),
         ...overrides,
         /** @param {number} address @param {Uint8Array} data */
-        writeMemory(address, data){
-            bytes.set(data, address);
-        },
-        /** @param {number} address @param {number} maxLength */
-        readCString(address, maxLength){
-            let text = '';
-            for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[address + at]);
-            }
-            return text;
-        },
-        /** @param {number} address @param {number} maxLength */
-        readWideString(address, maxLength){
-            let text = '';
-            for (let at = 0; at < maxLength; at++)
-            {
-                const code = bytes[address + at * 2] | bytes[address + at * 2 + 1] << 8;
-                if (code === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(code);
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         /** @param {number} size */
         allocate(size){
             const address = next;
@@ -247,7 +223,7 @@ test('the W form copies text while a character of room stays, and a value whole 
         plantWide(0x100, input);
         plantWide(0x300, 'abcdefghijklmnopqrstuv');
         const count = fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, size]);
-        return [count, host.readWideString(0x300, 64)];
+        return [count, host.guest.wstr(0x300, 64)];
     };
     assert.deepEqual(expand('Long long value', 2), [16, 'Lbcdefghijklmnopqrstuv'],
         'text cut a character short of the room, unterminated');
@@ -343,7 +319,7 @@ test('GetEnvironmentVariableW reads a variable by a wide name into a wide buffer
     assert.equal(fns.GetEnvironmentVariableW.handler([0x200, 0x300, 2]), 8,
         'too short: the size wanted, terminator included');
     assert.equal(fns.GetEnvironmentVariableW.handler([0x200, 0x300, 0x40]), 7);
-    assert.equal(host.readWideString(0x300, 0x40), 'C:\\TEMP');
+    assert.equal(host.guest.wstr(0x300, 0x40), 'C:\\TEMP');
     assert.notEqual(fns.GetEnvironmentStringsA.handler(), 0, 'the block under its A name too');
 });
 
@@ -389,7 +365,7 @@ test('the system Windows directory is the Windows directory: this is no terminal
     assert.equal(fns.GetSystemWindowsDirectoryA.handler([0x200, 64]), 10);
     assert.equal(host.readAnsi(0x200), 'C:\\WINDOWS');
     assert.equal(fns.GetSystemWindowsDirectoryW.handler([0x300, 64]), 10);
-    assert.equal(host.readWideString(0x300, 64), 'C:\\WINDOWS');
+    assert.equal(host.guest.wstr(0x300, 64), 'C:\\WINDOWS');
     assert.equal(fns.GetSystemWindowsDirectoryW.handler([0x300, 10]), 11,
         'too small: what is needed');
     assert.deepEqual([fns.GetSystemWindowsDirectoryA.argBytes,
@@ -491,7 +467,7 @@ test('text in the upper half of the ANSI page goes back as the bytes it was read
     // euro sign, 0x99 the trade mark and 0x97 an em dash; a variable, the block
     // and the command line are written back in that page.
     const host = fakeHost({ commandLine: ()=>'C:\\\u20ac\\game.exe' });
-    host.readCString = (address, maxLength)=>decodeAnsi(
+    host.guest.cstr = (address, maxLength)=>decodeAnsi(
         host.bytes.subarray(address, host.bytes.indexOf(0, address)).subarray(0, maxLength));
     const fns = createEnvironmentFunctions(host);
     const value = [0x80, 0x99, 0x97, 0xe9];
@@ -528,7 +504,7 @@ test('the wide forms answer the windows directory and expand as the A forms do',
 
     assert.equal(fns.GetWindowsDirectoryW.argBytes, 8);
     assert.equal(fns.GetWindowsDirectoryW.handler([0x200, 64]), 10);
-    assert.equal(host.readWideString(0x200, 64), 'C:\\WINDOWS');
+    assert.equal(host.guest.wstr(0x200, 64), 'C:\\WINDOWS');
     assert.equal(host.bytes[0x200 + 20] | host.bytes[0x200 + 21], 0, 'terminated');
     assert.equal(fns.GetWindowsDirectoryW.handler([0x200, 10]), 11, 'too small: what is needed');
 
@@ -537,7 +513,7 @@ test('the wide forms answer the windows directory and expand as the A forms do',
     const expanded = 'C:\\TEMP\\\u3042 %NOSUCH%';
     assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0, 0]), expanded.length + 1);
     assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, 64]), expanded.length + 1);
-    assert.equal(host.readWideString(0x300, 64), expanded);
+    assert.equal(host.guest.wstr(0x300, 64), expanded);
 });
 
 test('CreateEnvironmentBlock hands out the process\'s block, and Destroy frees it', ()=>{
@@ -549,7 +525,7 @@ test('CreateEnvironmentBlock hands out the process\'s block, and Destroy frees i
     const fns = createUserenvFunctions({
         block: ()=>0x5000,
         free: block=>freed.push(block) && 1,
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         setLastError: code=>errors.push(code),
     });
     assert.equal(fns.CreateEnvironmentBlock.handler([4, 0, 1]), 1);

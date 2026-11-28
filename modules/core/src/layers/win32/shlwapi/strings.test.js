@@ -24,8 +24,7 @@ function compared(){
     const m = shlwapiMachine({ library: name=>(name === 'KERNEL32.dll' ? kernel32 : undefined) });
     kernel32 = createLocaleFunctions({ tables: runTables(roomy.api.space('tables',
         { idle: 'stay' })),
-    readMemory: m.base.readMemory,
-    writeMemory: m.base.writeMemory,
+    guest: m.base.guest,
     setLastError: ()=>{},
     stringLength: (address, unit)=>{
         let length = 0;

@@ -11,6 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createNamedObjects } from './named-objects.js';
 import { createDirectoryNatives } from './object-directories.js';
 
@@ -45,8 +46,7 @@ function machine(table = new Map()){
     const named = createNamedObjects({ table, handles });
     const natives = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
         createDirectoryNatives({
-            readMemory: (address, length)=>bytes.slice(address, address + length),
-            writeMemory: (address, data)=>bytes.set(data, address),
+            guest: guestOver(bytes),
             kernel: { handles }, namedObjects: named,
         }));
     const OUT = 0x10;

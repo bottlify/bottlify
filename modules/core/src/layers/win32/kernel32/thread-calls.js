@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { imm32 } from '../../../system/x86.js';
+
 /**
  * What the loader tells the libraries of a thread: DLL_THREAD_ATTACH before
  * a new thread's start routine runs, DLL_THREAD_DETACH when it ends cleanly.
@@ -39,10 +41,6 @@ export const WALK_OFFSET = 16;
 /** The same in an x86-64 process's routine (`longThreadCallsCode`). */
 export const LONG_WALK_OFFSET = 48;
 
-/** @param {number} value @returns {number[]} */
-const dword = value=>[
-    value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-];
 
 /**
  * @typedef {Object} LoaderLock
@@ -99,12 +97,12 @@ export function threadCallsCode({ at, trap, lock }){
     const walk = at + WALK_OFFSET;
     const start = [
         0x6a, DLL_THREAD_ATTACH,
-        0xe8, ...dword((walk - (at + 7)) | 0),
+        0xe8, ...imm32((walk - (at + 7)) | 0),
         0xff, 0x64, 0x24, 0x08,
     ];
     /** @param {number} routine */
     const locked = routine=>(lock
-        ? [0x68, ...dword(lock.address), 0xb8, ...dword(routine), 0xff, 0xd0]
+        ? [0x68, ...imm32(lock.address), 0xb8, ...imm32(routine), 0xff, 0xd0]
         : []);
     const body = [
         0x89, 0xe7,
@@ -124,7 +122,7 @@ export function threadCallsCode({ at, trap, lock }){
         0x8b, 0x5c, 0x24, 0x10,
         ...locked(lock?.enter ?? 0),
         0x53,
-        0xb8, ...dword(trap),
+        0xb8, ...imm32(trap),
         0xff, 0xd0,
         0x89, 0xc6,
         ...test,
@@ -196,16 +194,16 @@ export function longThreadCallsCode({ at, trap, lock }){
         0x48, 0x89, 0x4c, 0x24, 0x08,
         0x48, 0x89, 0x54, 0x24, 0x10,
         0x48, 0x83, 0xec, 0x28,
-        0xb9, ...dword(DLL_THREAD_ATTACH),
-        0xe8, ...dword((walk - (at + 24)) | 0),
+        0xb9, ...imm32(DLL_THREAD_ATTACH),
+        0xe8, ...imm32((walk - (at + 24)) | 0),
         0x48, 0x83, 0xc4, 0x28,
         0x48, 0x8b, 0x4c, 0x24, 0x08,
         0xff, 0x64, 0x24, 0x10,
     ];
     /** @param {number} routine */
-    const call = routine=>[0xb8, ...dword(routine), 0xff, 0xd0];
+    const call = routine=>[0xb8, ...imm32(routine), 0xff, 0xd0];
     /** @param {number} routine */
-    const locked = routine=>(lock ? [0xb9, ...dword(lock.address), ...call(routine)] : []);
+    const locked = routine=>(lock ? [0xb9, ...imm32(lock.address), ...call(routine)] : []);
     const body = [
         0x8b, 0x4e, 0x04,
         0x89, 0xda,
@@ -250,7 +248,7 @@ export function longThreadCallsCode({ at, trap, lock }){
  * @property {(name: string, fn: any) => number} register
  * @property {(bytes: number) => number} allocateCode
  * @property {(bytes: number) => number} allocate
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => ThreadCallImage[]} images
  * @property {() => void} [starting]  A thread is about to be told of its own
  *           start, on itself: what it needs before its libraries run.
@@ -263,6 +261,7 @@ export function longThreadCallsCode({ at, trap, lock }){
  * @param {ThreadCallsHost} host
  */
 export function createThreadCalls(host){
+    const { guest } = host;
     /** Where the routine is, once placed; zero before, and when it could not be. */
     let routine = 0;
     const code = host.long ? longThreadCallsCode : threadCallsCode;
@@ -294,7 +293,7 @@ export function createThreadCalls(host){
             {
                 return 0;
             }
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
             tables.set(key, at);
         }
         return at;
@@ -335,7 +334,7 @@ export function createThreadCalls(host){
         const at = trap === 0 || tableOf([]) === 0 ? 0 : host.allocateCode(size);
         if (at !== 0)
         {
-            host.writeMemory(at, code({ at, trap, lock }));
+            guest.setBytes(at, code({ at, trap, lock }));
             routine = at;
         }
         return routine;

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createDriveFunctions, onVolume, volumeName } from './drives.js';
 import { decodeAnsi } from './locale.js';
 
@@ -23,31 +24,7 @@ function setup(mounted = ['C'], volumes = {}, extra = {}){
     /** @type {number[]} */
     const errors = [];
     const fns = createDriveFunctions({
-        // As the memory layer reads an ANSI string: in Windows-1252, which is
-        // what the Encoding standard calls latin1.
-        readCString: (address, maxLength)=>{
-            let end = address;
-            while (end - address < maxLength && bytes[end] !== 0)
-            {
-                end++;
-            }
-            return decodeAnsi(bytes.subarray(address, end));
-        },
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = 0; at < maxLength; at++)
-            {
-                const code = bytes[address + at * 2] | bytes[address + at * 2 + 1] << 8;
-                if (code === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(code);
-            }
-            return text;
-        },
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         setLastError: code=>{
             errors.push(code);
         },

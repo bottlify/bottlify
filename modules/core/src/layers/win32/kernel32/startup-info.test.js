@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { STARTUPINFO, readStartupInfo, startupInfoBytes } from './startup-info.js';
 import { createEnvironmentFunctions } from './environment.js';
 
@@ -84,9 +85,7 @@ test('GetStartupInfoA and W answer the record, their strings in their width and 
     const record = readStartupInfo(parentStartup({ desktop: 0x100, title: 0x200 }), readText,
         null);
     const fns = createEnvironmentFunctions({
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
-        readCString: ()=>'',
-        readWideString: ()=>'',
+        guest: guestOver(memory),
         allocate: bytes=>{
             const at = next;
             next += bytes;

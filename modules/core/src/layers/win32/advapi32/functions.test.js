@@ -22,7 +22,7 @@ import {
     REG_MULTI_SZ,
     REG_SZ,
 } from './registry.js';
-import { IN_PLACE, externalGrowth } from '../common/guest.fixture.js';
+import { IN_PLACE, externalGrowth, guestOver } from '../common/guest.fixture.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -58,6 +58,7 @@ function fakeMemory(size = 0x11000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -106,6 +107,7 @@ function setup(extra = {}){
     const hive = createRegistryService(createHive());
     const fns = createRegistryFunctions({
         security: new Map(),
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -371,6 +373,7 @@ const perfClockStub = memory=>(/** @type {string} */ library,
 test('a performance key answers a PERF_DATA_BLOCK, stamped with the clocks it reads', ()=>{
     const memory = fakeMemory(0x200000);
     const fns = createRegistryFunctions({
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -423,6 +426,7 @@ test('a performance key answers a PERF_DATA_BLOCK, stamped with the clocks it re
 test('a performance key answers the Counter and Help index lists as REG_MULTI_SZ', ()=>{
     const memory = fakeMemory(0x10000);
     const fns = createRegistryFunctions({
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -856,6 +860,7 @@ test('the refusal says ERROR_INSUFFICIENT_BUFFER, as a caller sizing its buffer 
     /** @type {number[]} */
     const errors = [];
     const fns = createRegistryFunctions({
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -879,6 +884,7 @@ test('a SID is built in guest memory in the layout a program compares byte by by
     /** @type {number[]} */
     const errors = [];
     const fns = createRegistryFunctions({
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -916,6 +922,7 @@ test('a build with nowhere to put a SID says it ran out of memory rather than fa
 test('GetFileSecurity and SetFileSecurity are the file-security calls, stdcall-sized', ()=>{
     const memory = fakeMemory();
     const fns = createRegistryFunctions({
+        guest: memory.guest,
         readMemory: memory.readMemory, writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()), setLastError: ()=>{},
@@ -935,6 +942,7 @@ test('the file security calls are named-security\'s, wired into the table', ()=>
     /** @type {number[]} */
     const errors = [];
     const fns = createRegistryFunctions({
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -962,6 +970,7 @@ test('a restart is not implemented, as the consumer line answered, and says so',
     /** @type {string[]} */
     const diverged = [];
     const fns = /** @type {Record<string, any>} */ (/** @type {unknown} */ (createRegistryFunctions({
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -1354,6 +1363,7 @@ test('an object\'s security by name is read through the volume and the hive this
         files.stored.set('c:\\setup.ini', new Uint8Array(1));
         let heap = 0x800;
         const fns = /** @type {any} */ (createRegistryFunctions({
+            guest: memory.guest,
             readMemory: memory.readMemory,
             writeMemory: memory.writeMemory,
             readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -1391,6 +1401,7 @@ test('a key saved to a file loads under a root, writes its changes back as it un
     const files = fakeFiles();
     const fns = /** @type {any} */ (createRegistryFunctions({
         security: new Map(),
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -1481,6 +1492,7 @@ test('RegNotifyChangeKeyValue answers one change to the key or under it, and a c
     /** @type {string[]} */
     const told = [];
     const fns = /** @type {any} */ (createRegistryFunctions({
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
@@ -1676,6 +1688,7 @@ test('RegRenameKey gives a key or its subkey a new name, its values going with i
 test('IsTextUnicode reads the buffer, the tests asked for, and writes back which passed', ()=>{
     const memory = fakeMemory();
     const fns = createRegistryFunctions({
+        guest: memory.guest,
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),

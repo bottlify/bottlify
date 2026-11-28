@@ -212,8 +212,7 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
 
 /**
  * @typedef {Object} SehHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number) => boolean} isMapped
  *           Whether a frame's memory is there. A bounds test and nothing more.
  * @property {() => number} teb  The running thread's block; its first word is
@@ -271,15 +270,7 @@ const EXCEPTION_CONTINUE_EXECUTION = -1;
  * @param {SehHost} host
  */
 export function createSeh(host){
-    const readU32 = (/** @type {number} */ at)=>{
-        const bytes = host.readMemory(at, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    const writeU32 = (/** @type {number} */ at, /** @type {number} */ value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at, bytes);
-    };
+    const { guest } = host;
 
     /**
      * A thread's block, whose first word heads its chain.
@@ -310,14 +301,14 @@ export function createSeh(host){
             return null;
         }
         const teb = host.teb() >>> 0;
-        const top = teb === 0 ? 0 : readU32(teb + TEB.STACK_BASE);
-        const bottom = teb === 0 ? 0 : readU32(teb + TEB.DEALLOCATION_STACK);
+        const top = teb === 0 ? 0 : guest.u32(teb + TEB.STACK_BASE);
+        const bottom = teb === 0 ? 0 : guest.u32(teb + TEB.DEALLOCATION_STACK);
         if (address < bottom || address >= top)
         {
             return 'guard';
         }
         const page = (address & ~(PAGE_SIZE - 1)) >>> 0;
-        writeU32(teb + TEB.STACK_LIMIT, page);
+        guest.set32(teb + TEB.STACK_LIMIT, page);
         const next = page - PAGE_SIZE;
         return next >= bottom + PAGE_SIZE && host.guardPages.commitGuard(next)
             ? 'grown' : 'overflow';
@@ -330,15 +321,15 @@ export function createSeh(host){
      * @param {{ code: number, flags: number, address: number, parameters?: number[] }} what
      */
     const writeRecord = (at, what)=>{
-        host.writeMemory(at, new Uint8Array(RECORD.SIZE));
-        writeU32(at + RECORD.CODE, what.code);
-        writeU32(at + RECORD.FLAGS, what.flags);
-        writeU32(at + RECORD.NESTED, 0);
-        writeU32(at + RECORD.ADDRESS, what.address);
+        guest.setBytes(at, new Uint8Array(RECORD.SIZE));
+        guest.set32(at + RECORD.CODE, what.code);
+        guest.set32(at + RECORD.FLAGS, what.flags);
+        guest.set32(at + RECORD.NESTED, 0);
+        guest.set32(at + RECORD.ADDRESS, what.address);
         const parameters = (what.parameters ?? []).slice(0, 15);
-        writeU32(at + RECORD.PARAMETER_COUNT, parameters.length);
+        guest.set32(at + RECORD.PARAMETER_COUNT, parameters.length);
         parameters.forEach((value, index)=>
-            writeU32(at + RECORD.INFORMATION + index * 4, value));
+            guest.set32(at + RECORD.INFORMATION + index * 4, value));
     };
 
     /**
@@ -360,8 +351,8 @@ export function createSeh(host){
         const images = host.float?.images() ?? null;
         writeFloatGroups(images, bytes, CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS);
         writeDebugGroup(host.currentThread?.(), bytes, CONTEXT_DEBUG_REGISTERS);
-        host.writeMemory(at, bytes);
-        writeU32(at + CONTEXT.FLAGS, (images === null ? CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS
+        guest.setBytes(at, bytes);
+        guest.set32(at + CONTEXT.FLAGS, (images === null ? CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS
             : CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS | CONTEXT_FLOATING_POINT
                 | CONTEXT_EXTENDED_REGISTERS) >>> 0);
         for (const [field, name] of [
@@ -371,7 +362,7 @@ export function createSeh(host){
             [CONTEXT.ESP, 'esp'],
         ])
         {
-            writeU32(at + Number(field), registers[String(name)] ?? 0);
+            guest.set32(at + Number(field), registers[String(name)] ?? 0);
         }
         for (const [field, selector] of [
             [CONTEXT.GS, SELECTORS.GS], [CONTEXT.FS, SELECTORS.FS],
@@ -379,7 +370,7 @@ export function createSeh(host){
             [CONTEXT.CS, SELECTORS.CODE], [CONTEXT.SS, SELECTORS.DATA],
         ])
         {
-            writeU32(at + field, selector);
+            guest.set32(at + field, selector);
         }
     };
 
@@ -390,16 +381,16 @@ export function createSeh(host){
      * @returns {Record<string, number>}
      */
     const readContext = at=>({
-        edi: readU32(at + CONTEXT.EDI),
-        esi: readU32(at + CONTEXT.ESI),
-        ebx: readU32(at + CONTEXT.EBX),
-        edx: readU32(at + CONTEXT.EDX),
-        ecx: readU32(at + CONTEXT.ECX),
-        eax: readU32(at + CONTEXT.EAX),
-        ebp: readU32(at + CONTEXT.EBP),
-        eip: readU32(at + CONTEXT.EIP),
-        eflags: readU32(at + CONTEXT.EFLAGS),
-        esp: readU32(at + CONTEXT.ESP),
+        edi: guest.u32(at + CONTEXT.EDI),
+        esi: guest.u32(at + CONTEXT.ESI),
+        ebx: guest.u32(at + CONTEXT.EBX),
+        edx: guest.u32(at + CONTEXT.EDX),
+        ecx: guest.u32(at + CONTEXT.ECX),
+        eax: guest.u32(at + CONTEXT.EAX),
+        ebp: guest.u32(at + CONTEXT.EBP),
+        eip: guest.u32(at + CONTEXT.EIP),
+        eflags: guest.u32(at + CONTEXT.EFLAGS),
+        esp: guest.u32(at + CONTEXT.ESP),
     });
 
     /**
@@ -416,7 +407,7 @@ export function createSeh(host){
     const continuation = (at, flags, thread)=>{
         /** @type {Record<string, number>} */
         const registers = readContext(at);
-        const debug = debugGroupOf(host.readMemory(at, CONTEXT.SIZE), readU32(at + CONTEXT.FLAGS));
+        const debug = debugGroupOf(guest.snapshot(at, CONTEXT.SIZE), guest.u32(at + CONTEXT.FLAGS));
         if (debug !== null && thread)
         {
             setDebugRegisters(thread, debug, host.divergence, 'exception');
@@ -424,8 +415,8 @@ export function createSeh(host){
         // The floating-point groups the record names go back with the rest,
         // where the thread resumes: by then the registers on the processor
         // may be another thread's (`resumeContextAt`'s `float`).
-        const groups = floatGroupsOf(host.readMemory(at, CONTEXT.SIZE),
-            readU32(at + CONTEXT.FLAGS));
+        const groups = floatGroupsOf(guest.snapshot(at, CONTEXT.SIZE),
+            guest.u32(at + CONTEXT.FLAGS));
         if (groups !== null && host.float)
         {
             /** @type {any} */ (registers).float = groups;
@@ -473,7 +464,7 @@ export function createSeh(host){
     const chain = thread=>{
         /** @type {{ frame: number, handler: number }[]} */
         const frames = [];
-        let at = readU32(tebOf(thread));
+        let at = guest.u32(tebOf(thread));
         let previous = 0;
         while (at !== END_OF_CHAIN && at !== 0)
         {
@@ -481,9 +472,9 @@ export function createSeh(host){
             {
                 return { frames, damaged: true, broken: at };
             }
-            frames.push({ frame: at, handler: readU32(at + 4) });
+            frames.push({ frame: at, handler: guest.u32(at + 4) });
             previous = at;
-            at = readU32(at);
+            at = guest.u32(at);
             if (frames.length > 256)
             {
                 return { frames, damaged: true, broken: at };
@@ -502,7 +493,7 @@ export function createSeh(host){
     const damagedAt = (thread, frames, broken)=>{
         const teb = tebOf(thread);
         return ` at ${hex(broken ?? 0)} after [${frames.map(one=>hex(one.frame)).join(' ')}],`
-            + ` stack ${hex(readU32(teb + 8))}..${hex(readU32(teb + 4))}`;
+            + ` stack ${hex(guest.u32(teb + 8))}..${hex(guest.u32(teb + 4))}`;
     };
 
     /**
@@ -526,7 +517,7 @@ export function createSeh(host){
         const word = (/** @type {number} */ at)=>{
             try
             {
-                return host.isMapped(at >>> 0) ? readU32(wholeAddress(at)) : null;
+                return host.isMapped(at >>> 0) ? guest.u32(wholeAddress(at)) : null;
             }
             catch {
                 return null;
@@ -716,7 +707,7 @@ export function createSeh(host){
         const past = what.trap ?? 0;
         if (past !== 0)
         {
-            writeU32(context + CONTEXT.EIP, readU32(context + CONTEXT.EIP) + past);
+            guest.set32(context + CONTEXT.EIP, guest.u32(context + CONTEXT.EIP) + past);
         }
         try
         {
@@ -726,7 +717,7 @@ export function createSeh(host){
                     parameters: what.parameters ?? [], firstChance } });
             if (past !== 0 && answer !== DBG_CONTINUE)
             {
-                writeU32(context + CONTEXT.EIP, readU32(context + CONTEXT.EIP) - past);
+                guest.set32(context + CONTEXT.EIP, guest.u32(context + CONTEXT.EIP) - past);
             }
             return answer;
         }
@@ -787,8 +778,8 @@ export function createSeh(host){
         }
 
         const pointers = (at.top - 8) >>> 0;
-        writeU32(pointers, at.record);
-        writeU32(pointers + 4, at.context);
+        guest.set32(pointers, at.record);
+        guest.set32(pointers + 4, at.context);
         if (await callVectored(vectored.exception, pointers, asked, flags))
         {
             await callVectored(vectored.continue, pointers, asked, flags);
@@ -808,9 +799,9 @@ export function createSeh(host){
         // The call's own bytes and the registers say which slot it went
         // through (`ff 50 18` is [eax+0x18]) and whose table held the null.
         const nullCall = ()=>{
-            const back = readU32(wholeAddress(registers.esp)) >>> 0;
+            const back = guest.u32(wholeAddress(registers.esp)) >>> 0;
             const bytes = host.isMapped((back - 7) >>> 0)
-                ? ` (${[...host.readMemory(wholeAddress((back - 7) >>> 0), 7)]
+                ? ` (${[...guest.snapshot(wholeAddress((back - 7) >>> 0), 7)]
                     .map(byte=>byte.toString(16).padStart(2, '0')).join(' ')}`
                     + ` eax=${hex(registers.eax)} ecx=${hex(registers.ecx)}`
                     + ` edx=${hex(registers.edx)} esi=${hex(registers.esi)}`
@@ -826,7 +817,7 @@ export function createSeh(host){
         // otherwise.
         const refused = what.code === STATUS.ILLEGAL_INSTRUCTION
             && host.isMapped(what.address >>> 0)
-            ? ` (${[...host.readMemory(wholeAddress(what.address), 8)]
+            ? ` (${[...guest.snapshot(wholeAddress(what.address), 8)]
                 .map(byte=>byte.toString(16).padStart(2, '0')).join(' ')})` : '';
         // An access violation names the address it could not reach, and
         // whether it read or wrote there: what a caught one was after.
@@ -841,12 +832,12 @@ export function createSeh(host){
         // code a protection decrypts as it runs is not in the file to read.
         /** @param {number} where @param {number} length */
         const bytesAt = (where, length)=>(host.isMapped(where >>> 0)
-            ? [...host.readMemory(wholeAddress(where), length)]
+            ? [...guest.snapshot(wholeAddress(where), length)]
                 .map(byte=>byte.toString(16).padStart(2, '0')).join(' ') : 'unmapped');
         /** @param {number} index */
         const stackWord = index=>{
             const slot = (registers.esp + index * 4) >>> 0;
-            return host.isMapped(slot) ? hex(readU32(wholeAddress(slot))) : '?';
+            return host.isMapped(slot) ? hex(guest.u32(wholeAddress(slot))) : '?';
         };
         const state = reached && what.raisedFrom === undefined
             ? ` (${['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp']
@@ -878,9 +869,9 @@ export function createSeh(host){
             {
                 continue;
             }
-            writeU32(own, readU32(teb));
-            writeU32(own + 4, ownHandler);
-            writeU32(teb, own);
+            guest.set32(own, guest.u32(teb));
+            guest.set32(own + 4, ownHandler);
+            guest.set32(teb, own);
             // Handlers run below the record they were handed, each with the
             // flags the system gives one.
             const answer = await host.callGuest({
@@ -892,7 +883,7 @@ export function createSeh(host){
             }) >>> 0;
             // The head is whatever the frame links to now: the handler may
             // have relinked it.
-            writeU32(teb, readU32(own));
+            guest.set32(teb, guest.u32(own));
 
             if (answer === Disposition.CONTINUE_EXECUTION)
             {
@@ -904,8 +895,8 @@ export function createSeh(host){
                 {
                     // The frame's handler ran on the stack below the record,
                     // over where the pointers were.
-                    writeU32(pointers, at.record);
-                    writeU32(pointers + 4, at.context);
+                    guest.set32(pointers, at.record);
+                    guest.set32(pointers + 4, at.context);
                     await callVectored(vectored.continue, pointers, asked, flags);
                 }
                 return { handled: true, registers: continuation(at.context, flags, asked) };
@@ -970,7 +961,7 @@ export function createSeh(host){
         if (record !== 0 && host.isMapped(record))
         {
             shown = record >>> 0;
-            writeU32(shown + RECORD.FLAGS, readU32(shown + RECORD.FLAGS) | flags);
+            guest.set32(shown + RECORD.FLAGS, guest.u32(shown + RECORD.FLAGS) | flags);
         }
         else
         {
@@ -1020,7 +1011,7 @@ export function createSeh(host){
                 ?? (damaged ? null : END_OF_CHAIN);
             if (next !== null)
             {
-                writeU32(teb, next);
+                guest.set32(teb, next);
             }
         }
         return { unwound: reached && !damaged, context: at.context };
@@ -1050,8 +1041,8 @@ export function createSeh(host){
         else if (topLevelFilter !== 0)
         {
             const pointers = (at.top - 8) >>> 0;
-            writeU32(pointers, at.record);
-            writeU32(pointers + 4, at.context);
+            guest.set32(pointers, at.record);
+            guest.set32(pointers + 4, at.context);
             // With the flags a handler starts with: a chain with no frame on
             // it leaves the thread with the faulting code's own.
             const answer = await host.callGuest({
@@ -1110,7 +1101,7 @@ export function createSeh(host){
             flags,
             address: registers.eip,
             parameters,
-            raisedFrom: readU32(wholeAddress(registers.esp)),
+            raisedFrom: guest.u32(wholeAddress(registers.esp)),
             ...call ? { call } : {},
         }).then(result=>(result.registers ? host.answerWith(0, result.registers) : 0));
     };
@@ -1169,7 +1160,7 @@ export function createSeh(host){
         async onFault(fault, registers){
             if (fault.vector === 6)
             {
-                const answered = storeMachineStatus(host.readMemory, registers);
+                const answered = storeMachineStatus(guest.snapshot, registers);
                 if (answered)
                 {
                     return { handled: true, registers: answered };
@@ -1179,7 +1170,7 @@ export function createSeh(host){
             // program, whichever fault the processor model raised for it.
             const privileged = (fault.vector === 6 || fault.vector === 13)
                 && host.isMapped(registers.eip >>> 0)
-                && privilegedAt(host.readMemory, registers.eip >>> 0);
+                && privilegedAt(guest.snapshot, registers.eip >>> 0);
             // The debug service with no debugger to serve it: the services
             // that only tell a debugger something (a string, a module's
             // symbols) go on one byte past the instruction - the system's
@@ -1273,7 +1264,7 @@ export function createSeh(host){
                     const parameters = [];
                     for (let at = 0; at < total; at++)
                     {
-                        parameters.push(readU32(from + at * 4));
+                        parameters.push(guest.u32(from + at * 4));
                     }
                     // The context handlers are shown is the caller's as it
                     // stands once the call has returned - its return address,
@@ -1289,7 +1280,7 @@ export function createSeh(host){
                     // the code it was redirected from.
                     const registers = host.registers();
                     const esp = registers.esp >>> 0;
-                    const caller = { ...registers, eip: readU32(esp), esp: esp + 4 + 16 >>> 0 };
+                    const caller = { ...registers, eip: guest.u32(esp), esp: esp + 4 + 16 >>> 0 };
                     return raise({
                         code: code >>> 0,
                         flags: flags >>> 0 & EXCEPTION_NONCONTINUABLE,
@@ -1319,11 +1310,11 @@ export function createSeh(host){
                 handler: ([targetFrame, , record, returnValue])=>{
                     const registers = host.registers();
                     const esp = registers.esp >>> 0;
-                    const caller = { ...registers, eip: readU32(esp),
+                    const caller = { ...registers, eip: guest.u32(esp),
                         esp: esp + 4 + 16 >>> 0, eax: wholeAddress(returnValue) };
                     return unwind(wholeAddress(targetFrame), caller.eip,
                         { record: wholeAddress(record), registers, shown: caller })
-                        .then(({ context })=>readU32(context + CONTEXT.EAX));
+                        .then(({ context })=>guest.u32(context + CONTEXT.EAX));
                 },
             },
 

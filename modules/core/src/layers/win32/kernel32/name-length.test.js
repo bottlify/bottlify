@@ -15,6 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from './vfs.js';
@@ -61,24 +62,7 @@ async function setup(){
     /** @type {number[]} */
     const errors = [];
     const fns = /** @type {any} */ (createFileFunctions(/** @type {any} */ ({
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            bytes.slice(address, address + length),
-        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, address),
-        readCString: ()=>'',
-        readWideString: (/** @type {number} */ address, /** @type {number} */ limit)=>{
-            let text = '';
-            for (let at = address; at + 1 < address + limit; at += 2)
-            {
-                const code = bytes[at] | bytes[at + 1] << 8;
-                if (code === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(code);
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         files: volume,
         setLastError: (/** @type {number} */ code)=>errors.push(code),
         writeConsole: ()=>{},

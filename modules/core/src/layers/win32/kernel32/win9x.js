@@ -28,6 +28,7 @@
 
 import { createRefusals } from '../common/refusal.js';
 import { wholeAddress } from '../common/pointers.js';
+import { imm32 } from '../../../system/x86.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
@@ -65,8 +66,6 @@ const NO_16_BIT = 'there is no 16-bit subsystem to thunk to or make a selector i
  * @typedef {import('../msvcrt/guest-code.js').CodeBuilder} CodeBuilder
  */
 
-/** @param {number} value @returns {number[]} */
-const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 /**
  * Code that reports a refusal and changes no register: every register saved
@@ -107,7 +106,7 @@ const helperCode = (refusal, make)=>({
 const smapls = report=>{
     const head = [
         0x31, 0xd2,                                          // xor edx, edx
-        0xa9, ...dword(SELECTOR_MASK),                       // test eax, 0xffff0000
+        0xa9, ...imm32(SELECTOR_MASK),                       // test eax, 0xffff0000
         0x74, report.length + 2,                             // jz done
     ];
     return {
@@ -126,7 +125,7 @@ const smaplsFrame = offset=>report=>{
     const head = [
         0x8b, 0x45, offset,                                  // mov eax, [ebp + n]
         0x31, 0xd2,                                          // xor edx, edx
-        0xa9, ...dword(SELECTOR_MASK),                       // test eax, 0xffff0000
+        0xa9, ...imm32(SELECTOR_MASK),                       // test eax, 0xffff0000
         0x74, report.length + 2,                             // jz done
     ];
     return {

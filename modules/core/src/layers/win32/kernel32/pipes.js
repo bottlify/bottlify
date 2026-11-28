@@ -46,7 +46,6 @@
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { OBJ_INHERIT, readObjectAttributes } from './object-attributes.js';
-import { readLargeInteger } from './due-time.js';
 import { INTERACTIVE_SESSION } from './teb.js';
 import { allows, mappedAccess } from './access.js';
 import { wholeAddress } from '../common/pointers.js';
@@ -260,10 +259,7 @@ const DEVICE_CONTROLS = new Map([
  *     access: (handle: number) => number | null,
  *     list: () => { handle: number, type: string }[] }} handles
  *     The process's handle table; a pipe handle's HANDLE_FLAG_INHERIT is its own there.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxBytes: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError
  * @property {(thread: any, code: number) => void} setLastErrorFor
  * @property {() => any} currentThread
@@ -575,6 +571,7 @@ export function pipeStandIn(id, described){
 
 /** @param {PipeHost} host */
 export function createNamedPipes(host){
+    const { guest } = host;
     const layout = overlappedLayout(host.pointerSize);
     const { kernel } = host;
     /** @type {Map<string, any>} */
@@ -617,13 +614,10 @@ export function createNamedPipes(host){
         return result;
     };
     /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>host.writeMemory(wholeAddress(address), Uint8Array.of(
-        value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
-    /** @param {number} address @param {number} value */
     const writeDwordIf = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            writeDword(address, value);
+            guest.set32(address, value);
         }
     };
     /**
@@ -634,13 +628,8 @@ export function createNamedPipes(host){
      */
     const nativeWaitEnded = (waiter, status)=>{
         const owner = waiter.ctx.host;
-        owner.writeMemory(/** @type {number} */ (waiter.block), dwordBytes(status));
-        owner.writeMemory(/** @type {number} */ (waiter.block) + 4, dwordBytes(0));
-    };
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+        owner.guest.set32(/** @type {number} */ (waiter.block), status);
+        owner.guest.set32(/** @type {number} */ (waiter.block) + 4, 0);
     };
     /**
      * An OVERLAPPED's event is reset as its operation begins, as the I/O
@@ -657,7 +646,7 @@ export function createNamedPipes(host){
             return;
         }
         // The low bit asks that no packet go to a port; the handle is the rest.
-        const event = (readDword(wholeAddress(overlapped) + layout.event) & ~1) >>> 0;
+        const event = (guest.u32(wholeAddress(overlapped) + layout.event) & ~1) >>> 0;
         if (event !== 0)
         {
             host.resetEvent?.(event);
@@ -731,8 +720,8 @@ export function createNamedPipes(host){
     };
     /** @param {number} pointer @param {boolean} wide */
     const nameAt = (pointer, wide)=>((pointer >>> 0) === 0 ? null
-        : wide ? host.readWideString(wholeAddress(pointer), NAME_BYTES)
-            : host.readCString(wholeAddress(pointer), NAME_BYTES / 2));
+        : wide ? guest.wstr(wholeAddress(pointer), NAME_BYTES)
+            : guest.cstr(wholeAddress(pointer), NAME_BYTES / 2));
     /** The run's key for a pipe's name. @param {string} name */
     const keyOf = name=>{
         const prefix = PREFIXES.find(one=>name.toLowerCase().startsWith(one)) ?? PREFIXES[0];
@@ -744,7 +733,7 @@ export function createNamedPipes(host){
         return held?.kind === 'pipe' ? held.object : null;
     };
     /** What a security attributes block says of inheritance. @param {number} attributes */
-    const inheritsBy = attributes=>readSecurityAttributes(host.readMemory,
+    const inheritsBy = attributes=>readSecurityAttributes(guest,
         wholeAddress(attributes), host.pointerSize)?.inherit ?? false;
 
     /**
@@ -921,7 +910,7 @@ export function createNamedPipes(host){
      * @param {boolean} [skipPort]  finished in its own call on a handle that skips the port
      */
     function finishNative(owner, handle, block, io, thread, status, count, skipPort = false){
-        overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)),
+        overlappedResult(owner.guest.set32,
             overlappedLayout(owner.pointerSize), block, status, count);
         if (io.event !== 0)
         {
@@ -948,7 +937,7 @@ export function createNamedPipes(host){
      */
     const completeRoutine = (owner, thread, overlapped, routine, status, count)=>{
         const theirs = overlappedLayout(owner.pointerSize);
-        overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)), theirs,
+        overlappedResult(owner.guest.set32, theirs,
             overlapped, status, count);
         owner.queueApc?.(thread, routine,
             [status === STATUS.SUCCESS ? ERROR_SUCCESS : toDosError(status), count, overlapped]);
@@ -972,8 +961,7 @@ export function createNamedPipes(host){
             return false;
         }
         const theirs = overlappedLayout(op.ctx.host.pointerSize);
-        const word = op.ctx.host.readMemory((overlapped + theirs.event) >>> 0, 4);
-        return ((word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) & ~1) !== 0;
+        return (op.ctx.host.guest.u32((overlapped + theirs.event) >>> 0) & ~1) !== 0;
     };
 
     /**
@@ -986,7 +974,7 @@ export function createNamedPipes(host){
      */
     const doneAtOnce = (end, handle, overlapped, io)=>{
         const event = io ? io.event
-            : (overlapped >>> 0) === 0 ? 0 : readDword(wholeAddress(overlapped) + layout.event)
+            : (overlapped >>> 0) === 0 ? 0 : guest.u32(wholeAddress(overlapped) + layout.event)
                 & ~1;
         if (end.signal && event === 0
             && ((ctx.modes.get(handle >>> 0) ?? 0) & FILE_SKIP_SET_EVENT_ON_HANDLE) === 0)
@@ -1028,9 +1016,9 @@ export function createNamedPipes(host){
             else
             {
                 const theirs = overlappedLayout(owner.pointerSize);
-                overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)), theirs,
+                overlappedResult(owner.guest.set32, theirs,
                     op.overlapped, status, count);
-                const event = readFrom(owner, op.overlapped + theirs.event);
+                const event = owner.guest.u32(wholeAddress(op.overlapped + theirs.event));
                 if (event !== 0)
                 {
                     owner.setEvent?.(event);
@@ -1045,7 +1033,7 @@ export function createNamedPipes(host){
         }
         if (op.native)
         {
-            overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)),
+            overlappedResult(owner.guest.set32,
                 overlappedLayout(owner.pointerSize), op.out, status, count);
             // The thread is woken with the answer first: the APC queued
             // after must wait for its next alertable wait, not end this one.
@@ -1067,14 +1055,14 @@ export function createNamedPipes(host){
         }
         if (op.out !== 0)
         {
-            owner.writeMemory(op.out, dwordBytes(count));
+            owner.guest.set32(op.out, count);
         }
         if (op.statusAt)
         {
             const theirs = overlappedLayout(owner.pointerSize);
-            overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)), theirs,
+            overlappedResult(owner.guest.set32, theirs,
                 op.statusAt, status, count);
-            const event = readFrom(owner, op.statusAt + theirs.event);
+            const event = owner.guest.u32(wholeAddress(op.statusAt + theirs.event));
             if (event !== 0)
             {
                 owner.setEvent?.(event);
@@ -1189,7 +1177,7 @@ export function createNamedPipes(host){
                 end.readers.shift();
                 if (got.bytes.length > 0)
                 {
-                    op.ctx.host.writeMemory(op.buffer, got.bytes);
+                    op.ctx.host.guest.setBytes(op.buffer, got.bytes);
                 }
                 finish(op, got.status, got.bytes.length);
                 continue;
@@ -1500,16 +1488,21 @@ export function createNamedPipes(host){
             const op = { kind, thread: null, handle: 0, overlapped: 0, buffer: ACROSS_BUFFER,
                 length, out: ACROSS_STATUS, native: true, end, ctx: { modes: new Map(),
                     host: /** @type {any} */ ({
-                        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>{
-                            if (at === ACROSS_BUFFER)
-                            {
-                                bytes = data.slice();
-                            }
-                            else if (at === ACROSS_STATUS + overlappedLayout().internalHigh)
-                            {
-                                count = (data[0] | data[1] << 8 | data[2] << 16 | data[3] << 24)
-                                    >>> 0;
-                            }
+                        // What the op's finish writes, kept: its bytes, and the count
+                        // its status block's InternalHigh holds.
+                        guest: {
+                            setBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>{
+                                if (at === ACROSS_BUFFER)
+                                {
+                                    bytes = data.slice();
+                                }
+                            },
+                            set32: (/** @type {number} */ at, /** @type {number} */ value)=>{
+                                if (at === ACROSS_STATUS + overlappedLayout().internalHigh)
+                                {
+                                    count = value >>> 0;
+                                }
+                            },
                         },
                         kernel: {
                             setEvent: (/** @type {any} */ event)=>kernel.setEvent(event),
@@ -1913,7 +1906,7 @@ export function createNamedPipes(host){
             }
             if (native)
             {
-                overlappedResult(writeDword, layout, out, status, count);
+                overlappedResult(guest.set32, layout, out, status, count);
                 return status;
             }
             writeDwordIf(out, count);
@@ -1935,7 +1928,7 @@ export function createNamedPipes(host){
         {
             if (got.bytes.length > 0)
             {
-                host.writeMemory(wholeAddress(buffer), got.bytes);
+                guest.setBytes(wholeAddress(buffer), got.bytes);
             }
             return answerNow(got.status, got.bytes.length);
         }
@@ -1979,12 +1972,12 @@ export function createNamedPipes(host){
         if (routine !== 0)
         {
             // ReadFileEx answers TRUE for a read that has begun.
-            overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+            overlappedResult(guest.set32, layout, overlapped, STATUS.PENDING, 0);
             return 1;
         }
         if (op.overlapped !== 0)
         {
-            overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+            overlappedResult(guest.set32, layout, overlapped, STATUS.PENDING, 0);
             return native ? STATUS.PENDING : fail(ERROR_IO_PENDING);
         }
         if (tell)
@@ -2076,7 +2069,7 @@ export function createNamedPipes(host){
         }
         const peer = /** @type {End} */ (peerOf(end));
         const { entry, written, waits } = enqueue(end, count === 0 ? new Uint8Array(0)
-            : host.readMemory(wholeAddress(buffer), count), whole);
+            : guest.snapshot(wholeAddress(buffer), count), whole);
         if (waits)
         {
             const entryOf = /** @type {Entry} */ (entry);
@@ -2105,7 +2098,7 @@ export function createNamedPipes(host){
             }
             if (routine !== 0 || op.overlapped !== 0)
             {
-                overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+                overlappedResult(guest.set32, layout, overlapped, STATUS.PENDING, 0);
                 return routine !== 0 ? 1 : native ? STATUS.PENDING : fail(ERROR_IO_PENDING);
             }
             kernel.block(op.thread, 'pipe write');
@@ -2133,7 +2126,7 @@ export function createNamedPipes(host){
                 // its packet, as its read does (`startRead`).
                 host.posted?.(handle, written, STATUS.SUCCESS, io.context);
             }
-            overlappedResult(writeDword, layout, out, STATUS.SUCCESS, written);
+            overlappedResult(guest.set32, layout, out, STATUS.SUCCESS, written);
             return STATUS.SUCCESS;
         }
         // The last error is left as it was, as WriteFile and ReadFile leave
@@ -2173,7 +2166,7 @@ export function createNamedPipes(host){
         {
             if (later)
             {
-                overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+                overlappedResult(guest.set32, layout, overlapped, STATUS.PENDING, 0);
             }
             whenAnswered(answer=>completeRoutine(host, thread, overlapped, routine,
                 answer.status, into(answer)));
@@ -2183,7 +2176,7 @@ export function createNamedPipes(host){
         {
             if (later)
             {
-                overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+                overlappedResult(guest.set32, layout, overlapped, STATUS.PENDING, 0);
                 whenAnswered(answer=>host.completed?.(handle, into(answer), overlapped,
                     answer.status));
                 return fail(ERROR_IO_PENDING);
@@ -2200,7 +2193,7 @@ export function createNamedPipes(host){
             const count = into(answer);
             if (native)
             {
-                overlappedResult(writeDword, layout, out, answer.status, count);
+                overlappedResult(guest.set32, layout, out, answer.status, count);
                 return answer.status;
             }
             writeDwordIf(out, count);
@@ -2208,8 +2201,8 @@ export function createNamedPipes(host){
             {
                 // A handle opened without FILE_FLAG_OVERLAPPED is told its
                 // status in the OVERLAPPED it was given, as `finish` tells it.
-                overlappedResult(writeDword, layout, overlapped, answer.status, count);
-                const event = (readDword(wholeAddress(overlapped) + layout.event) & ~1) >>> 0;
+                overlappedResult(guest.set32, layout, overlapped, answer.status, count);
+                const event = (guest.u32(wholeAddress(overlapped) + layout.event) & ~1) >>> 0;
                 if (event !== 0)
                 {
                     host.setEvent?.(event);
@@ -2249,7 +2242,7 @@ export function createNamedPipes(host){
                 const count = answer.bytes?.length ?? 0;
                 if (count > 0)
                 {
-                    host.writeMemory(wholeAddress(buffer), /** @type {Uint8Array} */ (answer.bytes));
+                    guest.setBytes(wholeAddress(buffer), /** @type {Uint8Array} */ (answer.bytes));
                 }
                 return count;
             } });
@@ -2274,7 +2267,7 @@ export function createNamedPipes(host){
             return native ? STATUS.ACCESS_VIOLATION : fail(ERROR_NOACCESS);
         }
         const got = /** @type {PipesAcross} */ (host.across).write(standIn.id,
-            count === 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count));
+            count === 0 ? new Uint8Array(0) : guest.snapshot(wholeAddress(buffer), count));
         if (!waits(got) && /** @type {AcrossAnswer} */ (got).status === STATUS_PIPE_CLOSING)
         {
             return native ? STATUS_PIPE_CLOSING : fail(ERROR_NO_DATA);
@@ -2314,7 +2307,7 @@ export function createNamedPipes(host){
         }
         if (overlapped !== 0)
         {
-            overlappedResult(writeDword, layout, wholeAddress(overlapped), STATUS.PENDING, 0);
+            overlappedResult(guest.set32, layout, wholeAddress(overlapped), STATUS.PENDING, 0);
             void /** @type {Promise<AcrossAnswer>} */ (got).then(answer=>
                 host.completed?.(handle, 0, wholeAddress(overlapped), answer.status));
             return fail(ERROR_IO_PENDING);
@@ -2536,8 +2529,8 @@ export function createNamedPipes(host){
         if (!end.canWrite || !peer || peer.closed || peer.inbox.length === 0
             || blocked(end, true) !== null)
         {
-            host.writeMemory(wholeAddress(block), dwordBytes(STATUS.SUCCESS));
-            host.writeMemory(wholeAddress(block) + 4, dwordBytes(0));
+            guest.set32(wholeAddress(block), STATUS.SUCCESS);
+            guest.set32(wholeAddress(block) + 4, 0);
             return STATUS.SUCCESS;
         }
         /** @type {Op} */
@@ -2636,7 +2629,7 @@ export function createNamedPipes(host){
             const mode = await step('LocalAlloc', [LPTR, 4]);
             if (mode !== 0)
             {
-                writeDword(mode, PIPE_READMODE_MESSAGE);
+                guest.set32(mode, PIPE_READMODE_MESSAGE);
             }
             const ok = mode !== 0
                 && await step('SetNamedPipeHandleState', [handle, mode, 0, 0]) !== 0
@@ -2822,7 +2815,7 @@ export function createNamedPipes(host){
     {
         const size = inputSize >>> 0;
         const got = /** @type {PipesAcross} */ (host.across).transact(standIn.id,
-            size === 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(input), size),
+            size === 0 ? new Uint8Array(0) : guest.snapshot(wholeAddress(input), size),
             outputSize >>> 0);
         if (!waits(got) && /** @type {AcrossAnswer} */ (got).refused)
         {
@@ -2836,7 +2829,7 @@ export function createNamedPipes(host){
                 const bytes = answered.bytes ?? new Uint8Array(0);
                 if (bytes.length > 0)
                 {
-                    host.writeMemory(wholeAddress(output), bytes);
+                    guest.setBytes(wholeAddress(output), bytes);
                 }
                 return bytes.length;
             } });
@@ -2893,7 +2886,7 @@ export function createNamedPipes(host){
                 [...text].forEach((ch, at)=>{
                     bytes[wide ? at * 2 : at] = ch.charCodeAt(0);
                 });
-                host.writeMemory(wholeAddress(user), bytes.subarray(0,
+                guest.setBytes(wholeAddress(user), bytes.subarray(0,
                     Math.min(bytes.length, (room >>> 0) * (wide ? 2 : 1))));
             }
             return 1;
@@ -2913,7 +2906,7 @@ export function createNamedPipes(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            writeDword(out, INTERACTIVE_SESSION);
+            guest.set32(out, INTERACTIVE_SESSION);
             return 1;
         },
     });
@@ -2991,7 +2984,7 @@ export function createNamedPipes(host){
                 const answer = listen(end, handle >>> 0, { overlapped: wholeAddress(overlapped) });
                 if (answer === STATUS.PENDING)
                 {
-                    overlappedResult(writeDword, layout, wholeAddress(overlapped), STATUS.PENDING,
+                    overlappedResult(guest.set32, layout, wholeAddress(overlapped), STATUS.PENDING,
                         0);
                     return fail(ERROR_IO_PENDING);
                 }
@@ -3113,7 +3106,7 @@ export function createNamedPipes(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                const mode = readDword(modePointer);
+                const mode = guest.u32(modePointer);
                 const messages = end ? end.instance.pipe.messages
                     : /** @type {StandIn} */ (standIn).messages;
                 if ((mode & ~PIPE_STATE_MASK) !== 0
@@ -3299,7 +3292,7 @@ export function createNamedPipes(host){
             return { parked: answer };
         }
         return { status: answer,
-            information: answer === STATUS.PENDING ? 0 : readDword(block + layout.internalHigh) };
+            information: answer === STATUS.PENDING ? 0 : guest.u32(block + layout.internalHigh) };
     };
 
     /** Whether a wait through the device with an absolute time-out was said. */
@@ -3340,13 +3333,13 @@ export function createNamedPipes(host){
         {
             return answer(STATUS.INVALID_PARAMETER);
         }
-        const head = new DataView(host.readMemory(input, NAME_AT).buffer);
+        const head = new DataView(guest.snapshot(input, NAME_AT).buffer);
         const nameBytes = head.getUint32(8, true);
         if (nameBytes % 2 !== 0 || NAME_AT + nameBytes > inLength)
         {
             return answer(STATUS.INVALID_PARAMETER);
         }
-        const raw = host.readMemory(input + NAME_AT, nameBytes);
+        const raw = guest.snapshot(input + NAME_AT, nameBytes);
         let name = '';
         for (let at = 0; at + 1 < raw.length; at += 2)
         {
@@ -3424,8 +3417,8 @@ export function createNamedPipes(host){
                 readMode, completion, maxInstances, inbound, outbound, timeout])=>{
                 // The handle's place is written before anything is made: a call
                 // that cannot answer makes no instance.
-                writeDword(out, 0);
-                const given = readObjectAttributes(host.readMemory, attributes,
+                guest.set32(out, 0);
+                const given = readObjectAttributes(guest, attributes,
                     host.pointerSize === 8 ? 8 : 4);
                 if (given === null)
                 {
@@ -3483,7 +3476,7 @@ export function createNamedPipes(host){
                 }
                 const count = wholeAddress(maxInstances);
                 const due = wholeAddress(timeout) === 0 ? 0n
-                    : readLargeInteger(host.readMemory, wholeAddress(timeout));
+                    : guest.i64(wholeAddress(timeout));
                 // A pipe made with no name is one of its own: nothing opens
                 // it by a name, so asking to open one finds none.
                 if (pipeName === null && asked === 'open')
@@ -3515,11 +3508,11 @@ export function createNamedPipes(host){
                 {
                     return NATIVE_REFUSALS.get(made.error) ?? STATUS.UNSUCCESSFUL;
                 }
-                writeDword(out, made.handle);
+                guest.set32(out, made.handle);
                 if (wholeAddress(status) !== 0)
                 {
-                    writeDword(status, STATUS.SUCCESS);
-                    writeDword(wholeAddress(status) + 4, FILE_CREATED);
+                    guest.set32(status, STATUS.SUCCESS);
+                    guest.set32(wholeAddress(status) + 4, FILE_CREATED);
                 }
                 return STATUS.SUCCESS;
             },
@@ -3804,7 +3797,7 @@ export function createNamedPipes(host){
                 const bytes = got.bytes ?? new Uint8Array(0);
                 if ((buffer >>> 0) !== 0 && bytes.length > 0)
                 {
-                    host.writeMemory(wholeAddress(buffer), bytes);
+                    guest.setBytes(wholeAddress(buffer), bytes);
                 }
                 writeDwordIf(copiedOut, bytes.length);
                 writeDwordIf(total, got.total ?? 0);
@@ -3830,7 +3823,7 @@ export function createNamedPipes(host){
             const seen = peekAt(end, (buffer >>> 0) === 0 ? 0 : size);
             if (seen.bytes.length > 0)
             {
-                host.writeMemory(wholeAddress(buffer), seen.bytes);
+                guest.setBytes(wholeAddress(buffer), seen.bytes);
             }
             writeDwordIf(copiedOut, seen.bytes.length);
             writeDwordIf(total, seen.total);
@@ -3919,13 +3912,13 @@ export function createNamedPipes(host){
             const peer = peerOf(end);
             const state = end.instance.state === 'connected' && peer && !peer.closed
                 ? FILE_PIPE_CONNECTED_STATE : FILE_PIPE_CLOSING_STATE;
-            writeDword(output, state);
-            writeDword(wholeAddress(output) + 4, seen.total);
-            writeDword(wholeAddress(output) + 8, seen.count);
-            writeDword(wholeAddress(output) + 12, seen.length);
+            guest.set32(output, state);
+            guest.set32(wholeAddress(output) + 4, seen.total);
+            guest.set32(wholeAddress(output) + 8, seen.count);
+            guest.set32(wholeAddress(output) + 12, seen.length);
             if (seen.bytes.length > 0)
             {
-                host.writeMemory(wholeAddress(output) + PEEK_HEAD, seen.bytes);
+                guest.setBytes(wholeAddress(output) + PEEK_HEAD, seen.bytes);
             }
             // Only a message cut short overflows: a byte pipe's peek takes what fits.
             const whole = end.instance.pipe.messages ? seen.length : seen.bytes.length;
@@ -4065,8 +4058,8 @@ export function createNamedPipes(host){
             {
                 return STATUS_PIPE_DISCONNECTED;
             }
-            const readMode = readDword(wholeAddress(from));
-            const completion = readDword(wholeAddress(from) + 4);
+            const readMode = guest.u32(wholeAddress(from));
+            const completion = guest.u32(wholeAddress(from) + 4);
             if (readMode > 1 || completion > 1 || (readMode === 1 && !end.instance.pipe.messages))
             {
                 return STATUS.INVALID_PARAMETER;
@@ -4192,12 +4185,6 @@ export function createNamedPipes(host){
 /** @param {number} value */
 const dwordBytes = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff,
     (value >>> 16) & 0xff, (value >>> 24) & 0xff);
-
-/** @param {PipeHost} host @param {number} address */
-const readFrom = (host, address)=>{
-    const bytes = host.readMemory(wholeAddress(address), 4);
-    return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-};
 
 /**
  * FileNameInformation of a pipe end: its name on the pipe device.

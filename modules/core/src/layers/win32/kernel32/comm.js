@@ -79,16 +79,14 @@ const PORT_CALLS = Object.freeze({
  * @property {{ typeOf?: (handle: number) => string | undefined | null }} handles
  * @property {(code: number) => void} setLastError
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString  limit in bytes
+ * @property {import('../common/guest.js').Guest} guest
  */
 
 /**
  * @param {CommHost} host
  */
 export function createCommFunctions(host){
+    const { guest } = host;
     const refuse = createRefusals({ setLastError: host.setLastError, divergence: host.divergence });
 
     /** @param {number} handle */
@@ -112,42 +110,41 @@ export function createCommFunctions(host){
      * Windows refuses changes nothing and is ERROR_INVALID_PARAMETER; one it
      * takes leaves the last error alone.
      *
-     * @param {(address: number) => string} readText @param {boolean} withTimeouts
+     * @param {boolean} wide @param {boolean} withTimeouts
      */
-    const buildDcb = (readText, withTimeouts)=>({
+    const buildDcb = (wide, withTimeouts)=>({
         argBytes: withTimeouts ? 12 : 8,
         /** @param {number[]} args */
         handler: ([text, dcb, timeouts])=>{
             const settings = (text >>> 0) === 0 ? null
-                : parseCommString(readText(wholeAddress(text)));
+                : parseCommString(guest.text(wholeAddress(text), wide,
+                    WHOLE_STRING * (wide ? 2 : 1)));
             if (settings === null)
             {
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            const block = host.readMemory(wholeAddress(dcb), DCB_SIZE);
+            const block = guest.snapshot(wholeAddress(dcb), DCB_SIZE);
             const times = withTimeouts && (timeouts >>> 0) !== 0
-                ? host.readMemory(wholeAddress(timeouts), TIMEOUTS_SIZE) : null;
+                ? guest.snapshot(wholeAddress(timeouts), TIMEOUTS_SIZE) : null;
             applyCommSettings(settings, block, times);
-            host.writeMemory(wholeAddress(dcb), block);
+            guest.setBytes(wholeAddress(dcb), block);
             if (times)
             {
-                host.writeMemory(wholeAddress(timeouts), times);
+                guest.setBytes(wholeAddress(timeouts), times);
             }
             return 1;
         },
     });
-    const ansi = (/** @type {number} */ address)=>host.readCString(address, WHOLE_STRING);
-    const wide = (/** @type {number} */ address)=>host.readWideString(address, WHOLE_STRING * 2);
     const builders = [
         /** BOOL BuildCommDCBA(LPCSTR lpDef, LPDCB lpDCB) */
-        ['BuildCommDCBA', buildDcb(ansi, false)],
+        ['BuildCommDCBA', buildDcb(false, false)],
         /** BOOL BuildCommDCBW(LPCWSTR lpDef, LPDCB lpDCB) */
-        ['BuildCommDCBW', buildDcb(wide, false)],
+        ['BuildCommDCBW', buildDcb(true, false)],
         /** BOOL BuildCommDCBAndTimeoutsA(LPCSTR, LPDCB, LPCOMMTIMEOUTS) */
-        ['BuildCommDCBAndTimeoutsA', buildDcb(ansi, true)],
+        ['BuildCommDCBAndTimeoutsA', buildDcb(false, true)],
         /** BOOL BuildCommDCBAndTimeoutsW(LPCWSTR, LPDCB, LPCOMMTIMEOUTS) */
-        ['BuildCommDCBAndTimeoutsW', buildDcb(wide, true)],
+        ['BuildCommDCBAndTimeoutsW', buildDcb(true, true)],
     ];
 
     const handled = Object.entries(SERIAL_CALLS).map(([name, argBytes])=>{

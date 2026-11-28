@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { serveCall, takeAnswer, askChild, after, childThread, isChildThread, threadArg,
     threadEnd, VIRTUAL_READ }
     from './cross-process.js';
@@ -53,10 +54,7 @@ function childOf(calls){
             return at;
         },
         free: (/** @type {number} */ at)=>child.freed.push(at),
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            memory.slice(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, at),
+        guest: guestOver(memory),
     };
     return { child, host };
 }
@@ -117,8 +115,8 @@ test('the parent writes the answer where its call asked, and sets the error it c
     const memory = new Uint8Array(0x100);
     /** @type {number[]} */
     const errors = [];
-    const parent = { writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-        memory.set(bytes, at), setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const parent = { guest: guestOver(memory),
+        setLastError: (/** @type {number} */ code)=>errors.push(code) };
     assert.equal(takeAnswer({ result: 1, error: null, outs: [null, new Uint8Array([9, 8])] },
         [null, 0x10], parent), 1);
     assert.deepEqual([...memory.slice(0x10, 0x12)], [9, 8]);
@@ -138,7 +136,7 @@ test('an answer later sets the error of the thread that asked, whichever runs th
             running = { id: 2 };
             return { result: 0, error: 6, outs: [] };
         }),
-        writeMemory: ()=>{},
+        guest: guestOver(new Uint8Array(0x10)),
         currentThread: ()=>running,
         setLastErrorFor: (/** @type {any} */ thread, /** @type {number} */ code)=>
             set.push([thread, code]),

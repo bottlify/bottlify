@@ -40,11 +40,7 @@ const MAX_ATOM_NAME = 255;
 
 /**
  * @typedef {Object} AtomHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- *           A string cut to the limit when it is longer, as the layer's reader does.
- * @property {(address: number, maxLength: number) => string} [readWideString]
- *           The same, the limit in bytes.
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} [setLastError]
  */
 
@@ -57,6 +53,7 @@ const MAX_ATOM_NAME = 255;
  * @param {AtomHost} host
  */
 export function createAtomFunctions(host){
+    const { guest } = host;
     /** @type {Map<string, { atom: number, count: number }>} */
     const byName = new Map();
     /** @type {Map<number, string>} */
@@ -82,8 +79,8 @@ export function createAtomFunctions(host){
         }
         // One character past the longest name, which the reader cuts a
         // longer one to: a name that reaches it is too long.
-        const text = wide ? host.readWideString?.(raw, (MAX_ATOM_NAME + 1) * 2) ?? ''
-            : host.readCString(raw, MAX_ATOM_NAME + 1);
+        const text = wide ? guest.wstr(raw, (MAX_ATOM_NAME + 1) * 2) ?? ''
+            : guest.cstr(raw, MAX_ATOM_NAME + 1);
         if (text.length > MAX_ATOM_NAME)
         {
             host.setLastError?.(ERROR_INVALID_PARAMETER);
@@ -207,12 +204,12 @@ export function createAtomFunctions(host){
         if (global && wide)
         {
             const kept = text.slice(0, room);
-            host.writeMemory(wholeAddress(buffer),
+            guest.setBytes(wholeAddress(buffer),
                 utf16(kept.length < room ? `${kept}\0` : kept));
             return kept.length;
         }
         const kept = text.slice(0, room - 1);
-        host.writeMemory(wholeAddress(buffer),
+        guest.setBytes(wholeAddress(buffer),
             wide ? utf16z(kept) : encodeAnsi(`${kept}\0`));
         if (kept.length < text.length && (global || kept.length === 0))
         {

@@ -31,7 +31,7 @@ import { blockLayouts } from './teb.js';
 import { systemTimeToMs } from './filetime.js';
 import { formatMessageText } from './format-message.js';
 import { systemMessage } from './system-messages.js';
-import { compareStrings, decodeAnsi, encodeAnsi } from './locale.js';
+import { compareStrings, encodeAnsi } from './locale.js';
 import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
 import { STATUS } from '../ntdll/status.js';
 import { highestUserAddress, pointerWidth, wholeAddress } from '../common/pointers.js';
@@ -257,8 +257,7 @@ const EXECUTION_STATES = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRES
 
 /**
  * @typedef {Object} SystemHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => number} systemTimeMs   Guest wall clock, milliseconds since 1970.
  * @property {(code: number) => void} setLastError
  * @property {(module: number, language: number, id: number) => string | null} [findMessage]
@@ -348,6 +347,7 @@ const pick = (table, names)=>/** @type {Partial<T>} */ (
  * @param {SystemHost} host
  */
 export function createSystemFunctions(host){
+    const { guest } = host;
     const processors = host.processors;
 
     /**
@@ -417,76 +417,26 @@ export function createSystemFunctions(host){
         : {});
 
     /**
-     * A terminated string of `width`-byte units, read a span at a time -- up to
-     * 64 bytes and never across a page -- rather than a unit at a time: a
-     * read per character was an allocation and a region check per character,
-     * most of what an lstrlen cost. A span that cannot be read whole is read a
-     * unit at a time, so a string ending just short of unmapped memory reads
-     * as it always did, and one running into it throws where it always did.
+     * A terminated string copied, \`count\` units of it at most, and a
+     * terminator of its width after: the bytes as they are, in either width,
+     * as the lstr copies move them. Answers the units copied.
      *
-     * @param {number} address @param {number} maxLength @param {1 | 2} width
+     * @param {number} to @param {number} from @param {boolean} wide @param {number} [count]
      */
-    const readUnits = (address, maxLength, width)=>{
-        let text = '';
-        let at = address;
-        let left = maxLength;
-        while (left > 0)
+    const copyString = (to, from, wide, count = MAX_STRING)=>{
+        const size = wide ? 2 : 1;
+        const length = Math.min(guest.stringBytes(from, wide, MAX_STRING * size).length,
+            count * size);
+        guest.copy(to, from, length);
+        if (wide)
         {
-            const units = Math.min(left, 64 / width,
-                Math.max(1, (PAGE_SIZE - (at & (PAGE_SIZE - 1))) / width | 0));
-            /** @type {Uint8Array | null} */
-            let bytes = null;
-            try
-            {
-                bytes = host.readMemory(at, units * width);
-            }
-            catch (e){
-                void e;
-            }
-            for (let i = 0; i < units; i++)
-            {
-                const pair = bytes ?? host.readMemory(at + i * width, width);
-                const from = bytes ? i * width : 0;
-                const unit = width === 1 ? pair[from] : pair[from] | pair[from + 1] << 8;
-                if (unit === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(unit);
-            }
-            at += units * width;
-            left -= units;
+            guest.set16(to + length, 0);
         }
-        return text;
-    };
-
-    /** @param {number} address @param {number} maxLength */
-    const readAnsi = (address, maxLength)=>readUnits(address, maxLength, 1);
-
-    /** @param {number} address @param {number} maxLength */
-    const readWide = (address, maxLength)=>readUnits(address, maxLength, 2);
-
-    /** @param {number} address @param {string} text  Written with a terminator. */
-    const writeAnsi = (address, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
-        for (let at = 0; at < text.length; at++)
+        else
         {
-            bytes[at] = text.charCodeAt(at) & 0xff;
+            guest.set8(to + length, 0);
         }
-        host.writeMemory(address, bytes);
-    };
-
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(address, new Uint8Array([
-            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-        ]));
-    };
-
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+        return length / size;
     };
 
     /**
@@ -504,20 +454,20 @@ export function createSystemFunctions(host){
         const needed = processors.count() * 8;
         if (buffer === 0)
         {
-            if (readDword(length) === 0)
+            if (guest.u32(length) === 0)
             {
-                writeDword(length, needed);
+                guest.set32(length, needed);
             }
             return 1;
         }
-        const room = readDword(length);
-        writeDword(length, needed);
+        const room = guest.u32(length);
+        guest.set32(length, needed);
         if (room < needed)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
         }
-        host.writeMemory(buffer, new Uint8Array(needed));
+        guest.setBytes(buffer, new Uint8Array(needed));
         return 1;
     };
 
@@ -534,10 +484,9 @@ export function createSystemFunctions(host){
             {
                 return Math.sign((first >>> 0 === 0 ? 0 : 1) - (second >>> 0 === 0 ? 0 : 1));
             }
-            const read = wide ? readWide : (/** @type {number} */ address)=>decodeAnsi(
-                Uint8Array.from(readAnsi(address, MAX_STRING), character=>character.charCodeAt(0)));
-            return compareStrings(read(wholeAddress(first), MAX_STRING),
-                read(wholeAddress(second), MAX_STRING),
+            const read = (/** @type {number} */ address)=>guest.text(address, wide,
+                MAX_STRING * (wide ? 2 : 1));
+            return compareStrings(read(wholeAddress(first)), read(wholeAddress(second)),
                 flags) - 2;
         }),
     });
@@ -574,7 +523,7 @@ export function createSystemFunctions(host){
             const allocating = (asked & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0;
             if (allocating && (buffer >>> 0) !== 0)
             {
-                writeDword(wholeAddress(buffer), 0);
+                guest.set32(wholeAddress(buffer), 0);
             }
             if ((asked & (FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_FROM_HMODULE
                 | FORMAT_MESSAGE_FROM_SYSTEM)) === 0)
@@ -601,9 +550,7 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                format = wide ? readWide(wholeAddress(source), MAX_STRING)
-                    : decodeAnsi(Uint8Array.from(readAnsi(wholeAddress(source), MAX_STRING),
-                        character=>character.charCodeAt(0)));
+                format = guest.text(wholeAddress(source), wide, MAX_STRING * (wide ? 2 : 1));
             }
             else
             {
@@ -626,23 +573,21 @@ export function createSystemFunctions(host){
 
             const array = (asked & FORMAT_MESSAGE_ARGUMENT_ARRAY) !== 0;
             const list = (argumentsPtr >>> 0) === 0 ? 0
-                : array ? argumentsPtr >>> 0 : readDword(wholeAddress(argumentsPtr));
+                : array ? argumentsPtr >>> 0 : guest.u32(wholeAddress(argumentsPtr));
             const room = allocating ? Infinity : (size >>> 0) - 1;
             const { text, error, reads } = formatMessageText(format, {
                 wide,
                 ignoreInserts: (asked & FORMAT_MESSAGE_IGNORE_INSERTS) !== 0,
                 width: asked & FORMAT_MESSAGE_MAX_WIDTH_MASK,
                 args: (argumentsPtr >>> 0) === 0 ? null
-                    : { array, read: slot=>readDword(list + slot * 4) },
-                readString: (address, wideString)=>(wideString
-                    ? readWide(address, MAX_STRING)
-                    : decodeAnsi(Uint8Array.from(readAnsi(address, MAX_STRING),
-                        character=>character.charCodeAt(0)))),
+                    : { array, read: slot=>guest.u32(list + slot * 4) },
+                readString: (address, wideString)=>guest.text(address, wideString,
+                    MAX_STRING * (wideString ? 2 : 1)),
                 room: wide ? room : Infinity,
             });
             if (!array && (argumentsPtr >>> 0) !== 0 && reads > 0)
             {
-                writeDword(wholeAddress(argumentsPtr), list + reads * 4);
+                guest.set32(wholeAddress(argumentsPtr), list + reads * 4);
             }
 
             const unit = wide ? 2 : 1;
@@ -658,13 +603,13 @@ export function createSystemFunctions(host){
                     {
                         units[at] = text.charCodeAt(at);
                     }
-                    host.writeMemory(address, new Uint8Array(units.buffer));
+                    guest.setBytes(address, new Uint8Array(units.buffer));
                 }
                 else
                 {
                     const out = new Uint8Array(count + (terminated ? 1 : 0));
                     out.set(bytes.subarray(0, count));
-                    host.writeMemory(address, out);
+                    guest.setBytes(address, out);
                 }
             };
             if (error === ERROR_INVALID_PARAMETER || (!wide && length >= ANSI_MESSAGE_LIMIT))
@@ -690,7 +635,7 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 put(address, length, true);
-                writeDword(wholeAddress(buffer), address);
+                guest.set32(wholeAddress(buffer), address);
                 return length;
             }
             if (error === ERROR_INSUFFICIENT_BUFFER || length + 1 > (size >>> 0))
@@ -720,7 +665,7 @@ export function createSystemFunctions(host){
     const readable = (address, length)=>{
         try
         {
-            host.readMemory(address, Math.max(length, 1));
+            guest.snapshot(address, Math.max(length, 1));
             return true;
         }
         catch (e){
@@ -771,9 +716,7 @@ export function createSystemFunctions(host){
 
     /**
      * Whether a string can be read to its terminator, or to a count of
-     * characters, without leaving mapped memory. Probed a page at a time
-     * rather than a character at a time: the count is usually unlimited and
-     * the terminator is what stops the walk.
+     * characters, without leaving mapped memory.
      *
      * @param {number} address @param {number} count @param {1 | 2} width
      */
@@ -782,32 +725,15 @@ export function createSystemFunctions(host){
         {
             return false;
         }
-        let at = address;
-        let left = count;
-        while (left > 0)
+        try
         {
-            const span = Math.min(left * width, PAGE_SIZE - (at & (PAGE_SIZE - 1)));
-            /** @type {Uint8Array} */
-            let bytes;
-            try
-            {
-                bytes = host.readMemory(at, span);
-            }
-            catch (e){
-                void e;
-                return false;
-            }
-            for (let i = 0; i + width <= bytes.length; i += width)
-            {
-                if (bytes[i] === 0 && (width === 1 || bytes[i + 1] === 0))
-                {
-                    return true;
-                }
-            }
-            at += span;
-            left -= span / width;
+            guest.stringBytes(address, width === 2, count * width);
+            return true;
         }
-        return true;
+        catch (e){
+            void e;
+            return false;
+        }
     };
 
     /** @param {number} handle @param {string} [type] */
@@ -841,8 +767,7 @@ export function createSystemFunctions(host){
     const threadErrorMode = ()=>{
         const block = ownBlock();
         return block === 0 ? 0
-            : new DataView(host.readMemory(block + TEB.HARD_ERROR_MODE, 4).buffer)
-                .getUint32(0, true);
+            : guest.u32(block + TEB.HARD_ERROR_MODE);
     };
     /** @param {number} mode  in ntdll's bits */
     const setThreadErrorMode = mode=>{
@@ -851,7 +776,7 @@ export function createSystemFunctions(host){
         {
             const bytes = new Uint8Array(4);
             new DataView(bytes.buffer).setUint32(0, mode >>> 0, true);
-            host.writeMemory(block + TEB.HARD_ERROR_MODE, bytes);
+            guest.setBytes(block + TEB.HARD_ERROR_MODE, bytes);
         }
     };
 
@@ -874,7 +799,7 @@ export function createSystemFunctions(host){
 
     /** @param {number} address @returns {bigint} */
     const readFileTime = address=>{
-        const bytes = host.readMemory(address, 8);
+        const bytes = guest.snapshot(address, 8);
         return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
     };
 
@@ -882,7 +807,7 @@ export function createSystemFunctions(host){
     const writeFileTime = (address, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigUint64(0, value, true);
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
     };
 
     /**
@@ -892,7 +817,7 @@ export function createSystemFunctions(host){
      * @param {number} address
      */
     const filetimeFrom = address=>{
-        const milliseconds = systemTimeToMs(host.readMemory(address, SYSTEMTIME_SIZE));
+        const milliseconds = systemTimeToMs(guest.snapshot(address, SYSTEMTIME_SIZE));
         return milliseconds === null ? null
             : BigInt(milliseconds) * 10_000n + FILETIME_AT_UNIX_EPOCH;
     };
@@ -934,7 +859,7 @@ export function createSystemFunctions(host){
             // The family and the model and stepping, as CPUID gives them.
             view.setUint16(layout.LEVEL, PROCESSOR_LEVEL, true);
             view.setUint16(layout.REVISION, PROCESSOR_REVISION, true);
-            host.writeMemory(wholeAddress(info), bytes);
+            guest.setBytes(wholeAddress(info), bytes);
             return 0;
         },
     });
@@ -1094,7 +1019,7 @@ export function createSystemFunctions(host){
             {
                 bytes[wide ? at * 2 : at] = text.charCodeAt(at);
             }
-            host.writeMemory(wholeAddress(buffer), bytes);
+            guest.setBytes(wholeAddress(buffer), bytes);
             return WOW64_DIRECTORY.length;
         },
     });
@@ -1131,7 +1056,7 @@ export function createSystemFunctions(host){
             {
                 if ((argument >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(argument),
+                    guest.setBytes(wholeAddress(argument),
                         Uint8Array.of(redirectionOff(), 0, 0, 0));
                 }
                 turnRedirection(true);
@@ -1235,17 +1160,16 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 const bytes = logicalProcessors();
-                const room = new DataView(host.readMemory(wholeAddress(returned), 4).buffer)
-                    .getUint32(0, true);
+                const room = guest.u32(wholeAddress(returned));
                 const length = new Uint8Array(4);
                 new DataView(length.buffer).setUint32(0, bytes.length, true);
-                host.writeMemory(wholeAddress(returned), length);
+                guest.setBytes(wholeAddress(returned), length);
                 if (room < bytes.length || wholeAddress(buffer) === 0)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(buffer), bytes);
+                guest.setBytes(wholeAddress(buffer), bytes);
                 return 1;
             },
         },
@@ -1267,17 +1191,16 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const room = new DataView(host.readMemory(wholeAddress(returned), 4).buffer)
-                    .getUint32(0, true);
+                const room = guest.u32(wholeAddress(returned));
                 const length = new Uint8Array(4);
                 new DataView(length.buffer).setUint32(0, bytes.length, true);
-                host.writeMemory(wholeAddress(returned), length);
+                guest.setBytes(wholeAddress(returned), length);
                 if (room < bytes.length || wholeAddress(buffer) === 0)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(buffer), bytes);
+                guest.setBytes(wholeAddress(buffer), bytes);
                 return 1;
             },
         },
@@ -1305,7 +1228,7 @@ export function createSystemFunctions(host){
             /** @param {number[]} args */
             handler: ([out])=>{
                 const number = processors.processorOf(host.currentThread()) & 0xff;
-                host.writeMemory(wholeAddress(out), Uint8Array.of(0, 0, number, 0));
+                guest.setBytes(wholeAddress(out), Uint8Array.of(0, 0, number, 0));
                 return 0;
             },
         },
@@ -1338,7 +1261,7 @@ export function createSystemFunctions(host){
                 }
                 /** @param {boolean} under */
                 const say = under=>{
-                    host.writeMemory(wholeAddress(answer), Uint8Array.of(under ? 1 : 0, 0, 0, 0));
+                    guest.setBytes(wholeAddress(answer), Uint8Array.of(under ? 1 : 0, 0, 0, 0));
                     return 1;
                 };
                 if (current || host.machine64 !== true)
@@ -1373,7 +1296,7 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 /** @param {number} at @param {number} value */
-                const half = (at, value)=>host.writeMemory(wholeAddress(at),
+                const half = (at, value)=>guest.setBytes(wholeAddress(at),
                     Uint8Array.of(value & 0xff, value >>> 8));
                 /** @param {boolean} under */
                 const say = under=>{
@@ -1435,7 +1358,7 @@ export function createSystemFunctions(host){
                         {
                             return STATUS_ACCESS_VIOLATION;
                         }
-                        host.writeMemory(wholeAddress(old),
+                        guest.setBytes(wholeAddress(old),
                             Uint8Array.of(redirectionOff(), 0, 0, 0));
                         turnRedirection((disable >>> 0) !== 0);
                         return STATUS_SUCCESS;
@@ -1476,7 +1399,7 @@ export function createSystemFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([time])=>{
-                host.writeMemory(wholeAddress(time), nowAsSystemTime());
+                guest.setBytes(wholeAddress(time), nowAsSystemTime());
                 return 0;
             },
         },
@@ -1493,7 +1416,7 @@ export function createSystemFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([time])=>{
-                host.writeMemory(wholeAddress(time), nowAsSystemTime());
+                guest.setBytes(wholeAddress(time), nowAsSystemTime());
                 return 0;
             },
         },
@@ -1527,7 +1450,7 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(systemTime), systemTimeFrom(value));
+                guest.setBytes(wholeAddress(systemTime), systemTimeFrom(value));
                 return 1;
             },
         },
@@ -1705,7 +1628,7 @@ export function createSystemFunctions(host){
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, child && !child.current
                     ? child.exitCode ?? STILL_ACTIVE : STILL_ACTIVE, true);
-                host.writeMemory(wholeAddress(code), bytes);
+                guest.setBytes(wholeAddress(code), bytes);
                 return 1;
             },
         },
@@ -1728,7 +1651,7 @@ export function createSystemFunctions(host){
                 if (remote && remote.exitCode === null && host.setLastErrorFor)
                 {
                     const asked = askChild({ askChild: host.askChild,
-                        writeMemory: host.writeMemory, currentThread: host.currentThread,
+                        guest, currentThread: host.currentThread,
                         setLastErrorFor: host.setLastErrorFor }, remote.process,
                     { call: 'GetExitCodeThread', args: [threadArg(remote), { out: 4 }] },
                     [null, wholeAddress(code)]);
@@ -1747,7 +1670,7 @@ export function createSystemFunctions(host){
                 new DataView(bytes.buffer).setUint32(
                     0, remote && remote.exitCode === null ? remote.process.exitCode ?? 0
                         : target.exitCode ?? STILL_ACTIVE, true);
-                host.writeMemory(wholeAddress(code), bytes);
+                guest.setBytes(wholeAddress(code), bytes);
                 return 1;
             },
         },
@@ -1875,7 +1798,7 @@ export function createSystemFunctions(host){
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, previous, true);
-                    host.writeMemory(wholeAddress(old), bytes);
+                    guest.setBytes(wholeAddress(old), bytes);
                 }
                 return 1;
             },
@@ -1968,7 +1891,7 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_NOACCESS);
                     return 0;
                 }
-                writeDword(wholeAddress(out), target.priorityBoostDisabled ? 1 : 0);
+                guest.set32(wholeAddress(out), target.priorityBoostDisabled ? 1 : 0);
                 return 1;
             },
         },
@@ -2056,9 +1979,8 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const head = readAnsi(wholeAddress(first), MAX_STRING);
-                const tail = readAnsi(wholeAddress(second), MAX_STRING);
-                writeAnsi(wholeAddress(first) + head.length, tail);
+                const head = guest.stringBytes(wholeAddress(first), false, MAX_STRING).length;
+                copyString(wholeAddress(first) + head, wholeAddress(second), false);
                 return first >>> 0;
             }),
         },
@@ -2073,15 +1995,8 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const head = readWide(wholeAddress(first), MAX_STRING);
-                const tail = readWide(wholeAddress(second), MAX_STRING);
-                const units = new Uint16Array(tail.length + 1);
-                for (let at = 0; at < tail.length; at++)
-                {
-                    units[at] = tail.charCodeAt(at);
-                }
-                host.writeMemory(wholeAddress(first) + head.length * 2,
-                    new Uint8Array(units.buffer));
+                const head = guest.stringBytes(wholeAddress(first), true, MAX_STRING * 2).length;
+                copyString(wholeAddress(first) + head, wholeAddress(second), true);
                 return first >>> 0;
             }),
         },
@@ -2104,8 +2019,7 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const text = readAnsi(wholeAddress(source), MAX_STRING).slice(0, room - 1);
-                writeAnsi(wholeAddress(destination), text);
+                copyString(wholeAddress(destination), wholeAddress(source), false, room - 1);
                 return wholeAddress(destination);
             }),
         },
@@ -2126,13 +2040,7 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const text = readWide(wholeAddress(source), MAX_STRING).slice(0, room - 1);
-                const units = new Uint16Array(text.length + 1);
-                for (let at = 0; at < text.length; at++)
-                {
-                    units[at] = text.charCodeAt(at);
-                }
-                host.writeMemory(wholeAddress(destination), new Uint8Array(units.buffer));
+                copyString(wholeAddress(destination), wholeAddress(source), true, room - 1);
                 return wholeAddress(destination);
             }),
         },
@@ -2149,7 +2057,7 @@ export function createSystemFunctions(host){
             /** @param {number[]} args */
             handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
-                : readAnsi(wholeAddress(text), MAX_STRING).length)),
+                : guest.stringBytes(wholeAddress(text), false, MAX_STRING).length)),
             ...lstrCode((at, trap, top)=>lstrlenCode(1, at, trap, top),
                 top=>lstrlenLongCode(1, top)),
         },
@@ -2160,7 +2068,7 @@ export function createSystemFunctions(host){
             /** @param {number[]} args */
             handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
-                : readWide(wholeAddress(text), MAX_STRING).length)),
+                : guest.stringBytes(wholeAddress(text), true, MAX_STRING * 2).length / 2)),
             ...lstrCode((at, trap, top)=>lstrlenCode(2, at, trap, top),
                 top=>lstrlenLongCode(2, top)),
         },
@@ -2181,7 +2089,7 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                writeAnsi(wholeAddress(destination), readAnsi(wholeAddress(source), MAX_STRING));
+                copyString(wholeAddress(destination), wholeAddress(source), false);
                 return wholeAddress(destination);
             }),
             ...lstrCode((at, trap, top)=>lstrcpyCode(1, at, trap, top),
@@ -2198,13 +2106,7 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const text = readWide(wholeAddress(source), MAX_STRING);
-                const units = new Uint16Array(text.length + 1);
-                for (let at = 0; at < text.length; at++)
-                {
-                    units[at] = text.charCodeAt(at);
-                }
-                host.writeMemory(wholeAddress(destination), new Uint8Array(units.buffer));
+                copyString(wholeAddress(destination), wholeAddress(source), true);
                 return wholeAddress(destination);
             }),
             ...lstrCode((at, trap, top)=>lstrcpyCode(2, at, trap, top),

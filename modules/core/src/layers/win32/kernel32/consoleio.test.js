@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createConsoleIoFunctions } from './consoleio.js';
 
 function setup(){
@@ -15,8 +16,7 @@ function setup(){
     /** @type {number[]} */
     const errors = [];
     const fns = createConsoleIoFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         setLastError: code=>{
             errors.push(code);
         },
@@ -149,8 +149,7 @@ test('the screen buffer\'s calls and writing input are refused as for a handle t
         const { fns: typed, errors } = setup();
         const fns = /** @type {any} */ (typed);
         const withSay = /** @type {any} */ (createConsoleIoFunctions({
-            readMemory: ()=>new Uint8Array(0),
-            writeMemory: ()=>{},
+            guest: guestOver(new Uint8Array(0x10)),
             setLastError: code=>errors.push(code),
             write: ()=>{},
             divergence: api=>said.push(api),

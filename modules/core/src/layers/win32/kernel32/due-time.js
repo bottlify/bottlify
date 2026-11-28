@@ -4,13 +4,11 @@
  * See LICENSE for details
  */
 
-import { wholeAddress } from '../common/pointers.js';
-
 /**
  * A due time as Windows gives one: a LARGE_INTEGER in hundreds of nanoseconds,
  * negative for an interval from now and positive for a moment in system time
  * (a FILETIME). SetWaitableTimer, the thread pool's timers and every native
- * timeout read it; one reading serves them all.
+ * timeout read it, the port's i64; one conversion serves them all.
  */
 
 /** Milliseconds from FILETIME's epoch (1601) to the Unix epoch (1970). */
@@ -29,16 +27,4 @@ export function dueInMs(raw, wallClockMs){
         return Number(-raw) / 10000;
     }
     return Math.max(0, Number(raw / 10000n) - FILETIME_EPOCH_MS - wallClockMs);
-}
-
-/**
- * The LARGE_INTEGER at an address.
- *
- * @param {(address: number, length: number) => Uint8Array} readMemory
- * @param {number} pointer
- * @returns {bigint}
- */
-export function readLargeInteger(readMemory, pointer){
-    const bytes = readMemory(wholeAddress(pointer), 8);
-    return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true);
 }

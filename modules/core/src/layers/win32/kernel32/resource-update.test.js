@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createResourceUpdates, peChecksum } from './resource-update.js';
 import { parsePe } from '../../loader/internal/pe.js';
 import { findResource, listResources } from '../../loader/internal/resources.js';
@@ -128,24 +129,7 @@ function setup(){
             close: ()=>{},
         }),
         fullPath: name=>(name.includes('\\') ? name : `C:\\WORK\\${name}`),
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, data)=>memory.set(data, at),
-        readCString: at=>{
-            let text = '';
-            for (let i = at; memory[i] !== 0; i++)
-            {
-                text += String.fromCharCode(memory[i]);
-            }
-            return text;
-        },
-        readWideString: at=>{
-            let text = '';
-            for (let i = at; memory[i] | memory[i + 1]; i += 2)
-            {
-                text += String.fromCharCode(memory[i] | memory[i + 1] << 8);
-            }
-            return text;
-        },
+        guest: guestOver(memory),
         setLastError: code=>errors.push(code),
         handles: {
             open: (type, object)=>{

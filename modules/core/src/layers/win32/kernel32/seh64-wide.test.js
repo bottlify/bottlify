@@ -14,6 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createSeh64 } from './seh64.js';
 import { createUnwinder } from './unwind.js';
 import { wholeAddresses } from '../../bridge/internal/dispatch.js';
@@ -59,10 +60,10 @@ function wideMachine({ callFunclet = ()=>0n, interpreter } = {}){
     view.setBigUint64(0xc000, BigInt(WIDE + 0x1020), true);
     const gpr = Array.from({ length: 16 }, ()=>0n);
     gpr[4] = BigInt(stack);
-    /** @param {number} at @param {number} length */
-    const readMemory = (at, length)=>bytes.slice(offset(at, length), offset(at, length) + length);
+    // Only the image past 4 GiB is there: an address cut to its low dword faults.
+    const guest = guestOver(bytes, 8, [], 0, WIDE);
     const unwinder = createUnwinder({
-        readMemory,
+        guest,
         imageOf: at=>(at >= WIDE && at < WIDE + bytes.length
             ? { base: WIDE, size: bytes.length, table: { address: 0x100, size: 12 } } : null),
     });
@@ -70,9 +71,7 @@ function wideMachine({ callFunclet = ()=>0n, interpreter } = {}){
     const funclets = [];
     const seh = createSeh64(/** @type {any} */ ({
         unwinder,
-        readMemory,
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, offset(at, data.length)),
+        guest,
         longState: ()=>({ gpr, eflags: 0x202, xmm: new Uint8Array(256), mxcsr: 0x1f80 }),
         currentThread: ()=>({}),
         handlerStubs: ()=>(interpreter ? [] : [WIDE + 0x3000]),

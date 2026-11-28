@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { MULDIV_CODE, createSystemFunctions, imageBits, mulDiv } from './system.js';
 import { createActivationContexts } from './actctx.js';
 import { testProcessors } from '../kernel.fixture.js';
@@ -48,11 +49,11 @@ function fakeHost(size = 0x1000){
         handles,
         clock,
         view: new DataView(bytes.buffer),
-        /** Addresses at or above this are mapped; below it, nothing is. */
-        mappedFrom: 0x100,
+        // Addresses at or above 0x100 are mapped; below it, nothing is.
+        guest: guestOver(bytes, 4, [], 0x100),
         /** @param {number} address @param {number} length */
         readMemory(address, length){
-            if (address < this.mappedFrom || address + length > bytes.length)
+            if (address < 0x100 || address + length > bytes.length)
             {
                 throw new Error(`unmapped ${address}`);
             }
@@ -916,19 +917,12 @@ test('lstrcmpW compares wide strings in the word sort, by sign, folded or not', 
     assert.equal(fns.lstrcmpW.argBytes, 8);
 });
 
-test('the lstr family reads a string a span at a time, and to the edge of mapped memory', ()=>{
+test('the lstr family reads a string to the edge of mapped memory', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
-    let reads = 0;
-    const read = host.readMemory.bind(host);
-    host.readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>{
-        reads++;
-        return read(address, length);
-    };
     host.writeMemory(0x200, new Uint8Array(100).fill(0x41));
     host.writeMemory(0x264, Uint8Array.from([0]));
     assert.equal(fns.lstrlenA.handler([0x200]), 100);
-    assert.ok(reads <= 3, `a span at a time, not a read per character: ${reads}`);
 
     // The last bytes of mapped memory: the span there cannot be read whole,
     // and the string still reads as it did a character at a time.
@@ -1285,17 +1279,7 @@ test('a C runtime checking its own load runs where Windows runs it, and stops wh
             const bytes = new Uint8Array(0x10000);
             let next = 0x4000;
             const { functions, loaderApi } = createActivationContexts({
-                readMemory: (address, length)=>bytes.slice(address, address + length),
-                writeMemory: (address, data)=>bytes.set(data, address),
-                readCString: ()=>'',
-                readWideString: address=>{
-                    let text = '';
-                    for (let at = address; bytes[at] | bytes[at + 1]; at += 2)
-                    {
-                        text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
-                    }
-                    return text;
-                },
+                guest: guestOver(bytes),
                 setLastError: ()=>{},
                 allocate: size=>{
                     const at = next;

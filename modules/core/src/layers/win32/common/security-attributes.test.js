@@ -6,11 +6,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from './guest.fixture.js';
 import { readSecurityAttributes } from './security-attributes.js';
 
 /** A memory of `bytes` at `base`. @param {number} base @param {number[]} bytes */
-const memory = (base, bytes)=>(/** @type {number} */ at, /** @type {number} */ length)=>
-    Uint8Array.from(bytes.slice(at - base, at - base + length));
+const memory = (base, bytes)=>{
+    const ram = new Uint8Array(base + bytes.length);
+    ram.set(bytes, base);
+    return guestOver(ram);
+};
 
 test('a 32-bit SECURITY_ATTRIBUTES has its descriptor at 4 and its flag at 8', ()=>{
     const read = memory(0x1000, [12, 0, 0, 0, 0x78, 0x56, 0x34, 0x12, 1, 0, 0, 0]);
@@ -35,7 +39,5 @@ test('a 64-bit SECURITY_ATTRIBUTES has its descriptor at 8 and its flag at 16', 
 });
 
 test('a null SECURITY_ATTRIBUTES is no structure', ()=>{
-    assert.equal(readSecurityAttributes(()=>{
-        throw new Error('read');
-    }, 0, 8), null);
+    assert.equal(readSecurityAttributes(guestOver(new Uint8Array(0x10)), 0, 8), null);
 });

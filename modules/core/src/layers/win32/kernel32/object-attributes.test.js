@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { nativeNameOf, readObjectAttributes } from './object-attributes.js';
 import { createNamedObjects } from './named-objects.js';
 
@@ -33,17 +34,11 @@ test('an empty name with no buffer is read as empty, its buffer never touched', 
     view.setUint32(0x10, 24, true);
     // ObjectName: a UNICODE_STRING of length 0 whose Buffer is NULL.
     view.setUint32(0x18, 0x40, true);
-    /** @type {number[]} */
-    const reads = [];
-    const read = readObjectAttributes((at, length)=>{
-        reads.push(at);
-        if (at === 0)
-        {
-            throw new Error('read at NULL');
-        }
-        return memory.slice(at, at + length);
-    }, 0x10);
+    const guest = guestOver(memory);
+    const read = readObjectAttributes({ ...guest, text: (at, wide, limit, counted)=>{
+        assert.notEqual(at, 0, 'nothing read through the NULL buffer');
+        return guest.text(at, wide, limit, counted);
+    } }, 0x10);
     assert.equal(read?.name, '');
     assert.equal(read?.invalid, 0);
-    assert.ok(!reads.includes(0), 'nothing read through the NULL buffer');
 });

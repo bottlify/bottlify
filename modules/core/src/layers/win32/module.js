@@ -255,8 +255,7 @@ withLongCode(KERNEL32_COMPILED, KERNEL32_LONG);
  * `kernel32/locale.js` taking everything else through a trap the code jumps to.
  *
  * @param {Record<string, any>} table
- * @param {{ readMemory: (address: number, length: number) => Uint8Array,
- *     writeMemory: (address: number, bytes: Uint8Array) => void }} memory
+ * @param {import('./msvcrt/guest-code.js').GuestHost} memory
  */
 export function conversionsInGuest(table, memory){
     return {
@@ -1284,8 +1283,7 @@ export function createWin32Module(){
                 list: ()=>kernel.handles.list(),
             };
 
-            const threadState = createThreadState(()=>kernel.currentThread(),
-                { readU32: memory.readU32, writeU32: memory.writeU32 }, blocks.teb);
+            const threadState = createThreadState(()=>kernel.currentThread(), guest, blocks.teb);
             const { setError, lastErrorOf, setErrorOn: setErrorOnBlock } = threadState;
             /**
              * A call made in a child (`kernel32/cross-process.js`). The thread
@@ -1464,7 +1462,7 @@ export function createWin32Module(){
                 register: (name, fn)=>bridge.register(name, fn),
                 allocate: bytes=>heap.allocate(bytes),
                 allocateCode: bytes=>heap.allocateCode(bytes),
-                writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                guest,
                 // None for a thread whose block says SkipThreadAttach: the
                 // list is asked for on the thread itself, at its start and end.
                 images: ()=>{
@@ -1635,12 +1633,11 @@ export function createWin32Module(){
             // port a program waits on, and the file calls that owe it a packet when
             // an overlapped read or write finishes.
             const ports = createIoCompletionPorts({
+                guest,
                 pointerSize,
                 kernel,
                 namedObjects,
                 divergence: config?.divergence,
-                readMemory,
-                writeMemory,
                 setLastError: setError,
                 setLastErrorFor: setErrorOn,
                 currentThread: ()=>kernel.currentThread(),
@@ -1742,13 +1739,10 @@ export function createWin32Module(){
                 return entry;
             };
             const pipes = createNamedPipes({
+                guest,
                 pointerSize,
                 kernel,
                 handles,
-                readMemory,
-                writeMemory,
-                readCString,
-                readWideString,
                 setLastError: setError,
                 setLastErrorFor: setErrorOn,
                 currentThread: ()=>kernel.currentThread(),
@@ -1833,13 +1827,10 @@ export function createWin32Module(){
             // Mailslots: their own calls, and ReadFile, WriteFile and
             // CreateFile hand their handles and names on to them.
             const mailslots = createMailslots({
+                guest,
                 kernel,
                 pointerSize,
                 handles,
-                readMemory,
-                writeMemory,
-                readCString,
-                readWideString,
                 setLastError: setError,
                 setLastErrorFor: setErrorOn,
                 currentThread: ()=>kernel.currentThread(),
@@ -2410,9 +2401,8 @@ export function createWin32Module(){
             // The host's half of a critical section: the queue behind a contended
             // one and the hand-off that wakes it. The rest is guest code.
             const critical = createCriticalSections({
+                guest,
                 pointerSize,
-                readMemory,
-                writeMemory,
                 currentThread: ()=>kernel.currentThread(),
                 /** @param {any} thread @param {string} reason */
                 block: (thread, reason)=>kernel.block(thread, reason),
@@ -2694,8 +2684,7 @@ export function createWin32Module(){
             /** The handler of the dispatch's own frame: ExceptionContinueSearch. */
             let dispatcherFrameTrap = 0;
             const seh = createSeh({
-                readMemory,
-                writeMemory,
+                guest,
                 isMapped,
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 // With the flags: a raised exception's context carries them as a
@@ -2756,7 +2745,7 @@ export function createWin32Module(){
             let cxx64 = null;
             const unwinder = pointerSize === 8
                 ? createUnwinder({
-                    readMemory,
+                    guest,
                     /** @param {number} address */
                     imageOf: address=>modules.imageOf?.(address) ?? null,
                     // A JIT's lookup callback, called on the thread whose
@@ -2768,9 +2757,8 @@ export function createWin32Module(){
             /** @type {ReturnType<typeof createSeh64> | null} */
             const seh64 = unwinder
                 ? createSeh64({
+                    guest,
                     unwinder,
-                    readMemory,
-                    writeMemory,
                     longState: ()=>cpuRegisters.long(),
                     /** @param {any} call */
                     callFunclet: ({ entry, rcx = 0, rdx = 0, r8 = 0, r9 = 0, stack, thread })=>
@@ -3351,11 +3339,11 @@ export function createWin32Module(){
             // the thread pool API, on threads of its own; ntdll's pool calls
             // are its, answered as statuses (`native`).
             const threadPool = createThreadPool({
+                guest,
                 kernel,
                 pointerSize,
                 // A timer's due time and a wait's time-out are read
                 // from the caller's FILETIME, against the wall clock.
-                readMemory,
                 register: (name, fn)=>bridge.register(name, fn),
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
@@ -3379,7 +3367,6 @@ export function createWin32Module(){
                             wholeAddress(address)]);
                     },
                 },
-                writeMemory,
                 threadBlock: threadMade,
                 park: (/** @type {any} */ thread)=>bridge.park(thread),
                 setLastError: setError,
@@ -3620,10 +3607,8 @@ export function createWin32Module(){
             // Fibre-local storage: each fiber's values, called back as a
             // fiber or a thread ends (`kernel32/fls.js`).
             const fiberStorage = createFiberLocalStorage({
+                guest,
                 pointerSize,
-                readPointer: address=>memory.readPointer(address, pointerSize === 8 ? 8 : 4),
-                writePointer: (address, value)=>memory.writePointer(address, value,
-                    pointerSize === 8 ? 8 : 4),
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 allocate: bytes=>{
                     const at = heap.allocate(bytes);
@@ -3638,13 +3623,12 @@ export function createWin32Module(){
                 call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 setLastError: setError,
                 allocateCode: bytes=>heap.allocateCode(bytes),
-                writeMemory,
             });
 
             // Activation contexts: built from manifests on the volume and in
             // the modules, answered from guest memory (`actctx.js`).
             const activation = createActivationContexts({
-                readMemory, writeMemory, readCString, readWideString,
+                guest,
                 pointerSize,
                 setLastError: setError,
                 allocate: bytes=>heap.allocate(bytes),
@@ -3947,8 +3931,8 @@ export function createWin32Module(){
             // started with DEBUG_PROCESS reports, each stopping its thread until
             // continued (`debug-events.js`).
             debuggerSide = createDebuggerFunctions({
+                guest,
                 kernel,
-                writeMemory,
                 setLastError: setError,
                 setLastErrorFor: setErrorOn,
                 currentThread: ()=>kernel.currentThread(),
@@ -3961,7 +3945,6 @@ export function createWin32Module(){
                 breakIn,
                 terminateChild: (/** @type {any} */ child, /** @type {number} */ code)=>
                     config?.terminate?.(child, code) === true,
-                readMemory,
                 // DbgSsReserved[1] of the calling thread's block; a 64-bit
                 // thread's has no slot here yet, and keeps none.
                 threadDebugObject: {
@@ -4004,6 +3987,7 @@ export function createWin32Module(){
                         standardHandles: config?.standardHandles,
                     }),
                     ...createThreadingFunctions({
+                        guest,
                         pointerSize,
                         kernel,
                         processes: runProcesses,
@@ -4011,10 +3995,6 @@ export function createWin32Module(){
                         // A thread made in a child, and one waited on there.
                         askChild,
                         setLastErrorFor: setErrorOn,
-                        readMemory,
-                        readCString,
-                        readWideString,
-                        writeMemory,
                         setLastError: setError,
                         namedObjects,
                         close: handle=>closeHandle(handle),
@@ -4075,8 +4055,7 @@ export function createWin32Module(){
                     ...apcs.table,
                     ...threadPool.table,
                     ...createDebugFunctions({
-                        readCString,
-                        readWideString,
+                        guest,
                         say: text=>trace(text),
                         beingDebugged: ()=>{
                             const { teb, peb, pointer } = blockLayouts(pointerSize);
@@ -4097,8 +4076,9 @@ export function createWin32Module(){
                     }),
                     ...debuggerSide.functions,
                     ...createHeapFunctions({
+                        guest,
                         pointerSize,
-                        arena, physicalMemory, allocator, readMemory, writeMemory, fillMemory,
+                        arena, physicalMemory, allocator,
                         viewAt, reach: arenaReach,
                         guestHeap,
                         // A child's memory, reached where the child runs.
@@ -4146,19 +4126,16 @@ export function createWin32Module(){
                         }),
                     }),
                     ...createProcessFunctions({
+                        guest,
                         threadState,
                         processors,
                         pointerSize,
                         performanceFrequency: config?.performanceFrequency,
                         timeStampMhz: config?.processorMhz,
-                        readMemory,
                         processId,
-                        writeMemory,
                         compareExchangeU64: (address, expected, value)=>
                             memory.compareExchangeU64(address, expected, value),
                         wordsOver: (address, length)=>memory.wordsOver(address, length) ?? null,
-                        readCString,
-                        readWideString,
                         currentThread: ()=>kernel.currentThread(),
                         now: ()=>kernel.clock.virtualTime(),
                         systemTimeMs: ()=>kernel.clock.wallClock(),
@@ -4235,6 +4212,7 @@ export function createWin32Module(){
                         allocateCode: bytes=>heap.allocateCode(bytes),
                     }),
                     ...createSyncFunctions({
+                        guest,
                         pointerSize,
                         processId,
                         debugged: ()=>debuggerNow() !== null,
@@ -4249,8 +4227,6 @@ export function createWin32Module(){
                         // A change notification watches a directory on the
                         // same volume every file call writes through.
                         volume,
-                        readMemory,
-                        writeMemory,
                         compareExchangeU32: (address, expected, value)=>
                             memory.compareExchangeU32(address, expected, value),
                         compareExchangeU64: (address, expected, value)=>
@@ -4298,7 +4274,8 @@ export function createWin32Module(){
                         },
                     }),
                     ...conversionsInGuest(createLocaleFunctions({
-                        readMemory, writeMemory, stringLength, tables,
+                        guest,
+                        stringLength, tables,
                         setLastError: setError,
                         divergence: config?.divergence,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
@@ -4309,10 +4286,9 @@ export function createWin32Module(){
                         allocate: bytes=>heap.allocate(bytes),
                         /** @param {number} address */
                         free: address=>heap.free(address),
-                    }), { readMemory, writeMemory }),
+                    }), { guest }),
                     ...createResourceFunctions({
-                        readCString,
-                        readWideString,
+                        guest,
                         setLastError: setError,
                         /** @param {number} instance @param {any} type @param {any} name */
                         findResource: (instance, type, name, language = null)=>
@@ -4326,24 +4302,20 @@ export function createWin32Module(){
                          */
                         call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                         callerThread: ()=>bridge.callerThread(),
-                        writeMemory,
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
                         /** @param {number} address */
                         free: address=>heap.free(address),
                     }),
                     ...createProfileFunctions({
-                        readMemory,
-                        writeMemory,
-                        readCString,
-                        readWideString,
+                        guest,
                         files: volume,
                         setLastError: setError,
                         registry: hive,
                     }),
                     ...createDriveFunctions({
+                        guest,
                         pointerSize,
-                        readCString, readWideString, readMemory, writeMemory,
                         setLastError: setError,
                         drives: ()=>filesystem.drives(),
                         volume: (/** @type {string} */ letter)=>filesystem.volume(letter) ?? null,
@@ -4353,7 +4325,7 @@ export function createWin32Module(){
                         divergence: config?.divergence,
                     }),
                     ...createMappingFunctions({
-                        readMemory,
+                        guest,
                         // A child's views, unmapped where the child runs.
                         processTarget,
                         askChild,
@@ -4361,9 +4333,6 @@ export function createWin32Module(){
                         machine64,
                         pipes,
                         divergence: config?.divergence,
-                        writeMemory,
-                        readCString,
-                        readWideString,
                         setLastError: setError,
                         namedObjects,
                         viewRegions,
@@ -4438,8 +4407,7 @@ export function createWin32Module(){
                     // After the mapping's table, whose anonymous pipes these leave be.
                     ...pipes.functions,
                     ...createFileTimeFunctions({
-                        readMemory,
-                        writeMemory,
+                        guest,
                         setLastError: setError,
                         /** @param {number} handle @param {string} [type] */
                         resolveHandle: (handle, type)=>kernel.handles.resolve(handle, type),
@@ -4455,18 +4423,15 @@ export function createWin32Module(){
                         fileId: path=>volume.fileId(path),
                     }),
                     ...createConsoleIoFunctions({
-                        readMemory,
-                        writeMemory,
+                        guest,
                         setLastError: setError,
                         divergence: config?.divergence,
                         write: (/** @type {number} */ handle, /** @type {string} */ text)=>
                             sink(handle, text),
                     }),
                     ...createEnvironmentFunctions({
+                        guest,
                         pointerSize,
-                        readCString,
-                        readWideString,
-                        writeMemory,
                         setLastError: setError,
                         allocate: bytes=>allocator.allocate(bytes),
                         // What a program believes it was started with. Kept stable
@@ -4480,6 +4445,7 @@ export function createWin32Module(){
                     // against it (decisions.md, tools/run/vcredist-matrix.mjs).
                     ...activation.functions,
                     ...createSystemFunctions({
+                        guest,
                         processors,
                         pointerSize,
                         // What the system says of itself, not the volume's view.
@@ -4517,8 +4483,6 @@ export function createWin32Module(){
                             config?.terminate?.(child, code) === true,
                         finishChild: (/** @type {any} */ child, /** @type {number} */ code)=>
                             kernel.processes.finish(child, code),
-                        readMemory,
-                        writeMemory,
                         setLastError: setError,
                         // FormatMessage's FORMAT_MESSAGE_FROM_HMODULE: the entry
                         // RtlFindMessage finds, in the width its flags say.
@@ -4566,12 +4530,11 @@ export function createWin32Module(){
                         },
                     }),
                     ...createAtomFunctions({
-                        writeMemory,
-                        readCString,
-                        readWideString,
+                        guest,
                         setLastError: setError,
                     }),
                     ...createSpawnFunctions({
+                        guest,
                         // A child started with bInheritHandles takes this
                         // process's inheritable handles, by their numbers.
                         inheritedHandles: inheritedObjects,
@@ -4586,10 +4549,6 @@ export function createWin32Module(){
                         }),
                         kernel,
                         processId,
-                        readMemory,
-                        writeMemory,
-                        readCString,
-                        readWideString,
                         setLastError: setError,
                         /** @param {string} path */
                         stat: path=>volume.stat(path),
@@ -4624,11 +4583,8 @@ export function createWin32Module(){
                     // Rtl unwinders kernel32 forwards to ntdll are exported here.
                     ...seh64 ? seh64.table : {},
                     ...createModuleFunctions({
-                        readCString,
+                        guest,
                         pointerSize,
-                        readWideString,
-                        writeMemory,
-                        readMemory,
                         find: name=>modules.find(name),
                         byBase: base=>modules.byBase(base),
                         setLastError: setError,
@@ -4671,6 +4627,7 @@ export function createWin32Module(){
                     // entry points for a file as for a console or an event, and the
                     // one that knows about files answers for all of them.
                     ...createFileFunctions({
+                        guest,
                         pointerSize,
                         divergence: config?.divergence,
                         // Asked when called: the table is assembled by then.
@@ -4684,11 +4641,7 @@ export function createWin32Module(){
                                 refusedOpens.shift();
                             }
                         },
-                        readMemory,
                         windowMemory: (address, length)=>memory.window(address, length),
-                        writeMemory,
-                        readCString,
-                        readWideString,
                         files: volume,
                         // What CreateFile and CreateDirectory were given is
                         // kept as the file's security (advapi32's store).
@@ -6082,12 +6035,13 @@ export function createWin32Module(){
                     log: text=>trace(`libcef: ${text}`),
                     divergence: config?.divergence }),
                 'USERENV.dll': ()=>createUserenvFunctions({
+                    guest,
                     block: ()=>libraries['KERNEL32.dll'].GetEnvironmentStringsW.handler([]),
                     free: block=>libraries['KERNEL32.dll'].FreeEnvironmentStringsW
                         .handler([block]),
                     expand: (source, target, size)=>libraries['KERNEL32.dll']
                         .ExpandEnvironmentStringsW.handler([source, target, size]),
-                    writeMemory, setLastError: setError,
+                    setLastError: setError,
                 }),
                 'SensApi.dll': ()=>createSensFunctions({ readMemory, writeMemory,
                     setLastError: setError }),
@@ -6503,6 +6457,7 @@ export function createWin32Module(){
                 'ADVAPI32.dll': ()=>({
                     ...createRegistryFunctions({
                         pointerSize,
+                        guest,
                         readMemory,
                         writeMemory,
                         readCString,
@@ -7981,8 +7936,7 @@ export function createWin32Module(){
                     free: address=>{
                         allocator.free(address);
                     },
-                    readMemory,
-                    writeMemory,
+                    guest,
                 })),
 
                 /**

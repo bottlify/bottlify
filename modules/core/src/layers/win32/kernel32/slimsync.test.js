@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createTestMachine } from '../../../../../cork/src/testing/machine.js';
 import {
     CODE_64, ENTRY_64, KEPT_64, QUADS, STACK_64, argumentOf, callLong, longMachine,
@@ -66,8 +67,7 @@ function setup(race = {}){
     };
     const fns = createSlimSync({
         kernel,
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         compareExchangeU32: (/** @type {number} */ address, /** @type {number} */ expected,
             /** @type {number} */ value)=>
         {

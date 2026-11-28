@@ -20,6 +20,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createSlimSync, SRW, srwCode } from './slimsync.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const PROGRAM = 0x10000;
 const CODE = 0x8100;
@@ -206,10 +207,7 @@ function throughTraps(steps){
     const fns = createSlimSync(/** @type {any} */ ({
         kernel: { onTimeout: ()=>{}, block: ()=>assert.fail('a sequence never waits'),
             wake: ()=>assert.fail('a sequence never wakes') },
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            bytes.slice(address, address + length),
-        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, address),
+        guest: guestOver(bytes),
         compareExchangeU32: (/** @type {number} */ address, /** @type {number} */ expected,
             /** @type {number} */ value)=>
         {

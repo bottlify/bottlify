@@ -6,8 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createAtomFunctions } from './atoms.js';
-import { decodeAnsi } from './locale.js';
 
 const NAME = 0x10000;
 const NAME2 = 0x10100;
@@ -16,17 +16,7 @@ const OUT = 0x200;
 function setup(){
     const bytes = new Uint8Array(0x10400);
     const fns = createAtomFunctions({
-        writeMemory: (address, data)=>bytes.set(data, address),
-        // As the memory layer reads an ANSI string: in Windows-1252, which is
-        // what the Encoding standard calls latin1.
-        readCString(address, maxLength){
-            let end = address;
-            while (end - address < maxLength && bytes[end] !== 0)
-            {
-                end++;
-            }
-            return decodeAnsi(bytes.subarray(address, end));
-        },
+        guest: guestOver(bytes),
         setLastError(){},
     });
     /** @param {number} at @param {string} text */
@@ -97,17 +87,7 @@ test('a name in the upper half of the ANSI page reads back as the bytes it was a
 test('the wide spellings add and find in the same table', ()=>{
     const bytes = new Uint8Array(0x10400);
     const fns = createAtomFunctions({
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: ()=>'',
-        readWideString(address, maxLength){
-            let text = '';
-            for (let at = address; text.length < maxLength && (bytes[at] | bytes[at + 1]) !== 0;
-                at += 2)
-            {
-                text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
     });
     const WIDE_NAME = 0x10100;
     [...'Futuremark'].forEach((unit, index)=>{
@@ -125,17 +105,7 @@ test('an atom name is one name as Windows\' case table folds it, and no other', 
     // not k, though JavaScript's lower case makes them one.
     const bytes = new Uint8Array(0x10400);
     const fns = createAtomFunctions({
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: ()=>'',
-        readWideString(address, maxLength){
-            let text = '';
-            for (let at = address; text.length < maxLength && (bytes[at] | bytes[at + 1]) !== 0;
-                at += 2)
-            {
-                text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
     });
     const put = (/** @type {number} */ at, /** @type {string} */ text)=>{
         [...text, '\0'].forEach((unit, index)=>{
@@ -152,15 +122,7 @@ test('an atom name is one name as Windows\' case table folds it, and no other', 
 test('the wide name reads back in UTF-16, cut to the characters asked for', ()=>{
     const bytes = new Uint8Array(0x10400);
     const fns = createAtomFunctions({
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString(address){
-            let end = address;
-            while (bytes[end] !== 0)
-            {
-                end++;
-            }
-            return decodeAnsi(bytes.subarray(address, end));
-        },
+        guest: guestOver(bytes),
     });
     bytes.set([...'Caf\u00e9'].map(c=>c.charCodeAt(0)), NAME);
     const atom = fns.GlobalAddAtomA.handler([NAME]);
@@ -184,24 +146,8 @@ function strictSetup(){
     const bytes = new Uint8Array(0x10800);
     /** @type {number[]} */
     const errors = [];
-    /** @param {number} address @param {number} limit @param {number} unit */
-    const units = (address, limit, unit)=>{
-        let at = 0;
-        for (; at + unit <= limit; at += unit)
-        {
-            if (bytes[address + at] === 0 && (unit === 1 || bytes[address + at + 1] === 0))
-            {
-                break;
-            }
-        }
-        return at / unit;
-    };
     const fns = createAtomFunctions({
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: (address, limit)=>decodeAnsi(bytes.subarray(address,
-            address + units(address, limit, 1))),
-        readWideString: (address, limit)=>String.fromCharCode(...new Uint16Array(
-            bytes.slice(address, address + units(address, limit, 2) * 2).buffer)),
+        guest: guestOver(bytes),
         setLastError: code=>errors.push(code),
     });
     /** @param {number} at @param {string} text @param {boolean} [wide] */

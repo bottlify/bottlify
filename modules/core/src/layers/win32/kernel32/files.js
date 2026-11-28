@@ -35,7 +35,6 @@ import { fileAttributes, msToFileTime } from './filetime.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
 import { createResourceUpdates } from './resource-update.js';
-import { readToTerminator } from '../common/scan-windows.js';
 import { overlappedLayout, overlappedPosition, overlappedResult } from '../common/overlapped.js';
 import { mountPointsOf, onVolume } from './drives.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
@@ -50,7 +49,6 @@ import {
 } from './reparse.js';
 import { pointerArg, pointerWidth, wholeAddress } from '../common/pointers.js';
 import { readSecurityAttributes } from '../common/security-attributes.js';
-import { writeZeros } from '../../../system/port.js';
 import { utf16 } from '../common/utf16.js';
 import { foldName } from '../../../system/text.js';
 
@@ -627,7 +625,7 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @typedef {Object} FileHost
  * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
  *     laid out wider (`overlappedLayout`); absent, 4.
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {{ read: (handle: number, buffer: number, length: number, out: number,
  *     native?: boolean, overlapped?: number,
  *     io?: { event: number, apc: number, context: number }) => any,
@@ -657,11 +655,6 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(address: number, length: number) => Uint8Array} [windowMemory]
  *           The guest's own bytes, not a copy, valid until the guest runs again:
  *           what a write hands a volume that keeps a copy of what it is given.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
- *           `maxLength` in bytes, as the memory layer counts it: a wide path of
- *           MAX_PATH characters is twice that.
  * @property {FileSystem} files
  * @property {(path: string, sd: number) => void} [recordFileSecurity]
  *           Keeps the SECURITY_ATTRIBUTES' descriptor CreateFile or CreateDirectory
@@ -972,6 +965,7 @@ export const CLOSE_HANDLE = Symbol('closeHandle');
  * @param {FileHost} host
  */
 export function createFileFunctions(host){
+    const { guest } = host;
     const layout = overlappedLayout(host.pointerSize);
     /**
      * An IO_STATUS_BLOCK written: the status and Information, each a pointer
@@ -981,7 +975,7 @@ export function createFileFunctions(host){
      * @param {number} block @param {number} status @param {number} information
      */
     const statusBlock = (block, status, information)=>
-        overlappedResult(writeDword, layout, block, status, information >>> 0);
+        overlappedResult(guest.set32, layout, block, status, information >>> 0);
     /**
      * FILE_RENAME_INFO and FILE_LINK_INFORMATION in this process's layout: a
      * flag word, RootDirectory a handle wide on its own boundary, then the
@@ -1031,18 +1025,11 @@ export function createFileFunctions(host){
         }
     });
 
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(address, new Uint8Array([
-            value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
-        ]));
-    };
-
     /** Most out-parameters here are optional, and a NULL one is not an error. */
     const writeDwordIf = (/** @type {number} */ address, /** @type {number} */ value)=>{
         if (address !== 0)
         {
-            writeDword(address, value);
+            guest.set32(address, value);
         }
     };
 
@@ -1056,20 +1043,8 @@ export function createFileFunctions(host){
     const writePointerIf = (address, value)=>{
         if (address !== 0)
         {
-            host.writeMemory(address, outPointer.bytes(value));
+            guest.setBytes(address, outPointer.bytes(value));
         }
-    };
-
-    /** @param {number} address @param {number} value */
-    const writeQword = (address, value)=>{
-        writeDword(address, low(value));
-        writeDword(address + 4, high(value));
-    };
-
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
 
     /**
@@ -1081,7 +1056,7 @@ export function createFileFunctions(host){
      * @param {number} transferred
      */
     const completeWith = (thread, overlapped, routine, transferred)=>{
-        overlappedResult(writeDword, layout, overlapped, ERROR_SUCCESS, transferred);
+        overlappedResult(guest.set32, layout, overlapped, ERROR_SUCCESS, transferred);
         if ((routine >>> 0) !== 0)
         {
             host.queueApc?.(thread, routine >>> 0,
@@ -1108,8 +1083,8 @@ export function createFileFunctions(host){
      * @param {number} address @param {number} limit
      */
     const readName = (address, limit)=>(fileApisOem
-        ? decodeOem(readToTerminator(host, address, 1, limit).bytes)
-        : host.readCString(address, limit));
+        ? decodeOem(guest.stringBytes(address, false, limit))
+        : guest.cstr(address, limit));
 
     /**
      * The two-call protocol every path-returning function here shares: called
@@ -1127,7 +1102,7 @@ export function createFileFunctions(host){
         {
             return text.length + 1;
         }
-        host.writeMemory(buffer, encodeName(text + '\0'));
+        guest.setBytes(buffer, encodeName(text + '\0'));
         return text.length;
     };
 
@@ -1533,7 +1508,7 @@ export function createFileFunctions(host){
     const writeFindData = (address, entry)=>{
         const data = findDataHead(entry);
         data.set(encodeName(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAA.cFileName);
-        host.writeMemory(address, data);
+        guest.setBytes(address, data);
     };
 
     /**
@@ -1602,7 +1577,7 @@ export function createFileFunctions(host){
         {
             return text.length + 1;
         }
-        host.writeMemory(buffer, utf16(text + String.fromCharCode(0)));
+        guest.setBytes(buffer, utf16(text + String.fromCharCode(0)));
         return text.length;
     };
 
@@ -1613,7 +1588,7 @@ export function createFileFunctions(host){
         const data = new Uint8Array(WIN32_FIND_DATAW.SIZE);
         data.set(findDataHead(entry).subarray(0, WIN32_FIND_DATAW.cFileName));
         data.set(utf16(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAW.cFileName);
-        host.writeMemory(address, data);
+        guest.setBytes(address, data);
     };
 
     /**
@@ -1650,10 +1625,10 @@ export function createFileFunctions(host){
     /** @type {TextForm} */
     const WIDE = {
         path: pointer=>fullPath(
-            pointer === 0 ? '' : host.readWideString(wholeAddress(pointer), MAX_WIDE_PATH * 2)),
-        raw: pointer=>pointer === 0 ? '' : host.readWideString(wholeAddress(pointer),
+            pointer === 0 ? '' : guest.wstr(wholeAddress(pointer), MAX_WIDE_PATH * 2)),
+        raw: pointer=>pointer === 0 ? '' : guest.wstr(wholeAddress(pointer),
             MAX_WIDE_PATH * 2),
-        list: pointer=>host.readWideString(wholeAddress(pointer), MAX_PATH_LIST * 2),
+        list: pointer=>guest.wstr(wholeAddress(pointer), MAX_PATH_LIST * 2),
         write: writeWideStringTo,
         findData: writeWideFindData,
         unit: 2,
@@ -2006,12 +1981,12 @@ export function createFileFunctions(host){
             return { status: STATUS_INVALID_DEVICE_REQUEST, information: 0 };
         }
         const given = input === 0 || inLength === 0 ? null
-            : host.readMemory(input, inLength);
+            : guest.snapshot(input, inLength);
         const answer = reparseRequest(/** @type {any} */ (files), path, code, given,
             output !== 0, outLength, host);
         if (answer.output)
         {
-            host.writeMemory(output, answer.output);
+            guest.setBytes(output, answer.output);
         }
         return answer;
     };
@@ -2337,7 +2312,7 @@ export function createFileFunctions(host){
          */
         const told = (done, reason)=>{
             const cancel = (progress?.cancel ?? 0) >>> 0;
-            if (cancel !== 0 && readDword(cancel) !== 0)
+            if (cancel !== 0 && guest.u32(cancel) !== 0)
             {
                 return 'cancel';
             }
@@ -2463,7 +2438,7 @@ export function createFileFunctions(host){
      *
      * @param {number} attributes
      */
-    const securityOf = attributes=>readSecurityAttributes(host.readMemory,
+    const securityOf = attributes=>readSecurityAttributes(guest,
         wholeAddress(attributes), host.pointerSize);
     /**
      * The security descriptor a SECURITY_ATTRIBUTES points at, or 0.
@@ -2558,7 +2533,7 @@ export function createFileFunctions(host){
             }
             const data = new Uint8Array(WIN32_FILE_ATTRIBUTE_DATA_SIZE);
             new DataView(data.buffer).setUint32(0, FILE_ATTRIBUTE_NORMAL, true);
-            host.writeMemory(wholeAddress(out), data);
+            guest.setBytes(wholeAddress(out), data);
             return 1;
         }
         const path = text.path(name);
@@ -2567,7 +2542,7 @@ export function createFileFunctions(host){
         {
             return fail(missing(path));
         }
-        host.writeMemory(wholeAddress(out),
+        guest.setBytes(wholeAddress(out),
             findDataHead(entry).subarray(0, WIN32_FILE_ATTRIBUTE_DATA_SIZE));
         return 1;
     });
@@ -3129,17 +3104,17 @@ export function createFileFunctions(host){
         // RootDirectory and ObjectName follow Length, each a pointer wide and
         // Length padded to one; a UNICODE_STRING's Buffer lies a pointer in.
         const word = layout.word;
-        const root = readDword(attributes + word);
-        const string = readDword(attributes + 2 * word);
+        const root = guest.u32(attributes + word);
+        const string = guest.u32(attributes + 2 * word);
         if (string === 0)
         {
             return null;
         }
-        const descriptor = host.readMemory(string, 8);
+        const descriptor = guest.snapshot(string, 8);
         const length = descriptor[0] | (descriptor[1] << 8);
-        const buffer = readDword(string + word);
+        const buffer = guest.u32(string + word);
         const raw = buffer === 0 || length === 0 ? new Uint8Array(0)
-            : host.readMemory(buffer, length & ~1);
+            : guest.snapshot(buffer, length & ~1);
         let name = '';
         for (let at = 0; at + 1 < raw.length; at += 2)
         {
@@ -3311,7 +3286,7 @@ export function createFileFunctions(host){
             {
                 return NATIVE_FAILURES[client.error] ?? STATUS_UNSUCCESSFUL;
             }
-            writeDword(wholeAddress(out), client.handle);
+            guest.set32(wholeAddress(out), client.handle);
             if ((status >>> 0) !== 0)
             {
                 statusBlock(status >>> 0, STATUS_SUCCESS, FILE_OPENED);
@@ -3327,12 +3302,12 @@ export function createFileFunctions(host){
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            writeDword(wholeAddress(out), host.handles.open('device',
+            guest.set32(wholeAddress(out), host.handles.open('device',
                 { device, mode: (options >>> 0) & SYNCHRONOUS_MODES }, access >>> 0));
             if ((status >>> 0) !== 0)
             {
-                writeDword(wholeAddress(status), STATUS_SUCCESS);
-                writeDword(wholeAddress(status) + 4, FILE_OPENED);
+                guest.set32(wholeAddress(status), STATUS_SUCCESS);
+                guest.set32(wholeAddress(status) + 4, FILE_OPENED);
             }
             return STATUS_SUCCESS;
         }
@@ -3355,7 +3330,7 @@ export function createFileFunctions(host){
         }
         /** @param {number} handle @param {number} information */
         const opened = (handle, information)=>{
-            writeDword(wholeAddress(out), handle);
+            guest.set32(wholeAddress(out), handle);
             if ((status >>> 0) !== 0)
             {
                 statusBlock(status >>> 0, STATUS_SUCCESS, information);
@@ -4020,7 +3995,7 @@ export function createFileFunctions(host){
                     && (buffer >>> 0) !== 0;
                 if (fits)
                 {
-                    host.writeMemory(wholeAddress(buffer), bytes);
+                    guest.setBytes(wholeAddress(buffer), bytes);
                 }
                 const count = fits ? bytes.length : 0;
                 const status = fits ? 0 : STATUS_NOTIFY_ENUM_DIR;
@@ -4031,13 +4006,13 @@ export function createFileFunctions(host){
                 }
                 if ((routine >>> 0) !== 0)
                 {
-                    overlappedResult(writeDword, layout, pointer, status, count);
+                    overlappedResult(guest.set32, layout, pointer, status, count);
                     host.queueApc?.(thread, routine >>> 0,
                         [status === 0 ? ERROR_SUCCESS : ERROR_NOTIFY_ENUM_DIR, count, pointer]);
                     return 1;
                 }
                 host.ports?.completed(handle >>> 0, count, pointer);
-                overlappedResult(writeDword, layout, pointer, status, count);
+                overlappedResult(guest.set32, layout, pointer, status, count);
                 return 1;
             };
             if (watched.records.length > 0 || watched.overflowed)
@@ -4050,10 +4025,10 @@ export function createFileFunctions(host){
                     watched.waiting.push(records=>resolve(give(records)));
                 });
             }
-            overlappedResult(writeDword, layout, pointer, STATUS_PENDING);
+            overlappedResult(guest.set32, layout, pointer, STATUS_PENDING);
             if ((routine >>> 0) === 0)
             {
-                const event = (readDword(pointer + layout.event) & ~1) >>> 0;
+                const event = (guest.u32(pointer + layout.event) & ~1) >>> 0;
                 if (event !== 0)
                 {
                     host.resetEvent?.(event);
@@ -4078,11 +4053,11 @@ export function createFileFunctions(host){
         if (object(handle, 'device')?.device === 'mountmgr')
         {
             const answer = mountManagerControl(mountPointsOf(host), code,
-                input >>> 0 === 0 ? null : host.readMemory(wholeAddress(input), inLength >>> 0),
+                input >>> 0 === 0 ? null : guest.snapshot(wholeAddress(input), inLength >>> 0),
                 output >>> 0 === 0 ? 0 : outLength >>> 0);
             if (answer.output)
             {
-                host.writeMemory(wholeAddress(output), answer.output);
+                guest.setBytes(wholeAddress(output), answer.output);
             }
             return answer;
         }
@@ -4193,8 +4168,8 @@ export function createFileFunctions(host){
             let at = file.position;
             if ((offset >>> 0) !== 0)
             {
-                const lower = readDword(wholeAddress(offset));
-                const upper = readDword(wholeAddress(offset) + 4);
+                const lower = guest.u32(wholeAddress(offset));
+                const upper = guest.u32(wholeAddress(offset) + 4);
                 if ((upper & 0x80000000) === 0)
                 {
                     at = upper * 0x100000000 + lower;
@@ -4229,7 +4204,7 @@ export function createFileFunctions(host){
             if (writing)
             {
                 const bytes = count === 0
-                    ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count);
+                    ? new Uint8Array(0) : guest.snapshot(wholeAddress(buffer), count);
                 const stored = (files.writeOrFetch ?? files.write)
                     .call(files, file.node, at, bytes);
                 return typeof stored === 'number'
@@ -4244,7 +4219,7 @@ export function createFileFunctions(host){
                 // ReadFile answers TRUE with nothing read.
                 finish(read, read === 0 && count > 0 ? STATUS_END_OF_FILE : STATUS_SUCCESS);
             const reading = files.readInto(file.node, at, count,
-                (piece, into)=>host.writeMemory(wholeAddress(buffer) + into, piece));
+                (piece, into)=>guest.setBytes(wholeAddress(buffer) + into, piece));
             return typeof (/** @type {any} */ (reading))?.then !== 'function'
                 ? delivered(/** @type {any} */ (reading))
                 : /** @type {any} */ (reading).then(delivered, ()=>STATUS_IO_DEVICE_ERROR);
@@ -4288,8 +4263,8 @@ export function createFileFunctions(host){
                     return STATUS_ACCESS_VIOLATION;
                 }
                 const answer = lockRange(handle >>> 0,
-                    qword(readDword(wholeAddress(offset)), readDword(wholeAddress(offset) + 4)),
-                    qword(readDword(wholeAddress(length)), readDword(wholeAddress(length) + 4)),
+                    qword(guest.u32(wholeAddress(offset)), guest.u32(wholeAddress(offset) + 4)),
+                    qword(guest.u32(wholeAddress(length)), guest.u32(wholeAddress(length) + 4)),
                     (exclusive & 0xff) !== 0);
                 return report(wholeAddress(block), answer === ERROR_SUCCESS ? STATUS_SUCCESS
                     : answer === ERROR_LOCK_VIOLATION ? STATUS_LOCK_NOT_GRANTED
@@ -4315,8 +4290,8 @@ export function createFileFunctions(host){
                     return STATUS_ACCESS_VIOLATION;
                 }
                 const answer = unlockRange(handle >>> 0,
-                    qword(readDword(wholeAddress(offset)), readDword(wholeAddress(offset) + 4)),
-                    qword(readDword(wholeAddress(length)), readDword(wholeAddress(length) + 4)));
+                    qword(guest.u32(wholeAddress(offset)), guest.u32(wholeAddress(offset) + 4)),
+                    qword(guest.u32(wholeAddress(length)), guest.u32(wholeAddress(length) + 4)));
                 return report(wholeAddress(block), answer === ERROR_SUCCESS ? STATUS_SUCCESS
                     : answer === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE
                         : STATUS_RANGE_NOT_LOCKED, 0);
@@ -4474,7 +4449,7 @@ export function createFileFunctions(host){
                     {
                         return report(wholeAddress(block), STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
-                    writeDword(wholeAddress(out), host.pipes.completionModes.of(handle));
+                    guest.set32(wholeAddress(out), host.pipes.completionModes.of(handle));
                     return report(wholeAddress(block), STATUS_SUCCESS, 4);
                 }
                 const held = heldKind(handle);
@@ -4522,12 +4497,12 @@ export function createFileFunctions(host){
                     const fits = fixed >= 0 && (length >>> 0) >= fixed;
                     if (fits)
                     {
-                        host.writeMemory(wholeAddress(out), data.subarray(0, length >>> 0));
+                        guest.setBytes(wholeAddress(out), data.subarray(0, length >>> 0));
                     }
                     return report(wholeAddress(block), fits ? STATUS_BUFFER_OVERFLOW
                         : STATUS_INFO_LENGTH_MISMATCH, fits ? length >>> 0 : 0);
                 }
-                host.writeMemory(wholeAddress(out), data);
+                guest.setBytes(wholeAddress(out), data);
                 return report(wholeAddress(block), STATUS_SUCCESS, data.length);
             },
         },
@@ -4670,7 +4645,7 @@ export function createFileFunctions(host){
                 }
                 if (wholeAddress(buffer) !== 0)
                 {
-                    writeZeros(host.writeMemory, wholeAddress(buffer), length >>> 0);
+                    guest.fill(wholeAddress(buffer), 0, length >>> 0);
                 }
                 return STATUS_NO_EAS_ON_FILE;
             },
@@ -4739,7 +4714,7 @@ export function createFileFunctions(host){
                     // The native call keeps the flags it knows and passes over
                     // the rest; skipping the port is for a handle whose I/O
                     // can finish later, not a synchronous file's.
-                    const flags = readDword(wholeAddress(from)) & COMPLETION_MODES;
+                    const flags = guest.u32(wholeAddress(from)) & COMPLETION_MODES;
                     const opened = object(handle, 'file');
                     if (opened && (flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0
                         && (modeOf(opened) & SYNCHRONOUS_MODES) !== 0)
@@ -4764,7 +4739,7 @@ export function createFileFunctions(host){
                     const held = host.handles.typeOf?.(handle >>> 0) ?? '';
                     const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held);
                     const bound = fileObject && host.ports?.bind?.(handle >>> 0,
-                        readDword(wholeAddress(from)), readDword(wholeAddress(from) + layout.word));
+                        guest.u32(wholeAddress(from)), guest.u32(wholeAddress(from) + layout.word));
                     // A handle no port takes is refused before any I/O: the
                     // status block is left as it was.
                     return bound === 'synchronous' ? STATUS_INVALID_PARAMETER
@@ -4786,7 +4761,7 @@ export function createFileFunctions(host){
                     {
                         return settled(wholeAddress(block), STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
-                    const record = host.readMemory(wholeAddress(from), length >>> 0);
+                    const record = guest.snapshot(wholeAddress(from), length >>> 0);
                     return settled(wholeAddress(block), linkError(open, record,
                         (kind >>> 0) === FILE_LINK_INFORMATION_EX), 0);
                 }
@@ -4810,7 +4785,7 @@ export function createFileFunctions(host){
                 {
                     return STATUS_ACCESS_VIOLATION;
                 }
-                const bytes = host.readMemory(wholeAddress(from), length >>> 0);
+                const bytes = guest.snapshot(wholeAddress(from), length >>> 0);
                 const view = new DataView(bytes.buffer);
                 const { file, kind: what } = open;
                 switch (kind >>> 0)
@@ -4995,7 +4970,7 @@ export function createFileFunctions(host){
         {
             return STATUS_INVALID_INFO_CLASS;
         }
-        host.writeMemory(out, record);
+        guest.setBytes(out, record);
         return STATUS_SUCCESS;
     };
 
@@ -5048,9 +5023,9 @@ export function createFileFunctions(host){
             let pattern = directory.listing?.pattern ?? '*';
             if (mask !== 0)
             {
-                const units = readDword(mask) & 0xffff;
-                const buffer = readDword(mask + layout.word);
-                const raw = buffer === 0 ? new Uint8Array(0) : host.readMemory(buffer, units & ~1);
+                const units = guest.u32(mask) & 0xffff;
+                const buffer = guest.u32(mask + layout.word);
+                const raw = buffer === 0 ? new Uint8Array(0) : guest.snapshot(buffer, units & ~1);
                 pattern = '';
                 for (let at = 0; at + 1 < raw.length; at += 2)
                 {
@@ -5160,7 +5135,7 @@ export function createFileFunctions(host){
         }
         const used = status === STATUS_BUFFER_OVERFLOW ? length
             : previous + shape.name + listing.entries[listing.next - 1].name.length * 2;
-        host.writeMemory(out, bytes.subarray(0, used));
+        guest.setBytes(out, bytes.subarray(0, used));
         return { status: report(block, status, used), reported: true };
     };
 
@@ -5431,7 +5406,7 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_BAD_LENGTH);
         }
-        const bytes = host.readMemory(from, Math.max(length, size));
+        const bytes = guest.snapshot(from, Math.max(length, size));
         const error = informationError(open.file, open.kind, type, bytes,
             asked=>renameTarget(open.file.path, asked), handle >>> 0);
         /** @param {InformationError} code */
@@ -5588,7 +5563,7 @@ export function createFileFunctions(host){
                 let flags = 0;
                 if (wholeAddress(parameters) !== 0)
                 {
-                    const bytes = host.readMemory(wholeAddress(parameters), 16);
+                    const bytes = guest.snapshot(wholeAddress(parameters), 16);
                     const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
                     flags = (view.getUint32(4, true) | view.getUint32(8, true)
                         | view.getUint32(12, true)) >>> 0;
@@ -5667,7 +5642,7 @@ export function createFileFunctions(host){
                 };
 
                 const reading = files.readInto(file.node, at, length >>> 0,
-                    (piece, offset)=>host.writeMemory(wholeAddress(buffer) + offset, piece));
+                    (piece, offset)=>guest.setBytes(wholeAddress(buffer) + offset, piece));
                 // A volume backed by a bundle answers with a promise when the
                 // bytes are not here yet. The guest cannot wait, so the bridge
                 // parks it -- the same way it does for any call that has no
@@ -5708,7 +5683,7 @@ export function createFileFunctions(host){
                 writeDwordIf(wholeAddress(written), 0);
                 if (isStandardHandle(handle >>> 0))
                 {
-                    const bytes = host.readMemory(wholeAddress(buffer), count);
+                    const bytes = guest.snapshot(wholeAddress(buffer), count);
                     host.writeConsole(handle >>> 0, decodeAnsi(bytes));
                     writeDwordIf(wholeAddress(written), count);
                     return 1;
@@ -5743,7 +5718,7 @@ export function createFileFunctions(host){
                 const bytes = count === 0
                     ? new Uint8Array(0)
                     : host.windowMemory?.(wholeAddress(buffer), count)
-                        ?? host.readMemory(wholeAddress(buffer), count);
+                        ?? guest.snapshot(wholeAddress(buffer), count);
                 const pointer = wholeAddress(overlapped);
                 const at = appendsOnly(handle) ? sizeOf(file)
                     : pointer !== 0 && host.ports ? host.ports.offsetOf(pointer)
@@ -5801,8 +5776,8 @@ export function createFileFunctions(host){
                 const bytes = new Uint8Array(length >>> 0);
                 for (let at = 0; at < bytes.length; at += PAGE_SIZE)
                 {
-                    const page = readDword(wholeAddress(segments) + at / PAGE_SIZE * 8);
-                    bytes.set(host.readMemory(page, Math.min(PAGE_SIZE, bytes.length - at)), at);
+                    const page = guest.u32(wholeAddress(segments) + at / PAGE_SIZE * 8);
+                    bytes.set(guest.snapshot(page, Math.min(PAGE_SIZE, bytes.length - at)), at);
                 }
                 const stored = files.write(file.node,
                     host.ports.offsetOf(wholeAddress(overlapped)), bytes);
@@ -5835,8 +5810,8 @@ export function createFileFunctions(host){
                 const deliver = bytes=>{
                     for (let at = 0; at < bytes.length; at += PAGE_SIZE)
                     {
-                        const page = readDword(wholeAddress(segments) + at / PAGE_SIZE * 8);
-                        host.writeMemory(page, bytes.subarray(at, at + PAGE_SIZE));
+                        const page = guest.u32(wholeAddress(segments) + at / PAGE_SIZE * 8);
+                        guest.setBytes(page, bytes.subarray(at, at + PAGE_SIZE));
                     }
                     ports.completed(handle >>> 0, bytes.length, wholeAddress(overlapped));
                     return 1;
@@ -5912,8 +5887,8 @@ export function createFileFunctions(host){
                     return completeWith(thread, pointer, routine, read);
                 };
                 const reading = files.readInto(file.node,
-                    overlappedPosition(readDword, layout, pointer), length >>> 0,
-                    (piece, offset)=>host.writeMemory(wholeAddress(buffer) + offset, piece));
+                    overlappedPosition(guest.u32, layout, pointer), length >>> 0,
+                    (piece, offset)=>guest.setBytes(wholeAddress(buffer) + offset, piece));
                 if (typeof (/** @type {any} */ (reading))?.then !== 'function')
                 {
                     return deliver(/** @type {any} */ (reading));
@@ -5963,9 +5938,9 @@ export function createFileFunctions(host){
                 const count = length >>> 0;
                 const bytes = count === 0
                     ? new Uint8Array(0)
-                    : host.readMemory(wholeAddress(buffer), count);
+                    : guest.snapshot(wholeAddress(buffer), count);
                 const stored = files.write(file.node,
-                    overlappedPosition(readDword, layout, pointer), bytes);
+                    overlappedPosition(guest.u32, layout, pointer), bytes);
                 return completeWith(host.currentThread?.() ?? null, pointer, routine, stored);
             },
         },
@@ -5995,7 +5970,7 @@ export function createFileFunctions(host){
                 const moveHigh = wholeAddress(highPointer);
                 const wanted = moveHigh === 0
                     ? (distance | 0)
-                    : int64(distance, readDword(moveHigh));
+                    : int64(distance, guest.u32(moveHigh));
                 const position = seek(file, wanted, method >>> 0);
                 if (position === null)
                 {
@@ -6006,7 +5981,7 @@ export function createFileFunctions(host){
                 file.position = position;
                 if (moveHigh !== 0)
                 {
-                    writeDword(moveHigh, high(position));
+                    guest.set32(moveHigh, high(position));
                 }
                 host.setLastError(ERROR_SUCCESS);
                 return low(position);
@@ -6042,7 +6017,7 @@ export function createFileFunctions(host){
                 file.position = position;
                 if (newPointer !== 0)
                 {
-                    writeQword(wholeAddress(newPointer), position);
+                    guest.set64(wholeAddress(newPointer), position);
                 }
                 return 1;
             },
@@ -6133,7 +6108,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeQword(wholeAddress(pointer), sizeOf(file));
+                guest.set64(wholeAddress(pointer), sizeOf(file));
                 return 1;
             },
         },
@@ -6241,7 +6216,7 @@ export function createFileFunctions(host){
                 const count = Math.min(size >>> 0, MAX_WIDE_PATH);
                 if (wholeAddress(buffer) !== 0 && count > 0)
                 {
-                    host.writeMemory(wholeAddress(buffer), new Uint8Array(count * 2));
+                    guest.setBytes(wholeAddress(buffer), new Uint8Array(count * 2));
                 }
                 return writeWideStringTo(wholeAddress(buffer), size, tempPath());
             },
@@ -6402,14 +6377,14 @@ export function createFileFunctions(host){
                         data[0] = OFSTRUCT_SIZE;
                         data[1] = 1;
                         data.set(encodeAnsi(path.slice(0, OFSTRUCT_PATH_MAX - 1)), OFSTRUCT_PATH);
-                        host.writeMemory(wholeAddress(reopen), data);
+                        guest.setBytes(wholeAddress(reopen), data);
                         return;
                     }
-                    host.writeMemory(wholeAddress(reopen) + 2,
+                    guest.setBytes(wholeAddress(reopen) + 2,
                         Uint8Array.of(code & 0xff, code >>> 8 & 0xff));
                     if (fits)
                     {
-                        host.writeMemory(wholeAddress(reopen) + OFSTRUCT_PATH,
+                        guest.setBytes(wholeAddress(reopen) + OFSTRUCT_PATH,
                             Uint8Array.from([...encodeAnsi(path), 0]));
                     }
                 };
@@ -6516,7 +6491,7 @@ export function createFileFunctions(host){
                     return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
                 }
                 const reading = files.readInto(file.node, file.position, count >>> 0,
-                    (piece, offset)=>host.writeMemory(wholeAddress(buffer) + offset, piece));
+                    (piece, offset)=>guest.setBytes(wholeAddress(buffer) + offset, piece));
                 // A bundle-backed volume can answer with a promise. This family
                 // has no overlapped form and no way to say "later", so the
                 // caller is parked exactly as the modern spelling parks it.
@@ -6543,7 +6518,7 @@ export function createFileFunctions(host){
                 }
                 const bytes = count === 0
                     ? new Uint8Array(0)
-                    : host.readMemory(wholeAddress(buffer), count >>> 0);
+                    : guest.snapshot(wholeAddress(buffer), count >>> 0);
                 /** @param {number} stored */
                 const deliver = stored=>{
                     file.position += stored;
@@ -6660,7 +6635,7 @@ export function createFileFunctions(host){
                 }
                 const at = wholeAddress(overlapped);
                 const answer = lockRange(handle >>> 0,
-                    qword(readDword(at + layout.offset), readDword(at + layout.offsetHigh)),
+                    qword(guest.u32(at + layout.offset), guest.u32(at + layout.offsetHigh)),
                     qword(lengthLow, lengthHigh), ((flags >>> 0) & LOCKFILE_EXCLUSIVE_LOCK) !== 0);
                 return answer === ERROR_SUCCESS ? 1 : fail(answer);
             },
@@ -6684,7 +6659,7 @@ export function createFileFunctions(host){
                 }
                 const at = wholeAddress(overlapped);
                 const answer = unlockRange(handle >>> 0,
-                    qword(readDword(at + layout.offset), readDword(at + layout.offsetHigh)),
+                    qword(guest.u32(at + layout.offset), guest.u32(at + layout.offsetHigh)),
                     qword(lengthLow, lengthHigh));
                 return answer === ERROR_SUCCESS ? 1 : fail(answer);
             },
@@ -6716,7 +6691,7 @@ export function createFileFunctions(host){
                         wholeAddress(input), inLength >>> 0, wholeAddress(output), outLength >>> 0);
                     if (wholeAddress(returned) !== 0 && (status >>> 0) < 0xc0000000)
                     {
-                        writeDword(wholeAddress(returned), information);
+                        guest.set32(wholeAddress(returned), information);
                     }
                     return status === STATUS_SUCCESS ? (host.setLastError(ERROR_SUCCESS), 1)
                         : fail(toDosError(status));
@@ -6729,7 +6704,7 @@ export function createFileFunctions(host){
                     output, outLength);
                 if (wholeAddress(returned) !== 0 && (status >>> 0) < 0xc0000000)
                 {
-                    writeDword(wholeAddress(returned), information);
+                    guest.set32(wholeAddress(returned), information);
                 }
                 const error = {
                     [STATUS_SUCCESS]: ERROR_SUCCESS,

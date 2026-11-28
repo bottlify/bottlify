@@ -17,7 +17,6 @@
 import { createAccessors } from '../../memory/internal/accessors.js';
 import { Access, RegionKind, createRegionMap } from '../../memory/internal/regions.js';
 import { WHOLE, createGuest } from '../common/guest.js';
-import { decodeAnsi } from '../kernel32/locale.js';
 
 /**
  * @param {Uint8Array} bytes  the guest's memory, byte 0 at `base`
@@ -69,19 +68,21 @@ export function guestThrough(read, write, pointerSize = 4){
         }
         write(address, bytes);
     };
-    /** @param {number} address @param {number} unit @param {number} limit */
+    /**
+     * Where a string's terminator is, in units; the limit's whole units where none comes first.
+     *
+     * @param {number} address @param {number} unit @param {number} limit
+     */
     const units = (address, unit, limit)=>{
-        let text = '';
-        for (let at = 0; at + unit <= limit; at += unit)
+        let count = 0;
+        for (let at = 0; at + unit <= limit; at += unit, count++)
         {
-            const code = value(address + at, unit);
-            if (code === 0)
+            if (value(address + at, unit) === 0)
             {
-                return text;
+                return count;
             }
-            text += unit === 1 ? decodeAnsi(Uint8Array.of(code)) : String.fromCharCode(code);
         }
-        return text;
+        return count;
     };
     return createGuest({
         readU8: address=>value(address, 1),
@@ -94,7 +95,7 @@ export function guestThrough(read, write, pointerSize = 4){
         window: read,
         writeBytes: write,
         fillBytes: (address, number, length)=>write(address, new Uint8Array(length).fill(number)),
-        readCString: (address, limit = WHOLE)=>units(address, 1, limit),
-        readWideString: (address, limit = WHOLE)=>units(address, 2, limit),
+        scanCString: (address, limit = WHOLE)=>({ index: units(address, 1, limit) }),
+        scanWideString: (address, limit = WHOLE)=>units(address, 2, limit),
     }, pointerSize);
 }

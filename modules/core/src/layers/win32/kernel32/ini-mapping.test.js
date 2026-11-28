@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createProfileFunctions } from './profile.js';
 import { INI_FILE_MAPPING } from './ini-mapping.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
@@ -66,15 +67,7 @@ function setup(){
     const registry = createRegistryService(createHive());
     const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
         createProfileFunctions({
-            writeMemory: (address, data)=>bytes.set(data, address),
-            readCString(address, limit){
-                let end = address;
-                while (end - address < limit && bytes[end] !== 0)
-                {
-                    end++;
-                }
-                return decodeAnsi(bytes.subarray(address, end));
-            },
+            guest: guestOver(bytes),
             files: /** @type {any} */ (files),
             setLastError(){},
             registry,

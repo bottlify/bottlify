@@ -6,11 +6,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { volumeName } from './drives.js';
 import { createFileFunctions, withSystemLibraries, WIN32_FIND_DATAA } from './files.js';
 import { createHandleTable } from '../../kernel/internal/handles.js';
 import { HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
-import { decodeAnsi } from './locale.js';
 import { systemProgramAt, systemProgramImage } from '../programs/table.js';
 import { readIntoBy } from './vfs.js';
 import { IN_PLACE, externalGrowth } from '../common/guest.fixture.js';
@@ -68,6 +68,7 @@ function fakeMemory(size = 0x1000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -339,25 +340,7 @@ function setup(extra = {}){
     const console = [];
 
     const fns = createFileFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        // The memory layer's contract: the limit counts bytes, and a string
-        // with no terminator inside it throws.
-        /** @param {number} address @param {number} maxLength */
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = 0; at + 1 < maxLength; at += 2)
-            {
-                const code = memory.bytes[address + at] | memory.bytes[address + at + 1] << 8;
-                if (code === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(code);
-            }
-            throw new Error(`No wide NUL within ${maxLength} bytes of 0x${address.toString(16)}`);
-        },
+        guest: memory.guest,
         files,
         setLastError: code=>{
             error.code = code;
@@ -1604,13 +1587,8 @@ test('in the OEM page a name ending just short of the end of its memory is read 
     // Past the end lies another allocation, or nothing: memory refuses a read
     // that runs into it, as the memory layer refuses one past a region's end.
     const end = 0x1000;
-    const { files, memory, fns } = setup({
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>{
-            assert.ok(address + length <= end, `read of ${length} bytes at`
-                + ` 0x${address.toString(16)} runs past the end of memory`);
-            return memory.bytes.subarray(address, address + length);
-        },
-    });
+    const { files, memory, fns } = setup();
+    assert.equal(memory.bytes.length, end, 'nothing past it: a read there faults');
     files.put('C:\\GAME\\\u00fc.TXT', 'umlaut');
     const name = Uint8Array.from([...'C:\\GAME\\'].map(c=>c.charCodeAt(0))
         .concat([0x81], [...'.TXT'].map(c=>c.charCodeAt(0)), [0]));
@@ -2134,8 +2112,6 @@ test('a name in the upper half of the ANSI page goes back as the bytes it was re
     // calls hand back are written in the same page, so a program finds the
     // bytes it named a file with.
     const { memory, files, fns } = setup();
-    memory.readCString = (address, maxLength)=>decodeAnsi(
-        memory.bytes.subarray(address, memory.bytes.indexOf(0, address)).subarray(0, maxLength));
     const bytesOf = (/** @type {string} */ text)=>Array.from(text, unit=>unit.charCodeAt(0));
     const name = [0x80, 0x99, 0x97, 0xe9];
     const path = [...bytesOf('C:\\GAME\\'), ...name];

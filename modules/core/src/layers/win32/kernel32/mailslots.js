@@ -101,10 +101,7 @@ const LOCAL_PREFIX = '\\\\.\\mailslot\\';
  *     resolve: (handle: number, type?: string) => any,
  *     typeOf?: (handle: number) => string | null,
  *     holds?: (object: any) => boolean }} handles
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString  limit in bytes
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError
  * @property {(thread: any, code: number) => void} setLastErrorFor
  * @property {() => any} currentThread
@@ -129,6 +126,7 @@ export const isMailslotName = name=>name.toUpperCase().startsWith(LOCAL_PREFIX.t
 
 /** @param {MailslotHost} host */
 export function createMailslots(host){
+    const { guest } = host;
     const { kernel } = host;
 
     /** @type {Map<string, Slot>} */
@@ -144,7 +142,7 @@ export function createMailslots(host){
     const writeDwordIf = (address, value)=>{
         if (address !== 0)
         {
-            host.writeMemory(address, Uint8Array.of(value & 0xff, (value >>> 8) & 0xff,
+            guest.setBytes(address, Uint8Array.of(value & 0xff, (value >>> 8) & 0xff,
                 (value >>> 16) & 0xff, value >>> 24));
         }
     };
@@ -271,12 +269,10 @@ export function createMailslots(host){
         {
             return STATUS_ACCESS_VIOLATION;
         }
-        const dword = (/** @type {number} */ at)=>new DataView(host.readMemory(at, 4)
-            .buffer).getUint32(0, true);
-        const string = dword((attributes >>> 0) + 8);
-        const nameBytes = string === 0 ? 0 : dword(string) & 0xffff;
-        const buffer = string === 0 ? 0 : dword(string + 4);
-        const name = buffer === 0 ? '' : host.readWideString(buffer, (nameBytes >>> 1) * 2);
+        const string = guest.u32((attributes >>> 0) + 8);
+        const nameBytes = string === 0 ? 0 : guest.u32(string) & 0xffff;
+        const buffer = string === 0 ? 0 : guest.u32(string + 4);
+        const name = buffer === 0 ? '' : guest.wstr(buffer, (nameBytes >>> 1) * 2);
         const asked = win32Name(name);
         if (asked === null)
         {
@@ -285,8 +281,7 @@ export function createMailslots(host){
         let milliseconds = MAILSLOT_WAIT_FOREVER;
         if ((timeout >>> 0) !== 0)
         {
-            const interval = new DataView(host.readMemory(wholeAddress(timeout), 8).buffer)
-                .getBigInt64(0, true);
+            const interval = guest.i64(wholeAddress(timeout));
             milliseconds = interval > 0n ? MAILSLOT_WAIT_FOREVER : Number(-interval / 10000n);
         }
         const made = make(asked, maxSize, milliseconds, ((options >>> 0)
@@ -380,7 +375,7 @@ export function createMailslots(host){
             }
             if (message.length > 0)
             {
-                host.writeMemory(reader.buffer, message);
+                guest.setBytes(reader.buffer, message);
             }
             return finishAsync(reader, STATUS_SUCCESS, message.length);
         }
@@ -394,7 +389,7 @@ export function createMailslots(host){
         }
         if (message.length > 0)
         {
-            host.writeMemory(reader.buffer, message);
+            guest.setBytes(reader.buffer, message);
         }
         report(reader, message.length);
         if (!reader.native)
@@ -459,7 +454,7 @@ export function createMailslots(host){
             slot.messages.shift();
             if (next.length > 0)
             {
-                host.writeMemory(wholeAddress(buffer), next);
+                guest.setBytes(wholeAddress(buffer), next);
             }
             return succeed(caller, next.length);
         }
@@ -535,7 +530,7 @@ export function createMailslots(host){
             return refuse(caller, ERROR_NOACCESS, STATUS_ACCESS_VIOLATION);
         }
         const message = count === 0
-            ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count);
+            ? new Uint8Array(0) : guest.snapshot(wholeAddress(buffer), count);
         /** @type {Slot} */
         const slot = client.slot;
         const answer = succeed(caller, count);
@@ -615,14 +610,13 @@ export function createMailslots(host){
         }
         /** @type {Slot} */
         const slot = object(handle, type);
-        const pointer = new DataView(host.readMemory(from, 4).buffer).getUint32(0, true);
+        const pointer = guest.u32(from);
         if (pointer === 0)
         {
             slot.timeout = MAILSLOT_WAIT_FOREVER;
             return 0;
         }
-        const interval = new DataView(host.readMemory(pointer, 8).buffer)
-            .getBigInt64(0, true);
+        const interval = guest.i64(pointer);
         // The largest interval is the one a slot that waits for ever reports
         // (GetMailslotInfo's MAILSLOT_WAIT_FOREVER); a relative one is
         // negative, and zero answers at once.
@@ -639,7 +633,7 @@ export function createMailslots(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, maxSize, timeout])=>create(
-                wholeAddress(name) === 0 ? null : host.readCString(wholeAddress(name), WHOLE_NAME),
+                wholeAddress(name) === 0 ? null : guest.cstr(wholeAddress(name), WHOLE_NAME),
                 maxSize, timeout),
         },
         /** HANDLE CreateMailslotW(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES) */
@@ -647,7 +641,7 @@ export function createMailslots(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, maxSize, timeout])=>create(
-                wholeAddress(name) === 0 ? null : host.readWideString(wholeAddress(name),
+                wholeAddress(name) === 0 ? null : guest.wstr(wholeAddress(name),
                     WHOLE_NAME * 2),
                 maxSize, timeout),
         },

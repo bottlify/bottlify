@@ -30,8 +30,7 @@ const ENTRY_BYTES = 16;
 
 /**
  * @typedef {Object} DirectoryNativesHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {{ handles: { open: (kind: string, object: any, access?: number | null) => number,
  *     typeOf: (handle: number) => string | null, resolve: (handle: number) => any } }} kernel
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
@@ -41,21 +40,11 @@ const ENTRY_BYTES = 16;
  * @param {DirectoryNativesHost} host
  */
 export function createDirectoryNatives(host){
+    const { guest } = host;
     const { kernel, namedObjects } = host;
     /** Paths no name reaches, for the directories made with none. */
     let unnamed = 0;
 
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
-    };
     /** @param {number} handle @param {string} kind @param {number} access */
     const opened = (handle, kind, access)=>{
         const granted = grantedAccess(kind, access);
@@ -74,8 +63,8 @@ export function createDirectoryNatives(host){
         {
             return STATUS.ACCESS_VIOLATION;
         }
-        writeDword(out, 0);
-        const given = readObjectAttributes(host.readMemory, attributes);
+        guest.set32(out, 0);
+        const given = readObjectAttributes(guest, attributes);
         const walked = nameToWalk(given, false);
         if ('status' in walked)
         {
@@ -84,7 +73,7 @@ export function createDirectoryNatives(host){
         if (given === null || walked.name === null)
         {
             const object = make(null);
-            writeDword(out, kernel.handles.open(kind, object, opened(0, kind, access)));
+            guest.set32(out, kernel.handles.open(kind, object, opened(0, kind, access)));
             return STATUS.SUCCESS;
         }
         const place = namedObjects.place(given, kind);
@@ -103,7 +92,7 @@ export function createDirectoryNatives(host){
                 return STATUS.OBJECT_NAME_COLLISION;
             }
             namedObjects.reference(place.held.object);
-            writeDword(out, kernel.handles.open(kind, place.held.object,
+            guest.set32(out, kernel.handles.open(kind, place.held.object,
                 opened(0, kind, access)));
             return STATUS.OBJECT_NAME_EXISTS;
         }
@@ -111,7 +100,7 @@ export function createDirectoryNatives(host){
             : `${place.directory}\\${place.name}`;
         const object = make(path);
         namedObjects.remember(place.key, kind, object, false, ()=>{});
-        writeDword(out, kernel.handles.open(kind, object, opened(0, kind, access)));
+        guest.set32(out, kernel.handles.open(kind, object, opened(0, kind, access)));
         return STATUS.SUCCESS;
     };
 
@@ -125,8 +114,8 @@ export function createDirectoryNatives(host){
         {
             return STATUS.ACCESS_VIOLATION;
         }
-        writeDword(out, 0);
-        const given = readObjectAttributes(host.readMemory, attributes);
+        guest.set32(out, 0);
+        const given = readObjectAttributes(guest, attributes);
         const walked = nameToWalk(given, true);
         if ('status' in walked || given === null)
         {
@@ -151,7 +140,7 @@ export function createDirectoryNatives(host){
             return STATUS.ACCESS_DENIED;
         }
         namedObjects.reference(place.held.object);
-        writeDword(out, kernel.handles.open(kind, place.held.object, granted.granted));
+        guest.set32(out, kernel.handles.open(kind, place.held.object, granted.granted));
         return STATUS.SUCCESS;
     };
 
@@ -161,9 +150,9 @@ export function createDirectoryNatives(host){
      * @param {number} pointer
      */
     const unicodeAt = pointer=>{
-        const length = readDword(pointer) & 0xffff;
-        const buffer = readDword(pointer + 4);
-        const units = length === 0 ? new Uint8Array(0) : host.readMemory(buffer, length & ~1);
+        const length = guest.u32(pointer) & 0xffff;
+        const buffer = guest.u32(pointer + 4);
+        const units = length === 0 ? new Uint8Array(0) : guest.snapshot(buffer, length & ~1);
         let text = '';
         for (let at = 0; at + 1 < units.length; at += 2)
         {
@@ -224,7 +213,7 @@ export function createDirectoryNatives(host){
                     return STATUS.ACCESS_VIOLATION;
                 }
                 const { path } = kernel.handles.resolve(handle >>> 0);
-                const start = (restart & 0xff) !== 0 ? 0 : readDword(context);
+                const start = (restart & 0xff) !== 0 ? 0 : guest.u32(context);
                 const left = namedObjects.list(path)
                     .filter(entry=>TYPE_NAMES.has(entry.kind)).slice(start);
                 const room = length >>> 0;
@@ -232,7 +221,7 @@ export function createDirectoryNatives(host){
                 const answer = needed=>{
                     if (wholeAddress(returned) !== 0)
                     {
-                        writeDword(returned, needed);
+                        guest.set32(returned, needed);
                     }
                 };
                 /** @param {number} count  the entries' strings' bytes, by how many are taken */
@@ -243,7 +232,7 @@ export function createDirectoryNatives(host){
                 {
                     if (room >= ENTRY_BYTES)
                     {
-                        host.writeMemory(wholeAddress(buffer), new Uint8Array(ENTRY_BYTES));
+                        guest.setBytes(wholeAddress(buffer), new Uint8Array(ENTRY_BYTES));
                     }
                     answer(ENTRY_BYTES);
                     return STATUS.NO_MORE_ENTRIES;
@@ -280,9 +269,9 @@ export function createDirectoryNatives(host){
                 });
                 if (room >= ENTRY_BYTES)
                 {
-                    host.writeMemory(wholeAddress(buffer), bytes.subarray(0, Math.min(size, room)));
+                    guest.setBytes(wholeAddress(buffer), bytes.subarray(0, Math.min(size, room)));
                 }
-                writeDword(context, start + taken);
+                guest.set32(context, start + taken);
                 answer(size);
                 return taken < left.length && wanted > 1 ? STATUS_MORE_ENTRIES : STATUS.SUCCESS;
             },
@@ -347,9 +336,9 @@ export function createDirectoryNatives(host){
                 const needed = target.length * 2 + 2;
                 if (wholeAddress(returned) !== 0)
                 {
-                    writeDword(returned, needed);
+                    guest.set32(returned, needed);
                 }
-                const room = readDword(wholeAddress(string)) >>> 16;
+                const room = guest.u32(wholeAddress(string)) >>> 16;
                 if (room < needed)
                 {
                     return STATUS_BUFFER_TOO_SMALL;
@@ -360,8 +349,8 @@ export function createDirectoryNatives(host){
                     bytes[at * 2] = target.charCodeAt(at) & 0xff;
                     bytes[at * 2 + 1] = target.charCodeAt(at) >>> 8;
                 }
-                host.writeMemory(readDword(wholeAddress(string) + 4), bytes);
-                host.writeMemory(wholeAddress(string), Uint8Array.of((needed - 2) & 0xff,
+                guest.setBytes(guest.u32(wholeAddress(string) + 4), bytes);
+                guest.setBytes(wholeAddress(string), Uint8Array.of((needed - 2) & 0xff,
                     (needed - 2) >>> 8));
                 return STATUS.SUCCESS;
             },

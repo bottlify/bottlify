@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import {
     createFileTimeFunctions, fileAttributes, BY_HANDLE_FILE_INFORMATION, TIME_ZONE_INFORMATION,
 } from './filetime.js';
@@ -31,8 +32,7 @@ function setup(){
     /** @type {{ path: string, modified: number }[]} */
     const stamped = [];
     const fns = createFileTimeFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         setLastError: code=>{
             errors.push(code);
         },
@@ -470,8 +470,7 @@ test('a directory lists by handle as many entries as fit, then goes on, then has
     const errors = [];
     const folder = { path: 'C:\\GAME', directory: true };
     const fns = createFileTimeFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         setLastError: code=>{
             errors.push(code);
         },

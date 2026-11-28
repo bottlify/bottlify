@@ -149,15 +149,11 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
 
 /**
  * @typedef {Object} ModulesHost
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- *           For a module's own headers; absent, its information is not given.
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(name: string | null) => ModuleRecord | null} find
  *           A module by name; null asks for the running program's own image.
  * @property {(base: number) => ModuleRecord | null} byBase
  * @property {(code: number) => void} setLastError
- * @property {(address: number, maxLength: number) => string} readWideString
  * @property {() => string} imagePath  The path the running program was loaded from.
  * @property {(name: string) => string | null} [libraryHome]  The folder a library this
  *           build synthesises is installed in when it is not the system folder.
@@ -221,6 +217,7 @@ function definedExport(module, name, ordinal){
  * @param {ModulesHost} host
  */
 export function createModuleFunctions(host){
+    const { guest } = host;
     /**
      * Where a module's file is, as a program asking about it expects.
      *
@@ -392,27 +389,6 @@ export function createModuleFunctions(host){
     let nextCookie = DLL_DIRECTORY_COOKIE_BASE;
 
     /**
-     * Writes a NUL-terminated string and reports what a Win32 out-parameter of
-     * this shape reports: characters written, not counting the terminator, and
-     * the buffer's own size when the name did not fit -- truncated, terminated,
-     * and not an error, which is exactly the trap in that API. The name is in
-     * the ANSI page, as the paths a program gives the ANSI calls are read.
-     *
-     * @param {number} buffer
-     * @param {number} size
-     * @param {string} text
-     */
-    const writeString = (buffer, size, text)=>{
-        if (size === 0)
-        {
-            return 0;
-        }
-        const written = Math.min(text.length, size - 1);
-        host.writeMemory(buffer, encodeAnsi(`${text.slice(0, written)}\0`));
-        return written;
-    };
-
-    /**
      * GetModuleFileName, either width: the path and its terminator where they
      * fit, the length without it answered and the last error cleared; where
      * they do not, as many
@@ -441,11 +417,11 @@ export function createModuleFunctions(host){
         const kept = `${fits ? path : path.slice(0, room - 1)}\0`;
         if (wide)
         {
-            host.writeMemory(wholeAddress(buffer), utf16(kept));
+            guest.setBytes(wholeAddress(buffer), utf16(kept));
         }
         else
         {
-            host.writeMemory(wholeAddress(buffer), encodeAnsi(kept));
+            guest.setBytes(wholeAddress(buffer), encodeAnsi(kept));
         }
         // A whole path clears the last error, as Windows' does.
         host.setLastError(fits ? 0 : ERROR_INSUFFICIENT_BUFFER);
@@ -485,10 +461,10 @@ export function createModuleFunctions(host){
         }
         if (!wide)
         {
-            return writeString(wholeAddress(buffer), size >>> 0, text);
+            return guest.writeAnsi(wholeAddress(buffer), text, size >>> 0);
         }
         const kept = text.slice(0, (size >>> 0) - 1);
-        host.writeMemory(wholeAddress(buffer), utf16z(kept));
+        guest.setBytes(wholeAddress(buffer), utf16z(kept));
         return kept.length;
     };
 
@@ -519,7 +495,7 @@ export function createModuleFunctions(host){
             }
             const at = wholeAddress(address);
             const read = (/** @type {number} */ where)=>new DataView(
-                host.readMemory?.(where, 4).buffer ?? new ArrayBuffer(4))
+                guest.snapshot(where, 4).buffer ?? new ArrayBuffer(4))
                 .getUint32(0, true);
             const image = (host.list?.() ?? []).find(module=>at >= module.base
                 && at < module.base + read(module.base + read(module.base + 0x3c) + 24 + 56));
@@ -544,17 +520,17 @@ export function createModuleFunctions(host){
             // Windows leaves it; one of no size is not touched.
             if (size > 0 && buffer !== 0)
             {
-                host.writeMemory(buffer, new Uint8Array(wide ? 2 : 1));
+                guest.setBytes(buffer, new Uint8Array(wide ? 2 : 1));
             }
             return text.length + 1;
         }
         if (wide)
         {
-            host.writeMemory(buffer, utf16z(text));
+            guest.setBytes(buffer, utf16z(text));
         }
         else
         {
-            host.writeMemory(buffer, encodeAnsi(`${text}\0`));
+            guest.setBytes(buffer, encodeAnsi(`${text}\0`));
         }
         return text.length;
     };
@@ -599,11 +575,11 @@ export function createModuleFunctions(host){
         {
             const out = new DataView(new ArrayBuffer(fits * handleSize));
             bases.slice(0, fits).forEach((base, at)=>out.setUint32(at * handleSize, base, true));
-            host.writeMemory(wholeAddress(handles), new Uint8Array(out.buffer));
+            guest.setBytes(wholeAddress(handles), new Uint8Array(out.buffer));
         }
         const total = new DataView(new ArrayBuffer(4));
         total.setUint32(0, bases.length * handleSize, true);
-        host.writeMemory(wholeAddress(needed), new Uint8Array(total.buffer));
+        guest.setBytes(wholeAddress(needed), new Uint8Array(total.buffer));
         return 1;
     };
 
@@ -659,7 +635,7 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>(wholeAddress(name) === 0 ? noName()
-                : load(host.readCString(wholeAddress(name), WHOLE_NAME))),
+                : load(guest.cstr(wholeAddress(name), WHOLE_NAME))),
         },
 
         /**
@@ -679,7 +655,7 @@ export function createModuleFunctions(host){
                 {
                     return noName();
                 }
-                return load(host.readCString(wholeAddress(name), WHOLE_NAME), flags >>> 0);
+                return load(guest.cstr(wholeAddress(name), WHOLE_NAME), flags >>> 0);
             },
         },
         LoadLibraryExW: {
@@ -691,7 +667,7 @@ export function createModuleFunctions(host){
                 {
                     return noName();
                 }
-                return load(host.readWideString(wholeAddress(name), WHOLE_NAME * 2), flags >>> 0);
+                return load(guest.wstr(wholeAddress(name), WHOLE_NAME * 2), flags >>> 0);
             },
         },
 
@@ -709,7 +685,7 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>{
-                dllDirectory = (path >>> 0) === 0 ? null : host.readCString(wholeAddress(path),
+                dllDirectory = (path >>> 0) === 0 ? null : guest.cstr(wholeAddress(path),
                     WHOLE_NAME);
                 return 1;
             },
@@ -748,7 +724,7 @@ export function createModuleFunctions(host){
             /** @param {number[]} args */
             handler: ([path])=>{
                 const directory = wholeAddress(path) === 0 ? ''
-                    : host.readWideString(wholeAddress(path), MAX_NAME * 2);
+                    : guest.wstr(wholeAddress(path), MAX_NAME * 2);
                 if (!/^([a-z]:\\|\\\\)/i.test(directory))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -780,7 +756,7 @@ export function createModuleFunctions(host){
             /** @param {number[]} args */
             handler: ([path])=>{
                 dllDirectory = (path >>> 0) === 0 ? null
-                    : host.readWideString(wholeAddress(path), MAX_NAME * 2);
+                    : guest.wstr(wholeAddress(path), MAX_NAME * 2);
                 return 1;
             },
         },
@@ -895,7 +871,7 @@ export function createModuleFunctions(host){
 
                 const ordinal = isOrdinal(wholeAddress(name)) ? wholeAddress(name) : null;
                 const wanted = ordinal !== null ? `#${ordinal}`
-                    : host.readCString(wholeAddress(name), WHOLE_NAME);
+                    : guest.cstr(wholeAddress(name), WHOLE_NAME);
                 /** @param {{ address: number } | { error: number }} found */
                 const answer = found=>{
                     const address = 'address' in found ? found.address : 0;
@@ -922,7 +898,7 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>(wholeAddress(name) === 0 ? noName()
-                : load(host.readWideString(wholeAddress(name), MAX_NAME * 2))),
+                : load(guest.wstr(wholeAddress(name), MAX_NAME * 2))),
         },
 
         /**
@@ -951,7 +927,7 @@ export function createModuleFunctions(host){
             /** @param {number[]} args */
             handler: ([, handle, info, size])=>{
                 const module = handle === 0 ? host.find(null) : host.byBase(wholeAddress(handle));
-                if (!module || !host.readMemory)
+                if (!module)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
@@ -962,7 +938,7 @@ export function createModuleFunctions(host){
                     return 0;
                 }
                 const read = (/** @type {number} */ address)=>new DataView(
-                    host.readMemory?.(address, 4).buffer ?? new ArrayBuffer(4))
+                    guest.snapshot(address, 4).buffer ?? new ArrayBuffer(4))
                     .getUint32(0, true);
                 const optional = module.base + read(module.base + 0x3c) + 24;
                 const entry = read(optional + 16);
@@ -970,7 +946,7 @@ export function createModuleFunctions(host){
                 out.setUint32(0, module.base, true);
                 out.setUint32(4, read(optional + 56), true);
                 out.setUint32(8, entry === 0 ? 0 : module.base + entry, true);
-                host.writeMemory(wholeAddress(info), new Uint8Array(out.buffer));
+                guest.setBytes(wholeAddress(info), new Uint8Array(out.buffer));
                 return 1;
             },
         },

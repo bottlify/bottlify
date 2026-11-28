@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import {
     createProcessBlocks, TEB, PEB, PARAMS, LDR_DATA, LDR_ENTRY, END_OF_EXCEPTION_LIST, TLS_SLOTS,
     TEB64, PEB64, PARAMS64, LDR_DATA64, LDR_ENTRY64, INTERACTIVE_SESSION,
@@ -34,8 +35,7 @@ function guest(){
 
 const build = (/** @type {any} */ memory, /** @type {any} */ extra = {})=>createProcessBlocks({
     allocate: (/** @type {number} */ size)=>memory.allocate(size),
-    writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>
-        memory.writeMemory(at, value),
+    guest: guestOver(memory.bytes, extra.pointerSize ?? 4),
     processId: 0x1234,
     version: { major: 5, minor: 1, build: 2600 },
     imageBase: 0x00400000,

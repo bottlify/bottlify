@@ -18,8 +18,7 @@ import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} DebugHost
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(text: string) => void} say  Where a program's own words go.
  * @property {(report: { code: number, string: { address: number, length: number,
  *     unicode: boolean } }) => Promise<number>} [report]  This process's debugger, when
@@ -40,6 +39,7 @@ const MAX_TRACE = 1 << 16;
  * @param {DebugHost} host
  */
 export function createDebugFunctions(host){
+    const { guest } = host;
     /**
      * A debuggee's words, told to its debugger as OUTPUT_DEBUG_STRING: the
      * string where it is, its length in characters with the terminator.
@@ -62,7 +62,7 @@ export function createDebugFunctions(host){
                 {
                     return 0;
                 }
-                const said = host.readCString(wholeAddress(text), MAX_TRACE);
+                const said = guest.cstr(wholeAddress(text), MAX_TRACE);
                 host.say(said);
                 return tell(wholeAddress(text), said.length + 1, false);
             },
@@ -77,7 +77,7 @@ export function createDebugFunctions(host){
                 {
                     return 0;
                 }
-                const said = host.readWideString(wholeAddress(text), MAX_TRACE * 2);
+                const said = guest.wstr(wholeAddress(text), MAX_TRACE * 2);
                 host.say(said);
                 return tell(wholeAddress(text), said.length + 1, true);
             },

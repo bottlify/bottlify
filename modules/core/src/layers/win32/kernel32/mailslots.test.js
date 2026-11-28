@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createMailslots, isMailslotName } from './mailslots.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
@@ -87,17 +88,7 @@ function setup(pointerSize = 4){
             typeOf: handle=>table.get(handle)?.type ?? null,
             holds: object=>[...table.values()].some(entry=>entry.object === object),
         },
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: (address, max)=>{
-            let text = '';
-            for (let at = address; at < address + max && bytes[at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[at]);
-            }
-            return text;
-        },
-        readWideString: ()=>'',
+        guest: guestOver(bytes),
         setLastError: code=>errors.push(code),
         setLastErrorFor: (thread, code)=>threadErrors.set(thread, code),
         currentThread: ()=>current,

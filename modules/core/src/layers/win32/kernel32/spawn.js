@@ -502,10 +502,7 @@ export function createSpawner(host){
 /**
  * @typedef {Object} SpawnHost
  * @property {any} kernel                        The kernel layer's API.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError
  * @property {(path: string) => ({ exists: boolean, isDirectory: boolean } | null)} stat
  *           Whether a path names a file on the volume. Case is folded there.
@@ -562,17 +559,11 @@ export function createSpawner(host){
  * @param {SpawnHost} host
  */
 export function createSpawnFunctions(host){
+    const { guest } = host;
     const { kernel } = host;
     const record = (host.spawner ?? createSpawner(host)).launch;
     const STARTUP_ = host.pointerSize === 8 ? STARTUP64 : STARTUP;
     const INFORMATION = host.pointerSize === 8 ? PROCESS_INFORMATION64 : PROCESS_INFORMATION;
-
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(address, new Uint8Array([
-            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-        ]));
-    };
 
     /** @param {number} handle @returns {any} */
     const processOf = handle=>{
@@ -592,9 +583,8 @@ export function createSpawnFunctions(host){
 
     /** Reading and writing a process's memory, this one or a child's. */
     const processMemory = createProcessMemory({
-        readMemory: host.readMemory,
+        guest,
         pointerSize: host.pointerSize,
-        writeMemory: host.writeMemory,
         ...host.patchMemory ? { patchMemory: host.patchMemory } : {},
         // Without VirtualQuery's answers every mapped page is taken as
         // writable: a read of one that is not there still finds that out.
@@ -605,12 +595,6 @@ export function createSpawnFunctions(host){
         ...host.currentThread ? { currentThread: host.currentThread } : {},
         ...host.setLastErrorFor ? { setLastErrorFor: host.setLastErrorFor } : {},
     });
-
-    /** @param {number} address */
-    const readDword = address=>{
-        const b = host.readMemory(address, 4);
-        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
-    };
 
     /**
      * An environment block as variables: NAME=VALUE entries, each ended by a
@@ -629,7 +613,7 @@ export function createSpawnFunctions(host){
         let entry = '';
         for (let at = address; at < address + ENVIRONMENT_LIMIT; at += unit)
         {
-            const bytes = host.readMemory(at, unit);
+            const bytes = guest.snapshot(at, unit);
             const code = wide ? bytes[0] | bytes[1] << 8 : bytes[0];
             if (code !== 0)
             {
@@ -688,11 +672,11 @@ export function createSpawnFunctions(host){
             const text = `${path}\0`;
             if (wide)
             {
-                host.writeMemory(wholeAddress(buffer), utf16(text));
+                guest.setBytes(wholeAddress(buffer), utf16(text));
             }
             else
             {
-                host.writeMemory(wholeAddress(buffer), encodeAnsi(text));
+                guest.setBytes(wholeAddress(buffer), encodeAnsi(text));
             }
             return path.length;
         },
@@ -731,7 +715,7 @@ export function createSpawnFunctions(host){
                 host.setLastError(ERROR_NOT_SUPPORTED);
                 return 0;
             }
-            const room = readDword(wholeAddress(size));
+            const room = guest.u32(wholeAddress(size));
             if (room < path.length + 1)
             {
                 host.setLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -745,13 +729,13 @@ export function createSpawnFunctions(host){
             const text = `${path}\0`;
             if (wide)
             {
-                host.writeMemory(wholeAddress(buffer), utf16(text));
+                guest.setBytes(wholeAddress(buffer), utf16(text));
             }
             else
             {
-                host.writeMemory(wholeAddress(buffer), encodeAnsi(text));
+                guest.setBytes(wholeAddress(buffer), encodeAnsi(text));
             }
-            writeDword(wholeAddress(size), path.length);
+            guest.set32(wholeAddress(size), path.length);
             return 1;
         },
     });
@@ -802,7 +786,7 @@ export function createSpawnFunctions(host){
      */
     const standardChosen = (startup, inherit)=>{
         const named = startup !== 0
-            && (readDword(startup + STARTUP_.flags) & STARTF_USESTDHANDLES) !== 0;
+            && (guest.u32(startup + STARTUP_.flags) & STARTF_USESTDHANDLES) !== 0;
         if (named)
         {
             if (!inherit)
@@ -810,9 +794,9 @@ export function createSpawnFunctions(host){
                 return { standardHandles: NO_STANDARD, duplicates: [] };
             }
             return { duplicates: [], standardHandles: {
-                input: readDword(startup + STARTUP_.input) >>> 0,
-                output: readDword(startup + STARTUP_.output) >>> 0,
-                error: readDword(startup + STARTUP_.error) >>> 0 } };
+                input: guest.u32(startup + STARTUP_.input) >>> 0,
+                output: guest.u32(startup + STARTUP_.output) >>> 0,
+                error: guest.u32(startup + STARTUP_.error) >>> 0 } };
         }
         if (!host.standardHandle)
         {
@@ -859,20 +843,20 @@ export function createSpawnFunctions(host){
         {
             return null;
         }
-        const list = readDword(startup + STARTUPINFO.SIZE);
+        const list = guest.u32(startup + STARTUPINFO.SIZE);
         if (list === 0)
         {
             return null;
         }
-        const used = readDword(list + 8);
+        const used = guest.u32(list + 8);
         for (let at = 0; at < used; at++)
         {
             const entry = list + ATTRIBUTE_LIST_HEADER + at * ATTRIBUTE_ENTRY;
-            if (readDword(entry) === attribute)
+            if (guest.u32(entry) === attribute)
             {
-                const value = readDword(entry + 8);
-                return Array.from({ length: readDword(entry + 4) >>> 2 },
-                    (_, index)=>readDword(value + index * 4));
+                const value = guest.u32(entry + 8);
+                return Array.from({ length: guest.u32(entry + 4) >>> 2 },
+                    (_, index)=>guest.u32(value + index * 4));
             }
         }
         return null;
@@ -912,7 +896,7 @@ export function createSpawnFunctions(host){
         // Cleared first: a call that fails leaves no handle or id in it.
         if ((information >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(information), new Uint8Array(INFORMATION.SIZE));
+            guest.setBytes(wholeAddress(information), new Uint8Array(INFORMATION.SIZE));
         }
         const refused = createRefusal(named, line);
         if (refused !== 0)
@@ -951,9 +935,9 @@ export function createSpawnFunctions(host){
             // What the child's GetStartupInfo answers: values, since the child
             // may be built on another thread from what crosses to it.
             startup: (startup >>> 0) === 0 ? null : readStartupInfo(
-                host.readMemory(wholeAddress(startup), STARTUPINFO.SIZE),
-                address=>(wide ? host.readWideString(address, WHOLE_NAME * 2)
-                    : host.readCString(address, WHOLE_NAME)),
+                guest.snapshot(wholeAddress(startup), STARTUPINFO.SIZE),
+                address=>(wide ? guest.wstr(address, WHOLE_NAME * 2)
+                    : guest.cstr(address, WHOLE_NAME)),
                 host.startup?.()?.desktop ?? null),
             // The process that started it, which its own snapshot names.
             parentId: (host.processId ?? 0) >>> 0,
@@ -988,10 +972,10 @@ export function createSpawnFunctions(host){
         }
         if ((information >>> 0) !== 0)
         {
-            writeDword(wholeAddress(information) + INFORMATION.process, made.handle);
-            writeDword(wholeAddress(information) + INFORMATION.thread, made.threadHandle);
-            writeDword(wholeAddress(information) + INFORMATION.processId, made.id);
-            writeDword(wholeAddress(information) + INFORMATION.threadId, made.threadId);
+            guest.set32(wholeAddress(information) + INFORMATION.process, made.handle);
+            guest.set32(wholeAddress(information) + INFORMATION.thread, made.threadHandle);
+            guest.set32(wholeAddress(information) + INFORMATION.processId, made.id);
+            guest.set32(wholeAddress(information) + INFORMATION.threadId, made.threadId);
         }
         host.setLastError(ERROR_SUCCESS);
         return 1;
@@ -1017,13 +1001,13 @@ export function createSpawnFunctions(host){
             /** @param {number[]} args */
             handler: ([application, commandLine, , , inherit, flags, environment, directory,
                 startup, information])=>create(
-                wholeAddress(application) === 0 ? null : host.readCString(wholeAddress(application),
+                wholeAddress(application) === 0 ? null : guest.cstr(wholeAddress(application),
                     WHOLE_NAME),
                 wholeAddress(commandLine) === 0
                     ? ''
-                    : host.readCString(wholeAddress(commandLine), MAX_COMMAND_LINE),
+                    : guest.cstr(wholeAddress(commandLine), MAX_COMMAND_LINE),
                 flags >>> 0, information, startup,
-                wholeAddress(directory) === 0 ? '' : host.readCString(wholeAddress(directory),
+                wholeAddress(directory) === 0 ? '' : guest.cstr(wholeAddress(directory),
                     WHOLE_NAME),
                 false, environment, inherit !== 0),
         },
@@ -1035,12 +1019,12 @@ export function createSpawnFunctions(host){
             handler: ([application, commandLine, , , inherit, flags, environment, directory,
                 startup, information])=>create(
                 (application >>> 0) === 0 ? null
-                    : host.readWideString(wholeAddress(application), WHOLE_NAME * 2),
+                    : guest.wstr(wholeAddress(application), WHOLE_NAME * 2),
                 (commandLine >>> 0) === 0
                     ? ''
-                    : host.readWideString(wholeAddress(commandLine), MAX_COMMAND_LINE * 2),
+                    : guest.wstr(wholeAddress(commandLine), MAX_COMMAND_LINE * 2),
                 flags >>> 0, information, startup,
-                (directory >>> 0) === 0 ? '' : host.readWideString(wholeAddress(directory),
+                (directory >>> 0) === 0 ? '' : guest.wstr(wholeAddress(directory),
                     WHOLE_NAME * 2),
                 true, environment, inherit !== 0),
         },
@@ -1115,17 +1099,17 @@ export function createSpawnFunctions(host){
                     return 0;
                 }
                 const needed = ATTRIBUTE_LIST_HEADER + (count >>> 0) * ATTRIBUTE_ENTRY;
-                const room = readDword(wholeAddress(size));
-                writeDword(wholeAddress(size), needed);
+                const room = guest.u32(wholeAddress(size));
+                guest.set32(wholeAddress(size), needed);
                 if (wholeAddress(list) === 0 || room < needed)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                writeDword(wholeAddress(list), 0);
-                writeDword(wholeAddress(list) + 4, count >>> 0);
-                writeDword(wholeAddress(list) + 8, 0);
-                writeDword(wholeAddress(list) + 16, 0);
+                guest.set32(wholeAddress(list), 0);
+                guest.set32(wholeAddress(list) + 4, count >>> 0);
+                guest.set32(wholeAddress(list) + 8, 0);
+                guest.set32(wholeAddress(list) + 16, 0);
                 return 1;
             },
         },
@@ -1156,25 +1140,25 @@ export function createSpawnFunctions(host){
                     return 0;
                 }
                 const at = wholeAddress(list);
-                const mask = readDword(at);
+                const mask = guest.u32(at);
                 const bit = (1 << (wanted & 0xffff)) >>> 0;
                 if ((mask & bit) !== 0)
                 {
                     host.setLastError(ERROR_OBJECT_NAME_EXISTS);
                     return 0;
                 }
-                const count = readDword(at + 8);
-                if (count >= readDword(at + 4))
+                const count = guest.u32(at + 8);
+                if (count >= guest.u32(at + 4))
                 {
                     host.setLastError(ERROR_GEN_FAILURE);
                     return 0;
                 }
                 const entry = at + ATTRIBUTE_LIST_HEADER + count * ATTRIBUTE_ENTRY;
-                writeDword(entry, wanted);
-                writeDword(entry + 4, length);
-                writeDword(entry + 8, wholeAddress(value));
-                writeDword(at + 8, count + 1);
-                writeDword(at, (mask | bit) >>> 0);
+                guest.set32(entry, wanted);
+                guest.set32(entry + 4, length);
+                guest.set32(entry + 8, wholeAddress(value));
+                guest.set32(at + 8, count + 1);
+                guest.set32(at, (mask | bit) >>> 0);
                 return 1;
             },
         },
@@ -1201,7 +1185,7 @@ export function createSpawnFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                writeDword(wholeAddress(out), INTERACTIVE_SESSION);
+                guest.set32(wholeAddress(out), INTERACTIVE_SESSION);
                 return 1;
             },
         },
@@ -1226,7 +1210,7 @@ export function createSpawnFunctions(host){
             handler: ([commandLine])=>{
                 const line = wholeAddress(commandLine) === 0
                     ? ''
-                    : host.readCString(wholeAddress(commandLine), MAX_COMMAND_LINE);
+                    : guest.cstr(wholeAddress(commandLine), MAX_COMMAND_LINE);
                 if (!record('', line, 0))
                 {
                     host.setLastError(ERROR_FILE_NOT_FOUND);

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import {
     createSpawner, createSpawnFunctions, isRedistributableInstaller, writeThroughProtection,
 } from './spawn.js';
@@ -95,32 +96,7 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\
             },
         },
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-        /** @param {number} address @param {number} max */
-        readCString(address, max){
-            let text = '';
-            for (let at = 0; at < max && bytes[address + at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[address + at]);
-            }
-            return text;
-        },
-        /** @param {number} address @param {number} max */
-        readWideString(address, max){
-            let text = '';
-            for (let at = 0; at < max; at++)
-            {
-                const unit = bytes[address + at * 2] | bytes[address + at * 2 + 1] << 8;
-                if (unit === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(unit);
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         /** @param {number} code */
         setLastError: code=>errors.push(code),
         /** @param {string} path */
@@ -851,14 +827,8 @@ test('ReadProcessMemory of this process where nothing is mapped is ERROR_PARTIAL
     // A crash handler walks the stack through it wherever a frame pointer
     // leads; the read faulted the engine instead of answering FALSE.
     const host = fakeHost({ files: [] });
-    const read = host.readMemory;
-    host.readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>{
-        if (address >= 0x900)
-        {
-            throw new Error(`Unmapped read at 0x${address.toString(16)}`);
-        }
-        return read(address, length);
-    };
+    // Nothing from 0x900 on is mapped.
+    host.guest = guestOver(host.bytes.subarray(0, 0x900));
     const fns = createSpawnFunctions(host);
     host.view.setUint32(0x700, 0xaaaaaaaa, true);
     assert.equal(fns.ReadProcessMemory.handler([CURRENT_PROCESS, 0x971, 0x600, 4, 0x700]), 0);

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createActivationContexts, hashKey } from './actctx.js';
 
@@ -40,24 +41,7 @@ function setup(volume = {}, extra = {}){
     const spelled = Object.keys(volume);
     const { functions, loaderApi } = createActivationContexts({
         ...extra,
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: address=>{
-            let text = '';
-            for (let at = address; bytes[at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[at]);
-            }
-            return text;
-        },
-        readWideString: address=>{
-            let text = '';
-            for (let at = address; view.getUint16(at, true) !== 0; at += 2)
-            {
-                text += String.fromCharCode(view.getUint16(at, true));
-            }
-            return text;
-        },
+        guest: guestOver(bytes, extra.pointerSize === 8 ? 8 : 4),
         setLastError: code=>{
             errors.push(code);
         },

@@ -18,6 +18,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { recordingGuest } from '../common/guest.fixture.js';
 import { createModuleFunctions, searchesBesideProgram, DLL_SEARCH_PATH } from './modules.js';
 
 /**
@@ -39,22 +40,18 @@ const record = (name, base)=>({
  * @param {Record<string, number>} [options.lookup]  Name to table base.
  * @param {(name: string, flags?: number) => number} [options.load]  What the assembler answers.
  */
-function hostFor({ lookup = {}, load } = {}){
+function hostFor({ lookup = {}, load } = {}, pointerSize = /** @type {4 | 8} */ (4)){
     /** @type {Map<string, ReturnType<typeof record>>} */
     const byName = new Map(Object.entries(lookup)
         .map(([name, base])=>[name.toLowerCase(), record(name, base)]));
     /** @type {Map<number, string>} */
     const strings = new Map();
     let lastError = 0;
+    // What each call wrote, by address; a name said reads as its text.
+    const memory = recordingGuest({ names: strings, pointerSize });
 
     const host = {
-        /** @param {number} address */
-        // Cut at the limit the caller passes, as the layer's reader is.
-        readCString: (/** @type {number} */ address, /** @type {number} */ limit)=>
-            (strings.get(address) ?? '').slice(0, limit),
-        /** @param {number} address */
-        readWideString: address=>strings.get(address) ?? '',
-        writeMemory: ()=>{},
+        guest: memory.guest,
         /** @param {string | null} name */
         find: name=>name === null ? null : byName.get(String(name).toLowerCase()) ?? null,
         /** @param {number} base */
@@ -70,6 +67,9 @@ function hostFor({ lookup = {}, load } = {}){
         /** @param {number} address @param {string} text */
         say: (address, text)=>{ strings.set(address, text); },
         lastError: ()=>lastError,
+        written: memory.written,
+        plant: memory.plant,
+        use: memory.use,
     };
 }
 
@@ -370,41 +370,27 @@ test('the program\'s file name is written in the ANSI page', ()=>{
     host.find = (/** @type {string | null} */ name)=>(name === null
         ? record('app.exe', 0x400000) : null);
     host.imagePath = ()=>'C:\\\u20ac\u2122\u2014\u00e9\\app.exe';
-    /** @type {Uint8Array[]} */
-    const written = [];
-    host.writeMemory = (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
-        written.push(bytes.slice());
-    };
     const fns = createModuleFunctions(f.host);
 
     assert.equal(fns.GetModuleFileNameA.handler([0, 0x1000, 64]), 15);
-    assert.deepEqual([...written[0].subarray(3, 8)], [0x80, 0x99, 0x97, 0xe9, 0x5c]);
+    assert.deepEqual([...(f.written.get(0x1000) ?? new Uint8Array(0)).subarray(3, 8)],
+        [0x80, 0x99, 0x97, 0xe9, 0x5c]);
 });
 
 test("K32GetModuleInformation reads a module's base, size and entry from its own headers", ()=>{
     // d3d9's device.c test_vtbl_hook asks for d3d9.dll's image to scan it.
-    const { host, lastError } = hostFor({ lookup: { 'd3d9.dll': 0x10000 } });
+    const { host, lastError, plant } = hostFor({ lookup: { 'd3d9.dll': 0x10000 } });
     const image = new Uint8Array(0x400);
     const view = new DataView(image.buffer);
     view.setUint32(0x3c, 0x80, true);
     view.setUint32(0x80 + 24 + 16, 0x1234, true);
     view.setUint32(0x80 + 24 + 56, 0x9000, true);
-    const seen = { bytes: /** @type {Uint8Array} */ (new Uint8Array(0)) };
-    const fns = createModuleFunctions({
-        ...host,
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>image.slice(address - 0x10000, address - 0x10000 + length),
-        /** @param {number} address @param {Uint8Array} bytes */
-        writeMemory: (address, bytes)=>{
-            assert.equal(address, 0x500);
-            seen.bytes = bytes;
-        },
-    });
+    plant(0x10000, image);
+    const fns = createModuleFunctions(host);
     const entry = fns.K32GetModuleInformation;
     assert.equal(entry.argBytes, 16);
     assert.equal(entry.handler([0xffffffff, 0x10000, 0x500, 12]), 1);
-    const out = new DataView(seen.bytes.buffer);
-    assert.deepEqual([0, 4, 8].map(at=>out.getUint32(at, true)), [0x10000, 0x9000, 0x11234]);
+    assert.deepEqual([0, 4, 8].map(at=>host.guest.u32(0x500 + at)), [0x10000, 0x9000, 0x11234]);
     assert.equal(entry.handler([0xffffffff, 0x10000, 0x500, 8]), 0);
     assert.equal(lastError(), 122, 'ERROR_INSUFFICIENT_BUFFER');
     assert.equal(entry.handler([0xffffffff, 0x20000, 0x500, 12]), 0);
@@ -416,17 +402,13 @@ test('a path cut by a short buffer ends in its terminator, answers nSize and say
     const host = /** @type {any} */ (f.host);
     host.find = (/** @type {string | null} */ name)=>(name === null
         ? record('app.exe', 0x400000) : null);
-    /** @type {Uint8Array[]} */
-    const written = [];
-    host.writeMemory = (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
-        written.push(bytes.slice());
-    };
     const fns = createModuleFunctions(f.host);
     // C:\App\speedDemo.exe is 20 characters.
     assert.equal(fns.GetModuleFileNameW.handler([0, 0x1000, 8]), 8);
     assert.equal(f.lastError(), 122, 'ERROR_INSUFFICIENT_BUFFER');
-    assert.equal(written[0].length, 16, 'seven characters and the terminator');
-    assert.equal(written[0][14] | written[0][15], 0);
+    const cut = f.written.get(0x1000) ?? new Uint8Array(0);
+    assert.equal(cut.length, 16, 'seven characters and the terminator');
+    assert.equal(cut[14] | cut[15], 0);
     assert.equal(fns.GetModuleFileNameA.handler([0, 0x1000, 21]), 20);
     assert.equal(f.lastError(), 0, 'a whole path clears the error');
     assert.equal(fns.GetModuleFileNameA.handler([0, 0x1000, 0]), 0);
@@ -567,12 +549,9 @@ test('SetDllDirectory adds its directory to a bare name\'s search; NULL takes it
 
 test('GetDllDirectory answers as the path calls do', ()=>{
     const bytes = new Uint8Array(0x400);
-    const { host, say } = hostFor();
-    const fns = createModuleFunctions(/** @type {any} */ ({
-        ...host,
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, at),
-    }));
+    const { host, say, use } = hostFor();
+    use(bytes);
+    const fns = createModuleFunctions(host);
     assert.equal(fns.GetDllDirectoryA.argBytes, 8);
     assert.equal(fns.GetDllDirectoryA.handler([16, 0x100]), 0, 'none set: an empty string');
     assert.equal(bytes[0x100], 0);
@@ -594,19 +573,15 @@ test('GetDllDirectory answers as the path calls do', ()=>{
 });
 
 test('K32EnumProcessModules hands out the image first and the bytes all of them take', ()=>{
-    const { host, lastError } = hostFor({
+    const { host, lastError, written } = hostFor({
         lookup: { 'game.exe': 0x400000, 'engine.dll': 0x10000000 },
     });
-    /** @type {Map<number, Uint8Array>} */
-    const written = new Map();
     const fns = createModuleFunctions({
         ...host,
         list: ()=>[
             { base: 0x400000, name: 'game.exe', path: 'C:\\App\\game.exe' },
             { base: 0x10000000, name: 'engine.dll', path: 'C:\\App\\engine.dll' },
         ],
-        /** @param {number} address @param {Uint8Array} bytes */
-        writeMemory: (address, bytes)=>{ written.set(address, bytes); },
     });
     const u32 = (/** @type {number} */ address, at = 0)=>
         new DataView(/** @type {Uint8Array} */ (written.get(address)).buffer).getUint32(at, true);
@@ -626,16 +601,12 @@ test('K32EnumProcessModules hands out the image first and the bytes all of them 
 });
 
 test('a 64-bit process\'s module handles are quadwords, EnumProcessModulesEx\'s as its own', ()=>{
-    const { host } = hostFor({ lookup: { 'game.exe': 0x400000 } });
-    /** @type {Map<number, Uint8Array>} */
-    const written = new Map();
+    const { host, written } = hostFor({ lookup: { 'game.exe': 0x400000 } }, 8);
     const fns = createModuleFunctions({
         ...host,
         pointerSize: 8,
         list: ()=>[{ base: 0x400000, name: 'game.exe', path: 'C:\\App\\game.exe' },
             { base: 0x10000000, name: 'engine.dll', path: 'C:\\App\\engine.dll' }],
-        /** @param {number} address @param {Uint8Array} bytes */
-        writeMemory: (address, bytes)=>{ written.set(address, bytes); },
     });
     const u32 = (/** @type {number} */ address, at = 0)=>
         new DataView(/** @type {Uint8Array} */ (written.get(address)).buffer).getUint32(at, true);
@@ -649,18 +620,17 @@ test('a 64-bit process\'s module handles are quadwords, EnumProcessModulesEx\'s 
 });
 
 test('K32GetModuleFileNameEx and K32GetModuleBaseName answer a path and its file name', ()=>{
-    const { host, lastError } = hostFor({ lookup: { 'engine.dll': 0x10000000 } });
-    /** @type {Map<number, Uint8Array>} */
-    const written = new Map();
+    const { host, lastError, written } = hostFor({ lookup: { 'engine.dll': 0x10000000 } });
     const fns = createModuleFunctions({
         ...host,
         /** @param {string | null} name */
         find: name=>name === null ? record('speedDemo.exe', 0x400000) : host.find(name),
-        /** @param {number} address @param {Uint8Array} bytes */
-        writeMemory: (address, bytes)=>{ written.set(address, bytes); },
     });
-    const ansi = (/** @type {number} */ address)=>
-        String.fromCharCode(...(written.get(address) ?? []));
+    /** The text written there and its terminator. @param {number} address */
+    const ansi = address=>{
+        const text = host.guest.cstr(address, 260);
+        return host.guest.u8(address + text.length) === 0 ? `${text}\0` : text;
+    };
     const image = [0xffffffff, 0, 0x500, 260];
     const engine = [0xffffffff, 0x10000000, 0x500, 260];
     assert.equal(fns.K32GetModuleFileNameExA.handler(image), 20);
@@ -688,27 +658,22 @@ test('DelayLoadFailureHook offers no stand-in, leaving the delay-load helper to 
 test('K32GetMappedFileName names the image an address lies in, as the object manager does', ()=>{
     // A DRM wrapper resolves psapi's GetMappedFileNameA and checks its own
     // image with it; without the export it gave up on starting the game.
-    const { host, lastError } = hostFor();
+    const { host, lastError, plant, written } = hostFor();
     const image = new Uint8Array(0x400);
     const view = new DataView(image.buffer);
     view.setUint32(0x3c, 0x80, true);
     view.setUint32(0x80 + 24 + 56, 0x9000, true);
-    /** @type {Uint8Array[]} */
-    const written = [];
+    plant(0x400000, image);
     const fns = createModuleFunctions({
         ...host,
         list: ()=>[{ base: 0x400000, name: 'gta-vc.exe', path: 'C:\\App\\gta-vc.exe' }],
         nativePath: path=>`\\Device\\HarddiskVolume1${path.slice(2)}`,
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>image.slice(address - 0x400000,
-            address - 0x400000 + length),
-        writeMemory: (_, bytes)=>{ written.push(bytes); },
     });
     const wanted = '\\Device\\HarddiskVolume1\\App\\gta-vc.exe';
     assert.equal(fns.K32GetMappedFileNameA.argBytes, 16);
     assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x401234, 0x500, 260]),
         wanted.length);
-    assert.equal(String.fromCharCode(...written.at(-1) ?? []).replace(/\0$/, ''), wanted);
+    assert.equal(String.fromCharCode(...written.get(0x500) ?? []).replace(/\0$/, ''), wanted);
     assert.equal(fns.K32GetMappedFileNameW.handler([0xffffffff, 0x408fff, 0x500, 260]),
         wanted.length, 'the last byte of the image');
     assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x409000, 0x500, 260]), 0,
@@ -723,24 +688,19 @@ test('K32GetMappedFileName names the image an address lies in, as the object man
 test('K32GetMappedFileName names one of the system\'s libraries by the folder it is in', ()=>{
     // A library the engine makes has no file of its own: it is where
     // GetModuleFileName says it is, as ntdll's test reads it.
-    const { host } = hostFor();
+    const { host, plant, written } = hostFor();
     const image = new Uint8Array(0x400);
     const view = new DataView(image.buffer);
     view.setUint32(0x3c, 0x80, true);
     view.setUint32(0x80 + 24 + 56, 0x2000, true);
-    /** @type {Uint8Array[]} */
-    const written = [];
+    plant(0x7c900000, image);
     const fns = createModuleFunctions({
         ...host,
         list: ()=>[{ base: 0x7c900000, name: 'ntdll.dll' }],
         nativePath: path=>`\\Device\\HarddiskVolume1${path.slice(2)}`,
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>image.slice(address - 0x7c900000,
-            address - 0x7c900000 + length),
-        writeMemory: (_, bytes)=>{ written.push(bytes); },
     });
     const wanted = '\\Device\\HarddiskVolume1\\Windows\\System32\\ntdll.dll';
     assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x7c9004d2, 0x500, 260]),
         wanted.length);
-    assert.equal(String.fromCharCode(...written.at(-1) ?? []).replace(/\0$/, ''), wanted);
+    assert.equal(String.fromCharCode(...written.get(0x500) ?? []).replace(/\0$/, ''), wanted);
 });

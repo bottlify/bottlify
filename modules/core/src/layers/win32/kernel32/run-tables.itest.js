@@ -17,6 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { Worker } from 'node:worker_threads';
 import { testCache } from '../../cache/testing.fixture.js';
 import { noCache } from '../../cache/module.js';
@@ -53,7 +54,7 @@ const machine = tables=>{
     const errors = [];
     const fns = createLocaleFunctions({
         tables,
-        readMemory: (address, length)=>bytes.slice(address, address + length),
+        guest: guestOver(bytes),
         stringLength(address, unit){
             let count = 0;
             while ((unit === 1 ? bytes[address + count]
@@ -63,7 +64,6 @@ const machine = tables=>{
             }
             return count;
         },
-        writeMemory: (address, data)=>bytes.set(data, address),
         setLastError: code=>errors.push(code),
     });
     return { bytes, errors, fns: /** @type {Record<string, any>} */ (fns) };

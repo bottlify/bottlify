@@ -126,7 +126,8 @@ text beside it, which the win32 layer builds once per process and hands to each 
 the sound and input layers through its api. Its text is one reader and one writer, the width
 (ANSI or UTF-16) their modifier, and every A/W pair's guest text goes through them: `text` reads a
 string to its terminator or to a limit in bytes (cut there, a fault only where memory ends), or a
-counted string's length whole; `setText` writes one cut to its room; `cstr`, `wstr`,
+counted string's length whole, and `stringBytes` is the bytes it decodes, in place, for a caller
+that decodes in a page of its own; `setText` writes one cut to its room; `cstr`, `wstr`,
 `writeAnsi` and `writeWide` are the two widths named. `guid` and `setGuid` read and write a
 GUID in its canonical form. A write whose length is
 the program's is never made on the host first: `fill` is the memory layer's own, and `setMade`

@@ -74,7 +74,7 @@ const CHUNK_ENTRIES = 256;
  *     without it only a heap block is fixed memory a lock hands back.
  * @property {(address: number, length: number) => void} zero
  *     Zeroes what a fresh allocation handed over, where it is not zero already.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError
  * @property {Map<number, { value: number, flags: number }>} userInfo
  *     The heap user value and flags of each block that has them.
@@ -97,6 +97,7 @@ const CHUNK_ENTRIES = 256;
  * @param {GlobalMemoryHost} host
  */
 export function createGlobalMemory(host){
+    const { guest } = host;
     const width = host.pointerSize ?? 4;
     const entrySize = width * 2;
     /** @type {Map<number, Entry>} live entries, by handle */
@@ -111,18 +112,10 @@ export function createGlobalMemory(host){
     /** @param {number} handle */
     const isHandle = handle=>(handle & (entrySize - 1)) === width;
 
-    /** @param {number} address @param {number} value */
-    const writeWord = (address, value)=>{
-        const bytes = new Uint8Array(width);
-        const view = new DataView(bytes.buffer);
-        view.setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
-    };
-
     /** @param {number} handle @param {Entry} entry */
     const store = (handle, entry)=>{
-        writeWord(handle - width, entry.flags);
-        writeWord(handle, entry.pointer);
+        guest.setPtr(handle - width, entry.flags);
+        guest.setPtr(handle, entry.pointer);
     };
 
     /** A free entry's handle, a chunk made for it if none is free; 0 when the table is full. */
@@ -158,8 +151,8 @@ export function createGlobalMemory(host){
         live.delete(handle);
         const entry = handle - width;
         // A freed entry links to the next free one, as Windows' free list does.
-        writeWord(entry, unused.at(-1) ?? firstChunk);
-        writeWord(handle, 0);
+        guest.setPtr(entry, unused.at(-1) ?? firstChunk);
+        guest.setPtr(handle, 0);
         unused.push(entry);
     };
 

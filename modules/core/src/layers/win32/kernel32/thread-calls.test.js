@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import {
     DLL_THREAD_ATTACH, DLL_THREAD_DETACH, WALK_OFFSET, createThreadCalls, threadCallsCode,
 } from './thread-calls.js';
@@ -94,7 +95,7 @@ function machine(images, { room = Infinity } = {}){
             free += (bytes + 15) & ~15;
             return at;
         },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         images: ()=>images,
         loaderLock: ()=>LOCK,
     });

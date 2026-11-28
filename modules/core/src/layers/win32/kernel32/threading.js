@@ -10,7 +10,7 @@ import { TAKEN } from './named-objects.js';
 import { askChild, childThread, threadEnd } from './cross-process.js';
 import { MODIFY_STATE, SYNCHRONIZE, allows, duplicateAccess, grantedAccess } from './access.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
-import { FILETIME_EPOCH_MS, dueInMs, readLargeInteger } from './due-time.js';
+import { FILETIME_EPOCH_MS, dueInMs } from './due-time.js';
 import { createSyncNatives } from './sync-natives.js';
 import { createDirectoryNatives } from './object-directories.js';
 import { overlappedLayout } from '../common/overlapped.js';
@@ -124,9 +124,7 @@ const STATUS_OF_RIGHTS = /** @type {Record<number, number>} */ ({
  * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
  *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {any} kernel                       The kernel layer's API.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
  * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
@@ -141,7 +139,6 @@ const STATUS_OF_RIGHTS = /** @type {Record<number, number>} */ ({
  *           routine. Zero, or absent, and it begins in its start routine.
  * @property {() => boolean} [terminating]  Whether the process has begun to end,
  *           after which CreateThread makes no thread (ERROR_ACCESS_DENIED).
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {(object: object, sd: number) => void} [recordObjectSecurity]
  *           Keeps the SECURITY_ATTRIBUTES' descriptor a freshly created sync
@@ -313,6 +310,7 @@ const readU32 = (bytes, at)=>
  * @param {ThreadingHost} host
  */
 export function createThreadingFunctions(host){
+    const { guest } = host;
     const overlappedFields = overlappedLayout(host.pointerSize);
     /**
      * @param {number} handle
@@ -357,7 +355,7 @@ export function createThreadingFunctions(host){
             host.setLastError(ERROR_NO_MORE_FILES);
             return 0;
         }
-        if (readU32(host.readMemory(wholeAddress(entry), 4), 0) < size)
+        if (readU32(guest.snapshot(wholeAddress(entry), 4), 0) < size)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
@@ -395,7 +393,7 @@ export function createThreadingFunctions(host){
             view.setUint32(THREADENTRY32.tpBasePri, NORMAL_PRIORITY_BASE, true);
             snapshot.thread = at + 1;
         }
-        host.writeMemory(wholeAddress(entry), bytes);
+        guest.setBytes(wholeAddress(entry), bytes);
         return 1;
     };
 
@@ -424,7 +422,7 @@ export function createThreadingFunctions(host){
         }
         const unit = wide ? 2 : 1;
         const size = MODULEENTRY32.szModule + (MODULEENTRY32.NAME + MAX_PATH) * unit;
-        if (readU32(host.readMemory(wholeAddress(entry), 4), 0) < size)
+        if (readU32(guest.snapshot(wholeAddress(entry), 4), 0) < size)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
@@ -457,7 +455,7 @@ export function createThreadingFunctions(host){
             MODULEENTRY32.NAME);
         put(module.path, MODULEENTRY32.szModule + MODULEENTRY32.NAME * unit, MAX_PATH);
         snapshot.module = at + 1;
-        host.writeMemory(wholeAddress(entry), bytes);
+        guest.setBytes(wholeAddress(entry), bytes);
         return 1;
     };
 
@@ -555,7 +553,7 @@ export function createThreadingFunctions(host){
         return handle;
     };
     /** @param {number} attributes  SECURITY_ATTRIBUTES, or 0 */
-    const securityOf = attributes=>readSecurityAttributes(host.readMemory,
+    const securityOf = attributes=>readSecurityAttributes(guest,
         wholeAddress(attributes), host.pointerSize);
     /** @param {number} attributes  SECURITY_ATTRIBUTES, or 0 */
     const inherits = attributes=>securityOf(attributes)?.inherit ?? false;
@@ -644,8 +642,8 @@ export function createThreadingFunctions(host){
         {
             return null;
         }
-        const name = wide ? host.readWideString(wholeAddress(pointer), WHOLE_NAME * 2)
-            : host.readCString(wholeAddress(pointer), WHOLE_NAME);
+        const name = wide ? guest.wstr(wholeAddress(pointer), WHOLE_NAME * 2)
+            : guest.cstr(wholeAddress(pointer), WHOLE_NAME);
         // The ANSI forms take a name shorter than MAX_PATH, as Windows' do.
         if (!wide && name.length >= MAX_NAME)
         {
@@ -968,9 +966,9 @@ export function createThreadingFunctions(host){
             handleWords = null;
             return null;
         }
-        host.writeMemory(words, new Uint8Array(EVENT_SLOTS * 4));
-        host.writeMemory(mutexes, new Uint8Array(MUTEX_SLOTS * 4));
-        host.writeMemory(events, new Uint8Array(EVENT_WORD_SLOTS * 4));
+        guest.setBytes(words, new Uint8Array(EVENT_SLOTS * 4));
+        guest.setBytes(mutexes, new Uint8Array(MUTEX_SLOTS * 4));
+        guest.setBytes(events, new Uint8Array(EVENT_WORD_SLOTS * 4));
         // The semaphores' two words each at the table's end (`wait-one.js`).
         const eventWords = EVENT_WORD_SLOTS - SEMAPHORE_SLOTS * 2;
         kernel.mirrorEvents(words, EVENT_SLOTS, mutexes, MUTEX_SLOTS, events, eventWords,
@@ -1011,7 +1009,7 @@ export function createThreadingFunctions(host){
                 return trap;
             }
             const at = allocate(SEMAPHORE_CODE.waitSemaphore.code.length);
-            host.writeMemory(at, boundRoutine(SEMAPHORE_CODE.waitSemaphore, at, trap, words));
+            guest.setBytes(at, boundRoutine(SEMAPHORE_CODE.waitSemaphore, at, trap, words));
             semaphoreWait = at;
         }
         return semaphoreWait;
@@ -1044,7 +1042,7 @@ export function createThreadingFunctions(host){
         if (words !== null && allocate)
         {
             at = allocate(code(0, trap, words).length);
-            host.writeMemory(at, code(at, trap, words));
+            guest.setBytes(at, code(at, trap, words));
         }
         placedRoutines.set(name, at);
         return at;
@@ -1082,7 +1080,7 @@ export function createThreadingFunctions(host){
             ? sourceFlags ?? 0 : (attributes & OBJ_INHERIT) !== 0 ? HANDLE_FLAG_INHERIT : 0);
         /** @param {number} handle @param {number} made */
         const written = (handle, made)=>{
-            host.writeMemory(wholeAddress(handle), new Uint8Array([made & 0xff, made >>> 8 & 0xff,
+            guest.setBytes(wholeAddress(handle), new Uint8Array([made & 0xff, made >>> 8 & 0xff,
                 made >>> 16 & 0xff, made >>> 24 & 0xff]));
             return STATUS.SUCCESS;
         };
@@ -1299,14 +1297,14 @@ export function createThreadingFunctions(host){
             handler: ([file, overlapped, transferred, wait])=>{
                 /** @param {number} offset */
                 const field = offset=>{
-                    const bytes = host.readMemory((overlapped + offset) >>> 0, 4);
+                    const bytes = guest.snapshot((overlapped + offset) >>> 0, 4);
                     return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
                 };
                 const count = ()=>{
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, field(overlappedFields.internalHigh),
                         true);
-                    host.writeMemory(wholeAddress(transferred), bytes);
+                    guest.setBytes(wholeAddress(transferred), bytes);
                 };
                 let status = field(overlappedFields.internal);
                 if (status === STATUS.PENDING)
@@ -1557,7 +1555,7 @@ export function createThreadingFunctions(host){
                     const before = kernel.releaseSemaphore(semaphore, count | 0);
                     if (previous !== 0)
                     {
-                        host.writeMemory(wholeAddress(previous), new Uint8Array([
+                        guest.setBytes(wholeAddress(previous), new Uint8Array([
                             before & 0xff, before >>> 8 & 0xff,
                             before >>> 16 & 0xff, before >>> 24 & 0xff,
                         ]));
@@ -1665,7 +1663,7 @@ export function createThreadingFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(out), new Uint8Array([flags, 0, 0, 0]));
+                guest.setBytes(wholeAddress(out), new Uint8Array([flags, 0, 0, 0]));
                 return 1;
             },
         },
@@ -1705,7 +1703,7 @@ export function createThreadingFunctions(host){
                             return STATUS.INFO_LENGTH_MISMATCH;
                         }
                         const [inheritable, protect] =
-                            host.readMemory(wholeAddress(information), 2);
+                            guest.snapshot(wholeAddress(information), 2);
                         return setFlags(handle, (inheritable ? HANDLE_FLAG_INHERIT : 0)
                             | (protect ? HANDLE_FLAG_PROTECT_FROM_CLOSE : 0));
                     },
@@ -1876,7 +1874,7 @@ export function createThreadingFunctions(host){
                     return 0;
                 }
                 const due = kernel.clock.virtualTime() + dueInMs(
-                    readLargeInteger(host.readMemory, dueTime), kernel.clock.wallClock());
+                    guest.i64(wholeAddress(dueTime)), kernel.clock.wallClock());
                 // A completion routine is queued to the thread that set the
                 // timer, once per expiry, with the time it expired as a
                 // FILETIME; it runs when that thread next waits alertably.
@@ -1991,11 +1989,11 @@ export function createThreadingFunctions(host){
                 all.slice(0, count).forEach((id, i)=>view.setUint32(i * 4, id, true));
                 if (count > 0)
                 {
-                    host.writeMemory(wholeAddress(ids), bytes);
+                    guest.setBytes(wholeAddress(ids), bytes);
                 }
                 const written = new Uint8Array(4);
                 new DataView(written.buffer).setUint32(0, count * 4, true);
-                host.writeMemory(wholeAddress(needed), written);
+                guest.setBytes(wholeAddress(needed), written);
                 return 1;
             },
         },
@@ -2222,7 +2220,7 @@ export function createThreadingFunctions(host){
         }
         const [, stack, start, parameter, flags, idOut] = rest;
         const asked = host.setLastErrorFor ? askChild({ askChild: host.askChild,
-            writeMemory: host.writeMemory, currentThread: host.currentThread,
+            guest, currentThread: host.currentThread,
             setLastErrorFor: host.setLastErrorFor }, target,
         { call: 'CreateThread', args: [0, stack >>> 0, start >>> 0, parameter >>> 0,
             flags >>> 0, { out: 4 }] }, [null, null, null, null, null, idOut >>> 0],
@@ -2246,7 +2244,8 @@ export function createThreadingFunctions(host){
     // The native calls over the same objects, which ntdll publishes: they ride
     // on CreateEventW's entry, whose state they share (`sync-natives.js`).
     const natives = createSyncNatives({
-        readMemory: host.readMemory, writeMemory: host.writeMemory, kernel, creates,
+        guest,
+        kernel, creates,
         existing, keyOf: (given, kind)=>host.namedObjects.keyOf(given, kind),
         reference: found=>host.namedObjects.reference(found), object,
         currentThread: host.currentThread, park: host.park, queueApc: host.queueApc,
@@ -2256,8 +2255,8 @@ export function createThreadingFunctions(host){
     return {
         ...table,
         CreateEventW: { ...table.CreateEventW, natives: { ...natives,
-            ...createDirectoryNatives({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, kernel, namedObjects: host.namedObjects }) } },
+            ...createDirectoryNatives({ guest,
+                kernel, namedObjects: host.namedObjects }) } },
         CreateRemoteThread: {
             argBytes: 28,
             /** @param {number[]} args */

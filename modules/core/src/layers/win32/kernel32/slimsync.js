@@ -6,6 +6,7 @@
 
 import { criticalLayout } from './critical.js';
 import { wholeAddress } from '../common/pointers.js';
+import { imm32 } from '../../../system/x86.js';
 
 /**
  * Slim reader/writer locks, condition variables and one-time initialisation:
@@ -57,16 +58,13 @@ const INFINITE = 0xffffffff;
 /** What a condition variable's sleep that ran out of time leaves as the error. */
 const ERROR_TIMEOUT = 1460;
 
-/** @param {number} value @returns {number[]} */
-const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
-
 /**
  * A near call from `at` to `target`.
  *
  * @param {number} at @param {number} target
  * @returns {number[]}
  */
-const call = (at, target)=>[0xe8, ...dword(target - (at + 5))];
+const call = (at, target)=>[0xe8, ...imm32(target - (at + 5))];
 
 /**
  * BOOL SleepConditionVariableSRW(PCONDITION_VARIABLE, PSRWLOCK, DWORD, ULONG),
@@ -120,7 +118,7 @@ export function sleepSrwCode(at, { sleep, timedOut, shared, exclusive }){
  * @param {number} at @param {number} target
  * @returns {number[]}
  */
-const jump = (at, target)=>[0xe9, ...dword(target - (at + 5))];
+const jump = (at, target)=>[0xe9, ...imm32(target - (at + 5))];
 
 /**
  * The SRW lock's six exports as 32-bit guest code: what takes or lets go of a
@@ -178,7 +176,7 @@ export function srwCode(at, traps){
     add('acquireExclusive', start=>[
         0x8b, 0x4c, 0x24, 0x04, //                mov ecx, [esp+4]
         0x31, 0xc0, //                            xor eax, eax
-        0xba, ...dword(HELD), //                  mov edx, HELD
+        0xba, ...imm32(HELD), //                  mov edx, HELD
         0xf0, 0x0f, 0xb1, 0x11, //                lock cmpxchg [ecx], edx
         0x75, 0x03, //                            jnz trap (+3)
         0xc2, 0x04, 0x00, //                      ret 4
@@ -187,7 +185,7 @@ export function srwCode(at, traps){
     add('tryExclusive', ()=>[
         0x8b, 0x4c, 0x24, 0x04, //                mov ecx, [esp+4]
         0x31, 0xc0, //                            xor eax, eax
-        0xba, ...dword(HELD), //                  mov edx, HELD
+        0xba, ...imm32(HELD), //                  mov edx, HELD
         0xf0, 0x0f, 0xb1, 0x11, //                lock cmpxchg [ecx], edx
         0x0f, 0x94, 0xc0, //                      sete al
         0x0f, 0xb6, 0xc0, //                      movzx eax, al
@@ -195,7 +193,7 @@ export function srwCode(at, traps){
     ]);
     add('releaseExclusive', start=>[
         0x8b, 0x4c, 0x24, 0x04, //                mov ecx, [esp+4]
-        0xb8, ...dword(HELD), //                  mov eax, HELD
+        0xb8, ...imm32(HELD), //                  mov eax, HELD
         0x31, 0xd2, //                            xor edx, edx
         0xf0, 0x0f, 0xb1, 0x11, //                lock cmpxchg [ecx], edx
         0x75, 0x03, //                            jnz trap (+3)
@@ -213,7 +211,7 @@ export function srwCode(at, traps){
         0x8d, 0x50, SRW.SHARED, //          0f    lea edx, [eax+SHARED]
         0x85, 0xc0, //                      12    test eax, eax
         0x75, 0x05, //                      14    jnz swap (0x1b)
-        0xba, ...dword(ONE_READER), //      16    mov edx, HELD|SHARED
+        0xba, ...imm32(ONE_READER), //      16    mov edx, HELD|SHARED
         // swap:
         0xf0, 0x0f, 0xb1, 0x11, //          1b    lock cmpxchg [ecx], edx
         0x75, 0xe5, //                      1f    jnz again (0x06)
@@ -231,11 +229,11 @@ export function srwCode(at, traps){
         0x8d, 0x50, SRW.SHARED, //          0f    lea edx, [eax+SHARED]
         0x85, 0xc0, //                      12    test eax, eax
         0x75, 0x05, //                      14    jnz swap (0x1b)
-        0xba, ...dword(ONE_READER), //      16    mov edx, HELD|SHARED
+        0xba, ...imm32(ONE_READER), //      16    mov edx, HELD|SHARED
         // swap:
         0xf0, 0x0f, 0xb1, 0x11, //          1b    lock cmpxchg [ecx], edx
         0x75, 0xe5, //                      1f    jnz again (0x06)
-        0xb8, ...dword(1), //               21    mov eax, 1
+        0xb8, ...imm32(1), //               21    mov eax, 1
         0xc2, 0x04, 0x00, //                26    ret 4
         // fail:
         0x31, 0xc0, //                      29    xor eax, eax
@@ -479,8 +477,7 @@ export const executeOnceLongCode = ()=>longRoutine([
 /**
  * @typedef {Object} SlimHost
  * @property {any} kernel
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
  *           indivisible against the guest's threads on the process's other executors
  * @property {() => any} currentThread
@@ -508,16 +505,11 @@ export const executeOnceLongCode = ()=>longRoutine([
  *        the section back through.
  */
 export function createSlimSync(host, enterCritical, enterSection){
+    const { guest } = host;
     const { kernel } = host;
     const CS = criticalLayout(host.pointerSize);
     /** An SRW lock, condition variable, INIT_ONCE or context: a pointer's width. */
     const WORD = host.pointerSize ?? 4;
-    /** @param {number} value  Below 4 GiB, as every address is. */
-    const wide = value=>{
-        const bytes = new Uint8Array(WORD);
-        bytes.set(dword(value >>> 0));
-        return bytes;
-    };
 
     /**
      * The threads waiting for each SRW lock, in arrival order. The word itself
@@ -531,8 +523,7 @@ export function createSlimSync(host, enterCritical, enterSection){
     const conditions = new Map();
 
     /** @param {number} address */
-    const lockWord = address=>new DataView(
-        host.readMemory(address, 4).buffer).getUint32(0, true);
+    const lockWord = address=>guest.u32(address);
     /**
      * The word replaced by `value` if it still holds `expected`, answering
      * what it held: a thread on another executor takes and lets go of the lock
@@ -548,7 +539,7 @@ export function createSlimSync(host, enterCritical, enterSection){
         const held = lockWord(address);
         if (held === expected >>> 0)
         {
-            host.writeMemory(address, new Uint8Array(dword(value)));
+            guest.set32(address, value);
         }
         return held;
     };
@@ -749,8 +740,8 @@ export function createSlimSync(host, enterCritical, enterSection){
      */
     const leaveSection = section=>{
         const zero = new Uint8Array(4);
-        host.writeMemory(section + CS.RECURSION_COUNT, zero);
-        host.writeMemory(section + CS.OWNING_THREAD, zero);
+        guest.setBytes(section + CS.RECURSION_COUNT, zero);
+        guest.setBytes(section + CS.OWNING_THREAD, zero);
         // The count goes down as LeaveCriticalSection's `lock dec` takes it:
         // a thread on another executor entering meanwhile takes it up with
         // `lock inc`, and a plain store of the count read before lost that --
@@ -759,13 +750,13 @@ export function createSlimSync(host, enterCritical, enterSection){
         let lockCount;
         for (;;)
         {
-            const was = new DataView(host.readMemory(at, 4).buffer).getInt32(0, true);
+            const was = guest.i32(at);
             lockCount = (was - 1) | 0;
             if (host.compareExchangeU32 === undefined)
             {
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setInt32(0, lockCount, true);
-                host.writeMemory(at, bytes);
+                guest.setBytes(at, bytes);
                 break;
             }
             if ((host.compareExchangeU32(at, was >>> 0, lockCount >>> 0) | 0) === was)
@@ -849,7 +840,7 @@ export function createSlimSync(host, enterCritical, enterSection){
         const size = srwCode(0, traps).code.length;
         const at = (host.allocateCode ?? host.allocate)(size);
         const { code, entries } = srwCode(at, traps);
-        host.writeMemory(at, code);
+        guest.setBytes(at, code);
         srwEntries = entries;
         return entries;
     };
@@ -873,7 +864,7 @@ export function createSlimSync(host, enterCritical, enterSection){
         /** @param {(at: number) => Uint8Array} code */
         const place = code=>{
             const at = (host.allocateCode ?? host.allocate)(code(0).length);
-            host.writeMemory(at, code(at));
+            guest.setBytes(at, code(at));
             return at;
         };
         stubs = {
@@ -901,11 +892,8 @@ export function createSlimSync(host, enterCritical, enterSection){
     };
 
     /** @param {number} address */
-    const clear = address=>host.writeMemory(address, new Uint8Array(WORD));
+    const clear = address=>guest.fill(address, 0, WORD);
 
-    /** @param {number} address */
-    const readWord = address=>new DataView(
-        host.readMemory(address, 4).buffer).getUint32(0, true);
     /**
      * A pointer-sized word: an INIT_ONCE, or the context one hands out.
      *
@@ -914,7 +902,8 @@ export function createSlimSync(host, enterCritical, enterSection){
     const writeWord = (address, value)=>{
         if (address !== 0)
         {
-            host.writeMemory(address, wide(value));
+            // Below 4 GiB, as every address is.
+            guest.setPtr(address, value >>> 0);
         }
     };
     /**
@@ -925,7 +914,7 @@ export function createSlimSync(host, enterCritical, enterSection){
     const writeBool = (address, value)=>{
         if (address !== 0)
         {
-            host.writeMemory(address, new Uint8Array(dword(value)));
+            guest.set32(address, value);
         }
     };
 
@@ -1001,7 +990,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             /** @param {number[]} args */
             handler: ([pointer, context])=>{
                 const once = wholeAddress(pointer);
-                const word = readWord(once);
+                const word = guest.u32(once);
                 switch (word & 3)
                 {
                     case ONCE_DONE:
@@ -1025,7 +1014,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pointer, succeeded, context])=>{
-                const value = (context >>> 0) === 0 ? 0 : readWord(wholeAddress(context));
+                const value = (context >>> 0) === 0 ? 0 : guest.u32(wholeAddress(context));
                 settle(pointer >>> 0, succeeded !== 0, value);
                 return succeeded !== 0 ? 1 : 0;
             },
@@ -1044,7 +1033,7 @@ export function createSlimSync(host, enterCritical, enterSection){
         const end = builder.register('<init-once-end>', onceTraps.end);
         const code = (/** @type {number} */ at)=>executeOnceCode(at, { begin, end });
         executeOnce = (host.allocateCode ?? host.allocate)(code(0).length);
-        host.writeMemory(executeOnce, code(executeOnce));
+        guest.setBytes(executeOnce, code(executeOnce));
         return executeOnce;
     };
 
@@ -1198,7 +1187,7 @@ export function createSlimSync(host, enterCritical, enterSection){
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
                 const async = (asked & INIT_ONCE_ASYNC) !== 0;
-                const word = readWord(once);
+                const word = guest.u32(once);
                 const state = word & 3;
                 if (state === ONCE_DONE)
                 {
@@ -1251,7 +1240,7 @@ export function createSlimSync(host, enterCritical, enterSection){
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                const state = readWord(once) & 3;
+                const state = guest.u32(once) & 3;
                 if (state === ONCE_FRESH || state === ONCE_DONE)
                 {
                     return refuse(ERROR_GEN_FAILURE);

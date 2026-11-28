@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { JUMP_BUFFER64, SETJMP64_CODE, createSeh64 } from './seh64.js';
 
 /**
@@ -22,9 +23,7 @@ function machine(returns){
     const gpr = Array.from({ length: 16 }, ()=>0n);
     gpr[4] = BigInt(stack);
     const seh = createSeh64(/** @type {any} */ ({
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.slice(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>bytes.set(data, at),
+        guest: guestOver(bytes, 8),
         longState: ()=>({ gpr, eflags: 0x202, xmm: new Uint8Array(256), mxcsr: 0x1f80 }),
         currentThread: ()=>null,
         unwinder: {
@@ -96,10 +95,7 @@ test('_setjmp\'s x86-64 writes the buffer its handler writes, from the same regi
         const xmm = new Uint8Array(256);
         lanes.forEach((lane, index)=>xmm.set(lane, index * 16));
         const seh = createSeh64(/** @type {any} */ ({
-            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-                bytes.slice(at, at + length),
-            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-                bytes.set(data, at),
+            guest: guestOver(bytes, 8),
             // As the stub leaves them at the trap: RDX and RAX its own.
             longState: ()=>({ gpr: QUADS.map(name=>(name === 'rdx' || name === 'rax'
                 ? 0x1234n : registers[name])), eflags: 0x202, xmm, mxcsr: 0x1f80 }),

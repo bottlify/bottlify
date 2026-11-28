@@ -19,12 +19,11 @@
  */
 
 import { assembleTo } from './code-arena.js';
+import { imm32 } from '../../../system/x86.js';
 
 /** The null region: Windows never maps the first 64 KiB. */
 const LOWEST = 0x10000;
 
-/** @param {number} value @returns {number[]} */
-const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 const JZ = [0x0f, 0x84];
 const JB = [0x0f, 0x82];
@@ -42,8 +41,8 @@ const JMP = [0xe9];
  * @returns {Piece[]}
  */
 const readable = (modrm, top)=>[
-    [0x81, modrm, ...dword(LOWEST)], { jump: JB, to: 'slow' },
-    [0x81, modrm, ...dword(top)], { jump: JAE, to: 'slow' },
+    [0x81, modrm, ...imm32(LOWEST)], { jump: JB, to: 'slow' },
+    [0x81, modrm, ...imm32(top)], { jump: JAE, to: 'slow' },
 ];
 
 /**
@@ -59,7 +58,7 @@ const scan = (unit, top)=>[
     unit === 1 ? [0x80, 0x38, 0x00] : [0x66, 0x83, 0x38, 0x00], // cmp byte|word [eax], 0
     { jump: JZ, to: 'found' },
     unit === 1 ? [0x40] : [0x83, 0xc0, 0x02],                // inc eax | add eax, 2
-    [0x3d, ...dword(top - (unit - 1))],                      // cmp eax, top
+    [0x3d, ...imm32(top - (unit - 1))],                      // cmp eax, top
     { jump: JB, to: 'scan' },
     { jump: JMP, to: 'slow' },
     'found',
@@ -105,7 +104,7 @@ export function lstrcpyCode(unit, at, trap, top){
         [0x83, 0xc0, unit],                                  // add eax, unit: the terminator
         [0x56, 0x57],                                        // push esi; push edi
         [0x8d, 0x3c, 0x01],                                  // lea edi, [ecx + eax]
-        [0x81, 0xff, ...dword(top)],                         // cmp edi, top
+        [0x81, 0xff, ...imm32(top)],                         // cmp edi, top
         { jump: JA, to: 'restore' },
         [0x89, 0xd6],                                        // mov esi, edx
         [0x89, 0xcf],                                        // mov edi, ecx
@@ -159,7 +158,7 @@ export function lstrlenLongCode(unit, top){
         unit === 1 ? [0x80, 0x38, 0x00] : [0x66, 0x83, 0x38, 0x00], // cmp byte|word [rax], 0
         { jump: JZ, to: 'found' },
         unit === 1 ? [0xff, 0xc0] : [0x83, 0xc0, 0x02],      // inc eax | add eax, 2
-        [0x3d, ...dword(top - (unit - 1))],                  // cmp eax, top
+        [0x3d, ...imm32(top - (unit - 1))],                  // cmp eax, top
         { jump: JB, to: 'scan' },
         { jump: JMP, to: 'slow' },
         'found',
@@ -191,14 +190,14 @@ export function lstrcpyLongCode(unit, top){
         unit === 1 ? [0x80, 0x38, 0x00] : [0x66, 0x83, 0x38, 0x00], // cmp byte|word [rax], 0
         { jump: JZ, to: 'found' },
         unit === 1 ? [0xff, 0xc0] : [0x83, 0xc0, 0x02],      // inc eax | add eax, 2
-        [0x3d, ...dword(top - (unit - 1))],                  // cmp eax, top
+        [0x3d, ...imm32(top - (unit - 1))],                  // cmp eax, top
         { jump: JB, to: 'scan' },
         { jump: JMP, to: 'slow' },
         'found',
         [0x29, 0xd0],                                        // sub eax, edx
         [0x83, 0xc0, unit],                                  // add eax, unit: the terminator
         [0x44, 0x8d, 0x0c, 0x01],                            // lea r9d, [rcx + rax]
-        [0x41, 0x81, 0xf9, ...dword(top)],                   // cmp r9d, top
+        [0x41, 0x81, 0xf9, ...imm32(top)],                   // cmp r9d, top
         { jump: JA, to: 'slow' },
         [0x56, 0x57],                                        // push rsi; push rdi
         [0x49, 0x89, 0xc8],                                  // mov r8, rcx

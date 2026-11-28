@@ -39,8 +39,7 @@ const CONSOLE_CODE_PAGE = 1252;
 
 /**
  * @typedef {Object} ConsoleIoHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, text: string) => void} write  Where output goes.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -50,11 +49,12 @@ const CONSOLE_CODE_PAGE = 1252;
  * @param {ConsoleIoHost} host
  */
 export function createConsoleIoFunctions(host){
+    const { guest } = host;
     /** @param {number} address @param {number} value */
     const writeDwordIf = (address, value)=>{
         if (address !== 0)
         {
-            host.writeMemory(address, new Uint8Array([
+            guest.setBytes(address, new Uint8Array([
                 value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
             ]));
         }
@@ -75,7 +75,7 @@ export function createConsoleIoFunctions(host){
      * @param {number} buffer @param {number} count @param {boolean} isWide
      */
     const textOf = (buffer, count, isWide)=>{
-        const bytes = host.readMemory(buffer, count * (isWide ? 2 : 1));
+        const bytes = guest.snapshot(buffer, count * (isWide ? 2 : 1));
         if (!isWide)
         {
             return decodeAnsi(bytes);
@@ -222,7 +222,6 @@ export function createConsoleIoFunctions(host){
             argBytes: 4,
             handler: ()=>fail(ERROR_INVALID_HANDLE),
         },
-
 
         /** HWND GetConsoleWindow(void): there is no console, so no window of one */
         GetConsoleWindow: { argBytes: 0, handler: ()=>0 },

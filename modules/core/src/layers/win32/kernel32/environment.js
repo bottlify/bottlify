@@ -57,9 +57,7 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
 
 /**
  * @typedef {Object} EnvironmentHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} allocate   Guest bytes that stay put.
  * @property {(code: number) => void} setLastError
  * @property {() => string} commandLine
@@ -224,6 +222,7 @@ export function machineArchitecture(variables, { long, wow64 }){
  * @param {EnvironmentHost} host
  */
 export function createEnvironmentFunctions(host){
+    const { guest } = host;
     /** Handed out once and kept, because callers keep it. @type {number | null} */
     let commandLineAddress = null;
     /** The same text in the other encoding, kept for the same reason. */
@@ -258,23 +257,15 @@ export function createEnvironmentFunctions(host){
     };
 
     /**
-     * Text in the ANSI page, which is how the memory layer reads what a
-     * program sets: a value goes back in the bytes it was read from.
+     * Text in memory of its own: in the ANSI page, which is how the memory
+     * layer reads what a program sets (a value goes back in the bytes it was
+     * read from), or in UTF-16.
      *
-     * @param {string} text
+     * @param {string} text @param {boolean} wide
      */
-    const writeAnsi = text=>{
-        const bytes = encodeAnsi(`${text}\0`);
-        const address = host.allocate(bytes.length);
-        host.writeMemory(address, bytes);
-        return address;
-    };
-
-    /** @param {string} text */
-    const writeWideString = text=>{
-        const bytes = utf16z(text);
-        const address = host.allocate(bytes.length);
-        host.writeMemory(address, bytes);
+    const place = (text, wide)=>{
+        const address = host.allocate(wide ? (text.length + 1) * 2 : encodeAnsi(text).length + 1);
+        guest.setText(address, text, wide);
         return address;
     };
 
@@ -306,7 +297,7 @@ export function createEnvironmentFunctions(host){
             }
         }
         const address = host.allocate(bytes.length);
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
         blocks.set(key, address);
         return address;
     };
@@ -325,7 +316,7 @@ export function createEnvironmentFunctions(host){
         {
             return path.length + 1;
         }
-        host.writeMemory(wholeAddress(buffer), encodeAnsi(`${path}\0`));
+        guest.setBytes(wholeAddress(buffer), encodeAnsi(`${path}\0`));
         return path.length;
     };
 
@@ -433,7 +424,7 @@ export function createEnvironmentFunctions(host){
         {
             return path.length + 1;
         }
-        host.writeMemory(wholeAddress(buffer), utf16z(path));
+        guest.setBytes(wholeAddress(buffer), utf16z(path));
         return path.length;
     };
 
@@ -461,14 +452,13 @@ export function createEnvironmentFunctions(host){
                     // is not laid out at that width yet.
                     const bytes = new Uint8Array(STARTUPINFO_SIZE64);
                     new DataView(bytes.buffer).setUint32(0, STARTUPINFO_SIZE64, true);
-                    host.writeMemory(wholeAddress(info), bytes);
+                    guest.setBytes(wholeAddress(info), bytes);
                     return 0;
                 }
                 const record = host.startup?.() ?? null;
-                const write = wide ? writeWideString : writeAnsi;
                 strings ??= {
-                    desktop: record?.desktop == null ? 0 : write(record.desktop),
-                    title: record?.title == null ? 0 : write(record.title),
+                    desktop: record?.desktop == null ? 0 : place(record.desktop, wide),
+                    title: record?.title == null ? 0 : place(record.title, wide),
                 };
                 const bytes = startupInfoBytes(record, strings);
                 const view = new DataView(bytes.buffer);
@@ -480,7 +470,7 @@ export function createEnvironmentFunctions(host){
                     // test_StdHandleInheritance, as Windows answers).
                     if (wide)
                     {
-                        host.writeMemory(wholeAddress(info), bytes.subarray(0,
+                        guest.setBytes(wholeAddress(info), bytes.subarray(0,
                             STARTUPINFO.STD_INPUT));
                         return 0;
                     }
@@ -490,7 +480,7 @@ export function createEnvironmentFunctions(host){
                         view.setUint32(at, 0xffffffff, true);
                     }
                 }
-                host.writeMemory(wholeAddress(info), bytes);
+                guest.setBytes(wholeAddress(info), bytes);
                 return 0;
             },
         };
@@ -507,7 +497,7 @@ export function createEnvironmentFunctions(host){
             returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
-                commandLineAddress ??= writeAnsi(host.commandLine());
+                commandLineAddress ??= place(host.commandLine(), false);
                 return commandLineAddress;
             },
         },
@@ -523,7 +513,7 @@ export function createEnvironmentFunctions(host){
             returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
-                commandLineWideAddress ??= writeWideString(host.commandLine());
+                commandLineWideAddress ??= place(host.commandLine(), true);
                 return commandLineWideAddress;
             },
         },
@@ -570,7 +560,7 @@ export function createEnvironmentFunctions(host){
             handler: ([name, buffer, size])=>{
                 // A NULL name names no variable.
                 const value = wholeAddress(name) === 0 ? undefined
-                    : variables.get(host.readCString(wholeAddress(name), 0x400));
+                    : variables.get(guest.cstr(wholeAddress(name), 0x400));
                 if (value === undefined)
                 {
                     host.setLastError(ERROR_ENVVAR_NOT_FOUND);
@@ -586,7 +576,7 @@ export function createEnvironmentFunctions(host){
             /** @param {number[]} args */
             handler: ([name, buffer, size])=>{
                 const value = wholeAddress(name) === 0 ? undefined
-                    : variables.get(host.readWideString(wholeAddress(name), 0x400 * 2));
+                    : variables.get(guest.wstr(wholeAddress(name), 0x400 * 2));
                 if (value === undefined)
                 {
                     host.setLastError(ERROR_ENVVAR_NOT_FOUND);
@@ -606,14 +596,14 @@ export function createEnvironmentFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const wanted = host.readCString(wholeAddress(name), 0x400);
+                const wanted = guest.cstr(wholeAddress(name), 0x400);
                 if (wholeAddress(value) === 0)
                 {
                     variables.delete(wanted);
                 }
                 else
                 {
-                    variables.set(wanted, host.readCString(wholeAddress(value), 0x2000));
+                    variables.set(wanted, guest.cstr(wholeAddress(value), 0x2000));
                 }
                 // The cached blocks describe an environment that no longer
                 // exists. Dropping them means the next reader builds a fresh
@@ -640,17 +630,17 @@ export function createEnvironmentFunctions(host){
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
                 const expanded = encodeAnsi(wholeAddress(source) === 0 ? ''
-                    : expand(host.readCString(wholeAddress(source), 0x8000)));
+                    : expand(guest.cstr(wholeAddress(source), 0x8000)));
                 if ((size >>> 0) >= expanded.length + 2 && wholeAddress(destination) !== 0)
                 {
                     const bytes = new Uint8Array(expanded.length + 1);
                     bytes.set(expanded);
-                    host.writeMemory(wholeAddress(destination), bytes);
+                    guest.setBytes(wholeAddress(destination), bytes);
                     return expanded.length + 1;
                 }
                 if (wholeAddress(destination) !== 0)
                 {
-                    host.writeMemory(wholeAddress(destination), Uint8Array.of(0));
+                    guest.setBytes(wholeAddress(destination), Uint8Array.of(0));
                 }
                 return expanded.length + 2;
             },
@@ -670,13 +660,13 @@ export function createEnvironmentFunctions(host){
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
                 const pieces = wholeAddress(source) === 0 ? []
-                    : expandPieces(host.readWideString(wholeAddress(source), 0x8000));
+                    : expandPieces(guest.wstr(wholeAddress(source), 0x8000));
                 const length = pieces.reduce((sum, piece)=>sum + piece.text.length, 0);
                 if (wholeAddress(destination) !== 0)
                 {
                     for (const { at, units } of placeExpansion(pieces, size >>> 0))
                     {
-                        host.writeMemory(wholeAddress(destination) + at * 2, utf16(units));
+                        guest.setBytes(wholeAddress(destination) + at * 2, utf16(units));
                     }
                 }
                 return length + 1;
@@ -707,14 +697,14 @@ export function createEnvironmentFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const wanted = host.readWideString(wholeAddress(name), 0x400 * 2);
+                const wanted = guest.wstr(wholeAddress(name), 0x400 * 2);
                 if (wholeAddress(value) === 0)
                 {
                     variables.delete(wanted);
                 }
                 else
                 {
-                    variables.set(wanted, host.readWideString(wholeAddress(value), 0x2000));
+                    variables.set(wanted, guest.wstr(wholeAddress(value), 0x2000));
                 }
                 blocks.clear();
                 return 1;
@@ -776,12 +766,13 @@ export function createEnvironmentFunctions(host){
  *
  * @param {{ block: () => number, free: (block: number) => number,
  *     expand?: (source: number, target: number, size: number) => number,
- *     writeMemory: (address: number, bytes: Uint8Array) => void,
+ *     guest: import('../common/guest.js').Guest,
  *     setLastError: (code: number) => void }} host
  *     `block` is GetEnvironmentStringsW, `free` FreeEnvironmentStringsW,
  *     `expand` ExpandEnvironmentStringsW.
  */
 export function createUserenvFunctions(host){
+    const { guest } = host;
     return {
         /**
          * BOOL CreateEnvironmentBlock(LPVOID *lpEnvironment, HANDLE hToken, BOOL bInherit)
@@ -801,7 +792,7 @@ export function createUserenvFunctions(host){
                 const block = host.block() >>> 0;
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, block, true);
-                host.writeMemory(wholeAddress(out), bytes);
+                guest.setBytes(wholeAddress(out), bytes);
                 return block === 0 ? 0 : 1;
             },
         },

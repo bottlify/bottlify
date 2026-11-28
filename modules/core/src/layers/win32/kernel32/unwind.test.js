@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { UNW_FLAG, createUnwinder, stackOf } from './unwind.js';
 
 /**
@@ -46,7 +47,7 @@ function machine({ imageBase = 0x40000, imageSize = 0x40000, tableRva = 0x1000 }
         host(){
             return {
                 /** @param {number} address @param {number} length */
-                readMemory: (address, length)=>memory.slice(address, address + length),
+                guest: guestOver(memory),
                 /** @param {number} address */
                 imageOf: address=>(address >>> 0) >= imageBase
                     && (address >>> 0) < imageBase + imageSize

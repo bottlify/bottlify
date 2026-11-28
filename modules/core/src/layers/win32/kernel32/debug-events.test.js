@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, DEBUG_EVENT, attachEvents,
     createDebuggerFunctions, debuggeeFor, mergeContextGroups } from './debug-events.js';
 import { DEBUG_ATTACH, DEBUG_BREAK } from './cross-process.js';
@@ -64,8 +65,7 @@ function debuggerOf(children, extra = {}, table = new Map()){
     let slot = 0;
     const side = createDebuggerFunctions({
         kernel,
-        writeMemory: (address, written)=>bytes.set(written, address),
-        readMemory: (address, length)=>bytes.slice(address, address + length),
+        guest: guestOver(bytes),
         threadDebugObject: { get: ()=>slot, set: handle=>{
             slot = handle;
         } },

@@ -31,10 +31,10 @@
 
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { overlappedLayout, overlappedPosition, overlappedResult } from '../common/overlapped.js';
-import { dueInMs, readLargeInteger } from './due-time.js';
+import { dueInMs } from './due-time.js';
 import { nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { TAKEN } from './named-objects.js';
-import { pointerArg, pointerIo, wholeAddress } from '../common/pointers.js';
+import { pointerArg, wholeAddress } from '../common/pointers.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -116,8 +116,7 @@ const HANG_AFTER_MS = 10_000;
  * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
  *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {any} kernel                        The kernel layer's API.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} setLastError            The running thread's.
  * @property {(thread: any, code: number) => void} setLastErrorFor
  *           A parked thread's, for whoever wakes it.
@@ -142,6 +141,7 @@ const HANG_AFTER_MS = 10_000;
  * @param {CompletionPortHost} host
  */
 export function createIoCompletionPorts(host){
+    const { guest } = host;
     const layout = overlappedLayout(host.pointerSize);
     const { kernel } = host;
     const hostTime = host.hostTime ?? (()=>Date.now());
@@ -186,35 +186,21 @@ export function createIoCompletionPorts(host){
     };
 
     /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(address, new Uint8Array([
-            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-        ]));
-    };
-
-    /** @param {number} address @param {number} value */
     const writeDwordIf = (address, value)=>{
         if (address !== 0)
         {
-            writeDword(address, value);
+            guest.set32(address, value);
         }
     };
 
     /** A pointer-sized field - a key, an OVERLAPPED's address - whole. */
     const width = host.pointerSize === 8 ? 8 : 4;
-    const { write: writePointer } = pointerIo(host, width);
     /** @param {number} address @param {number} value */
     const writePointerIf = (address, value)=>{
         if (address !== 0)
         {
-            writePointer(address, value);
+            guest.setPtr(address, value);
         }
-    };
-
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
     /** @param {number} handle */
@@ -238,10 +224,10 @@ export function createIoCompletionPorts(host){
      * @param {number} at @param {CompletionPacket} packet
      */
     const writeEntry = (at, packet)=>{
-        writePointer(at, packet.key);
-        writePointer(at + width, packet.overlapped);
-        writePointer(at + 2 * width, statusOf(packet) >>> 0);
-        writeDword(at + 3 * width, packet.transferred);
+        guest.setPtr(at, packet.key);
+        guest.setPtr(at + width, packet.overlapped);
+        guest.setPtr(at + 2 * width, statusOf(packet) >>> 0);
+        guest.set32(at + 3 * width, packet.transferred);
     };
 
     /** @param {CompletionOut} out @param {CompletionPacket | null} packet */
@@ -262,8 +248,8 @@ export function createIoCompletionPorts(host){
             // IO_STATUS_BLOCK: the status, then the information a pointer's width on.
             if (packet)
             {
-                writeDword(out.bytes, statusOf(packet));
-                writePointer(out.bytes + width, packet.transferred);
+                guest.set32(out.bytes, statusOf(packet));
+                guest.setPtr(out.bytes + width, packet.transferred);
             }
             return;
         }
@@ -630,7 +616,7 @@ export function createIoCompletionPorts(host){
             writeEntry(entries + taken * size, packet);
             taken++;
         }
-        writeDword(removed, taken);
+        guest.set32(removed, taken);
         return taken;
     };
 
@@ -659,7 +645,7 @@ export function createIoCompletionPorts(host){
      * @param {number} pointer
      */
     const nativeWait = pointer=>((pointer >>> 0) === 0 ? INFINITE
-        : Math.min(INFINITE - 1, Math.ceil(dueInMs(readLargeInteger(host.readMemory, pointer),
+        : Math.min(INFINITE - 1, Math.ceil(dueInMs(guest.i64(wholeAddress(pointer)),
             kernel.clock.wallClock()))));
 
     /** @param {number} handle @returns {any | number} the port, or the status for a handle that names none */
@@ -690,7 +676,7 @@ export function createIoCompletionPorts(host){
      * @returns {string | null | number}
      */
     const portName = (attributes, opening = false)=>{
-        const given = readObjectAttributes(host.readMemory, attributes,
+        const given = readObjectAttributes(guest, attributes,
             host.pointerSize === 8 ? 8 : 4);
         const walked = nameToWalk(given, opening);
         if ('status' in walked)
@@ -741,7 +727,7 @@ export function createIoCompletionPorts(host){
                 }
                 const port = makePort();
                 host.namedObjects?.remember(named, 'iocp', port, false, ()=>{});
-                writeDword(wholeAddress(out), port.handle);
+                guest.set32(wholeAddress(out), port.handle);
                 return STATUS.SUCCESS;
             },
         },
@@ -773,7 +759,7 @@ export function createIoCompletionPorts(host){
                     return STATUS.OBJECT_NAME_NOT_FOUND;
                 }
                 host.namedObjects?.reference(found);
-                writeDword(wholeAddress(out), kernel.handles.open('iocp', found));
+                guest.set32(wholeAddress(out), kernel.handles.open('iocp', found));
                 return STATUS.SUCCESS;
             },
         },
@@ -871,7 +857,7 @@ export function createIoCompletionPorts(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                writeDword(wholeAddress(buffer), port.queue.length);
+                guest.set32(wholeAddress(buffer), port.queue.length);
                 writeDwordIf(wholeAddress(returned), 4);
                 return STATUS.SUCCESS;
             },
@@ -918,7 +904,7 @@ export function createIoCompletionPorts(host){
          *
          * @param {number} overlapped
          */
-        offsetOf: overlapped=>overlappedPosition(readDword, layout, overlapped >>> 0),
+        offsetOf: overlapped=>overlappedPosition(guest.u32, layout, overlapped >>> 0),
 
         /**
          * Finishes an overlapped operation: the OVERLAPPED's own status fields,
@@ -937,8 +923,8 @@ export function createIoCompletionPorts(host){
             const pointer = wholeAddress(overlapped);
             if (pointer !== 0)
             {
-                overlappedResult(writeDword, layout, pointer, status, transferred);
-                const event = readDword(pointer + layout.event);
+                overlappedResult(guest.set32, layout, pointer, status, transferred);
+                const event = guest.u32(pointer + layout.event);
                 if (event !== 0 && !skip.event)
                 {
                     host.signalEvent(event);

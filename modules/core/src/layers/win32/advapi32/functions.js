@@ -177,6 +177,7 @@ export { USER_NAME };
 
 /**
  * @typedef {Object} RegistryHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -551,7 +552,7 @@ export function createRegistryFunctions(host){
             // The structure is checked as every native call checks it; a
             // name the key calls are not handed is read through the null
             // pointer, as Windows' registry reads it.
-            const given = readObjectAttributes(host.readMemory, attributes);
+            const given = readObjectAttributes(host.guest, attributes);
             if (given?.invalid)
             {
                 return given.invalid;

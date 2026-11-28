@@ -97,8 +97,7 @@ export function accessibleSpan(pageState, address, length, write){
 
 /**
  * @typedef {Object} ProcessMemoryHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]  A write
  *           through the memory layer's own protection (`writeThroughProtection`).
  * @property {number} [pointerSize]  8 in a 64-bit process, whose counts are eight bytes
@@ -115,6 +114,7 @@ export function accessibleSpan(pageState, address, length, write){
  * @param {ProcessMemoryHost} host
  */
 export function createProcessMemory(host){
+    const { guest } = host;
     /**
      * A count out: a SIZE_T, eight bytes in a 64-bit process. Written as a
      * dword there, its upper half stayed whatever the caller's variable held
@@ -127,7 +127,7 @@ export function createProcessMemory(host){
         {
             const bytes = new Uint8Array(host.pointerSize === 8 ? 8 : 4);
             new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-            host.writeMemory(address, bytes);
+            guest.setBytes(address, bytes);
         }
     };
 
@@ -136,7 +136,7 @@ export function createProcessMemory(host){
         const span = length === 0 ? 0 : accessibleSpan(host.pageState, address, length, false);
         try
         {
-            return span === 0 ? new Uint8Array(0) : host.readMemory(address, span);
+            return span === 0 ? new Uint8Array(0) : guest.snapshot(address, span);
         }
         catch (e){
             void e;
@@ -154,7 +154,7 @@ export function createProcessMemory(host){
         {
             return host.patchMemory(address, bytes);
         }
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
         return true;
     };
 
@@ -170,7 +170,7 @@ export function createProcessMemory(host){
             : accessibleSpan(host.pageState, buffer, bytes.length, true);
         if (room > 0)
         {
-            host.writeMemory(buffer, bytes.subarray(0, room));
+            guest.setBytes(buffer, bytes.subarray(0, room));
         }
         writeCount(read, room);
         return room === count ? STATUS_SUCCESS : STATUS_PARTIAL_COPY;
@@ -206,7 +206,7 @@ export function createProcessMemory(host){
         // Up to the first page that cannot be written, unless the first page
         // is code WriteProcessMemory makes writable for the write.
         const room = lift && !open ? count : accessibleSpan(host.pageState, base, count, true);
-        if (room > 0 && !store(base, host.readMemory(buffer, room)))
+        if (room > 0 && !store(base, guest.snapshot(buffer, room)))
         {
             writeCount(written, 0);
             return STATUS_PARTIAL_COPY;
@@ -246,7 +246,7 @@ export function createProcessMemory(host){
             return here();
         }
         const asked = host.currentThread && host.setLastErrorFor ? askChild({
-            askChild: host.askChild, writeMemory: host.writeMemory,
+            askChild: host.askChild, guest,
             currentThread: host.currentThread, setLastErrorFor: host.setLastErrorFor,
         }, target.child, call, [], answer=>(answer.outs.at(-1) ? then(answer)
             : STATUS_ACCESS_DENIED)) : null;
@@ -270,7 +270,7 @@ export function createProcessMemory(host){
                     .slice().buffer).getUint32(0, true);
                 if (got > 0)
                 {
-                    host.writeMemory(to, /** @type {Uint8Array} */ (answer.outs[1])
+                    guest.setBytes(to, /** @type {Uint8Array} */ (answer.outs[1])
                         .subarray(0, got));
                 }
                 writeCount(read >>> 0, got);

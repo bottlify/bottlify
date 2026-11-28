@@ -325,8 +325,7 @@ const LONG_NAMES = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
 /**
  * @typedef {Object} Seh64Host
  * @property {ReturnType<typeof import('./unwind.js').createUnwinder>} unwinder
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => { gpr: bigint[], eflags: number, xmm: Uint8Array, mxcsr: number }} longState
  *     The running thread's registers whole (`cpu.longState`).
  * @property {(options: { entry: number, rcx?: number, rdx?: number, r8?: number, r9?: number,
@@ -357,14 +356,11 @@ const LONG_NAMES = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
  * @param {Seh64Host} host
  */
 export function createSeh64(host){
+    const { guest } = host;
     const { unwinder } = host;
-    const readU32 = (/** @type {number} */ at)=>{
-        const bytes = host.readMemory(wholeAddress(at), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
     /** A quadword's 64 bits. @param {number} at */
     const readQuad = at=>{
-        const bytes = host.readMemory(wholeAddress(at), 8);
+        const bytes = guest.snapshot(wholeAddress(at), 8);
         return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
     };
     /** A pointer-wide field, whole. @param {number} at */
@@ -375,7 +371,7 @@ export function createSeh64(host){
     const writeQuad = (at, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigUint64(0, quadOf(value), true);
-        host.writeMemory(wholeAddress(at), bytes);
+        guest.setBytes(wholeAddress(at), bytes);
     };
 
     /** The last top-level filter SetUnhandledExceptionFilter installed. */
@@ -442,7 +438,7 @@ export function createSeh64(host){
         view.setBigUint64(CONTEXT64.RIP, quadOf(context.rip), true);
         view.setUint32(CONTEXT64.EFLAGS, context.eflags >>> 0, true);
         bytes.set(context.xmm.subarray(0, 256), CONTEXT64.XMM0);
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
     };
 
     /**
@@ -452,7 +448,7 @@ export function createSeh64(host){
      * @returns {UnwindContext}
      */
     const readContext = at=>{
-        const bytes = host.readMemory(at, CONTEXT64.SIZE);
+        const bytes = guest.snapshot(at, CONTEXT64.SIZE);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         return {
             gpr: Array.from({ length: 16 }, (_, index)=>
@@ -479,7 +475,7 @@ export function createSeh64(host){
         view.setBigUint64(RECORD64.PARAMETER_COUNT, BigInt(parameters.length), true);
         parameters.forEach((value, index)=>
             view.setBigUint64(RECORD64.INFORMATION + index * 8, quadOf(value), true));
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
     };
 
     /**
@@ -491,8 +487,8 @@ export function createSeh64(host){
      * @returns {ExceptionRecord}
      */
     const readRecord = at=>{
-        const count = Math.min(readU32(at + RECORD64.PARAMETER_COUNT), 15);
-        return { code: readU32(at + RECORD64.CODE), flags: readU32(at + RECORD64.FLAGS),
+        const count = Math.min(guest.u32(at + RECORD64.PARAMETER_COUNT), 15);
+        return { code: guest.u32(at + RECORD64.CODE), flags: guest.u32(at + RECORD64.FLAGS),
             address: addressAt(at + RECORD64.ADDRESS),
             parameters: Array.from({ length: count },
                 (_, index)=>valueOf(readQuad(at + RECORD64.INFORMATION + index * 8))) };
@@ -571,7 +567,7 @@ export function createSeh64(host){
         }
         // A jmp [rip+disp] thunk: follow it to the import slot, a quadword,
         // and the stub.
-        const bytes = host.readMemory(wholeAddress(address), 6);
+        const bytes = guest.snapshot(wholeAddress(address), 6);
         if (bytes[0] === 0xff && bytes[1] === 0x25)
         {
             const disp = (bytes[2] | bytes[3] << 8 | bytes[4] << 16 | bytes[5] << 24) | 0;
@@ -663,7 +659,7 @@ export function createSeh64(host){
         quad(DISPATCHER64.CONTEXT_RECORD, scratch.context);
         quad(DISPATCHER64.LANGUAGE_HANDLER, visit.handler);
         quad(DISPATCHER64.HANDLER_DATA, visit.handlerData);
-        host.writeMemory(scratch.dispatcher, bytes);
+        guest.setBytes(scratch.dispatcher, bytes);
         dispatching.set(scratch.dispatcher, { visit,
             pass: passFor(pass.record, pass.faultContext, pass.thread, scratch.top), unwinding });
         try
@@ -871,7 +867,7 @@ export function createSeh64(host){
                     const scratch = scratchBelow(pass.floor);
                     writeRecord(scratch.record, pass.record);
                     writeContext(scratch.context, visit.context);
-                    host.writeMemory(scratch.pointers,
+                    guest.setBytes(scratch.pointers,
                         pointerPair(scratch.record, scratch.context));
                     answer = await host.callFunclet({
                         entry: visit.fn.imageBase + scope.handler,
@@ -931,15 +927,15 @@ export function createSeh64(host){
      * @returns {{ begin: number, end: number, handler: number, target: number }[]}
      */
     const readScopeTable = at=>{
-        const count = readU32(at);
+        const count = guest.u32(at);
         /** @type {{ begin: number, end: number, handler: number, target: number }[]} */
         const scopes = [];
         for (let index = 0; index < Math.min(count, WALK_LIMIT); index++)
         {
             const entry = at + 4 + index * 16;
             scopes.push({
-                begin: readU32(entry), end: readU32(entry + 4),
-                handler: readU32(entry + 8), target: readU32(entry + 12),
+                begin: guest.u32(entry), end: guest.u32(entry + 4),
+                handler: guest.u32(entry + 8), target: guest.u32(entry + 12),
             });
         }
         return scopes;
@@ -1081,7 +1077,7 @@ export function createSeh64(host){
                 address: wholeAddress(what.address),
                 ...what.parameters ? { parameters: what.parameters } : {} });
             writeContext(scratch.context, faultContext);
-            host.writeMemory(scratch.pointers, pointerPair(scratch.record, scratch.context));
+            guest.setBytes(scratch.pointers, pointerPair(scratch.record, scratch.context));
             const answer = await host.callFunclet({
                 entry: topLevelFilter, rcx: scratch.pointers, stack: scratch.top,
                 thread: host.currentThread(),
@@ -1164,8 +1160,8 @@ export function createSeh64(host){
         view.setBigUint64(JUMP_BUFFER64.RIP, quadOf(context.rip), true);
         view.setUint32(JUMP_BUFFER64.MXCSR, context.mxcsr >>> 0, true);
         view.setUint16(JUMP_BUFFER64.FPCSR, host.controlWord?.() ?? 0x27f, true);
-        host.writeMemory(buffer, head);
-        host.writeMemory(buffer + JUMP_BUFFER64.XMM6, context.xmm.subarray(6 * 16, 16 * 16));
+        guest.setBytes(buffer, head);
+        guest.setBytes(buffer + JUMP_BUFFER64.XMM6, context.xmm.subarray(6 * 16, 16 * 16));
         return 0;
     };
 
@@ -1179,7 +1175,7 @@ export function createSeh64(host){
      * @param {number} buffer @param {number} value
      */
     const longJump = async(buffer, value)=>{
-        const bytes = host.readMemory(buffer, JUMP_BUFFER64.SIZE);
+        const bytes = guest.snapshot(buffer, JUMP_BUFFER64.SIZE);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const frame = Number(view.getBigUint64(JUMP_BUFFER64.FRAME, true));
         const rip = Number(view.getBigUint64(JUMP_BUFFER64.RIP, true));
@@ -1397,10 +1393,10 @@ export function createSeh64(host){
                         view.setBigUint64(index * 8, quadOf(address), true);
                         sum = (sum + (address >>> 0)) >>> 0;
                     });
-                    host.writeMemory(wholeAddress(out), bytes);
+                    guest.setBytes(wholeAddress(out), bytes);
                     if (wholeAddress(hash) !== 0)
                     {
-                        host.writeMemory(wholeAddress(hash),
+                        guest.setBytes(wholeAddress(hash),
                             new Uint8Array(Uint32Array.of(sum).buffer));
                     }
                     return frames.length;

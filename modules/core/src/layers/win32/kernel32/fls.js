@@ -36,6 +36,7 @@
 
 import { TEB, TEB64 } from './teb.js';
 import { wholeAddress } from '../common/pointers.js';
+import { imm32 } from '../../../system/x86.js';
 
 /** FLS_MAXIMUM_AVAILABLE: indexes 1 to 127, 0 being none. */
 const FLS_SLOTS = 128;
@@ -45,8 +46,6 @@ const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NO_MORE_ITEMS = 259;
 
-/** @param {number} value @returns {number[]} */
-const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 /**
  * FlsGetValue as i386: the value at the index in the running fiber's block,
@@ -64,10 +63,10 @@ export function flsGetValueCode(at, trap){
     const slow = 39;
     return Uint8Array.of(
         0x8b, 0x44, 0x24, 0x04, 0x48, 0x83, 0xf8, FLS_SLOTS - 1, 0x73, slow - 10,
-        0x64, 0x8b, 0x0d, ...dword(TEB.FLS_SLOTS), 0x85, 0xc9, 0x74, slow - 21,
-        0x64, 0xc7, 0x05, ...dword(TEB.LAST_ERROR), ...dword(0),
+        0x64, 0x8b, 0x0d, ...imm32(TEB.FLS_SLOTS), 0x85, 0xc9, 0x74, slow - 21,
+        0x64, 0xc7, 0x05, ...imm32(TEB.LAST_ERROR), ...imm32(0),
         0x8b, 0x44, 0x81, 0x0c, 0xc2, 0x04, 0x00,
-        0xe9, ...dword(trap - (at + slow + 5)));
+        0xe9, ...imm32(trap - (at + slow + 5)));
 }
 
 /**
@@ -85,10 +84,10 @@ export function flsSetValueCode(at, trap){
     const slow = 37;
     return Uint8Array.of(
         0x8b, 0x44, 0x24, 0x04, 0x48, 0x83, 0xf8, FLS_SLOTS - 1, 0x73, slow - 10,
-        0x64, 0x8b, 0x0d, ...dword(TEB.FLS_SLOTS), 0x85, 0xc9, 0x74, slow - 21,
+        0x64, 0x8b, 0x0d, ...imm32(TEB.FLS_SLOTS), 0x85, 0xc9, 0x74, slow - 21,
         0x8b, 0x54, 0x24, 0x08, 0x89, 0x54, 0x81, 0x0c,
-        0xb8, ...dword(1), 0xc2, 0x08, 0x00,
-        0xe9, ...dword(trap - (at + slow + 5)));
+        0xb8, ...imm32(1), 0xc2, 0x08, 0x00,
+        0xe9, ...imm32(trap - (at + slow + 5)));
 }
 
 /**
@@ -103,11 +102,11 @@ export function flsGetValueLongCode(){
     const slow = 40;
     const code = Uint8Array.of(
         0x8d, 0x41, 0xff, 0x83, 0xf8, FLS_SLOTS - 1, 0x73, slow - 8,
-        0x65, 0x48, 0x8b, 0x14, 0x25, ...dword(TEB64.FLS_SLOTS), 0x48, 0x85, 0xd2,
+        0x65, 0x48, 0x8b, 0x14, 0x25, ...imm32(TEB64.FLS_SLOTS), 0x48, 0x85, 0xd2,
         0x74, slow - 22,
-        0x65, 0xc7, 0x04, 0x25, ...dword(TEB64.LAST_ERROR), ...dword(0),
+        0x65, 0xc7, 0x04, 0x25, ...imm32(TEB64.LAST_ERROR), ...imm32(0),
         0x48, 0x8b, 0x44, 0xc2, 0x18, 0xc3,
-        0xe9, ...dword(0));
+        0xe9, ...imm32(0));
     return { code, jump: slow + 1 };
 }
 
@@ -123,18 +122,16 @@ function flsSetValueLongCode(){
     const slow = 33;
     const code = Uint8Array.of(
         0x8d, 0x41, 0xff, 0x83, 0xf8, FLS_SLOTS - 1, 0x73, slow - 8,
-        0x65, 0x4c, 0x8b, 0x04, 0x25, ...dword(TEB64.FLS_SLOTS), 0x4d, 0x85, 0xc0,
+        0x65, 0x4c, 0x8b, 0x04, 0x25, ...imm32(TEB64.FLS_SLOTS), 0x4d, 0x85, 0xc0,
         0x74, slow - 22,
-        0x49, 0x89, 0x54, 0xc0, 0x18, 0xb8, ...dword(1), 0xc3,
-        0xe9, ...dword(0));
+        0x49, 0x89, 0x54, 0xc0, 0x18, 0xb8, ...imm32(1), 0xc3,
+        0xe9, ...imm32(0));
     return { code, jump: slow + 1 };
 }
 
 /**
  * @typedef {Object} FlsHost
  * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
- * @property {(address: number) => number} readPointer
- * @property {(address: number, value: number) => void} writePointer
  * @property {() => number} teb  The calling thread's block.
  * @property {(bytes: number) => number} allocate  Guest memory, zeroed, or 0.
  * @property {(address: number) => void} free
@@ -145,13 +142,14 @@ function flsSetValueLongCode(){
  * @property {(code: number) => void} setLastError
  * @property {(bytes: number) => number} [allocateCode]
  *           Room for the i386 fast paths; absent, the exports stay host calls.
- * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
+ * @property {import('../common/guest.js').Guest} guest
  */
 
 /**
  * @param {FlsHost} host
  */
 export function createFiberLocalStorage(host){
+    const { guest } = host;
     const pointer = host.pointerSize === 8 ? 8 : 4;
     const slotsAt = host.pointerSize === 8 ? TEB64.FLS_SLOTS : TEB.FLS_SLOTS;
     /** Where index `i` lies in a block: past the LIST_ENTRY. @param {number} index */
@@ -164,7 +162,7 @@ export function createFiberLocalStorage(host){
     /** The running fiber's block, 0 for none yet. */
     const current = ()=>{
         const teb = host.teb() >>> 0;
-        return teb === 0 ? 0 : host.readPointer(teb + slotsAt);
+        return teb === 0 ? 0 : guest.ptr(teb + slotsAt);
     };
 
     /** @param {number} index */
@@ -191,13 +189,13 @@ export function createFiberLocalStorage(host){
     const callBack = async(block, indexes, call)=>{
         for (const index of indexes)
         {
-            const value = host.readPointer(block + slot(index));
+            const value = guest.ptr(block + slot(index));
             const callback = allocated.get(index) ?? 0;
             if (value === 0)
             {
                 continue;
             }
-            host.writePointer(block + slot(index), 0);
+            guest.setPtr(block + slot(index), 0);
             if (callback !== 0)
             {
                 await call(callback, [value]);
@@ -248,9 +246,9 @@ export function createFiberLocalStorage(host){
         {
             return;
         }
-        if (teb !== 0 && host.readPointer(teb + slotsAt) === block)
+        if (teb !== 0 && guest.ptr(teb + slotsAt) === block)
         {
-            host.writePointer(teb + slotsAt, 0);
+            guest.setPtr(teb + slotsAt, 0);
         }
         blocks.delete(block);
         host.free(block);
@@ -271,7 +269,7 @@ export function createFiberLocalStorage(host){
         if (made !== 0)
         {
             blocks.add(made);
-            host.writePointer(host.teb() + slotsAt, made);
+            guest.setPtr(host.teb() + slotsAt, made);
         }
         return made;
     };
@@ -296,7 +294,7 @@ export function createFiberLocalStorage(host){
                         // was left at it.
                         for (const block of blocks)
                         {
-                            host.writePointer(block + slot(index), 0);
+                            guest.setPtr(block + slot(index), 0);
                         }
                         return index;
                     }
@@ -343,7 +341,7 @@ export function createFiberLocalStorage(host){
                     return 0;
                 }
                 host.setLastError(ERROR_SUCCESS);
-                return host.readPointer(block + slot(at));
+                return guest.ptr(block + slot(at));
             },
         },
 
@@ -364,7 +362,7 @@ export function createFiberLocalStorage(host){
                     host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
                     return 0;
                 }
-                host.writePointer(block + slot(at), value);
+                guest.setPtr(block + slot(at), value);
                 return 1;
             },
         },
@@ -384,7 +382,7 @@ export function createFiberLocalStorage(host){
         const at = host.allocateCode?.(size) ?? 0;
         if (at !== 0)
         {
-            host.writeMemory?.(at, make(at, trap));
+            guest.setBytes(at, make(at, trap));
         }
         return at;
     };

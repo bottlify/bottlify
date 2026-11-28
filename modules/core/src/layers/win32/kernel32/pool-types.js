@@ -28,10 +28,7 @@
  *           is handed (a pool, a cleanup group, a work, timer, wait or I/O
  *           object): Windows makes them there, and HeapValidate on
  *           GetProcessHeap() knows one until it is released. Absent, `allocate`.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- *           Where a thread pool timer's or wait's FILETIME is read from;
- *           absent, a due time named is taken for now.
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => number} [wallClock]  Milliseconds since 1970, which an
  *           absolute due time is counted against; absent, the guest's clock.
  * @property {(thread: any) => void} [threadBlock]

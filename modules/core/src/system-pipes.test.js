@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from './layers/win32/common/guest.fixture.js';
 import { createNamedPipes, pipeStandIn } from './layers/win32/kernel32/pipes.js';
 import { pipeHandlers } from './system-pipes.js';
 
@@ -67,10 +68,7 @@ function processOf({ table, id, across }){
             typeOf: handle=>handles.get(handle)?.type ?? null,
             access: ()=>null,
         },
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: ()=>'',
-        readWideString: ()=>'',
+        guest: guestOver(bytes),
         setLastError: code=>lastError.set('main', code),
         setLastErrorFor: (thread, code)=>lastError.set(thread, code),
         currentThread: ()=>'main',

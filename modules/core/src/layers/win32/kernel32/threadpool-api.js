@@ -122,6 +122,7 @@ const COMPLETION_ORDER = Object.freeze(['LeaveCriticalSection', 'ReleaseMutex',
  */
 export function createThreadpoolApi(core){
     const { kernel, host } = core;
+    const { guest } = host;
 
     /** The process's pool, which a callback environment without one names. */
     /** @type {Pool} */
@@ -139,18 +140,6 @@ export function createThreadpoolApi(core){
         free: address=>host.free?.(address),
     };
 
-    /** @param {number} at */
-    const read32 = at=>{
-        const bytes = /** @type {NonNullable<typeof host.readMemory>} */ (host.readMemory)(at, 4);
-        return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
-    };
-    /** @param {number} at @param {number} value */
-    const write32 = (at, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at, bytes);
-    };
-
     /**
      * What a TP_CALLBACK_ENVIRON names, or why it is refused: a version
      * other than 1 and 3, a version 3 priority none of high, normal and low,
@@ -162,27 +151,27 @@ export function createThreadpoolApi(core){
      *     | { refused: number }}
      */
     const environmentOf = environment=>{
-        if ((environment >>> 0) === 0 || !host.readMemory)
+        if ((environment >>> 0) === 0)
         {
             return { pool: processPool, group: null, cancel: 0, finalization: 0 };
         }
         const at = wholeAddress(environment);
-        const version = read32(at + ENVIRONMENT.VERSION);
+        const version = guest.u32(at + ENVIRONMENT.VERSION);
         if ((version !== 1 && version !== 3)
-            || (version === 3 && read32(at + ENVIRONMENT.PRIORITY) > TP_CALLBACK_PRIORITY_LOW))
+            || (version === 3 && guest.u32(at + ENVIRONMENT.PRIORITY) > TP_CALLBACK_PRIORITY_LOW))
         {
             return { refused: ERROR_INVALID_PARAMETER };
         }
-        const poolHandle = read32(at + ENVIRONMENT.POOL);
-        const groupHandle = read32(at + ENVIRONMENT.CLEANUP_GROUP);
+        const poolHandle = guest.u32(at + ENVIRONMENT.POOL);
+        const groupHandle = guest.u32(at + ENVIRONMENT.CLEANUP_GROUP);
         const pool = poolHandle === 0 ? processPool : pools.get(poolHandle);
         const group = groupHandle === 0 ? null : groups.get(groupHandle);
         if (!pool || group === undefined)
         {
             return { refused: ERROR_INVALID_PARAMETER };
         }
-        return { pool, group, cancel: read32(at + ENVIRONMENT.CANCEL_CALLBACK),
-            finalization: read32(at + ENVIRONMENT.FINALIZATION) };
+        return { pool, group, cancel: guest.u32(at + ENVIRONMENT.CANCEL_CALLBACK),
+            finalization: guest.u32(at + ENVIRONMENT.FINALIZATION) };
     };
 
     /**
@@ -305,7 +294,7 @@ export function createThreadpoolApi(core){
         }
         const made = host.call('DuplicateHandle', [CURRENT_PROCESS, object, CURRENT_PROCESS, out,
             0, 0, DUPLICATE_SAME_ACCESS]);
-        const held = (made >>> 0) !== 0 ? read32(out) : 0;
+        const held = (made >>> 0) !== 0 ? guest.u32(out) : 0;
         host.free?.(out);
         return held;
     };
@@ -389,7 +378,7 @@ export function createThreadpoolApi(core){
             // given back once it has returned.
             const layout = overlappedLayout(host.pointerSize);
             const block = host.allocate(2 * layout.word);
-            overlappedResult(write32, layout, block, packet.status ?? 0, packet.transferred);
+            overlappedResult(guest.set32, layout, block, packet.status ?? 0, packet.transferred);
             core.dispatch({ entry: item.callback, instanced: true, owner: item,
                 args: [item.context, packet.overlapped, block, item.handle],
                 done: ()=>host.free?.(block) }, item.pool.lane);
@@ -500,12 +489,12 @@ export function createThreadpoolApi(core){
          */
         setStack: (handle, information)=>{
             const pool = pools.get(wholeAddress(handle));
-            if (!pool || (information >>> 0) === 0 || !host.readMemory)
+            if (!pool || (information >>> 0) === 0)
             {
                 return false;
             }
-            pool.lane.stack = { reserve: read32(wholeAddress(information)),
-                commit: read32(wholeAddress(information) + 4) };
+            pool.lane.stack = { reserve: guest.u32(wholeAddress(information)),
+                commit: guest.u32(wholeAddress(information) + 4) };
             return true;
         },
 
@@ -521,8 +510,8 @@ export function createThreadpoolApi(core){
             {
                 return false;
             }
-            write32(wholeAddress(information), stack.reserve);
-            write32(wholeAddress(information) + 4, stack.commit);
+            guest.set32(wholeAddress(information), stack.reserve);
+            guest.set32(wholeAddress(information) + 4, stack.commit);
             return true;
         },
 

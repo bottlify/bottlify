@@ -13,6 +13,7 @@ import { createNamedObjects } from './named-objects.js';
 import { CLOSE_HANDLE, createFileFunctions } from './files.js';
 import { createHandleTable, FIRST_HANDLE } from '../../kernel/internal/handles.js';
 import { kernelLayerAnswers } from '../kernel.fixture.js';
+import { guestOver, recordingGuest } from '../common/guest.fixture.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -263,7 +264,6 @@ function fakeKernel(handles = createHandleTable()){
         },
         /** @param {any} thread @param {number} code */
         exitThread: (thread, code)=>state.exited.push({ thread, code }),
-        /** @param {any} thread @param {string} [reason] */
         /** @param {any} thread @param {string} reason @param {any} [timed] */
         block: (thread, reason, timed)=>state.blocked.push(
             timed === undefined ? { thread, reason } : { thread, reason, timed }),
@@ -302,28 +302,20 @@ function setup(names, extra = {}, handles = createHandleTable()){
     const current = { name: 'caller' };
     /** @type {any[]} */
     const parked = [];
-    /** What a handler wrote, by address, so a test can read an out-parameter. */
-    /** @type {Map<number, Uint8Array>} */
-    const written = new Map();
+    // What a handler wrote, by address, so a test can read an out-parameter;
+    // every name the test hands reads as its text, any other as the empty one.
+    const { guest, written, use } = recordingGuest({ names: names ?? {} });
     /** @type {number[]} */
     const errors = [];
     /** @type {import('./threading.js').ThreadingHost} */
     const host = {
         kernel,
-        readMemory: ()=>new Uint8Array(0),
+        guest,
         currentThread: ()=>current,
         park: thread=>{
             parked.push(thread ?? current);
             return PARKED;
         },
-        /** @param {number} address @param {Uint8Array} bytes */
-        writeMemory: (address, bytes)=>{
-            written.set(address, bytes);
-        },
-        /** @param {number} pointer */
-        readCString: pointer=>names?.[pointer] ?? '',
-        /** @param {number} pointer */
-        readWideString: pointer=>names?.[pointer] ?? '',
         /** @param {number} code */
         setLastError: code=>{
             errors.push(code);
@@ -337,10 +329,7 @@ function setup(names, extra = {}, handles = createHandleTable()){
     // The close every kind of handle goes through is files.js's, as in the
     // module, and its CloseHandle the one that answers.
     const files = createFileFunctions({
-        readMemory: (address, length)=>host.readMemory(address, length),
-        writeMemory: (address, bytes)=>host.writeMemory(address, bytes),
-        readCString: (address, max)=>host.readCString(address, max),
-        readWideString: (address, max)=>host.readWideString(address, max),
+        guest,
         files: /** @type {any} */ ({}),
         setLastError: code=>host.setLastError(code),
         writeConsole: ()=>{},
@@ -348,7 +337,7 @@ function setup(names, extra = {}, handles = createHandleTable()){
         namedObjects: host.namedObjects,
     });
     const fns = { ...createThreadingFunctions(host), CloseHandle: files.CloseHandle };
-    return { kernel, fns, host, parked, current, written, errors };
+    return { kernel, fns, host, parked, current, written, errors, use };
 }
 
 test('CreateRemoteThread into a child is the child\'s CreateThread, the handle this one\'s',
@@ -356,7 +345,7 @@ test('CreateRemoteThread into a child is the child\'s CreateThread, the handle t
         // The thread runs where the child does, at an address in its memory;
         // the parent is handed a handle of its own naming the child's
         // thread, and its id.
-        const { kernel, fns, host, written, current } = setup();
+        const { kernel, fns, host, current, written } = setup();
         /** @type {any[]} */
         const asked = [];
         host.askChild = (record, call)=>{
@@ -907,11 +896,11 @@ test('every function declares the stack it pops', ()=>{
 });
 
 test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
-    const { fns, host, written, errors } = setup();
+    const { use, fns, host, written, errors } = setup();
     host.processId = 0x2a4;
     host.imagePath = ()=>'C:\\App\\Setup.exe';
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
 
     const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
@@ -937,10 +926,10 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
 });
 
 test('a child\'s snapshot names the process that started it as its parent', ()=>{
-    const { fns, host, written } = setup();
+    const { use, fns, host, written } = setup();
     Object.assign(host, { processId: 0x2a8, parentProcessId: 0x2a4 });
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
     fns.Process32First.handler([fns.CreateToolhelp32Snapshot.handler([0x2, 0]), 0x100]);
     const entry = /** @type {Uint8Array} */ (written.get(0x100));
@@ -964,10 +953,10 @@ test('a snapshot names the image in the ANSI page', ()=>{
     // The euro sign is 0x80 there, the trade mark 0x99 and an em dash 0x97,
     // as the ANSI calls read those bytes; an image named with them is named
     // with them in the entry too.
-    const { fns, host, written } = setup();
+    const { use, fns, host, written } = setup();
     host.imagePath = ()=>'C:\\App\\\u20ac\u2122\u2014\u00e9.exe';
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
 
     const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
@@ -981,7 +970,7 @@ test('a snapshot taken with its modules lists them in either width, the image fi
     // What a crash reporter and a debugging library walk to name the
     // modules of the process: MODULEENTRY32 is 548 bytes, the wide one
     // 1064, the id always one, the base both the address and the handle.
-    const { fns, host, written, errors } = setup();
+    const { use, fns, host, written, errors } = setup();
     host.processId = 0x2a4;
     host.modules = ()=>[
         { name: 'Game.exe', base: 0x400000, size: 0x3d000, path: 'C:\\Games\\Title\\Game.exe' },
@@ -989,7 +978,7 @@ test('a snapshot taken with its modules lists them in either width, the image fi
     ];
     const bytes = new Uint8Array(0x1000);
     const memory = new DataView(bytes.buffer);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     memory.setUint32(0x100, 548, true);
     memory.setUint32(0x400, 1064, true);
     const ansi = (/** @type {Uint8Array} */ entry, /** @type {number} */ at)=>
@@ -1085,9 +1074,9 @@ test('arming a timer with a waiter already parked releases it at the due time', 
     // The deadlock in one line: thread B waits before thread A arms. The
     // signal is a property of the object and the clock, so the arm is what
     // schedules the wake -- the wait that arrived first is not a lost one.
-    const { fns, kernel, host, current } = setup();
+    const { use, fns, kernel, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 1, 0]);
     assert.equal(kernel.handles.typeOf(timer), 'timer');
@@ -1110,9 +1099,9 @@ test('arming a timer with a waiter already parked releases it at the due time', 
 });
 
 test('a wait on an armed timer parks until it is due, then consumes it', ()=>{
-    const { fns, kernel, host, current } = setup();
+    const { use, fns, kernel, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1135,9 +1124,9 @@ test('a wait on an armed timer parks until it is due, then consumes it', ()=>{
 });
 
 test('a periodic timer signals again a period on, with no thread present between', ()=>{
-    const { fns, kernel, host, current } = setup();
+    const { use, fns, kernel, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     new DataView(bytes.buffer).setBigInt64(0x10, -10000n, true);
@@ -1156,9 +1145,9 @@ test('a periodic timer signals again a period on, with no thread present between
 });
 
 test('cancelling a timer leaves a parked waiter parked, and its own timeout still ends it', ()=>{
-    const { fns, kernel, host, current, errors } = setup();
+    const { use, fns, kernel, current, errors } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1179,9 +1168,9 @@ test('cancelling a timer leaves a parked waiter parked, and its own timeout stil
 });
 
 test('CancelWaitableTimer un-arms without signalling a parked waiter', ()=>{
-    const { fns, kernel, host, current } = setup();
+    const { use, fns, kernel, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1302,12 +1291,12 @@ test('a wait on a pseudo-handle is a wait on the running object, which is not si
 test('a timer\'s completion routine is queued to the setting thread at each expiry', ()=>{
     // With the timer's argument and the time it expired as a FILETIME. It runs
     // when that thread next waits alertably; queuing it is all this does.
-    const { fns, kernel, host, current } = setup();
+    const { use, fns, kernel, host, current } = setup();
     /** @type {any[]} */
     const queued = [];
     host.queueApc = (thread, routine, args)=>queued.push({ thread, routine, args });
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1325,9 +1314,9 @@ test('a timer\'s completion routine is queued to the setting thread at each expi
 });
 
 test('a timer set without a routine queues nothing', ()=>{
-    const { fns, kernel, host } = setup();
+    const { use, fns, kernel, host } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     host.queueApc = ()=>assert.fail('nothing to queue');
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
@@ -1372,11 +1361,10 @@ test('SwitchToThread stands aside for a ready thread and answers nonzero when it
  * @param {ReturnType<typeof setup>} parts
  * @param {number} internal @param {number} internalHigh @param {number} [event]
  */
-function overlapped({ host }, internal, internalHigh, event = 0){
+function overlapped({ use }, internal, internalHigh, event = 0){
     const bytes = new Uint8Array(0x100);
     const view = new DataView(bytes.buffer);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
-    host.writeMemory = (address, data)=>bytes.set(data, address);
+    use(bytes);
     view.setUint32(0x20, internal, true);
     view.setUint32(0x24, internalHigh, true);
     view.setUint32(0x30, event, true);
@@ -1532,11 +1520,11 @@ test('an Open call with no name at all is ERROR_INVALID_PARAMETER, not "no such 
 test('a snapshot lists the children still running and every thread, each walk to its end', ()=>{
     // Wine's kernel32 process.c test_Toolhelp walks the threads to find a
     // suspended child's; Thread32First was missing, a null pointer called.
-    const { fns, host, written, errors } = setup();
+    const { use, fns, host, written, errors } = setup();
     host.processId = 0x2a4;
     host.imagePath = ()=>'C:\\App\\Setup.exe';
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     const kernel = /** @type {any} */ (host.kernel);
     kernel.threads = ()=>[{ id: 0x10, state: 'running' }, { id: 0x14, state: 'terminated' },
         { id: 0x18, state: 'blocked' }];
@@ -1682,10 +1670,9 @@ test('GetProcessId, GetThreadId and GetProcessIdOfThread read the ids behind han
 
 test('a handle reads back the flags a duplicate or SetHandleInformation gave it', ()=>{
     // Wine's kernel32 process.c test_DuplicateHandle: GetHandleInformation was missing.
-    const { fns, host, errors } = setup();
+    const { use, fns, errors } = setup();
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
-    host.writeMemory = (address, data)=>bytes.set(data, address);
+    use(bytes);
     const event = fns.CreateEventA.handler([0, 1, 0, 0]);
     const read = (/** @type {number} */ handle)=>{
         assert.equal(fns.GetHandleInformation.handler([handle, 0x200]), 1);
@@ -1711,10 +1698,9 @@ test('a socket takes handle flags as a kernel object does', ()=>{
     // children it starts with SetHandleInformation(s, HANDLE_FLAG_INHERIT, 0),
     // and one that is told the handle is invalid gives up on its network.
     // Winsock files its sockets in the kernel's table (win32/module.js).
-    const { fns, host, errors, kernel } = setup();
+    const { use, fns, errors, kernel } = setup();
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
-    host.writeMemory = (address, data)=>bytes.set(data, address);
+    use(bytes);
     const socket = kernel.handles.open('socket', {});
     assert.equal(fns.SetHandleInformation.handler([socket, 1, 0]), 1);
     assert.equal(fns.GetHandleInformation.handler([socket, 0x200]), 1);
@@ -1730,10 +1716,9 @@ test('a handle\'s flags go with it: its number reused reads none, a protected on
     ()=>{
         // The kernel's table with one number, so the next open reuses the
         // number just closed.
-        const { fns, host } = setup(undefined, {}, createHandleTable({ limit: FIRST_HANDLE }));
+        const { use, fns } = setup(undefined, {}, createHandleTable({ limit: FIRST_HANDLE }));
         const bytes = new Uint8Array(0x1000);
-        host.readMemory = (address, length)=>bytes.slice(address, address + length);
-        host.writeMemory = (address, data)=>bytes.set(data, address);
+        use(bytes);
         const view = new DataView(bytes.buffer);
         [12, 0, 1].forEach((value, at)=>view.setUint32(0x300 + at * 4, value, true));
         /** @param {number} handle */
@@ -1760,10 +1745,9 @@ test('DUPLICATE_SAME_ATTRIBUTES gives the duplicate its source\'s flags, not the
     ()=>{
         // Wine's process.c test_DuplicateHandle, "Test DUPLICATE_SAME_ATTRIBUTES":
         // a pseudo-handle's are none.
-        const { fns, host, kernel } = setup();
+        const { use, fns, kernel } = setup();
         const bytes = new Uint8Array(0x1000);
-        host.readMemory = (address, length)=>bytes.slice(address, address + length);
-        host.writeMemory = (address, data)=>bytes.set(data, address);
+        use(bytes);
         const view = new DataView(bytes.buffer);
         /** @param {number} handle */
         const flagsOf = handle=>{
@@ -1788,12 +1772,12 @@ test('DUPLICATE_SAME_ATTRIBUTES gives the duplicate its source\'s flags, not the
 test('Process32FirstW and Process32NextW walk the same processes into a PROCESSENTRY32W', ()=>{
     // 556 bytes: the narrow entry's 36 before the name, then MAX_PATH wide
     // characters for it.
-    const { fns, host, written, errors } = setup();
+    const { use, fns, host, written, errors } = setup();
     host.processId = 0x2a4;
     host.imagePath = ()=>'C:\\App\\Setup\u20ac.exe';
     const bytes = new Uint8Array(0x1000);
     const memory = new DataView(bytes.buffer);
-    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    use(bytes);
     memory.setUint32(0x100, 556, true);
 
     const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
@@ -1870,9 +1854,7 @@ test('ReleaseSemaphore places the code of the process\'s width: x86-64 in a 64-b
                 free += (bytes + 15) & -16;
                 return at;
             },
-            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
-                memory.set(bytes, at);
-            },
+            guest: guestOver(memory, pointerSize),
         })));
         assert.equal(fns.ReleaseSemaphore.guestLong, true, 'placed in a 64-bit process too');
         const at = fns.ReleaseSemaphore.guest({ register: ()=>0x7000_0000 });
@@ -1911,11 +1893,10 @@ test('an object made with SECURITY_ATTRIBUTES is inheritable as it asks, at eith
         const word = pointerSize;
         /** @param {number} descriptor @param {number} inherit */
         const flagOf = (descriptor, inherit)=>{
-            const { fns, host } = setup(undefined, { pointerSize });
+            const { use, fns } = setup(undefined, { pointerSize });
             const bytes = new Uint8Array(0x1000);
             const view = new DataView(bytes.buffer);
-            host.readMemory = (address, length)=>bytes.slice(address, address + length);
-            host.writeMemory = (address, data)=>bytes.set(data, address);
+            use(bytes);
             view.setUint32(0x300, 3 * word, true);
             view.setUint32(0x300 + word, descriptor, true);
             view.setUint32(0x300 + 2 * word, inherit, true);

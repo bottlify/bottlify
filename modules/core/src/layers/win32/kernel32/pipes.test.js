@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { PIPE_CLIENT, createNamedPipes, dropUnclaimed, isPipeName, pipeDeviceOf } from './pipes.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
@@ -140,25 +141,7 @@ function processOn(table, id = 1, extra = {}){
             },
             typeOf: handle=>handles.get(handle)?.type ?? null,
         },
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: (address, max)=>{
-            let text = '';
-            for (let at = address; at < address + max && bytes[at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[at]);
-            }
-            return text;
-        },
-        readWideString: (address, max)=>{
-            let text = '';
-            for (let at = address; at < address + max && view.getUint16(at, true) !== 0;
-                at += 2)
-            {
-                text += String.fromCharCode(view.getUint16(at, true));
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         setLastError: code=>lastError.set(current, code),
         setLastErrorFor: (thread, code)=>lastError.set(thread, code),
         currentThread: ()=>current,

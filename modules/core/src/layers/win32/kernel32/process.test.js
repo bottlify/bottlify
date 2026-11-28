@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import { longMachine, callLong } from '../../../../scripts/guest-code/long.mjs';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { TEB, TEB64 } from './teb.js';
 import { testProcessors } from '../kernel.fixture.js';
 import {
@@ -75,41 +76,7 @@ function fakeHost({ arena = 0 } = {}){
         now: ()=>clock.uptimeMs,
         systemTimeMs: ()=>clock.wallMs,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory(address, data){
-            for (let i = 0; i < data.length; i++)
-            {
-                bytes[address + i] = data[i];
-            }
-        },
-        /** @param {number} address @param {number} maxLength */
-        readCString(address, maxLength){
-            let text = '';
-            for (let i = 0; i < maxLength && address + i < bytes.length; i++)
-            {
-                if (bytes[address + i] === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(bytes[address + i]);
-            }
-            return text;
-        },
-        /** @param {number} address @param {number} maxLength */
-        readWideString(address, maxLength){
-            let text = '';
-            for (let i = 0; i < maxLength && address + i * 2 + 1 < bytes.length; i++)
-            {
-                const unit = view.getUint16(address + i * 2, true);
-                if (unit === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(unit);
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         /** @param {string | null} name */
         moduleHandle: name=>(name === null || name.toLowerCase() === 'app.exe' ? IMAGE_BASE : 0),
         /** @param {number} milliseconds */
@@ -292,7 +259,7 @@ test('GetVersionExA fills the structure it was handed', ()=>{
     assert.equal(host.view.getUint32(address + 8, true), 1);
     assert.equal(host.view.getUint32(address + 12, true), 2600);
     assert.equal(host.view.getUint32(address + 16, true), VER_PLATFORM_WIN32_NT);
-    assert.equal(host.readCString(address + 20, 128), 'Service Pack 3',
+    assert.equal(host.guest.cstr(address + 20, 128), 'Service Pack 3',
         'XP is answered with its last service pack');
 });
 
@@ -315,7 +282,7 @@ test('GetVersionExA fills the extended fields when the caller asks for them', ()
 
     assert.equal(fns.GetVersionExA.handler([address]), 1);
 
-    assert.equal(host.readCString(address + 20, 128), 'Service Pack 3');
+    assert.equal(host.guest.cstr(address + 20, 128), 'Service Pack 3');
     assert.equal(host.bytes[address + 20 + 'Service Pack 3'.length + 1], 0,
         'the rest of the string is cleared, not left as it was');
     assert.equal(host.view.getUint16(address + 148, true), 3, 'wServicePackMajor');
@@ -340,7 +307,7 @@ test('each Windows is answered by GetVersion and GetVersionExA alike', ()=>{
         assert.equal(fns.GetVersionExA.handler([address]), 1);
         assert.deepEqual([4, 8, 12].map(at=>host.view.getUint32(address + at, true)),
             [version.major, version.minor, version.build], version.name);
-        assert.equal(host.readCString(address + 20, 128), version.csdVersion, version.name);
+        assert.equal(host.guest.cstr(address + 20, 128), version.csdVersion, version.name);
         assert.equal(host.view.getUint16(address + 148, true), version.servicePackMajor);
         assert.equal(host.view.getUint16(address + 152, true), version.suiteMask, version.name);
     }
@@ -374,7 +341,7 @@ test('GetVersionExW fills the wide structures and refuses any other size', ()=>{
     assert.equal(host.view.getUint32(address, true), OSVERSIONINFOEXW_SIZE);
     assert.deepEqual([4, 8, 12, 16].map(at=>host.view.getUint32(address + at, true)),
         [6, 1, 7601, VER_PLATFORM_WIN32_NT]);
-    assert.equal(host.readWideString(address + 20, 128), 'Service Pack 1');
+    assert.equal(host.guest.wstr(address + 20, 256), 'Service Pack 1');
     assert.equal(host.view.getUint16(address + 20 + 'Service Pack 1'.length * 2 + 2, true), 0);
     assert.equal(host.view.getUint16(address + 276, true), 1, 'wServicePackMajor');
     assert.equal(host.view.getUint16(address + 278, true), 0, 'wServicePackMinor');
@@ -385,7 +352,7 @@ test('GetVersionExW fills the wide structures and refuses any other size', ()=>{
     host.bytes.fill(0xcd, plain, plain + OSVERSIONINFOEXW_SIZE);
     host.view.setUint32(plain, OSVERSIONINFOW_SIZE, true);
     assert.equal(fns.GetVersionExW.handler([plain]), 1);
-    assert.equal(host.readWideString(plain + 20, 128), 'Service Pack 1');
+    assert.equal(host.guest.wstr(plain + 20, 256), 'Service Pack 1');
     assert.equal(host.bytes[plain + OSVERSIONINFOW_SIZE], 0xcd,
         'nothing past the smaller structure is written');
 

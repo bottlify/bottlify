@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createSyncFunctions } from './sync.js';
 import { floatImages, restoreFloatImages } from '../../cpu/internal/fpu-image.js';
 import { createCriticalSections, enterCode, leaveCode, tryEnterCode } from './critical.js';
@@ -209,8 +210,11 @@ function fakeKernel(){
     };
 }
 
-/** @param {number} [base]  where its memory lies: past 4 GiB for a 64-bit program's */
-function fakeHost(base = 0){
+/**
+ * @param {number} [base]  where its memory lies: past 4 GiB for a 64-bit program's
+ * @param {4 | 8} [pointerSize]
+ */
+function fakeHost(base = 0, pointerSize = 4){
     const bytes = new Uint8Array(0x1000);
     let free = 0x800;
     const kernel = fakeKernel();
@@ -231,6 +235,7 @@ function fakeHost(base = 0){
             current = thread;
         },
         currentThread: ()=>current,
+        guest: guestOver(bytes, pointerSize, [], 0, base),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address - base, address - base + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -263,8 +268,7 @@ function fakeHost(base = 0){
         },
     };
     host.critical = createCriticalSections({
-        readMemory: host.readMemory,
-        writeMemory: (address, data)=>host.writeMemory(address, data),
+        guest: host.guest,
         currentThread: ()=>current,
         /** @param {any} thread @param {string} reason */
         block: (thread, reason)=>kernel.state.blocked.push({ thread, reason }),
@@ -462,7 +466,7 @@ test('a 64-bit section past 4 GiB and its forced debug record name each other wh
     // Each pointer the record and the section hold is eight bytes: the section's
     // own address was written as its low dword, the record's 4 GiB below it.
     const base = 0x1_4000_0000;
-    const host = fakeHost(base);
+    const host = fakeHost(base, 8);
     const fns = createSyncFunctions(/** @type {any} */ ({ ...host, pointerSize: 8 }));
     const section = base + 0x200;
     assert.equal(fns.InitializeCriticalSectionEx.handler([section, 0, 0x10000000]), 1);

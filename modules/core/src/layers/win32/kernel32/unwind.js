@@ -108,7 +108,7 @@ export const stackOf = context=>Number(BigInt.asUintN(64, context.gpr[RSP]));
 
 /**
  * @typedef {Object} UnwindHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number) => { base: number, size: number,
  *     table: { address: number, size: number } | null } | null} imageOf
  *     The image an address lies in and its exception directory, an RVA and a
@@ -147,13 +147,7 @@ const slotsOf = (op, info, version)=>{
  * @param {UnwindHost} host
  */
 export function createUnwinder(host){
-    /** @param {number} at @param {number} length */
-    const view = (at, length)=>{
-        const bytes = host.readMemory(wholeAddress(at), length);
-        return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    };
-    const readU32 = (/** @type {number} */ at)=>view(at, 4).getUint32(0, true);
-    const readU64 = (/** @type {number} */ at)=>view(at, 8).getBigUint64(0, true);
+    const { guest } = host;
 
     /**
      * Tables a program added for code it made at run time
@@ -192,12 +186,11 @@ export function createUnwinder(host){
         {
             const middle = (low + high) >>> 1;
             const at = table + middle * RUNTIME_FUNCTION_SIZE;
-            const entry = view(at, 8);
-            if (rva < entry.getUint32(0, true))
+            if (rva < guest.u32(at))
             {
                 high = middle - 1;
             }
-            else if (rva >= entry.getUint32(4, true))
+            else if (rva >= guest.u32(at + 4))
             {
                 low = middle + 1;
             }
@@ -216,24 +209,22 @@ export function createUnwinder(host){
     const entryAt = (imageBase, entry)=>{
         imageBase = wholeAddress(imageBase);
         entry = wholeAddress(entry);
-        let fields = view(entry, RUNTIME_FUNCTION_SIZE);
         // RUNTIME_FUNCTION_INDIRECT: a part of a function the linker moved
         // away (a cold block) is described by the function's own entry,
         // whose RVA its UnwindData holds with the low bit set. The system's
         // lookup answers that entry, so a caller reading UNWIND_INFO there
         // never reads it from an odd address.
-        const unwindData = fields.getUint32(8, true);
+        const unwindData = guest.u32(entry + 8);
         if ((unwindData & 1) !== 0)
         {
             entry = imageBase + ((unwindData & ~1) >>> 0);
-            fields = view(entry, RUNTIME_FUNCTION_SIZE);
         }
         return {
             imageBase,
             entry,
-            begin: imageBase + fields.getUint32(0, true),
-            end: imageBase + fields.getUint32(4, true),
-            unwindInfo: imageBase + fields.getUint32(8, true),
+            begin: imageBase + guest.u32(entry),
+            end: imageBase + guest.u32(entry + 4),
+            unwindInfo: imageBase + guest.u32(entry + 8),
         };
     };
 
@@ -320,7 +311,7 @@ export function createUnwinder(host){
      */
     const returnFrom = context=>{
         const rsp = stackOf(context);
-        context.rip = Number(readU64(rsp));
+        context.rip = Number(guest.u64(rsp));
         context.gpr[RSP] = BigInt(rsp + 8);
     };
 
@@ -336,7 +327,7 @@ export function createUnwinder(host){
      * @returns {UnwindContext | null}
      */
     const epilogue = (fn, pc, context, frameRegister)=>{
-        const code = host.readMemory(wholeAddress(pc), 48);
+        const code = guest.snapshot(wholeAddress(pc), 48);
         const after = copyContext(context);
         let at = 0;
         /** @param {number} offset */
@@ -378,7 +369,7 @@ export function createUnwinder(host){
             {
                 const register = (op - 0x58) | ((rex & 1) << 3);
                 const rsp = stackOf(after);
-                after.gpr[register] = readU64(rsp);
+                after.gpr[register] = guest.u64(rsp);
                 after.gpr[RSP] = BigInt(rsp + 8);
                 at += rex ? 2 : 1;
                 continue;
@@ -418,10 +409,12 @@ export function createUnwinder(host){
      */
     const virtualUnwind = (type, fn, pc, context)=>{
         const header = (/** @type {number} */ info)=>{
-            const bytes = host.readMemory(wholeAddress(info), 4);
+            const at = wholeAddress(info);
+            const first = guest.u8(at);
+            const frame = guest.u8(at + 3);
             return {
-                version: bytes[0] & 7, flags: bytes[0] >> 3, prolog: bytes[1], count: bytes[2],
-                frameRegister: bytes[3] & 15, frameOffset: bytes[3] >> 4,
+                version: first & 7, flags: first >> 3, prolog: guest.u8(at + 1),
+                count: guest.u8(at + 2), frameRegister: frame & 15, frameOffset: frame >> 4,
             };
         };
         let info = fn.unwindInfo;
@@ -448,7 +441,7 @@ export function createUnwinder(host){
         let machineFrame = false;
         for (let chained = 0; ; chained++)
         {
-            const codes = host.readMemory(wholeAddress(info) + 4, head.count * 2 + 8);
+            const codes = guest.snapshot(wholeAddress(info) + 4, head.count * 2 + 8);
             const slot = (/** @type {number} */ index)=>codes[index * 2] | codes[index * 2 + 1] << 8;
             const far = (/** @type {number} */ index)=>(slot(index) | slot(index + 1) << 16) >>> 0;
             const setsFrame = head.frameRegister !== 0 && Array.from({ length: head.count },
@@ -474,7 +467,7 @@ export function createUnwinder(host){
                 switch (op)
                 {
                     case UWOP.PUSH_NONVOL:
-                        context.gpr[opInfo] = readU64(rsp);
+                        context.gpr[opInfo] = guest.u64(rsp);
                         context.gpr[RSP] = BigInt(rsp + 8);
                         break;
                     case UWOP.ALLOC_LARGE:
@@ -490,17 +483,17 @@ export function createUnwinder(host){
                         context.gpr[RSP] = BigInt(establisher);
                         break;
                     case UWOP.SAVE_NONVOL:
-                        context.gpr[opInfo] = readU64(frame + slot(index + 1) * 8);
+                        context.gpr[opInfo] = guest.u64(frame + slot(index + 1) * 8);
                         break;
                     case UWOP.SAVE_NONVOL_FAR:
-                        context.gpr[opInfo] = readU64(frame + far(index + 1));
+                        context.gpr[opInfo] = guest.u64(frame + far(index + 1));
                         break;
                     case UWOP.SAVE_XMM128:
-                        context.xmm.set(host.readMemory(frame + slot(index + 1) * 16, 16),
+                        context.xmm.set(guest.snapshot(frame + slot(index + 1) * 16, 16),
                             opInfo * 16);
                         break;
                     case UWOP.SAVE_XMM128_FAR:
-                        context.xmm.set(host.readMemory(frame + far(index + 1), 16),
+                        context.xmm.set(guest.snapshot(frame + far(index + 1), 16),
                             opInfo * 16);
                         break;
                     case UWOP.PUSH_MACHFRAME:
@@ -508,9 +501,9 @@ export function createUnwinder(host){
                     // An interrupt's frame: RIP, CS, EFLAGS, RSP, SS, after an
                     // error code when the info says one was pushed.
                         const base = rsp + (opInfo === 1 ? 8 : 0);
-                        context.rip = Number(readU64(base));
-                        context.eflags = Number(BigInt.asUintN(32, readU64(base + 16)));
-                        context.gpr[RSP] = readU64(base + 24);
+                        context.rip = Number(guest.u64(base));
+                        context.eflags = Number(BigInt.asUintN(32, guest.u64(base + 16)));
+                        context.gpr[RSP] = guest.u64(base + 24);
                         machineFrame = true;
                         break;
                     }
@@ -536,7 +529,7 @@ export function createUnwinder(host){
         if (!inPrologue && (head.flags & type) !== 0 && type !== UNW_FLAG.NHANDLER)
         {
             const handlerAt = info + 4 + (head.count + 1 & ~1) * 2;
-            handler = fn.imageBase + readU32(handlerAt);
+            handler = fn.imageBase + guest.u32(handlerAt);
             handlerData = handlerAt + 4;
         }
         if (!machineFrame)

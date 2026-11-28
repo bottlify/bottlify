@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createSyncNatives } from './sync-natives.js';
 import { createNamedObjects } from './named-objects.js';
 import { STATUS } from '../ntdll/status.js';
@@ -97,8 +98,7 @@ function setup(){
         return kernel.handles.open(kind, object);
     };
     const natives = createSyncNatives({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         kernel,
         creates: {
             /** @param {string | null} name @param {boolean} owned */

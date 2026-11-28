@@ -4,10 +4,10 @@
  * See LICENSE for details
  */
 
-
 import { TEB, TEB64, blockLayouts } from './teb.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { setCondition, verifyVersion, windowsVersion } from './versions.js';
+import { imm32 } from '../../../system/x86.js';
 
 /**
  * The kernel32 surface a program touches before it does anything interesting:
@@ -168,15 +168,12 @@ const ERROR_NOACCESS = 998;
  * @property {number} [timeStampMhz]  The rate the processor's rdtsc advances at, in MHz:
  *     where it is a whole multiple of the performance frequency, the counter's guest
  *     code reads it and moves inside a slice.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, expected: bigint, value: bigint) => bigint} [compareExchangeU64]
  * @property {(address: number, length: number) => Int32Array | null} [wordsOver]
  *     the dwords of a block the engine keeps, over the RAM itself, where it can be had
  *     A quadword swapped only if it holds `expected`, indivisible against the
  *     guest's `lock cmpxchg8b` on the process's other executors; answers what it held.
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} [readWideString]
  * @property {() => any} currentThread     The record per-thread state hangs on.
  * @property {() => number} now            Guest milliseconds since boot.
  * @property {() => number} systemTimeMs   Guest wall clock, milliseconds since 1970.
@@ -236,8 +233,7 @@ const ERROR_NOACCESS = 998;
  * one (a test's) keeps it here.
  *
  * @param {() => any} currentThread
- * @param {{ readU32: (address: number) => number,
- *           writeU32: (address: number, value: number) => void } | null} [memory]
+ * @param {import('../../../system/port.js').Port | null} [memory]
  * @param {{ LAST_ERROR: number }} [block]  The thread block's layout: a
  *        64-bit process's keeps the error at its own offset.
  */
@@ -274,7 +270,7 @@ export function createThreadState(currentThread, memory = null, block = TEB){
         const teb = blockOf(thread);
         if (teb !== 0 && memory)
         {
-            memory.writeU32(teb + block.LAST_ERROR, code >>> 0);
+            memory.set32(teb + block.LAST_ERROR, code >>> 0);
         }
         else
         {
@@ -286,7 +282,7 @@ export function createThreadState(currentThread, memory = null, block = TEB){
     const lastErrorOf = (thread = currentThread() ?? between)=>{
         const teb = blockOf(thread);
         return teb !== 0 && memory
-            ? memory.readU32(teb + block.LAST_ERROR)
+            ? memory.u32(teb + block.LAST_ERROR)
             : stateOf(thread).lastError;
     };
 
@@ -299,8 +295,6 @@ export function createThreadState(currentThread, memory = null, block = TEB){
     };
 }
 
-/** @param {number} value */
-const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 /**
  * GetLastError as guest code: the block's field, through FS. Measured on a
@@ -310,7 +304,7 @@ const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, val
  */
 export function getLastErrorCode(){
     return new Uint8Array([
-        0x64, 0xa1, ...dword(TEB.LAST_ERROR),                        // mov eax, fs:[0x34]
+        0x64, 0xa1, ...imm32(TEB.LAST_ERROR),                        // mov eax, fs:[0x34]
         0xc3,                                                        // ret
     ]);
 }
@@ -322,7 +316,7 @@ export function getLastErrorCode(){
  */
 export function getCurrentThreadIdCode(){
     return new Uint8Array([
-        0x64, 0xa1, ...dword(TEB.THREAD_ID),                         // mov eax, fs:[0x24]
+        0x64, 0xa1, ...imm32(TEB.THREAD_ID),                         // mov eax, fs:[0x24]
         0xc3,                                                        // ret
     ]);
 }
@@ -331,7 +325,7 @@ export function getCurrentThreadIdCode(){
 export function setLastErrorCode(){
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
-        0x64, 0xa3, ...dword(TEB.LAST_ERROR),                        // mov fs:[0x34], eax
+        0x64, 0xa3, ...imm32(TEB.LAST_ERROR),                        // mov fs:[0x34], eax
         0xc2, 0x04, 0x00,                                            // ret 4
     ]);
 }
@@ -351,11 +345,11 @@ export function tlsGetValueCode(at, trap){
         0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
         0x83, 0xf8, TLS_SLOTS_IN_BLOCK,                              // cmp eax, 64
         0x73, slow - 9,                                              // jae slow
-        0x64, 0xc7, 0x05, ...dword(TEB.LAST_ERROR), ...dword(0),     // mov dword fs:[0x34], 0
-        0x64, 0x8b, 0x04, 0x85, ...dword(TEB.TLS_SLOTS),             // mov eax, fs:[0xe10+eax*4]
+        0x64, 0xc7, 0x05, ...imm32(TEB.LAST_ERROR), ...imm32(0),     // mov dword fs:[0x34], 0
+        0x64, 0x8b, 0x04, 0x85, ...imm32(TEB.TLS_SLOTS),             // mov eax, fs:[0xe10+eax*4]
         0xc2, 0x04, 0x00,                                            // ret 4
         // slow:
-        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
 
@@ -379,11 +373,11 @@ export function tlsSetValueCode(at, trap){
         0x83, 0xf8, TLS_SLOTS_IN_BLOCK,                              // cmp eax, 64
         0x73, slow - 9,                                              // jae slow
         0x8b, 0x54, 0x24, 0x08,                                      // mov edx, [esp+8]
-        0x64, 0x89, 0x14, 0x85, ...dword(TEB.TLS_SLOTS),             // mov fs:[0xe10+eax*4], edx
-        0xb8, ...dword(1),                                           // mov eax, 1
+        0x64, 0x89, 0x14, 0x85, ...imm32(TEB.TLS_SLOTS),             // mov fs:[0xe10+eax*4], edx
+        0xb8, ...imm32(1),                                           // mov eax, 1
         0xc2, 0x08, 0x00,                                            // ret 8
         // slow:
-        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
 
@@ -393,7 +387,7 @@ export function tlsSetValueCode(at, trap){
  * slots a quadword each. A routine that hands an index past the block's
  * TlsSlots to the host jumps to its trap, whose rel32 is at `jump`.
  */
-const gs = (/** @type {number} */ offset)=>[0x04, 0x25, ...dword(offset)];
+const gs = (/** @type {number} */ offset)=>[0x04, 0x25, ...imm32(offset)];
 
 /** GetLastError at 64 bits: mov eax, gs:[0x68]; ret */
 const getLastErrorLongCode = ()=>Uint8Array.of(
@@ -401,7 +395,7 @@ const getLastErrorLongCode = ()=>Uint8Array.of(
 
 /** SetLastError at 64 bits: mov gs:[0x68], ecx; ret */
 const setLastErrorLongCode = ()=>Uint8Array.of(
-    0x65, 0x89, 0x0c, 0x25, ...dword(TEB64.LAST_ERROR), 0xc3);
+    0x65, 0x89, 0x0c, 0x25, ...imm32(TEB64.LAST_ERROR), 0xc3);
 
 /** GetCurrentThreadId at 64 bits: mov eax, gs:[0x48]; ret */
 const getCurrentThreadIdLongCode = ()=>Uint8Array.of(
@@ -419,10 +413,10 @@ function tlsGetValueLongCode(){
     const slow = 29;
     const code = Uint8Array.of(
         0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,
-        0x65, 0xc7, ...gs(TEB64.LAST_ERROR), ...dword(0),
-        0x65, 0x48, 0x8b, 0x04, 0xcd, ...dword(TEB64.TLS_SLOTS),
+        0x65, 0xc7, ...gs(TEB64.LAST_ERROR), ...imm32(0),
+        0x65, 0x48, 0x8b, 0x04, 0xcd, ...imm32(TEB64.TLS_SLOTS),
         0xc3,
-        0xe9, ...dword(0));
+        0xe9, ...imm32(0));
     return { code, jump: slow + 1 };
 }
 
@@ -438,10 +432,10 @@ function tlsSetValueLongCode(){
     const slow = 22;
     const code = Uint8Array.of(
         0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,
-        0x65, 0x48, 0x89, 0x14, 0xcd, ...dword(TEB64.TLS_SLOTS),
-        0xb8, ...dword(1),
+        0x65, 0x48, 0x89, 0x14, 0xcd, ...imm32(TEB64.TLS_SLOTS),
+        0xb8, ...imm32(1),
         0xc3,
-        0xe9, ...dword(0));
+        0xe9, ...imm32(0));
     return { code, jump: slow + 1 };
 }
 
@@ -522,25 +516,25 @@ export function queryPerformanceCounterCode(at, trap, block, perCount = 0){
     return new Uint8Array([
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
         0x85, 0xc9,                                                  // test ecx, ecx
-        0x0f, 0x84, ...dword(slow - 12),                             // jz slow
+        0x0f, 0x84, ...imm32(slow - 12),                             // jz slow
         0x53, 0x56, 0x57, 0x55,                                      // push ebx, esi, edi, ebp
         0x89, 0xcd,                                                  // mov ebp, ecx
         // read: (18)
-        0xa1, ...dword(sequence),                                    // mov eax, [sequence]
+        0xa1, ...imm32(sequence),                                    // mov eax, [sequence]
         0xa8, 0x01,                                                  // test al, 1
         0x75, 110 - 27,                                              // jnz spin
-        0x8b, 0x3d, ...dword(counter),                               // mov edi, [counter]
-        0x8b, 0x35, ...dword(counter + 4),                           // mov esi, [counter+4]
-        0x3b, 0x05, ...dword(sequence),                              // cmp eax, [sequence]
+        0x8b, 0x3d, ...imm32(counter),                               // mov edi, [counter]
+        0x8b, 0x35, ...imm32(counter + 4),                           // mov esi, [counter+4]
+        0x3b, 0x05, ...imm32(sequence),                              // cmp eax, [sequence]
         0x75, (18 - 47) & 0xff,                                      // jne read
-        0xa1, ...dword(last),                                        // mov eax, [last]
-        0x8b, 0x15, ...dword(last + 4),                              // mov edx, [last+4]
+        0xa1, ...imm32(last),                                        // mov eax, [last]
+        0x8b, 0x15, ...imm32(last + 4),                              // mov edx, [last+4]
         ...counterTail(last),
         // spin: (110)
         0xf3, 0x90,                                                  // pause
         0xeb, (18 - 114) & 0xff,                                     // jmp read
         // slow: (114)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
 
@@ -575,7 +569,7 @@ function queryPerformanceCounterTscCode(at, trap, block, perCount){
     return new Uint8Array([
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
         0x85, 0xc9,                                                  // test ecx, ecx
-        0x0f, 0x84, ...dword(slow - 12),                             // jz slow
+        0x0f, 0x84, ...imm32(slow - 12),                             // jz slow
         0x53, 0x56, 0x57, 0x55,                                      // push ebx, esi, edi, ebp
         0x89, 0xcd,                                                  // mov ebp, ecx
         // read: (18)
@@ -583,17 +577,17 @@ function queryPerformanceCounterTscCode(at, trap, block, perCount){
         0x89, 0xc1,                                                  // mov ecx, eax
         0x89, 0xd0,                                                  // mov eax, edx
         0x31, 0xd2,                                                  // xor edx, edx
-        0xbb, ...dword(perCount),                                    // mov ebx, perCount
+        0xbb, ...imm32(perCount),                                    // mov ebx, perCount
         0xf7, 0xf3,                                                  // div ebx
         0x89, 0xc6,                                                  // mov esi, eax
         0x89, 0xc8,                                                  // mov eax, ecx
         0xf7, 0xf3,                                                  // div ebx
         0x89, 0xc7,                                                  // mov edi, eax
-        0xa1, ...dword(last),                                        // mov eax, [last]
-        0x8b, 0x15, ...dword(last + 4),                              // mov edx, [last+4]
+        0xa1, ...imm32(last),                                        // mov eax, [last]
+        0x8b, 0x15, ...imm32(last + 4),                              // mov edx, [last+4]
         ...counterTail(last),
         // slow: (104)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
 
@@ -620,12 +614,12 @@ function counterTail(last){
         0x83, 0xc3, 0x01,                                            // add ebx, 1
         0x83, 0xd1, 0x00,                                            // adc ecx, 0
         // swap: (+24)
-        0xf0, 0x0f, 0xc7, 0x0d, ...dword(last),                      // lock cmpxchg8b [last]
+        0xf0, 0x0f, 0xc7, 0x0d, ...imm32(last),                      // lock cmpxchg8b [last]
         0x75, (0 - 34) & 0xff,                                       // jne next
         0x89, 0x5d, 0x00,                                            // mov [ebp], ebx
         0x89, 0x4d, 0x04,                                            // mov [ebp+4], ecx
         0x5d, 0x5f, 0x5e, 0x5b,                                      // pop ebp, edi, esi, ebx
-        0xb8, ...dword(1),                                           // mov eax, 1
+        0xb8, ...imm32(1),                                           // mov eax, 1
         0xc2, 0x04, 0x00,                                            // ret 4
     ];
 }
@@ -664,61 +658,61 @@ export function queryPerformanceCounterCode64(at, trap, block, perCount = 0){
         const slow = 77;
         return new Uint8Array([
             0x48, 0x85, 0xc9,                                        // test rcx, rcx
-            0x0f, 0x84, ...dword(slow - 9),                          // jz slow
-            0x41, 0xb8, ...dword(block),                             // mov r8d, block
+            0x0f, 0x84, ...imm32(slow - 9),                          // jz slow
+            0x41, 0xb8, ...imm32(block),                             // mov r8d, block
             // read: (15)
             0x0f, 0x31,                                              // rdtsc
             0x48, 0xc1, 0xe2, 0x20,                                  // shl rdx, 32
             0x48, 0x09, 0xd0,                                        // or rax, rdx
             0x31, 0xd2,                                              // xor edx, edx
-            0x41, 0xb9, ...dword(perCount),                          // mov r9d, perCount
+            0x41, 0xb9, ...imm32(perCount),                          // mov r9d, perCount
             0x49, 0xf7, 0xf1,                                        // div r9
             0x49, 0x89, 0xc1,                                        // mov r9, rax
-            0x49, 0x8b, 0x80, ...dword(CLOCK.LAST),                  // mov rax, [r8+last]
+            0x49, 0x8b, 0x80, ...imm32(CLOCK.LAST),                  // mov rax, [r8+last]
             // next: (45)
             0x4c, 0x89, 0xca,                                        // mov rdx, r9
             0x48, 0x39, 0xc2,                                        // cmp rdx, rax
             0x77, 57 - 53,                                           // ja swap
             0x48, 0x8d, 0x50, 0x01,                                  // lea rdx, [rax+1]
             // swap: (57)
-            0xf0, 0x49, 0x0f, 0xb1, 0x90, ...dword(CLOCK.LAST),      // lock cmpxchg [r8+last], rdx
+            0xf0, 0x49, 0x0f, 0xb1, 0x90, ...imm32(CLOCK.LAST),      // lock cmpxchg [r8+last], rdx
             0x75, (45 - 68) & 0xff,                                  // jne next
             0x48, 0x89, 0x11,                                        // mov [rcx], rdx
-            0xb8, ...dword(1),                                       // mov eax, 1
+            0xb8, ...imm32(1),                                       // mov eax, 1
             0xc3,                                                    // ret
             // slow: (77)
-            0xe9, ...dword(trap - (at + slow + 5)),                  // jmp trap
+            0xe9, ...imm32(trap - (at + slow + 5)),                  // jmp trap
         ]);
     }
     const slow = 85;
     return new Uint8Array([
         0x48, 0x85, 0xc9,                                            // test rcx, rcx
-        0x0f, 0x84, ...dword(slow - 9),                              // jz slow
-        0x41, 0xb8, ...dword(block),                                 // mov r8d, block
+        0x0f, 0x84, ...imm32(slow - 9),                              // jz slow
+        0x41, 0xb8, ...imm32(block),                                 // mov r8d, block
         // read: (15)
-        0x41, 0x8b, 0x80, ...dword(CLOCK.SEQUENCE),                  // mov eax, [r8+sequence]
+        0x41, 0x8b, 0x80, ...imm32(CLOCK.SEQUENCE),                  // mov eax, [r8+sequence]
         0xa8, 0x01,                                                  // test al, 1
         0x75, 81 - 26,                                               // jnz spin
-        0x4d, 0x8b, 0x88, ...dword(CLOCK.COUNTER),                   // mov r9, [r8+counter]
-        0x41, 0x3b, 0x80, ...dword(CLOCK.SEQUENCE),                  // cmp eax, [r8+sequence]
+        0x4d, 0x8b, 0x88, ...imm32(CLOCK.COUNTER),                   // mov r9, [r8+counter]
+        0x41, 0x3b, 0x80, ...imm32(CLOCK.SEQUENCE),                  // cmp eax, [r8+sequence]
         0x75, (15 - 42) & 0xff,                                      // jne read
-        0x49, 0x8b, 0x80, ...dword(CLOCK.LAST),                      // mov rax, [r8+last]
+        0x49, 0x8b, 0x80, ...imm32(CLOCK.LAST),                      // mov rax, [r8+last]
         // next: (49)
         0x4c, 0x89, 0xca,                                            // mov rdx, r9
         0x48, 0x39, 0xc2,                                            // cmp rdx, rax
         0x77, 61 - 57,                                               // ja swap
         0x48, 0x8d, 0x50, 0x01,                                      // lea rdx, [rax+1]
         // swap: (61)
-        0xf0, 0x49, 0x0f, 0xb1, 0x90, ...dword(CLOCK.LAST),          // lock cmpxchg [r8+last], rdx
+        0xf0, 0x49, 0x0f, 0xb1, 0x90, ...imm32(CLOCK.LAST),          // lock cmpxchg [r8+last], rdx
         0x75, (49 - 72) & 0xff,                                      // jne next
         0x48, 0x89, 0x11,                                            // mov [rcx], rdx
-        0xb8, ...dword(1),                                           // mov eax, 1
+        0xb8, ...imm32(1),                                           // mov eax, 1
         0xc3,                                                        // ret
         // spin: (81)
         0xf3, 0x90,                                                  // pause
         0xeb, (15 - 85) & 0xff,                                      // jmp read
         // slow: (85)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
 
@@ -735,12 +729,12 @@ export function queryPerformanceFrequencyCode64(at, trap,
     return new Uint8Array([
         0x48, 0x85, 0xc9,                                            // test rcx, rcx
         0x74, slow - 5,                                              // jz slow
-        0xb8, ...dword(frequency),                                   // mov eax, frequency
+        0xb8, ...imm32(frequency),                                   // mov eax, frequency
         0x48, 0x89, 0x01,                                            // mov [rcx], rax
-        0xb8, ...dword(1),                                           // mov eax, 1
+        0xb8, ...imm32(1),                                           // mov eax, 1
         0xc3,                                                        // ret
         // slow: (19)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
 
@@ -751,7 +745,7 @@ export function queryPerformanceFrequencyCode64(at, trap,
  */
 export function tickCountCode64(block){
     return new Uint8Array([
-        0x8b, 0x04, 0x25, ...dword(block + CLOCK.TICKS),             // mov eax, [block+ticks]
+        0x8b, 0x04, 0x25, ...imm32(block + CLOCK.TICKS),             // mov eax, [block+ticks]
         0xc3,                                                        // ret
     ]);
 }
@@ -769,12 +763,12 @@ export function queryPerformanceFrequencyCode(at, trap, frequency = Number(PERFO
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
         0x85, 0xc9,                                                  // test ecx, ecx
         0x74, slow - 8,                                              // jz slow
-        0xc7, 0x01, ...dword(frequency),                             // mov dword [ecx], frequency
-        0xc7, 0x41, 0x04, ...dword(0),                               // mov dword [ecx+4], 0
-        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc7, 0x01, ...imm32(frequency),                             // mov dword [ecx], frequency
+        0xc7, 0x41, 0x04, ...imm32(0),                               // mov dword [ecx+4], 0
+        0xb8, ...imm32(1),                                           // mov eax, 1
         0xc2, 0x04, 0x00,                                            // ret 4
         // slow:
-        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
 
@@ -813,11 +807,11 @@ export function sleepCode(at, trap, word, ex = false){
         0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
         ...test,
         0x75, slow - 6 - test.length,                                // jnz slow
-        0x83, 0x3d, ...dword(word), 0x00,                            // cmp dword [word], 0
+        0x83, 0x3d, ...imm32(word), 0x00,                            // cmp dword [word], 0
         0x75, 3,                                                     // jne slow
         0xc2, ex ? 0x08 : 0x04, 0x00,                                // ret
         // slow:
-        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
 
@@ -831,7 +825,7 @@ export function sleepCode(at, trap, word, ex = false){
  */
 export function tickCountCode(block){
     return new Uint8Array([
-        0xa1, ...dword(block + CLOCK.TICKS),                         // mov eax, [block+8]
+        0xa1, ...imm32(block + CLOCK.TICKS),                         // mov eax, [block+8]
         0xc3,                                                        // ret
     ]);
 }
@@ -845,6 +839,7 @@ export function tickCountCode(block){
  * @param {ProcessHost} host
  */
 export function createProcessFunctions(host){
+    const { guest } = host;
     const width = pointerWidth(host.pointerSize);
     const performanceFrequency = host.performanceFrequency ?? Number(PERFORMANCE_FREQUENCY);
     if (!Number.isInteger(performanceFrequency) || performanceFrequency < 1
@@ -875,20 +870,11 @@ export function createProcessFunctions(host){
     slots[0] = 0;
     let generation = 0;
 
-    const memory = {
-        /** @param {number} address */
-        readU32: address=>{
-            const bytes = host.readMemory(address, 4);
-            return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
-        },
-        /** @param {number} address @param {number} value */
-        writeU32: (address, value)=>host.writeMemory(address, new Uint8Array(dword(value))),
-    };
     // The thread block at the process's width: the last error's offset, and
     // TlsSlots', a pointer each.
     const blocks = blockLayouts(host.pointerSize);
     const { stateOf, setError, lastErrorOf } = host.threadState
-        ?? createThreadState(host.currentThread, memory, blocks.teb);
+        ?? createThreadState(host.currentThread, guest, blocks.teb);
     const processors = host.processors;
 
     /** @param {number} group  A WORD: ALL_PROCESSOR_GROUPS or 0, the only one. */
@@ -947,7 +933,7 @@ export function createProcessFunctions(host){
             const base = (asked & FROM_ADDRESS) !== 0
                 ? (host.moduleContaining?.(name >>> 0) ?? 0) >>> 0
                 : host.moduleHandle((name >>> 0) === 0 ? null : read(wholeAddress(name))) >>> 0;
-            host.writeMemory(wholeAddress(out), Uint8Array.from(dword(base)));
+            guest.set32(wholeAddress(out), base);
             if (base === 0)
             {
                 setError(ERROR_MOD_NOT_FOUND);
@@ -998,7 +984,7 @@ export function createProcessFunctions(host){
             const at = allocate(code(0).length);
             if (at !== 0)
             {
-                host.writeMemory(at, code(at));
+                guest.setBytes(at, code(at));
             }
             return at;
         };
@@ -1041,13 +1027,13 @@ export function createProcessFunctions(host){
             return lastCount;
         }
         const at = clockAt + CLOCK.LAST;
-        let last = BigInt(memory.readU32(at)) | BigInt(memory.readU32(at + 4)) << 32n;
+        let last = BigInt(guest.u32(at)) | BigInt(guest.u32(at + 4)) << 32n;
         for (;;)
         {
             const answer = clock > last ? clock : last + 1n;
             if (host.compareExchangeU64 === undefined)
             {
-                writeU64(at, answer);
+                guest.set64(at, answer);
                 return answer;
             }
             // As the routine's `lock cmpxchg8b`: another thread's answer taken
@@ -1096,9 +1082,9 @@ export function createProcessFunctions(host){
         // The span written runs from the ticks to the counter's end.
         clockView.setUint32(0, Math.floor(milliseconds) >>> 0, true);
         clockView.setBigUint64(CLOCK.COUNTER - CLOCK.TICKS, ticksOf(milliseconds), true);
-        memory.writeU32(clockAt + CLOCK.SEQUENCE, ++sequence);
-        host.writeMemory(clockAt + CLOCK.TICKS, clockBytes);
-        memory.writeU32(clockAt + CLOCK.SEQUENCE, ++sequence);
+        guest.set32(clockAt + CLOCK.SEQUENCE, ++sequence);
+        guest.setBytes(clockAt + CLOCK.TICKS, clockBytes);
+        guest.set32(clockAt + CLOCK.SEQUENCE, ++sequence);
     };
     /**
      * The block, taken once and alone on its page, with the engine told where
@@ -1159,7 +1145,7 @@ export function createProcessFunctions(host){
             // length, so the bytes depend on where they land only through the
             // one relative jump.
             const at = allocate(code(0, trap).length);
-            host.writeMemory(at, code(at, trap));
+            guest.setBytes(at, code(at, trap));
             return at;
         };
         const long = host.pointerSize === 8;
@@ -1213,7 +1199,7 @@ export function createProcessFunctions(host){
             host.readyWord(readyWord);
         }
         const at = allocate(sleepCode(0, trap, readyWord, ex !== null).length);
-        host.writeMemory(at, sleepCode(at, trap, readyWord, ex !== null));
+        guest.setBytes(at, sleepCode(at, trap, readyWord, ex !== null));
         sleepAt.set(name, at);
         return at;
     };
@@ -1263,7 +1249,7 @@ export function createProcessFunctions(host){
             const block = blockFor(index);
             if (block !== 0)
             {
-                host.writeMemory(block + index * width.size, width.bytes(0));
+                guest.setBytes(block + index * width.size, width.bytes(0));
             }
             return;
         }
@@ -1273,21 +1259,10 @@ export function createProcessFunctions(host){
             const block = teb === 0 ? 0 : teb + blocks.teb.TLS_SLOTS;
             if (block !== 0)
             {
-                host.writeMemory(block + index * width.size, width.bytes(0));
+                guest.setBytes(block + index * width.size, width.bytes(0));
             }
         }
     };
-
-    /** @param {number} address @param {bigint} value */
-    const writeU64 = (address, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigUint64(0, value, true);
-        host.writeMemory(address, bytes);
-    };
-
-    /** @param {number} address */
-    const readU32 = address=>new DataView(
-        host.readMemory(address, 4).buffer).getUint32(0, true);
 
     const told = host.version ?? DEFAULT_VERSION;
 
@@ -1300,7 +1275,7 @@ export function createProcessFunctions(host){
      */
     const versionEx = (address, wide)=>{
         const layout = wide ? OSVERSIONINFO_W : OSVERSIONINFO_A;
-        const declared = readU32(address);
+        const declared = guest.u32(address);
         if (declared !== layout.SIZE && declared !== layout.EX_SIZE)
         {
             setError(ERROR_INSUFFICIENT_BUFFER);
@@ -1335,7 +1310,7 @@ export function createProcessFunctions(host){
             view.setUint16(layout.EXTENDED + 4, told.suiteMask, true);
             struct[layout.EXTENDED + 6] = told.productType;
         }
-        host.writeMemory(address + 4, struct.subarray(4));
+        guest.setBytes(address + 4, struct.subarray(4));
         return 1;
     };
 
@@ -1347,14 +1322,14 @@ export function createProcessFunctions(host){
      */
     const verify = ([pointer, typeMask, maskLow, maskHigh], wide)=>{
         const at = wholeAddress(pointer);
-        const extended = host.readMemory(
+        const extended = guest.snapshot(
             at + (wide ? OSVERSIONINFO_W : OSVERSIONINFO_A).EXTENDED, 8);
         const fields = new DataView(extended.buffer);
         const answer = verifyVersion(told, {
-            major: readU32(at + 4),
-            minor: readU32(at + 8),
-            build: readU32(at + 12),
-            platformId: readU32(at + 16),
+            major: guest.u32(at + 4),
+            minor: guest.u32(at + 8),
+            build: guest.u32(at + 12),
+            platformId: guest.u32(at + 16),
             servicePackMajor: fields.getUint16(0, true),
             servicePackMinor: fields.getUint16(2, true),
             suiteMask: fields.getUint16(4, true),
@@ -1419,11 +1394,11 @@ export function createProcessFunctions(host){
                 const long = host.pointerSize === 8;
                 /** @param {number} at */
                 const read = at=>(long
-                    ? new DataView(host.readMemory(at, 8).buffer).getBigUint64(0, true)
-                    : BigInt(memory.readU32(at)));
+                    ? guest.u64(at)
+                    : BigInt(guest.u32(at)));
                 /** @param {number} at @param {bigint} value */
-                const write = (at, value)=>(long ? writeU64(at, value)
-                    : memory.writeU32(at, Number(value)));
+                const write = (at, value)=>(long ? guest.set64(at, value)
+                    : guest.set32(at, Number(value)));
                 write(wholeAddress(low), read(teb + blocks.teb.DEALLOCATION_STACK));
                 write(wholeAddress(high), read(teb + blocks.teb.STACK_BASE));
                 return 0;
@@ -1463,8 +1438,8 @@ export function createProcessFunctions(host){
                     return 0;
                 }
                 const base = moduleHandleOf(null) >>> 0;
-                const optional = base + memory.readU32(base + 0x3c) + 24;
-                const words = memory.readU32(optional + 48);
+                const optional = base + guest.u32(base + 0x3c) + 24;
+                const words = guest.u32(optional + 48);
                 return ((words & 0xffff) << 16 | words >>> 16) >>> 0;
             },
         },
@@ -1476,7 +1451,7 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readCString(wholeAddress(pointer), WHOLE_NAME)),
+                : guest.cstr(wholeAddress(pointer), WHOLE_NAME)),
         },
 
         /** HMODULE GetModuleHandleW(LPCWSTR lpModuleName) */
@@ -1486,15 +1461,15 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readWideString?.(wholeAddress(pointer), WHOLE_NAME * 2) ?? ''),
+                : guest.wstr(wholeAddress(pointer), WHOLE_NAME * 2) ?? ''),
         },
 
         /** BOOL GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModuleName, HMODULE *phModule) */
-        GetModuleHandleExA: moduleHandleEx(pointer=>host.readCString(pointer, WHOLE_NAME)),
+        GetModuleHandleExA: moduleHandleEx(pointer=>guest.cstr(pointer, WHOLE_NAME)),
 
         /** BOOL GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE *phModule) */
         GetModuleHandleExW: moduleHandleEx(pointer=>
-            host.readWideString?.(pointer, WHOLE_NAME * 2) ?? ''),
+            guest.wstr(pointer, WHOLE_NAME * 2) ?? ''),
 
         /**
          * BOOL GetSystemPowerStatus(LPSYSTEM_POWER_STATUS lpSystemPowerStatus)
@@ -1511,8 +1486,8 @@ export function createProcessFunctions(host){
                     setError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(status),
-                    Uint8Array.of(1, 128, 255, 0, ...dword(0xffffffff), ...dword(0xffffffff)));
+                guest.setBytes(wholeAddress(status),
+                    Uint8Array.of(1, 128, 255, 0, ...imm32(0xffffffff), ...imm32(0xffffffff)));
                 return 1;
             },
         },
@@ -1527,7 +1502,7 @@ export function createProcessFunctions(host){
                 | (told.minor << 8)
                 | ((told.build & 0x7fff) << 16)) >>> 0,
             // mov eax, version; ret -- one process, one version
-            code: ()=>Uint8Array.from([0xb8, ...dword(table.GetVersion.handler()), 0xc3]),
+            code: ()=>Uint8Array.from([0xb8, ...imm32(table.GetVersion.handler()), 0xc3]),
         },
 
         /**
@@ -1549,8 +1524,7 @@ export function createProcessFunctions(host){
                     return 0;
                 }
                 const known = (major >>> 0) >= 6 && told.edition !== undefined;
-                host.writeMemory(wholeAddress(out),
-                    Uint8Array.from(dword(known ? told.edition ?? 0 : PRODUCT_UNDEFINED)));
+                guest.set32(wholeAddress(out), known ? told.edition ?? 0 : PRODUCT_UNDEFINED);
                 return known ? 1 : 0;
             },
         },
@@ -1644,7 +1618,7 @@ export function createProcessFunctions(host){
             handler: ([pointer])=>{
                 const units = (BigInt(Math.floor(host.systemTimeMs())) + FILETIME_EPOCH_MS)
                     * 10_000n;
-                writeU64(wholeAddress(pointer), units);
+                guest.set64(wholeAddress(pointer), units);
                 return 0;
             },
         },
@@ -1662,7 +1636,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(wholeAddress(pointer), BigInt(Math.floor(host.systemTimeMs() * 10_000))
+                guest.set64(wholeAddress(pointer), BigInt(Math.floor(host.systemTimeMs() * 10_000))
                     + FILETIME_EPOCH_MS * 10_000n);
                 return 0;
             },
@@ -1695,7 +1669,7 @@ export function createProcessFunctions(host){
                 {
                     if ((pointer >>> 0) !== 0)
                     {
-                        host.writeMemory(wholeAddress(pointer), Uint8Array.of(value & 0xff,
+                        guest.setBytes(wholeAddress(pointer), Uint8Array.of(value & 0xff,
                             value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
                     }
                 }
@@ -1708,7 +1682,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(wholeAddress(pointer), nextCount());
+                guest.set64(wholeAddress(pointer), nextCount());
                 return 1;
             },
             ...clockGuest('counter'),
@@ -1729,7 +1703,7 @@ export function createProcessFunctions(host){
                     setError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                writeU64(wholeAddress(pointer), BigInt(Math.floor(host.now() * 10_000)));
+                guest.set64(wholeAddress(pointer), BigInt(Math.floor(host.now() * 10_000)));
                 return 1;
             },
         },
@@ -1739,7 +1713,7 @@ export function createProcessFunctions(host){
             handler: ([pointer])=>{
                 if ((pointer >>> 0) !== 0)
                 {
-                    writeU64(wholeAddress(pointer), BigInt(Math.floor(host.now() * 10_000)));
+                    guest.set64(wholeAddress(pointer), BigInt(Math.floor(host.now() * 10_000)));
                 }
                 return 0;
             },
@@ -1750,7 +1724,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(wholeAddress(pointer), BigInt(performanceFrequency));
+                guest.set64(wholeAddress(pointer), BigInt(performanceFrequency));
                 return 1;
             },
             ...clockGuest('frequency'),
@@ -1843,7 +1817,7 @@ export function createProcessFunctions(host){
                     setError(ERROR_NOACCESS);
                     return 0;
                 }
-                memory.writeU32(wholeAddress(out), priorityBoostDisabled ? 1 : 0);
+                guest.set32(wholeAddress(out), priorityBoostDisabled ? 1 : 0);
                 return 1;
             },
         },
@@ -1863,12 +1837,12 @@ export function createProcessFunctions(host){
                 // DWORD_PTRs: a quadword each in a 64-bit process.
                 if (wholeAddress(processMask) !== 0)
                 {
-                    host.writeMemory(wholeAddress(processMask),
+                    guest.setBytes(wholeAddress(processMask),
                         width.bytes(processors.processMask()));
                 }
                 if (wholeAddress(systemMask) !== 0)
                 {
-                    host.writeMemory(wholeAddress(systemMask),
+                    guest.setBytes(wholeAddress(systemMask),
                         width.bytes(processors.systemMask()));
                 }
                 return 1;
@@ -1986,8 +1960,8 @@ export function createProcessFunctions(host){
                     setError(ERROR_NOACCESS);
                     return 0;
                 }
-                memory.writeU32(wholeAddress(level), shutdown.level);
-                memory.writeU32(wholeAddress(flags), shutdown.flags);
+                guest.set32(wholeAddress(level), shutdown.level);
+                guest.set32(wholeAddress(flags), shutdown.flags);
                 return 1;
             },
         },
@@ -2005,11 +1979,11 @@ export function createProcessFunctions(host){
             handler: ([, minimum, maximum])=>{
                 if (wholeAddress(minimum) !== 0)
                 {
-                    memory.writeU32(wholeAddress(minimum), 50 * 4096);
+                    guest.set32(wholeAddress(minimum), 50 * 4096);
                 }
                 if (wholeAddress(maximum) !== 0)
                 {
-                    memory.writeU32(wholeAddress(maximum), 345 * 4096);
+                    guest.set32(wholeAddress(maximum), 345 * 4096);
                 }
                 return 1;
             },
@@ -2081,7 +2055,7 @@ export function createProcessFunctions(host){
                 const block = blockFor(slot);
                 if (block !== 0)
                 {
-                    return memory.readU32(block + slot * width.size);
+                    return guest.u32(block + slot * width.size);
                 }
                 const entry = stateOf().tls.get(slot);
                 return entry && entry.generation === slots[slot] ? entry.value : 0;
@@ -2104,7 +2078,7 @@ export function createProcessFunctions(host){
                 const block = blockFor(slot);
                 if (block !== 0)
                 {
-                    host.writeMemory(block + slot * width.size, width.bytes(value));
+                    guest.setBytes(block + slot * width.size, width.bytes(value));
                     return 1;
                 }
                 stateOf().tls.set(slot, {

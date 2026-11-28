@@ -29,13 +29,12 @@
 
 import { assemble } from '../msvcrt/guest-code.js';
 import { CACHE, CONTROL, HEAP_MAGIC, RECORD, SLAB_SHIFT, SMALL_LIMIT } from './guest-heap.js';
+import { imm32 } from '../../../system/x86.js';
 
 /** @typedef {import('./guest-heap.js').Placement} Placement */
 /** @typedef {import('./code-arena.js').Piece} Piece */
 /** @typedef {{ code: Uint8Array, jump: number }} LongRoutine */
 
-/** @param {number} value @returns {number[]} */
-const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 const JZ = [0x0f, 0x84];
 const JNZ = [0x0f, 0x85];
@@ -73,11 +72,11 @@ function assembleLong(pieces){
 function locate(p){
     return [
         [0x44, 0x89, 0xc0],                                  // mov eax, r8d
-        [0x44, 0x8d, 0x88, ...dword(-p.dirBase)],            // lea r9d, [rax - dirBase]
-        [0x41, 0x81, 0xf9, ...dword(p.dirSpan)],             // cmp r9d, dirSpan
+        [0x44, 0x8d, 0x88, ...imm32(-p.dirBase)],            // lea r9d, [rax - dirBase]
+        [0x41, 0x81, 0xf9, ...imm32(p.dirSpan)],             // cmp r9d, dirSpan
         { jump: JAE, to: 'bad' },
         [0x41, 0xc1, 0xe9, SLAB_SHIFT],                      // shr r9d, 14
-        [0x46, 0x8b, 0x0c, 0x8d, ...dword(p.directory)],     // mov r9d, [directory + r9*4]
+        [0x46, 0x8b, 0x0c, 0x8d, ...imm32(p.directory)],     // mov r9d, [directory + r9*4]
         [0x45, 0x85, 0xc9],                                  // test r9d, r9d
         { jump: JZ, to: 'bad' },
         [0x41, 0x2b, 0x41, RECORD.BASE],                     // sub eax, [r9 + base]
@@ -109,10 +108,10 @@ function allocBody(p, zero){
     return [
         [0x45, 0x8d, 0x48, 0x07],                            // lea r9d, [r8 + 7]
         [0x41, 0xc1, 0xe9, 0x03],                            // shr r9d, 3
-        [0x41, 0x0f, 0xb6, 0x81, ...dword(p.classMap)],      // movzx eax, byte [classMap + r9]
+        [0x41, 0x0f, 0xb6, 0x81, ...imm32(p.classMap)],      // movzx eax, byte [classMap + r9]
         [0xc1, 0xe0, CONTROL.CLASS_SHIFT],                   // shl eax, 10
         [0x41, 0x8d, 0x44, 0x02, CONTROL.CLASSES],           // lea eax, [r10 + rax + classes]
-        [0x41, 0xb9, ...dword(1)],                           // mov r9d, 1
+        [0x41, 0xb9, ...imm32(1)],                           // mov r9d, 1
         [0x45, 0x87, 0x0a],                                  // xchg [r10], r9d: the lock
         [0x45, 0x85, 0xc9],                                  // test r9d, r9d
         { jump: JNZ, to: 'slow' },
@@ -156,15 +155,15 @@ function allocBody(p, zero){
  */
 export function heapAllocLongCode(p){
     return assembleLong([
-        [0xf7, 0xc2, ...dword(~ALLOC_FLAGS)],                // test edx, ~flags
+        [0xf7, 0xc2, ...imm32(~ALLOC_FLAGS)],                // test edx, ~flags
         { jump: JNZ, to: 'slow' },
-        [0x49, 0x81, 0xf8, ...dword(SMALL_LIMIT)],           // cmp r8, 1024
+        [0x49, 0x81, 0xf8, ...imm32(SMALL_LIMIT)],           // cmp r8, 1024
         { jump: JA, to: 'slow' },
         [0x41, 0x89, 0xca],                                  // mov r10d, ecx
-        [0x41, 0x8d, 0x82, ...dword(-p.dirBase)],            // lea eax, [r10 - dirBase]
-        [0x3d, ...dword(p.dirSpan - CONTROL.SIZE)],          // cmp eax, dirSpan - control
+        [0x41, 0x8d, 0x82, ...imm32(-p.dirBase)],            // lea eax, [r10 - dirBase]
+        [0x3d, ...imm32(p.dirSpan - CONTROL.SIZE)],          // cmp eax, dirSpan - control
         { jump: JA, to: 'slow' },
-        [0x41, 0x81, 0x7a, CONTROL.MAGIC, ...dword(HEAP_MAGIC)], // cmp dword [r10 + 4], 'HEAP'
+        [0x41, 0x81, 0x7a, CONTROL.MAGIC, ...imm32(HEAP_MAGIC)], // cmp dword [r10 + 4], 'HEAP'
         { jump: JNZ, to: 'slow' },
         ...allocBody(p, [0xf6, 0xc2, 0x08]),                 // test dl, HEAP_ZERO_MEMORY
     ]);
@@ -178,10 +177,10 @@ export function heapAllocLongCode(p){
  */
 export function mallocLongCode(p, heap){
     return assembleLong([
-        [0x48, 0x81, 0xf9, ...dword(SMALL_LIMIT)],           // cmp rcx, 1024
+        [0x48, 0x81, 0xf9, ...imm32(SMALL_LIMIT)],           // cmp rcx, 1024
         { jump: JA, to: 'slow' },
         [0x49, 0x89, 0xc8],                                  // mov r8, rcx
-        [0x41, 0xba, ...dword(heap)],                        // mov r10d, heap
+        [0x41, 0xba, ...imm32(heap)],                        // mov r10d, heap
         ...allocBody(p, 'never'),
     ]);
 }
@@ -201,9 +200,9 @@ export function callocLongCode(p, heap){
         { jump: JNZ, to: 'slow' },
         [0x49, 0x89, 0xc8],                                  // mov r8, rcx
         [0x4c, 0x0f, 0xaf, 0xc2],                            // imul r8, rdx
-        [0x49, 0x81, 0xf8, ...dword(SMALL_LIMIT)],           // cmp r8, 1024
+        [0x49, 0x81, 0xf8, ...imm32(SMALL_LIMIT)],           // cmp r8, 1024
         { jump: JA, to: 'slow' },
-        [0x41, 0xba, ...dword(heap)],                        // mov r10d, heap
+        [0x41, 0xba, ...imm32(heap)],                        // mov r10d, heap
         ...allocBody(p, 'always'),
     ]);
 }
@@ -220,7 +219,7 @@ export function callocLongCode(p, heap){
 function freeBody(answer){
     return [
         [0x47, 0x8d, 0x5c, 0x59, RECORD.SIZES],              // lea r11d, [r9 + r11*2 + sizes]
-        [0xb8, ...dword(1)],                                 // mov eax, 1
+        [0xb8, ...imm32(1)],                                 // mov eax, 1
         [0x41, 0x87, 0x02],                                  // xchg [r10], eax: the lock
         [0x85, 0xc0],                                        // test eax, eax
         { jump: JNZ, to: 'bad' },
@@ -240,7 +239,7 @@ function freeBody(answer){
         UNLOCK,
         'done',
         ...answer === null ? [] : answer === 0 ? [[0x31, 0xc0]] // xor eax, eax
-            : [[0xb8, ...dword(answer)]],                    // mov eax, answer
+            : [[0xb8, ...imm32(answer)]],                    // mov eax, answer
         [0xc3],                                              // ret
         'unlock',
         UNLOCK,
@@ -340,7 +339,7 @@ export function msizeLongCode(p){
  */
 function resizeBody(zero){
     return [
-        [0x49, 0x81, 0xfa, ...dword(SMALL_LIMIT)],           // cmp r10, 1024
+        [0x49, 0x81, 0xfa, ...imm32(SMALL_LIMIT)],           // cmp r10, 1024
         { jump: JA, to: 'bad' },
         [0x45, 0x3b, 0x51, RECORD.CELL],                     // cmp r10d, [r9 + cell]
         { jump: JA, to: 'bad' },
@@ -382,7 +381,7 @@ function resizeBody(zero){
 export function heapReAllocLongCode(p){
     return assembleLong([
         [0x4d, 0x89, 0xca],                                  // mov r10, r9: the size
-        [0xf7, 0xc2, ...dword(~REALLOC_FLAGS)],              // test edx, ~flags
+        [0xf7, 0xc2, ...imm32(~REALLOC_FLAGS)],              // test edx, ~flags
         { jump: JNZ, to: 'bad' },
         ...locate(p),
         [0x41, 0x39, 0x09],                                  // cmp [r9 + heap], ecx
@@ -427,10 +426,10 @@ export function globalAllocLongCode(p, heap){
         { jump: JZ, to: 'slow' },
         [0xf6, 0xc1, 0x02],                                  // test cl, GMEM_MOVEABLE
         { jump: JNZ, to: 'slow' },
-        [0x48, 0x81, 0xfa, ...dword(SMALL_LIMIT)],           // cmp rdx, 1024
+        [0x48, 0x81, 0xfa, ...imm32(SMALL_LIMIT)],           // cmp rdx, 1024
         { jump: JA, to: 'slow' },
         [0x49, 0x89, 0xd0],                                  // mov r8, rdx
-        [0x41, 0xba, ...dword(heap)],                        // mov r10d, heap
+        [0x41, 0xba, ...imm32(heap)],                        // mov r10d, heap
         ...allocBody(p, [0xf6, 0xc1, 0x40]),                 // test cl, GMEM_ZEROINIT
     ]);
 }
@@ -450,7 +449,7 @@ export function globalFreeLongCode(p, heap){
         [0x49, 0x89, 0xc8],                                  // mov r8, rcx
         ...locate(p),
         [0x45, 0x8b, 0x11],                                  // mov r10d, [r9 + heap]
-        [0x41, 0x81, 0xfa, ...dword(heap)],                  // cmp r10d, heap
+        [0x41, 0x81, 0xfa, ...imm32(heap)],                  // cmp r10d, heap
         { jump: JNZ, to: 'bad' },
         ...freeBody(0),
     ]);

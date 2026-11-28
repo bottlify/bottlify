@@ -83,7 +83,24 @@ function hostOver(replace = {}){
             /** @param {number} at @param {number} value */
             writeU32: (at, value)=>view.setUint32(at, value >>> 0, true),
             find: ()=>null,
-            scanCString: ()=>({ index: 0, byte: 0 }),
+            /** @param {number} at @param {number} [max] */
+            scanCString: (at, max = 4096)=>{
+                let index = 0;
+                while (index < max && bytes[at + index] !== 0)
+                {
+                    index++;
+                }
+                return { index, byte: 0 };
+            },
+            /** @param {number} at @param {number} [max]  bytes */
+            scanWideString: (at, max = 8192)=>{
+                let units = 0;
+                while (units * 2 < max && view.getUint16(at + units * 2, true) !== 0)
+                {
+                    units++;
+                }
+                return units;
+            },
         },
         kernel: {
             ...kernelLayerAnswers,

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createHandleTable } from '../../kernel/internal/handles.js';
 import { createIoCompletionPorts } from './iocp.js';
 import { readIntoBy } from './vfs.js';
@@ -40,18 +41,7 @@ function fakeMemory(size = 0x1000){
     return {
         bytes,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-        /** @param {number} address @param {number} maxLength */
-        readCString(address, maxLength){
-            let text = '';
-            for (let i = 0; i < maxLength && bytes[address + i] !== 0; i++)
-            {
-                text += String.fromCharCode(bytes[address + i]);
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         /** @param {number} address @param {string} text */
         putString(address, text){
             for (let i = 0; i < text.length; i++)
@@ -182,8 +172,7 @@ function setup(extra = {}){
 
     const ports = createIoCompletionPorts({
         kernel,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
+        guest: guestOver(memory.bytes, extra.pointerSize === 8 ? 8 : 4),
         /** @param {number} code */
         setLastError: code=>{
             running.error = code;
@@ -529,10 +518,7 @@ function fileSetup(behaviour = {}){
     };
 
     const fns = createFileFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        readWideString: ()=>'',
+        guest: memory.guest,
         files: /** @type {any} */ (files),
         /** @param {number} code */
         setLastError: code=>{

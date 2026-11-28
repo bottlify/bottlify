@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { imm32 } from '../../../system/x86.js';
+
 /**
  * WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent, answered in the
  * guest where the answer changes nothing the host keeps, or only a mutex or an
@@ -145,12 +147,10 @@ const SIGNALLED = 0x1;
 const MANUAL = 0x2;
 const GUEST_STATES = SIGNALLED | MANUAL;
 
-/** @param {number} value @returns {number[]} */
-const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 /** `jcc rel32` from `from` to `to`, the condition's second opcode byte given. */
 const jcc = (/** @type {number} */ op, /** @type {number} */ from, /** @type {number} */ to)=>
-    [0x0f, op, ...dword((to - (from + 6)) | 0)];
+    [0x0f, op, ...imm32((to - (from + 6)) | 0)];
 
 const JAE = 0x83;
 const JB = 0x82;
@@ -177,9 +177,9 @@ export function waitOneCode(at, trap, table, { clear, invalid, mutexTag, eventTa
     const bytes = [
         0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
         0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
-        0x3d, ...dword(EVENT_SLOTS),                                 // 7: cmp eax, EVENT_SLOTS
+        0x3d, ...imm32(EVENT_SLOTS),                                 // 7: cmp eax, EVENT_SLOTS
         ...jcc(JAE, 12, slow),                                       // 12: jae slow
-        0x8b, 0x04, 0x85, ...dword(table),                           // 18: mov eax, [table+eax*4]
+        0x8b, 0x04, 0x85, ...imm32(table),                           // 18: mov eax, [table+eax*4]
         0x83, 0xf8, 0x04,                                            // 25: cmp eax, 4
         ...jcc(JAE, 28, word),                                       // 28: jae word
         0x83, 0xf8, clear,                                           // 34: cmp eax, CLEAR
@@ -187,7 +187,7 @@ export function waitOneCode(at, trap, table, { clear, invalid, mutexTag, eventTa
         // poll: (43)
         0x83, 0x7c, 0x24, 0x08, 0x00,                                // 43: cmp dword [esp+8], 0
         ...jcc(JNE, 48, slow),                                       // 48: jne slow
-        0xb8, ...dword(WAIT_TIMEOUT),                                // 54: mov eax, WAIT_TIMEOUT
+        0xb8, ...imm32(WAIT_TIMEOUT),                                // 54: mov eax, WAIT_TIMEOUT
         0xc2, 0x08, 0x00,                                            // 59: ret 8
         // word: (62)
         0xa8, mutexTag,                                              // 62: test al, MUTEX_TAG
@@ -211,7 +211,7 @@ export function waitOneCode(at, trap, table, { clear, invalid, mutexTag, eventTa
         0xa8, eventTag,                                              // 111: test al, EVENT_TAG
         ...jcc(JNE, 113, semaphore - at),                            // 113: jnz semaphore
         0x8d, 0x48, (-mutexTag) & 0xff,                              // 119: lea ecx, [eax-tag]
-        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 122: mov edx, fs:[0x24]
+        0x64, 0x8b, 0x15, ...imm32(TEB_THREAD_ID),                   // 122: mov edx, fs:[0x24]
         0xc1, 0xe2, 0x08,                                            // 129: shl edx, 8
         0x8b, 0x01,                                                  // 132: mov eax, [ecx]
         0x85, 0xc0,                                                  // 134: test eax, eax
@@ -232,14 +232,14 @@ export function waitOneCode(at, trap, table, { clear, invalid, mutexTag, eventTa
         0x31, 0xc0,                                                  // 182: xor eax, eax
         0xc2, 0x08, 0x00,                                            // 184: ret 8
         // slow: (187)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // 187: jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // 187: jmp trap
         // other: (192)
         0x83, 0xf8, invalid,                                         // 192: cmp eax, INVALID
         0x75, (slow - 197) & 0xff,                                   // 195: jne slow
         0x83, 0x7c, 0x24, 0x04, 0x00,                                // 197: cmp dword [esp+4], 0
         0x75, (slow - 204) & 0xff,                                   // 202: jne slow
-        0x64, 0xc7, 0x05, ...dword(TEB_LAST_ERROR),                  // 204: mov dword fs:[0x34],
-        ...dword(ERROR_INVALID_HANDLE),                              //      ERROR_INVALID_HANDLE
+        0x64, 0xc7, 0x05, ...imm32(TEB_LAST_ERROR),                  // 204: mov dword fs:[0x34],
+        ...imm32(ERROR_INVALID_HANDLE),                              //      ERROR_INVALID_HANDLE
         0x83, 0xc8, 0xff,                                            // 215: or eax, -1
         0xc2, 0x08, 0x00,                                            // 218: ret 8
     ];
@@ -303,9 +303,9 @@ export function releaseMutexCode(at, trap, table, { mutexTag, eventTag }){
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
         0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
-        0x3d, ...dword(EVENT_SLOTS),                                 // 7: cmp eax, EVENT_SLOTS
+        0x3d, ...imm32(EVENT_SLOTS),                                 // 7: cmp eax, EVENT_SLOTS
         ...jcc(JAE, 12, slow),                                       // 12: jae slow
-        0x8b, 0x04, 0x85, ...dword(table),                           // 18: mov eax, [table+eax*4]
+        0x8b, 0x04, 0x85, ...imm32(table),                           // 18: mov eax, [table+eax*4]
         0x83, 0xf8, 0x04,                                            // 25: cmp eax, 4
         ...jcc(JB, 28, slow),                                        // 28: jb slow
         0xa8, mutexTag,                                              // 34: test al, MUTEX_TAG
@@ -313,7 +313,7 @@ export function releaseMutexCode(at, trap, table, { mutexTag, eventTag }){
         0xa8, eventTag,                                              // 42: test al, EVENT_TAG
         ...jcc(JNE, 44, slow),                                       // 44: jnz slow
         0x8d, 0x48, (-mutexTag) & 0xff,                              // 50: lea ecx, [eax-MUTEX_TAG]
-        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 53: mov edx, fs:[0x24]
+        0x64, 0x8b, 0x15, ...imm32(TEB_THREAD_ID),                   // 53: mov edx, fs:[0x24]
         0xc1, 0xe2, 0x08,                                            // 60: shl edx, 8
         0x8b, 0x01,                                                  // 63: mov eax, [ecx]
         0x31, 0xd0,                                                  // 65: xor eax, edx
@@ -327,17 +327,17 @@ export function releaseMutexCode(at, trap, table, { mutexTag, eventTag }){
         0x8d, 0x50, 0xff,                                            // 84: lea edx, [eax-1]
         0xf0, 0x0f, 0xb1, 0x11,                                      // 87: lock cmpxchg [ecx], edx
         ...jcc(JNE, 91, slow),                                       // 91: jne slow
-        0xb8, ...dword(1),                                           // 97: mov eax, 1
+        0xb8, ...imm32(1),                                           // 97: mov eax, 1
         0xc2, 0x04, 0x00,                                            // 102: ret 4
         // last: (105)
         0x8d, 0x42, 0x01,                                            // 105: lea eax, [edx+1]
         0x31, 0xd2,                                                  // 108: xor edx, edx
         0xf0, 0x0f, 0xb1, 0x11,                                      // 110: lock cmpxchg [ecx], edx
         ...jcc(JNE, 114, slow),                                      // 114: jne slow
-        0xb8, ...dword(1),                                           // 120: mov eax, 1
+        0xb8, ...imm32(1),                                           // 120: mov eax, 1
         0xc2, 0x04, 0x00,                                            // 125: ret 4
         // slow: (128)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // 128: jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // 128: jmp trap
     ]);
 }
 
@@ -397,9 +397,9 @@ export function eventStateCode(at, trap, table, { clear, set, mutexTag, eventTag
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
         0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
-        0x3d, ...dword(EVENT_SLOTS),                                 // 7: cmp eax, EVENT_SLOTS
+        0x3d, ...imm32(EVENT_SLOTS),                                 // 7: cmp eax, EVENT_SLOTS
         ...jcc(JAE, 12, slow),                                       // 12: jae slow
-        0x8b, 0x0c, 0x85, ...dword(table),                           // 18: mov ecx, [table+eax*4]
+        0x8b, 0x0c, 0x85, ...imm32(table),                           // 18: mov ecx, [table+eax*4]
         0x83, 0xf9, signal ? set : clear,                            // 25: cmp ecx, state
         ...jcc(JE, 28, done),                                        // 28: je done
         0x83, 0xf9, 0x04,                                            // 34: cmp ecx, 4
@@ -418,9 +418,9 @@ export function eventStateCode(at, trap, table, { clear, set, mutexTag, eventTag
         0xf0, 0x0f, 0xb1, 0x51, (-eventTag) & 0xff,                  // 73: lock cmpxchg [ecx-1],edx
         ...jcc(JNE, 78, slow),                                       // 78: jne slow
         // done: (84)
-        0xb8, ...dword(1),                                           // 84: mov eax, 1
+        0xb8, ...imm32(1),                                           // 84: mov eax, 1
         0xc2, 0x04, 0x00,                                            // 89: ret 4
         // slow: (92)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // 92: jmp trap
+        0xe9, ...imm32(trap - (at + slow + 5)),                      // 92: jmp trap
     ]);
 }
