@@ -679,7 +679,7 @@ export function createScheduler(options){
         if (esp < thread.stackLimit && pastItsStack(esp) && !overflowed.has(thread))
         {
             overflowed.add(thread);
-            cpu.raiseFault?.({ name: 'stack overflow', eip: cpu.eip?.() ?? 0,
+            cpu.raiseFault({ name: 'stack overflow', eip: cpu.eip(),
                 detail: `${thread.name}'s stack pointer 0x${esp.toString(16)} is past the`
                     + ` bottom of its stack (0x${(thread.stackLimit >>> 0).toString(16)}),`
                     + ' where no stack of its own lies' });
@@ -1260,15 +1260,15 @@ export function createScheduler(options){
         if (longTurn)
         {
             longTurn = false;
-            cpu.stop?.();
+            cpu.stop();
             return;
         }
         /** @type {any[]} */
-        const free = (cpu.executors?.() ?? []).filter((/** @type {any} */ remote)=>!remote.busy());
+        const free = cpu.executors().filter((/** @type {any} */ remote)=>!remote.busy());
         if (soloShared && free.some(remote=>allowedOn(thread, remote.index)))
         {
             soloShared = false;
-            cpu.stop?.();
+            cpu.stop();
             return;
         }
         // One that may run only here, readied in the slice of one that may run
@@ -1282,7 +1282,7 @@ export function createScheduler(options){
             && free.some(remote=>allowedOn(current, remote.index)))
         {
             soloShared = false;
-            cpu.stop?.();
+            cpu.stop();
         }
     };
     /** The bell's count when they were last answered. */
@@ -1368,7 +1368,7 @@ export function createScheduler(options){
         played[index] = here;
         // What `cpuid` names on each, as GetCurrentProcessorNumber answers
         // (`processorOf`): a thread pinned to a processor reads its number there.
-        cpu.playProcessor?.(played[0] === 0 ? undefined : played[0]);
+        cpu.playProcessor(played[0] === 0 ? undefined : played[0]);
         remotes.find(remote=>remote.index === index)?.playProcessor?.(
             played[index] === index ? undefined : played[index]);
         tradeWanted = -1;
@@ -1478,7 +1478,7 @@ export function createScheduler(options){
         }
         for (let index = 1; index < 32; index++)
         {
-            if (allowedOn(thread, index) && cpu.wantExecutor?.(index))
+            if (allowedOn(thread, index) && cpu.wantExecutor(index))
             {
                 return true;
             }
@@ -1706,7 +1706,7 @@ export function createScheduler(options){
         const on = /** @type {Placement} */ (placing.on);
         switcher.switchTo(null, on.thread, placing.resume);
         watchStack(on.thread);
-        on.from = cpu.eip?.() ?? 0;
+        on.from = cpu.eip();
     };
     /** The placement whose slice `takeContext` takes off its executor. @type {Placement | null} */
     let taking = null;
@@ -1715,7 +1715,7 @@ export function createScheduler(options){
     const takeContext = ()=>{
         const on = /** @type {Placement} */ (taking);
         on.thread.context = cpu.captureContext(on.thread.context);
-        takenEip = cpu.eip?.() ?? 0;
+        takenEip = cpu.eip();
     };
 
     let crossingsUnclocked = 0;
@@ -1822,7 +1822,7 @@ export function createScheduler(options){
                 const at = takenEip;
                 if (ended.fault !== null)
                 {
-                    cpu.remoteFault?.(ended.fault);
+                    cpu.remoteFault(ended.fault);
                 }
                 account(on.thread, ended.instructions, on.began, on.from, at);
                 // Called back after little beside what this executor did
@@ -1872,7 +1872,7 @@ export function createScheduler(options){
         // that loads a library and leaves: 590 ms a round, 2 ms between turns).
         if (inTurn && heldInAnswer)
         {
-            cpu.stop?.();
+            cpu.stop();
         }
         else if (inTurn && (readiedInAnswer || ran !== null))
         {
@@ -1941,7 +1941,7 @@ export function createScheduler(options){
         // slice ends in a fault belongs to the fault stub, and reading that
         // would report every faulting thread as having left its stack.
         watchStack(next);
-        const from = cpu.eip?.() ?? 0;
+        const from = cpu.eip();
         const began = wall();
         readyAtSlice = 0;
         for (let at = 0; at < threads.length; at++)
@@ -1976,7 +1976,7 @@ export function createScheduler(options){
         // interrupt this one's slice (`interruptible`), at its next back edge,
         // its turns are as long with them running as without.
         const clear = soonestDue() - now();
-        const others = placed.length === 0 || cpu.interruptible?.() === true;
+        const others = placed.length === 0 || cpu.interruptible() === true;
         const solo = (!shared || others) && readyAtSlice === 0
             && clear > SOLO_CLEAR_MS;
         // No turn past the soonest deadline, at this executor's measured rate:
@@ -2004,7 +2004,7 @@ export function createScheduler(options){
         // host reads -- runs on to the routine's end: none of them waits,
         // so the end is a few instructions away.
         for (let more = 0; more < ATOMIC_STEPS && atomic.starts.length !== 0
-            && next.state === ThreadState.RUNNING && insideAtomic(cpu.eip?.() ?? 0); more++)
+            && next.state === ThreadState.RUNNING && insideAtomic(cpu.eip()); more++)
         {
             instructions += cpu.runSlice(ATOMIC_STEP);
         }
@@ -2013,7 +2013,7 @@ export function createScheduler(options){
         {
             perMs = perMs === 0 ? instructions / held : perMs * 0.75 + instructions / held * 0.25;
         }
-        account(next, instructions, began, from, cpu.eip?.() ?? 0, asked);
+        account(next, instructions, began, from, cpu.eip(), asked);
         // A slice that ended on a host call still answering: the answer is the
         // thread's own call, and once it comes the thread goes on (`pick`).
         next.hostContinues = next.awaitingHost === true && !next.answeredElsewhere;
@@ -2206,7 +2206,7 @@ export function createScheduler(options){
         }
         if (unplaced > 0)
         {
-            cpu.wantExecutors?.(remotes.length + unplaced);
+            cpu.wantExecutors(remotes.length + unplaced);
         }
         // This executor with nothing to run while another keeps a thread it
         // could run: past RECALL_MS that one lets it go at its slice's end and
@@ -2252,7 +2252,7 @@ export function createScheduler(options){
         }
         if (wanted || left && bell.hold === undefined)
         {
-            bell.goOn?.(false);
+            bell.goOn(false);
         }
         else if (left)
         {
@@ -2260,7 +2260,7 @@ export function createScheduler(options){
         }
         else
         {
-            bell.goOn?.(true);
+            bell.goOn(true);
         }
         return here;
     };
@@ -2435,7 +2435,7 @@ export function createScheduler(options){
 
     // Something the other executors said since they were last answered: the
     // translator forming regions here stops at the next one to let it be.
-    cpu.awaitedBy?.(()=>placed.length > 0 && cpu.executorBell().rung() !== answeredAt);
+    cpu.awaitedBy(()=>placed.length > 0 && cpu.executorBell().rung() !== answeredAt);
 
     // Another executor's crossing is answered here with its thread made
     // current (`answerExecutors`): its call is timed as one of this one's.
@@ -2456,7 +2456,7 @@ export function createScheduler(options){
         if (on !== callsTimed)
         {
             callsTimed = on;
-            cpu.trapTimed?.(on ? timeCall : null);
+            cpu.trapTimed(on ? timeCall : null);
         }
     };
 
@@ -2469,7 +2469,7 @@ export function createScheduler(options){
      * device's, which the host waits 200 ms for and then breaks, every time a
      * renderer here met another thread's call there.
      */
-    cpu.beforeTrap?.((/** @type {boolean | undefined} */ crossing)=>{
+    cpu.beforeTrap((/** @type {boolean | undefined} */ crossing)=>{
         if (current !== null && crossing !== false && !answering)
         {
             current.crossings++;
@@ -2479,7 +2479,7 @@ export function createScheduler(options){
         {
             return true;
         }
-        if (crossing === false && atomic.starts.length !== 0 && insideAtomic(cpu.eip?.() ?? 0))
+        if (crossing === false && atomic.starts.length !== 0 && insideAtomic(cpu.eip()))
         {
             putOff++;
             return false;
@@ -2644,7 +2644,7 @@ export function createScheduler(options){
             atomic.ends.splice(at, 0, start + (length >>> 0));
             // And the process's other executors, which end their threads' runs
             // where they will, are told too.
-            cpu.noteUnbroken?.(start, length >>> 0);
+            cpu.noteUnbroken(start, length >>> 0);
         },
 
         /** @returns {any[]} */
@@ -2718,7 +2718,7 @@ export function createScheduler(options){
          *     left without waiting for them
          */
         runOnce(){
-            const remotes = cpu.executors?.() ?? [];
+            const remotes = cpu.executors();
             timeCalls(remotes.length > 0);
             if (remotes.length > 0)
             {
@@ -2832,7 +2832,7 @@ export function createScheduler(options){
             if (preempts)
             {
                 preemptions++;
-                cpu.stop?.();
+                cpu.stop();
             }
             else
             {
@@ -2950,7 +2950,7 @@ export function createScheduler(options){
             // slice end rather than at whatever turn of this one comes next.
             if (placedElsewhere(thread))
             {
-                cpu.executorBell?.()?.goOn?.(false);
+                cpu.executorBell()?.goOn(false);
             }
             return previous - (thread.frozen ?? 0);
         },
@@ -3035,7 +3035,7 @@ export function createScheduler(options){
                 return false;
             }
             const bell = cpu.executorBell();
-            bell.goOn?.(false);
+            bell.goOn(false);
             const from = wall();
             while (runs() && wall() - from < ENDING_WAIT_MS)
             {
@@ -3089,7 +3089,7 @@ export function createScheduler(options){
             // still runs, on the stack and the blocks it was given.
             if (placedElsewhere(thread))
             {
-                cpu.executorBell?.()?.goOn?.(false);
+                cpu.executorBell()?.goOn(false);
             }
         },
 

@@ -20,7 +20,6 @@ import { STILL_ACTIVE, createProcessTable } from './internal/processes.js';
 import { createClock } from './internal/time.js';
 import { createStackPool } from './internal/stacks.js';
 import { wholeAddress } from '../../system/address.js';
-import { createTableMemory, openTable } from '@bottlify/cellar';
 
 /** Host ms a turn among ready threads lasts at least (`createScheduler`'s `turnMs`). */
 const TURN_MS = 0.25;
@@ -101,10 +100,7 @@ export function flushWrites(cpu, { now = ()=>performance.now(),
  */
 
 /**
- * The scheduler's shared tables, registered with the log layer when there is
- * one to register with. Without a registry -- a test's fake, a build with the
- * log layer switched off -- the scheduler keeps the same figures in arrays of
- * its own, and nothing about how it runs changes.
+ * The scheduler's shared tables, registered with the log layer.
  *
  * The page array spans the guest's memory: one entry per 64 KiB, and one
  * more for an address outside it.
@@ -112,14 +108,9 @@ export function flushWrites(cpu, { now = ()=>performance.now(),
  * @param {any} cpu @param {any} log
  */
 function published(cpu, log){
-    const memorySize = cpu.layout?.memorySize ?? 1024 * 1024 * 1024;
+    const memorySize = cpu.layout.memorySize;
     const pageRows = Math.ceil(memorySize / 0x10000) + 1;
-    const metrics = typeof log.metrics?.table === 'function' ? log.metrics : null;
-    if (!metrics)
-    {
-        return { pages: openTable(createTableMemory(
-            { rows: pageRows, columns: ['instructions'] })) };
-    }
+    const metrics = log.metrics;
     return {
         pages: metrics.table('kernel', 'pages', { rows: pageRows, columns: ['instructions'] }),
         counters: metrics.counters('kernel', SCHEDULER_COUNTERS),
@@ -262,13 +253,13 @@ export function createKernelModule(){
             // where the caller is an image past 4 GiB, and the park loop's put
             // over it whole, not over its low dword alone.
             /** @param {number} esp */
-            const readReturn = esp=>(cpu.bits?.() === 64
+            const readReturn = esp=>(cpu.bits() === 64
                 ? (memory.readU32(esp) >>> 0) + (memory.readU32(esp + 4) >>> 0) * 2 ** 32
                 : memory.readU32(esp));
             /** @param {number} esp @param {number} address */
             const writeReturn = (esp, address)=>{
                 memory.writeU32(esp, address >>> 0);
-                if (cpu.bits?.() === 64)
+                if (cpu.bits() === 64)
                 {
                     memory.writeU32(esp + 4, Math.floor(address / 2 ** 32));
                 }
@@ -282,7 +273,7 @@ export function createKernelModule(){
              * executors' timing, and a thread's retired count with it.
              */
             const endTurnAtCall = ()=>{
-                cpu.stop?.();
+                cpu.stop();
             };
 
             state.switcher = createSwitcher({ cpu, memory });
@@ -290,7 +281,7 @@ export function createKernelModule(){
             // The time-stamp counter counts the same time QueryPerformanceCounter
             // reads, so a program calibrating one against the other measures the
             // frequency CPUID states, on whichever executor it reads it.
-            cpu.useGuestClock?.(()=>state.clock.virtualTime(),
+            cpu.useGuestClock(()=>state.clock.virtualTime(),
                 (/** @type {() => void} */ listener)=>state.clock.whenMoved(listener));
             state.scheduler = createScheduler({
                 cpu,
@@ -334,14 +325,11 @@ export function createKernelModule(){
                 ids: config?.ids,
                 // Where a stack pointer that left its stack lies: an overflow
                 // stops the process before it reaches the engine's tables.
-                regionAt: (/** @type {number} */ address)=>memory.find?.(address),
+                regionAt: (/** @type {number} */ address)=>memory.find(address),
                 hostAnswering: ()=>state.hostAnswering?.() === true,
                 ...published(cpu, log),
             });
-            if (typeof log.metrics?.onFrame === 'function')
-            {
-                log.metrics.onFrame(()=>state.scheduler.publish());
-            }
+            log.metrics.onFrame(()=>state.scheduler.publish());
             // The words the guest reads its events by, once kernel32 places
             // the table (`mirrorEvents`); until then nothing is written.
             const mirror = createEventMirror((address, value)=>memory.writeU32(address, value),
@@ -521,7 +509,7 @@ export function createKernelModule(){
                             stackReleased);
                         if (!slot)
                         {
-                            log.warn?.('kernel', 'no room in the stack pool for a thread'
+                            log.warn('kernel', 'no room in the stack pool for a thread'
                                 + ' (commit {0}, reserve {1}): {2}', stackSize ?? 0,
                             stackReserve ?? 0, JSON.stringify(stacks.diagnostics()));
                             return null;
@@ -533,7 +521,7 @@ export function createKernelModule(){
                     // lies on a stack; a caller that names no low end has the
                     // reserve a thread gets by default.
                     const base = low ?? Math.max(0, top - 0x100000);
-                    cpu.noteStack?.(base, top - base);
+                    cpu.noteStack(base, top - base);
                     // The stack's own top, which the thread block names as its
                     // base: the frame below starts a little under it.
                     const region = top;
@@ -543,7 +531,7 @@ export function createKernelModule(){
                     // the top of the region is outside it. The headroom keeps every
                     // pointer the thread can reach inside the memory it was given.
                     top -= 16;
-                    const long = cpu.bits?.() === 64;
+                    const long = cpu.bits() === 64;
                     if (long)
                     {
                         // The x64 frame: the return address alone, with the 32
@@ -584,7 +572,7 @@ export function createKernelModule(){
                             const gpr = /** @type {bigint[]} */ ([]);
                             gpr[1] = BigInt(wholeAddress(parameter));
                             gpr[2] = BigInt(wholeAddress(routine));
-                            cpu.setContextLong?.(thread.context, { gpr });
+                            cpu.setContextLong(thread.context, { gpr });
                         }
                     }
                     else if (thread.context?.reg32)
@@ -633,7 +621,7 @@ export function createKernelModule(){
                         return null;
                     }
                     slot.owner = { released: false };
-                    cpu.noteStack?.(slot.base, slot.size);
+                    cpu.noteStack(slot.base, slot.size);
                     return { base: slot.base, top: slot.base + slot.size, owner: slot.owner };
                 },
 
@@ -779,7 +767,7 @@ export function createKernelModule(){
                  *
                  * @returns {number}
                  */
-                processors: ()=>cpu.processors?.() ?? 1,
+                processors: ()=>cpu.processors(),
                 /**
                  * The processor `thread` runs on now: the executor holding it.
                  *

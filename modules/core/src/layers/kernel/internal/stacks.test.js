@@ -20,6 +20,7 @@ function fakeMemory(){
         Access: { READ_WRITE: 'rw' },
         register: ()=>{},
         unregister: ()=>{},
+        charge: ()=>true,
         /** @param {number} address @param {number} value @param {number} length */
         fillBytes: (address, value, length)=>{
             filled.push([address, length]);

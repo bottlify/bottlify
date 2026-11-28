@@ -132,7 +132,7 @@ export function createStackPool({ memory, base, size, limit, dirtyTo = base }){
             // A stack past the highest the pool reached is the guest's to write:
             // taken from the machine's memory, none where it has no room.
             const past = from + bytes - Math.max(reached, from);
-            if (past > 0 && memory.charge?.(past) === false)
+            if (past > 0 && !memory.charge(past))
             {
                 return null;
             }
