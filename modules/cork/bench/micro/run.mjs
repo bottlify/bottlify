@@ -35,6 +35,7 @@ import '../../../../tools/lib/chromium-v8.mjs';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCorkHost } from '../../../core/src/layers/cpu/internal/cork-host.js';
+import { testAccount } from '../../../core/src/layers/cpu/testing.fixture.js';
 import * as engine from '../../src/index.js';
 import { median, option } from '../../../../tools/lib/common.mjs';
 
@@ -60,7 +61,7 @@ const names = readdirSync(images).filter(file=>file.endsWith('.bin'))
 
 /** @param {Uint8Array} image */
 function makeHost(image){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, cork, ...(bits === 64 ? { bits } : {}),
     });

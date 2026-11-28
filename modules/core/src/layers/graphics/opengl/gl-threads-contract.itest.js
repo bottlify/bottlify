@@ -60,6 +60,7 @@ import { GL_COMMANDS } from './commands.js';
 import { createOpengl } from './exports.js';
 import { GL } from './constants.js';
 import { testScratch } from '../../cache/testing.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const ENTRY = 0x7000;
 const TRAP = 0x7800;
@@ -137,7 +138,7 @@ const random = seed=>{
  * of one stopped inside a routine kept while the other runs.
  */
 const machine = ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: ENTRY,
         initialStack: STACKS[0], engine: cork, cork: { sliceMs: Infinity },
     });

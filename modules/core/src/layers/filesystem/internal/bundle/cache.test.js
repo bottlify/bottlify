@@ -10,6 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { createBlockCache, resolveBlockStore } from './cache.js';
 import { BLOCK_DIRECTORY, blockCacheName, bundleResidency, savedBlocks } from './saved.js';
 import { fakeOpfs } from '../opfs.fixture.js';
+import { testBlocks } from '../../../cpu/testing.fixture.js';
 
 const BLOCK = 4096;
 const NAME = blockCacheName('game', '0011aabb');
@@ -24,10 +25,12 @@ const blockOf = index=>{
 };
 
 /**
- * @param {any} store @param {Partial<Parameters<typeof createBlockCache>[0]>} [options]
+ * @param {any} store
+ * @param {Partial<Parameters<typeof createBlockCache>[0]> & { budget?: number }} [options]
+ *     `budget`: the blocks' ceiling in the test's account
  */
-const open = (store, options = {})=>createBlockCache({ store, name: NAME, blockSize: BLOCK,
-    blockCount: 64, ...options });
+const open = (store, { budget, ...options } = {})=>createBlockCache({ store, name: NAME,
+    blockSize: BLOCK, blockCount: 64, ...testBlocks(budget), ...options });
 
 /** A block as the cache reads it, copied out of its `with`. @param {any} cache @param {number} index */
 const readOf = (cache, index)=>cache.with(index, (/** @type {Uint8Array} */ body)=>body.slice());

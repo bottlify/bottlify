@@ -15,7 +15,7 @@
 import { mangledCall } from '../layers/loader/internal/mangling.js';
 import { parsePe, rvaToFileOffset } from '../layers/loader/internal/pe.js';
 import { findResource, listResources } from '../layers/loader/internal/resources.js';
-import { HEAP_POOLS } from '../memory-zones.js';
+import { BLOCK_CACHE_BYTES } from '../layers/cache/account.js';
 
 /**
  * One event's payload as a line.
@@ -551,10 +551,10 @@ export function resourceOfImage(file, type, id){
 
 /**
  * The most a host-side whole-file read asks of the volume at once: a quarter of
- * the heap's pool for fetched blocks, so one piece's blocks and the read-ahead
+ * what a bundle's fetched blocks are held hot in, so one piece's blocks and the read-ahead
  * beside them are all still held when the read looks again.
  */
-export const WHOLE_READ_BYTES = HEAP_POOLS.blockCache / 4;
+export const WHOLE_READ_BYTES = BLOCK_CACHE_BYTES / 4;
 
 /**
  * Reads a whole file off the volume, waiting for whatever is not here yet.

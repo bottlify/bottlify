@@ -31,6 +31,7 @@ import {
 } from './routines/getters.js';
 import { lockCode } from './routines/locks.js';
 import { COMMANDS, commandSlot, runCommands } from '../d3d9/commands.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 // The routines, 2 KiB apart: a routine longer than the room left it ran into
@@ -81,7 +82,7 @@ const call = (at, target, object, args)=>{
 const shape = (name, more = {})=>({ ...COMMANDS[name], slot: commandSlot(name), ...more });
 
 test('a command routine writes the call into the ring and leaves the rest to the trap', ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
@@ -248,7 +249,7 @@ test('a command routine writes the call into the ring and leaves the rest to the
 });
 
 test('a draw from the program\'s memory copies the vertices its primitives span', ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
@@ -335,7 +336,7 @@ test('a draw from the program\'s memory copies the vertices its primitives span'
 
 test('an indexed draw from the program\'s memory copies its indices and the vertices they reach',
     ()=>{
-        const host = createCorkHost({
+        const host = createCorkHost({ memoryBudget: testAccount(),
             memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
             initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
         });
@@ -459,7 +460,7 @@ test('an indexed draw from the program\'s memory copies its indices and the vert
 
 test('the viewport and the sampler states a program sets in the guest are what its getters read',
     ()=>{
-        const host = createCorkHost({
+        const host = createCorkHost({ memoryBudget: testAccount(),
             memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
             initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
         });
@@ -537,7 +538,7 @@ test('the viewport and the sampler states a program sets in the guest are what i
 
 test('a state set to what the block holds writes no record, unless a state block may have moved it',
     ()=>{
-        const host = createCorkHost({
+        const host = createCorkHost({ memoryBudget: testAccount(),
             memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
             initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
         });
@@ -590,7 +591,7 @@ test('a state set to what the block holds writes no record, unless a state block
     });
 
 test('a state block\'s Apply in the ring names the block and sends the getters to the host', ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
@@ -655,7 +656,7 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
 });
 
 test('a clear copies its rectangles, or none for the whole target', ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
@@ -722,7 +723,7 @@ test('a clear copies its rectangles, or none for the whole target', ()=>{
 });
 
 test('a surface\'s GetDesc copies the description out of its block', ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

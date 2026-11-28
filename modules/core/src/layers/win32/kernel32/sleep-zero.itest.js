@@ -23,6 +23,7 @@ import * as cork from '../../../../../cork/src/index.js';
 import { createApp } from '../../../app.js';
 import { assemble, buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 import { sleepCode } from './process.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const SLEEP = 0x8200;
@@ -38,7 +39,7 @@ const u32 = value=>[
 
 test('Sleep(0) with no thread waiting to run returns in the guest; every other call is the'
     + ' host\'s', async()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: cork,
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,

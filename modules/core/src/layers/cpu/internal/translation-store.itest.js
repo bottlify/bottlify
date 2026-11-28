@@ -24,6 +24,7 @@ import {
 import * as engine from '../../../../../cork/src/index.js';
 import { seedRecords } from '../../../../../cork/src/runtime/cache.js';
 import { features } from '../../../../../cork/src/wasm/features.js';
+import { testAccount } from '../testing.fixture.js';
 
 const IMAGES = new URL('../../../../../cork/bench/micro/images/', import.meta.url);
 const IMAGE_BASE = 0x401000;
@@ -42,7 +43,7 @@ const ENTRY_VECTOR = 0x7000;
  * @param {Uint8Array} image @param {any} store @param {HostOptions} [options]
  */
 function hostFor(image, store, { cork = {}, module = engine, memorySize = 16 << 20 } = {}){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: module, memorySize, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, cork: { store, bundleId: 'bench', timings: true, ...cork },
     });

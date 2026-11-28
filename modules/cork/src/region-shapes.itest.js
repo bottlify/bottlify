@@ -37,6 +37,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createCorkHost } from '../../core/src/layers/cpu/internal/cork-host.js';
+import { testAccount } from '../../core/src/layers/cpu/testing.fixture.js';
 import * as engine from './index.js';
 
 /** The ways between regions that say how a workload's regions are formed. */
@@ -90,7 +91,7 @@ const imagesOf = bits=>new URL(bits === 64 ? '../bench/micro/images64/' : '../be
  * @returns {Promise<Record<string, number>>}
  */
 async function countsOf(bits, name){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, cork: { blockProfile: true, sliceMs: Infinity },
         ...(bits === 64 ? { bits } : {}),

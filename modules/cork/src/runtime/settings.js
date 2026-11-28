@@ -105,13 +105,14 @@ export const SETTINGS = {
     // A module the bound has no room for lets those gone longest without running
     // go until there is (`take` answers false where there is none).
     charge: { kind: 'host',
-        value: /** @type {{ take(bytes: number): boolean, give(bytes: number): void } | null} */
-            (null),
+        value: /** @type {{ take(bytes: number): boolean, overdraw(bytes: number): void,
+            give(bytes: number): void } | null} */ (null),
         shown: 'none',
-        doc: 'Where a host bounds what its runtimes hold together: `{ take(bytes), give(bytes)'
-            + ' }`. Each module held is taken by its wasm bytes and given back as it is let go;'
-            + ' one it has no room for lets those gone longest without running go until there'
-            + ' is, and where none is left one module is held past it (`unchargedBytes` in the'
+        doc: 'Where a host bounds what its runtimes hold together: `{ take(bytes),'
+            + ' overdraw(bytes), give(bytes) }`. Each module held is taken by its wasm bytes and'
+            + ' given back as it is let go; one it has no room for lets those gone longest'
+            + ' without running go until there is, and where none is left it is taken past the'
+            + ' bound (`overdraw`, which the host counts and says; `overdrawnBytes` in the'
             + ' diagnostics).' },
     // The keeping's code is one whatever runtimes run it: paid once, by it.
     sharedCharge: { kind: 'host',

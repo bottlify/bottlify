@@ -8,7 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLinkMemory, createReader, grainsOf, linkCarrier, openKeeperClient, openLink }
     from '@bottlify/cellar';
+import { openAccount } from '@bottlify/cellar';
 import { CACHE_CALLS, openRunCache } from './run-cache.js';
+import { createRunAccount } from '../layers/cache/account.js';
 import { relayedJoin } from '../layers/cache/module.js';
 
 /**
@@ -378,4 +380,32 @@ test('the run\'s own scratches (its presenter\'s) are held under names of its ow
     assert.equal(run.under(prefix).hotBytes, grainsOf(10_000));
     run.close();
     assert.deepEqual(tails, [], 'no tail: the run took it with it');
+});
+
+test('a take of the run\'s account that does not fit lets this keeper\'s cold bodies go, then '
+    + 'those of a keeper given to it (`roomFrom`), and not once it is taken out', async()=>{
+    const account = createRunAccount({ machineMemory: 64 << 20 });
+    const run = await openRunCache({ account });
+    try
+    {
+        /** @type {number[]} */
+        const asked = [];
+        const leave = run.roomFrom(bytes=>{
+            asked.push(bytes);
+            return false;
+        });
+        const guest = openAccount(account, { room: run.room });
+        assert.equal(guest.take(56 << 20, 'guest'), true, 'its spare segment let go for it');
+        assert.equal(run.figures().roomMade, 1);
+        assert.deepEqual(asked, [], 'this keeper made the room: the other not asked');
+        assert.equal(guest.take(32 << 20, 'guest'), false);
+        assert.deepEqual(asked, [32 << 20], 'then the other');
+        leave();
+        assert.equal(guest.take(32 << 20, 'guest'), false);
+        assert.equal(asked.length, 1, 'taken out, not asked again');
+    }
+    finally
+    {
+        run.close();
+    }
 });

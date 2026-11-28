@@ -228,7 +228,8 @@ async function ceilingRun(seed, config){
         const d = diagnostics(m);
         return { state: [m.reg(0), m.reg(1), m.reg(3), m.reg(4), ...m.read(DATA, count * 4)],
             most: Math.max(...held), evictions: d.evictions, broughtBack: d.broughtBack,
-            cacheHits: d.cacheHits, heldBytes: d.heldBytes, heldModules: d.heldModules };
+            cacheHits: d.cacheHits, heldBytes: d.heldBytes, heldModules: d.heldModules,
+            overdrawnBytes: d.overdrawnBytes };
     }
     finally
     {
@@ -284,6 +285,9 @@ test('a program run under a host\'s bound (`charge`) a few modules high runs as 
             most = Math.max(most, taken);
             return true;
         },
+        overdraw(){
+            assert.fail('a bound of five modules is never overdrawn');
+        },
         /** @param {number} bytes */
         give(bytes){
             taken -= bytes;
@@ -297,6 +301,30 @@ test('a program run under a host\'s bound (`charge`) a few modules high runs as 
     assert.equal(taken, bounded.heldBytes, 'what is held is what was taken, nothing given twice');
 });
 
+test('under a bound no module fits, what runs is taken past it (`overdraw`), counted, given back',
+    async()=>{
+        const free = await ceilingRun(61, { cacheBytes: 0 });
+        let taken = 0;
+        let overdrawn = 0;
+        const charge = {
+            take: ()=>false,
+            /** @param {number} bytes */
+            overdraw(bytes){
+                overdrawn += bytes;
+                taken += bytes;
+            },
+            /** @param {number} bytes */
+            give(bytes){
+                taken -= bytes;
+            },
+        };
+        const bounded = await ceilingRun(61, { cacheBytes: 0, charge });
+        assert.deepEqual(bounded.state, free.state, 'the same registers and memory');
+        assert.ok(overdrawn > 0 && bounded.overdrawnBytes === overdrawn,
+            `${overdrawn} overdrawn, ${bounded.overdrawnBytes} counted`);
+        assert.equal(taken, bounded.heldBytes, 'nothing held that was not taken');
+    });
+
 test('every module let go is told to the host by its bytes (`letGo`), none twice', async()=>{
     const free = await ceilingRun(62, { cacheBytes: 0 });
     const cacheBytes = Math.ceil(5 * free.heldBytes / free.heldModules);
@@ -308,6 +336,7 @@ test('every module let go is told to the host by its bytes (`letGo`), none twice
             taken += bytes;
             return true;
         },
+        overdraw: ()=>assert.fail('never past a bound that takes all'),
         give: ()=>{},
     };
     const run = await ceilingRun(62, { cacheBytes, charge,

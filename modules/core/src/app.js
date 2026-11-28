@@ -11,7 +11,7 @@ import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 
 import { captureTrace, formatTrace } from './trace.js';
-import { HEAP_POOLS, NOT_MEASURED } from './memory-zones.js';
+import { NOT_MEASURED } from './memory-zones.js';
 import {
     DEFAULT_INITIAL_STACK, DEFAULT_MEMORY_SIZE, DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY,
     MAX_EXECUTORS, processorsFor,
@@ -55,8 +55,7 @@ import { remoteClassTable } from './com-link.js';
 import { createCallRepeats } from './call-repeats.js';
 import { withConcurrency } from './concurrency.js';
 import { SHARED_MODULE_BYTES, withHeldModules } from './layers/cpu/internal/store-link.js';
-import { createMemoryBudget, openMemoryBudget, RUN_HOLDER }
-    from './layers/cpu/internal/memory-budget.js';
+import { openAccount } from '@bottlify/cellar';
 import { PROGRAMS_LIBRARY, WINDOWS_DIRECTORY } from './layers/win32/programs/table.js';
 import { RUN_ONCE_ROUTINE } from './layers/win32/programs/functions.js';
 import { declaringOnRead } from './layers/win32/common/pointers.js';
@@ -74,6 +73,7 @@ import { createModuleTable, pathKey } from './process/module-table.js';
 import { createSystemModules, shapeOf } from './process/system-modules.js';
 import { bindSidecar } from './process/sidecar.js';
 import { openRunCache } from './process/run-cache.js';
+import { createRunAccount } from './layers/cache/account.js';
 import { cacheSpace } from './layers/cache/module.js';
 import { processesBeside } from './process/beside.js';
 import { processMemories } from './process/memories.js';
@@ -1318,7 +1318,6 @@ async function openRunFolderOf(options, events){
  */
 function openRunPageFile(events, reader){
     return createPageFile(cacheSpace(reader, 'pages', { onlyCopy: true, disk: 'run' }), {
-        workingBytes: HEAP_POOLS.writableFiles,
         onFailure: error=>events.emit('divergence', { api: 'filesystem',
             detail: `${error.message}; what the program writes is kept in memory from here` }),
     });
@@ -2325,7 +2324,8 @@ async function buildApp(options){
     // first.
     mountedBlocks = !options.system?.bundle;
     blocks = options.system?.bundle
-        ?? await mountBundle({ options, events, translationStore });
+        ?? await mountBundle({ options, events, translationStore,
+            roomFrom: /** @type {any} */ (options.cache).roomFrom });
     if (options.system && blocks)
     {
         options.system.bundle = blocks;
@@ -3860,30 +3860,35 @@ export async function createApp(options){
     // Settled once, here, so every process the run makes is built in it.
     options = withConcurrency(withCpuSetup(withoutFaultingTailCalls(withKnownRoutines(options))));
     options = { ...options, processId: options.processId ?? runProcessId() };
-    // The machine's memory, made once by the run and carried to every process
-    // it starts, here or in a worker of its own (`memory-budget.js`).
-    // Named, not yet the RAM asked for by default: a run of several processes
-    // (an installer, its services, a compiler's workers) finds no room at two
+    // The run's account (`createRunAccount`): the machine's memory, made once
+    // by the run and carried to every process it starts, here or in a worker
+    // of its own, its cache's segments one kind of it. Bounded where named,
+    // not yet the RAM asked for by default: a run of several processes (an
+    // installer, its services, a compiler's workers) finds no room at two
     // gigabytes until the engine's own parts give back under pressure.
     const tabMemory = options.machineMemory;
-    if (options.memoryBudget === undefined && tabMemory !== undefined && tabMemory > 0)
+    if (options.memoryBudget === undefined)
     {
-        const memoryBudget = createMemoryBudget(tabMemory);
-        const run = openMemoryBudget(memoryBudget);
-        // The compiled modules every process shares, sized to the machine and
-        // taken as they are kept, by what they cost (`sharedCharge`).
-        const shared = Math.min(SHARED_MODULE_BYTES, Math.floor(tabMemory / 32));
-        run.take(shared, 'translation');
+        const memoryBudget = createRunAccount({ machineMemory: tabMemory,
+            cacheBytes: options.cache?.budget });
+        const run = openAccount(memoryBudget);
         // In a tab, the tab's own: the page, the engine's thread, the graphics
         // and translators' workers, the browser's code mapped in.
         if (inBrowser())
         {
             run.take(RUN_ENGINE_BYTES, 'engine');
         }
-        const config = options.cork?.config;
-        options = { ...options, memoryBudget,
-            cork: { ...options.cork, config: { ...config,
+        options = { ...options, memoryBudget };
+        if (tabMemory !== undefined && tabMemory > 0)
+        {
+            // The compiled modules every process shares, sized to the machine and
+            // taken as they are kept, by what they cost (`sharedCharge`).
+            const shared = Math.min(SHARED_MODULE_BYTES, Math.floor(tabMemory / 32));
+            run.take(shared, 'translation');
+            const config = options.cork?.config;
+            options = { ...options, cork: { ...options.cork, config: { ...config,
                 sharedModuleBytes: config?.sharedModuleBytes ?? shared } } };
+        }
     }
     graphicsChoice(options.graphicsApi);
     // Both outlive every process: subscriptions a caller made before the first
@@ -3997,7 +4002,8 @@ export async function createApp(options){
     // across a link is handed the run's reader (`options.cache`).
     // Both keep what they let go of from memory in the run's own folder.
     const runFolder = options.system ? null : await openRunFolderOf(options, events);
-    const runCache = options.system ? null : await openRunCache({ ...options.cache, runFolder,
+    const runCache = options.system ? null : await openRunCache({ runFolder,
+        account: options.memoryBudget,
         onLoss: detail=>events.emit('loss', { api: 'cache', detail }),
         // An owner that went (a graphics root) leaving bodies under its names
         // past what it held: let go of now, said as what it is.
@@ -4144,7 +4150,8 @@ export async function createApp(options){
         machine: runMachine,
         ...runCache === null ? {}
             : { cache: { reader: runCache.reader, figures: runCache.figures,
-                join: runCache.join, serve: runCache.serve, own: runCache.own } },
+                join: runCache.join, serve: runCache.serve, own: runCache.own,
+                room: runCache.room, roomFrom: runCache.roomFrom } },
         cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
             ...lentConfig } },
         events,
@@ -4245,7 +4252,7 @@ export async function createApp(options){
         : createClassTable(serveHere);
 
     const processMemoriesParts = processMemories({
-        options,
+        options, runCache,
 
     });
     const {
@@ -4266,8 +4273,7 @@ export async function createApp(options){
         // Its own holder of the machine's memory; the first process of a
         // worker holds the one its parent claimed for it.
         const given = extra === undefined ? options.memoryHolder : undefined;
-        const holder = machineMemory === null ? RUN_HOLDER
-            : given ?? machineMemory.claim();
+        const holder = given ?? machineMemory.claim();
         spareToProcess(reusedMemory, holder);
         const start = { reused: reusedMemory };
         const memoryCredit = await roomForProcess(start, holder).catch(e=>{
@@ -4284,7 +4290,7 @@ export async function createApp(options){
             throw e;
         });
         const built = await buildApp(machine({ ...extra, reusedMemory: start.reused, memoryCredit,
-            ...machineMemory === null ? {} : { memoryHolder: holder },
+            memoryHolder: holder,
             com: { table: classTable, process },
             // With concurrency a child runs from CreateProcess on, beside
             // its parent, as on Windows; otherwise it waits for the parent to
@@ -4309,7 +4315,7 @@ export async function createApp(options){
             .catch(e=>{
                 if (given === undefined)
                 {
-                    machineMemory?.release(holder);
+                    machineMemory.release(holder);
                 }
                 throw e;
             })
@@ -4364,6 +4370,7 @@ export async function createApp(options){
     let current = rootAcross
         ? await buildSystemHost({ options, events, system, translationStore, now: journalClock,
             reader: runCache?.reader ?? null,
+            roomFrom: /** @type {NonNullable<typeof runCache>} */ (runCache).roomFrom,
             across: ()=>[...standingAcross], libraries: ()=>rootLibraries.value })
         : await build();
     // What every process's devices present comes back from the run's
@@ -4865,7 +4872,7 @@ export async function createApp(options){
                         holderOf.delete(gone);
                         if (held?.own)
                         {
-                            machineMemory?.release(held.holder);
+                            machineMemory.release(held.holder);
                         }
                     }
                 }

@@ -5,7 +5,7 @@
  */
 
 /**
- * The gate of the machine's memory (`machineMemory`, `memory-budget.js`): a run
+ * The gate of the machine's memory (`machineMemory`, the run's account): a run
  * whose processes would together hold more than the machine has never holds
  * more. A parent starts children four at a time, each asking its heap for
  * 100 MiB, which grows its memory to 512 MiB: four at once are 2 GiB past the
@@ -20,7 +20,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
-import { createMemoryBudget, openMemoryBudget } from './layers/cpu/internal/memory-budget.js';
+import { openAccount } from '@bottlify/cellar';
+import { createRunAccount } from './layers/cache/account.js';
+import { fakeOpfs } from './layers/filesystem/internal/opfs.fixture.js';
 
 /** @param {number} value */
 const u32 = value=>[value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
@@ -112,7 +114,7 @@ function countMemories(t){
 /**
  * Runs the parent, and answers each child's exit code.
  *
- * @param {{ budget?: SharedArrayBuffer | ArrayBuffer, machineMemory?: number,
+ * @param {{ budget?: import('@bottlify/cellar').AccountMemory, machineMemory?: number,
  *     cores?: number, concurrency?: 1 | 2, guestCharge?: 'length' | 'given',
  *     machineWaitMs?: number }} how
  */
@@ -163,17 +165,19 @@ for (const { guestCharge, cores, concurrency } of CASES)
     test(`a run never holds more than the machine's memory, guests counted by ${guestCharge}`
         + ` (${executors}${concurrency > 1 ? ', each child in a worker of its own' : ''})`,
     { timeout: 600_000 }, async()=>{
-        const budget = createMemoryBudget(1280 * MiB);
+        const budget = createRunAccount({ machineMemory: 1280 * MiB });
         const { codes } = await runParent({ budget, cores, concurrency, guestCharge });
-        const report = openMemoryBudget(budget).report();
+        const report = openAccount(budget).report();
         assert.equal(codes.length, 8, 'every child ran');
         assert.ok(codes.every(told), `codes ${codes}`);
         assert.ok(codes.includes(0), 'a child had its block');
-        assert.ok(report.peak <= report.limit, `peak ${report.peak / MiB} MiB of ${report.limit / MiB}`);
+        const limit = /** @type {number} */ (report.limit);
+        assert.ok(report.peak <= limit, `peak ${report.peak / MiB} MiB of ${limit / MiB}`);
         assert.ok(report.peak > (guestCharge === 'length' ? 512 : 400) * MiB,
             `the budget counted the guests: ${report.peak / MiB} MiB`);
-        assert.equal(report.used, 0,
-            `the run gave back all it held: ${JSON.stringify(report.byKind)}`);
+        // The run's cache's segments are its keeper's, kept with the run.
+        assert.equal(report.used, report.kinds.cache.bytes,
+            `the processes gave back all they held: ${JSON.stringify(report.kinds)}`);
     });
 }
 
@@ -184,8 +188,11 @@ for (const { guestCharge, cores, concurrency } of CASES)
  * 640 MiB four children by what they were given all but fitted, and whether
  * one was refused hung on when the round before let its memory go; at 384 MiB
  * they fitted once a process wrote only the system modules it loads (A280).
+ * The run's cache is a kind of the same account, its sound output's table and
+ * a segment held from the start: the machine is larger by that than one that
+ * counted the guests and the engine alone (320 MiB then).
  */
-const MACHINE = { length: 640 * MiB, given: 320 * MiB };
+const MACHINE = { length: 640 * MiB, given: 352 * MiB };
 for (const guestCharge of CHARGES)
 {
     test(`a run made with machineMemory reports it, and a block past it is refused, not a fault`
@@ -261,7 +268,10 @@ test('a library the machine\'s memory has no room for fails to load, and the pro
             ],
         });
         const app = await createApp({ executable: program, imagePath: 'C:\\App\\program.exe',
-            memorySize: 1024 * MiB, machineMemory: 192 * MiB, machineWaitMs: 3000,
+            // The program and the engine, and the run's cache beside them (its sound
+            // output's table and a segment, 36 MiB): room for the library's span,
+            // not for its image as well.
+            memorySize: 1024 * MiB, machineMemory: 240 * MiB, machineWaitMs: 3000,
             cpu: { cores: 1 },
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\big.dll',
                 bytes: bigLibrary(120) }] }) } });
@@ -279,3 +289,69 @@ test('a library the machine\'s memory has no room for fails to load, and the pro
             await app.dispose();
         }
     });
+
+test('a guest growing past the machine\'s memory has the run\'s cache let cold bodies go first, '
+    + 'then its allocation answers NULL and the journal says a loss',
+{ timeout: 120_000 }, async()=>{
+    const STEP = 16 * MiB;
+    const DATA = 8 * MiB;
+    // A file of 8 MiB, its pieces the run's cache's (the page file's, in a segment of
+    // their own), read twice; then HeapAlloc(heap, 0, 16 MiB) until NULL, a byte
+    // written in each block; exit with how many it had.
+    const readOnce = ({ iat = /** @type {(name: string) => number} */ (()=>0),
+        at = /** @type {(name: string) => number} */ (()=>0) })=>[
+        0x6a, 0, 0x68, ...u32(at('read')), 0x68, ...u32(DATA), 0x55, 0x57,
+        0xff, 0x15, ...u32(iat('ReadFile')),
+        0x6a, 0, 0x6a, 0, 0x6a, 0, 0x57, 0xff, 0x15, ...u32(iat('SetFilePointer'))];
+    const program = buildExe({
+        imports: { 'KERNEL32.dll': ['GetProcessHeap', 'HeapAlloc', 'CreateFileA', 'ReadFile',
+            'SetFilePointer', 'ExitProcess'] },
+        data: { name: ascii('C:\\App\\data.bin'), read: u32(0) },
+        codeSize: 0x100,
+        code: ({ iat, at })=>[
+            0xff, 0x15, ...u32(iat('GetProcessHeap')), 0x89, 0xc6,
+            0x6a, 0, 0x6a, 0, 0x6a, 3, 0x6a, 0, 0x6a, 1, 0x68, ...u32(0x80000000),
+            0x68, ...u32(at('name')), 0xff, 0x15, ...u32(iat('CreateFileA')), 0x89, 0xc7,
+            0x68, ...u32(DATA), 0x6a, 0, 0x56, 0xff, 0x15, ...u32(iat('HeapAlloc')), 0x89, 0xc5,
+            ...readOnce({ iat, at }), ...readOnce({ iat, at }),
+            0x31, 0xdb,
+            0x68, ...u32(STEP), 0x6a, 0, 0x56, 0xff, 0x15, ...u32(iat('HeapAlloc')),
+            0x85, 0xc0, 0x74, 0x06, 0xc6, 0x00, 0x01, 0x43, 0xeb, 0xe8,
+            0x53, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const machineMemory = 320 * MiB;
+    const app = await createApp({ executable: program, imagePath: 'C:\\App\\program.exe',
+        memorySize: 1024 * MiB, machineMemory, cpu: { cores: 1, guestCharge: 'given' },
+        // The run's folder, where the cache's only copies go for room.
+        pageFile: { root: fakeOpfs().root },
+        storage: { load: async()=>({ files: [{ path: 'C:\\App\\data.bin',
+            bytes: new Uint8Array(DATA).fill(7) }] }) } });
+    try
+    {
+        /** @type {any[]} */
+        const losses = [];
+        app.on('loss', (/** @type {any} */ event)=>losses.push(event));
+        const blocks = await app.run({ timeoutMs: 60_000 });
+        assert.ok(blocks >= 1 && blocks < machineMemory / STEP, `${blocks} blocks`);
+        const cache = /** @type {any} */ (app.runCache());
+        assert.ok(cache.roomAsked >= 1 && cache.roomMade >= 1, `the cache made room first: ${
+            JSON.stringify({ asked: cache.roomAsked, made: cache.roomMade,
+                refused: cache.roomRefused, letGo: cache.segmentsLetGo, cooled: cache.cooled })}`);
+        assert.ok(cache.segmentsLetGo >= 1, 'its segments let go for the guest');
+        assert.ok(cache.cooled >= 1, 'the file\'s pieces went to the run\'s folder for it');
+        assert.ok(cache.account.refused >= 1, 'then the account refused the guest');
+        const said = losses.filter(loss=>loss.api === 'cpu' && /no room for \d+ bytes of guest/
+            .test(loss.detail));
+        assert.ok(said.length >= 1,
+            `the refusal is a loss in the journal: ${JSON.stringify(losses)}`);
+        const report = await app.report();
+        const zones = report.diagnostics.find((/** @type {any} */ table)=>table.name === 'zones');
+        assert.equal(zones.metrics.limit, machineMemory);
+        assert.ok(zones.metrics.account.used <= machineMemory);
+    }
+    finally
+    {
+        await app.dispose();
+    }
+});

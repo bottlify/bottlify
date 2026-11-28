@@ -21,6 +21,7 @@ import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createSlimSync, SRW, srwCode } from './slimsync.js';
 import { guestOver } from '../common/guest.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x10000;
 const CODE = 0x8100;
@@ -133,7 +134,7 @@ function sequence(seed){
  * @returns {{ word: number, answer: number, eip: number }[]}
  */
 function throughGuest(steps, initial = 0){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: cork, memorySize: 64 * 1024 * 1024, trapPort: 0xb077,
         entryVector: 0x7000, initialStack: 0x300000, cork: { sliceMs: Infinity },
     });

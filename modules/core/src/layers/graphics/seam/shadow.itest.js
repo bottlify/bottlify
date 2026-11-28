@@ -28,6 +28,7 @@ import {
 } from './routines/getters.js';
 import { lockCode, unlockCode } from './routines/locks.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 /** Direct3D 8's stage state types, a bit each: what the stage-state getter answers. */
 const STAGE_STATE_TYPES = Object.values(D3DTSS).reduce((mask, type)=>mask | (1 << type), 0) >>> 0;
@@ -137,7 +138,7 @@ function program(){
  * first byte on a fresh stack until the halt after it.
  */
 function processor(){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

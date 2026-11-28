@@ -21,6 +21,7 @@ import * as cork from '../../../../../cork/src/index.js';
 import {
     CLOCK, queryPerformanceCounterCode, queryPerformanceFrequencyCode, tickCountCode,
 } from './process.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const COUNTER = 0x8100;
@@ -82,7 +83,7 @@ function program(){
 }
 
 test('the clock routines answer out of the block and leave a null pointer alone', async()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: cork,
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,
@@ -151,7 +152,7 @@ test('the clock routines answer out of the block and leave a null pointer alone'
 
 test('the counter read off the time-stamp counter moves while the guest clock stands, '
     + 'as inside one long slice', async()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: cork,
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,

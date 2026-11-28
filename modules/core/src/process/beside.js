@@ -454,10 +454,7 @@ export function processesBeside(deps){
                 // Its holder of the machine's memory, claimed here and given back
                 // here once the worker is gone, whatever ended it: the memory it
                 // was handed is its own from now on.
-                if (machineMemory !== null)
-                {
-                    held.holder = machineMemory.claim();
-                }
+                held.holder = machineMemory.claim();
                 worker.post({
                     type: 'start',
                     end: memory.b,
@@ -525,7 +522,7 @@ export function processesBeside(deps){
                 ()=>{
                     if (held.holder !== undefined)
                     {
-                        machineMemory?.release(held.holder);
+                        machineMemory.release(held.holder);
                         held.holder = undefined;
                     }
                 },

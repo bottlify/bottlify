@@ -41,6 +41,7 @@ import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import * as D3D9_COMMANDS from '../d3d9/commands.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import { createDirect3D9 } from '../d3d9/device.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 /** Each routine, and the halt it leaves for the host through. */
@@ -90,7 +91,7 @@ const reused = ()=>{
         shared.writePhysical(0, new Uint8Array(MEMORY));
         return shared;
     }
-    shared = createCorkHost({
+    shared = createCorkHost({ memoryBudget: testAccount(),
         memorySize: MEMORY, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

@@ -323,7 +323,7 @@ export async function serveProcess(start){
             // the batch is taken at the next turn rather than at the next timed
             // yield, as the engine's thread takes its own.
             cache: { reader: cacheReader, join: cacheRelay.join, own: cacheOwners.own,
-                serve: cacheOwners.serve },
+                serve: cacheOwners.serve, room: cacheOwners.room },
             cork: { ...options.cork, config: { ...options.cork?.config,
                 // The run's store, kept by the system's thread.
                 store: options.cork?.config?.store === 'run'

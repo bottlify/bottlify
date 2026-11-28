@@ -18,6 +18,7 @@ import { CORK_TSC_MHZ, cacheShare, createCorkHost } from './cork-host.js';
 import { freshThreadFpu } from './context.js';
 import * as engine from '../../../../../cork/src/index.js';
 import { testLog } from '../../log/testing.fixture.js';
+import { testAccount } from '../testing.fixture.js';
 
 const MEMORY = 4 << 20;
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
@@ -31,7 +32,7 @@ const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).
  */
 function host(config = {}){
     const { cork = {}, ...rest } = config;
-    return createCorkHost({
+    return createCorkHost({ memoryBudget: testAccount(),
         engine,
         memorySize: MEMORY,
         trapPort: 0x1234,
@@ -667,7 +668,7 @@ test('newContext under cork positions eip and esp', async()=>{
     const { cpuModule } = await import('../module.js');
     const log = await testLog();
     const api = await cpuModule.create({
-        engineUrl: ENGINE_URL, memorySize: MEMORY,
+        engineUrl: ENGINE_URL, memorySize: MEMORY, memoryBudget: testAccount(),
     }, /** @type {any} */ ({ requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api
         : log), provide: ()=>{} }));
     try

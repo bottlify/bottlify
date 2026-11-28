@@ -248,7 +248,7 @@ export function createDiagnostics(state){
         evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
         // The regions taken from the store this run and forgotten at its end, never entered.
         forgotten: 0,
-        chargeRefused: 0, unchargedBytes: 0,
+        chargeRefused: 0, overdrawnBytes: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
         // Emitting and encoding the worker did: reported apart from
@@ -603,10 +603,10 @@ export function createDiagnostics(state){
             parkedNow: settings.coldMs > 0 ? rt.parked.size : null,
             evictedRegions: counts.evictedRegions,
             // Where the host bounds the modules (`charge`): the times it had no
-            // room for one, and the bytes held past it where nothing was left
-            // to let go.
+            // room for one, and the bytes taken past it where nothing was left
+            // to let go (`overdraw`).
             chargeRefused: counts.chargeRefused,
-            unchargedBytes: counts.unchargedBytes,
+            overdrawnBytes: counts.overdrawnBytes,
             broughtBack: counts.broughtBack,
             // The function table's length: what the regions' indices span.
             tableSize: table ? table.length : 0,

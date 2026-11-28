@@ -11,7 +11,7 @@
  * layout nearly whole, every block below 4 GiB; one of 8 GiB a wide window whose RAM is
  * the window, its space below 4 GiB given first and then its RAM past it, nearly
  * the whole window, around an image linked there. Under a machine's memory
- * (`machineMemory`, `memory-budget.js`) a commit past it is refused, a null and
+ * (`machineMemory`, the run's account) a commit past it is refused, a null and
  * not a fault, the run never holding more than the machine has - in the 4 GiB
  * layout and over a wide window alike. A wide window is 8 GiB long whatever the
  * program takes of it: it is counted by what the program was given even where a
@@ -127,7 +127,7 @@ for (const wide of [false, true])
             {
                 // The window's length is no charge: what the program took is.
                 assert.ok(guest.held > MACHINE, JSON.stringify(guest));
-                assert.ok(machine.byKind.guest >= pages * STEP, JSON.stringify(machine));
+                assert.ok(machine.kinds.guest.bytes >= pages * STEP, JSON.stringify(machine));
             }
         });
     }

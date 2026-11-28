@@ -57,6 +57,7 @@ import {
     ret,
 } from '../d3d10/shader-fixtures.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 /** D3D11_SDK_VERSION. */
 const D3D11_SDK_VERSION = 7;
@@ -123,7 +124,7 @@ const floatWord = value=>new Uint32Array(new Float32Array([value]).buffer)[0];
 function machine(guestCode, worker, eleven = false){
     const gpu = createFakeDevice();
     const reads = gpuReads(gpu);
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

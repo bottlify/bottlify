@@ -42,6 +42,7 @@ import {
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const ROUTINE = 0x9000;
@@ -103,7 +104,7 @@ const floats = values=>[...new Uint32Array(new Float32Array(values).buffer)];
  * The processor, with the routine's block and ring in place.
  */
 const machine = ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

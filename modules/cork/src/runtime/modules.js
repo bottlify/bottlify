@@ -246,9 +246,11 @@ export function createModules(state){
     /**
      * A module's bytes taken from the host's bound (`charge`): where it has no
      * room, the modules gone longest without running are let go until it has.
-     * Where none is left to let go and still none fits, the module is held
-     * uncharged and counted (`unchargedBytes`): one module past the bound, said,
-     * rather than code the program needs refused.
+     * Where none is left to let go and still none fits, the module is taken
+     * past the bound (`overdraw`), which the host counts and says, and counted
+     * here (`overdrawnBytes`): the module is the code the program runs now, and
+     * refused it would be translated again at every entry while nothing else
+     * could be let go for it.
      *
      * @param {number} bytes
      * @returns {number} the bytes taken
@@ -275,8 +277,9 @@ export function createModules(state){
                 return bytes;
             }
         }
-        counts.unchargedBytes += bytes;
-        return 0;
+        charge.overdraw(bytes);
+        counts.overdrawnBytes += bytes;
+        return bytes;
     };
     /**
      * Lets modules go until `bytes` more fit under `cacheBytes`: those gone

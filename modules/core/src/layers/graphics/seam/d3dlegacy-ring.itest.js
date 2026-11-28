@@ -36,6 +36,7 @@ import {
     DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS,
     DDSD_HEIGHT, DDSD_WIDTH,
 } from '../ddraw/constants.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const ROUTINE = 0x9000;
@@ -77,7 +78,7 @@ function seeded(seed){
 
 /** The processor, with a routine's device block and ring at fixed places. */
 function machine(){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

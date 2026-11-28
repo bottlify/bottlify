@@ -37,6 +37,7 @@ import { commandCode } from '../seam/routines/command.js';
 import { GL_COMMANDS } from './commands.js';
 import { createOpengl } from './exports.js';
 import { GL } from './constants.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const TRAP = 0x8e00;
@@ -104,7 +105,7 @@ const floats = values=>values.map(f);
  * threads' TEBs.
  */
 const machine = ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

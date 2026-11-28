@@ -21,6 +21,7 @@ import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createUcrtMathFunctions } from './ucrt-math.js';
 import { guestThrough } from './guest-window.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const TRAPS = 0x8f00;
@@ -62,7 +63,7 @@ function inputs(seed){
 }
 
 test('sin and cos in the guest answer XMM0 and errno as their SSE2 handlers', ()=>{
-    const machine = createCorkHost({
+    const machine = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

@@ -2183,7 +2183,10 @@ start waits for another to end (`machineWaitMs`) and fails to start with STATUS_
 that, where Windows would page. Each process holds its part on a holder of its own, given back
 whole by whoever started it once it is gone, however it ended, as Windows takes back a process's
 memory at its exit. Outside a browser there is no tab, and no budget unless one is named; the
-tab's own cost is not counted there. *2026-11-13.*
+tab's own cost is not counted there. *2026-11-13.* The budget is Cellar's account, the run's
+cache's segments one kind of it (at most `cache.budget`): an allocation that does not fit has the
+cache let its cold bodies go first, and is refused only where that makes no room, said as a loss.
+*2026-11-28.*
 
 **A244. GL_CLAMP clamps to the edge, as GL_CLAMP_TO_EDGE does,** said when a texture or a
 sampler is given it: GL_CLAMP clamps a coordinate to [0, 1], so a linear filter at the edge takes

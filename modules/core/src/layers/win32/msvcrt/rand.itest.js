@@ -19,6 +19,7 @@ import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { RAND_CODE, SRAND_CODE, createMsvcrtFunctions } from './functions.js';
 import { guestThrough } from './guest-window.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const RAND = 0x9000;
@@ -59,7 +60,7 @@ function random(seed){
 }
 
 test('srand and rand in the guest draw what their handlers draw, from any seed', ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

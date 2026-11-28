@@ -19,6 +19,11 @@ import { createCorkHost } from './cork-host.js';
 import { createBell, createRemoteExecutor } from './executor.js';
 import { unbrokenTable } from './unbroken.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { openAccount } from '@bottlify/cellar';
+import { testAccount, testAccountCalls } from '../testing.fixture.js';
+import { accountLosses } from '../module.js';
+import { testLog } from '../../log/testing.fixture.js';
+import { openRunCache } from '../../../process/run-cache.js';
 
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 const MEMORY = 4 << 20;
@@ -26,6 +31,7 @@ const CODE = 0x20000;
 const DATA = 0x30000;
 const TRAP_PORT = 0xb077;
 const CONFIG = {
+    memoryBudget: testAccount(),
     memorySize: MEMORY, trapPort: TRAP_PORT, entryVector: 0x7000, initialStack: 0x300000,
     closedBelow: 0x10000, cork: { hotThreshold: 4, wasmInterpreter: true,
         // Slices end by their instruction count alone, not by the time a busy
@@ -136,7 +142,8 @@ test('programs run on another executor in a worker leave what they leave on the 
         const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
         handle(local);
         handle(process);
-        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        const remote = await createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1, engineUrl: ENGINE_URL,
             config: { ...CONFIG, executors: 2 } });
         try
         {
@@ -194,7 +201,8 @@ test('an answer to another executor leaves the process\'s own count where it is'
     // the process's count -- a frame presented inside another executor's call --
     // reads what the process's executor retired, not the other's.
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, executors: 2 } });
     try
     {
@@ -265,7 +273,8 @@ test('another executor\'s translator keeps its regions in the run\'s store throu
     const run = async()=>{
         const process = createCorkHost({ ...config, engine });
         handle(process);
-        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        const remote = await createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1, engineUrl: ENGINE_URL,
             config, store });
         try
         {
@@ -309,7 +318,8 @@ test('a store on one executor into code another translated reaches the other\'s 
     async()=>{
         const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
         handle(process);
-        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        const remote = await createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1, engineUrl: ENGINE_URL,
             config: { ...CONFIG, executors: 2 } });
         const LOOP = 0x40000;
         const WRITER = 0x41000;
@@ -390,7 +400,8 @@ test('what one executor learns of the process reaches the others: the stacks the
     + ' was told of, code translated on one of them, a read that faulted', async()=>{
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
     handle(process);
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, executors: 2 } });
     // A thread's stack, told to the process's executor alone, as the kernel tells it.
     const STACK = 0x50000;
@@ -451,8 +462,8 @@ test('two executors at once: interlocked counters, a spin lock and a compare-and
         return false;
     });
     const bell = createBell();
-    const remotes = await Promise.all([1, 2].map(index=>createRemoteExecutor({ host: process,
-        index, engineUrl: ENGINE_URL, config, bell })));
+    const remotes = await Promise.all([1, 2].map(index=>createRemoteExecutor({
+        account: testAccountCalls, host: process, index, engineUrl: ENGINE_URL, config, bell })));
     const COUNTER = DATA;
     const GUARDED = DATA + 8;
     const LOCK = DATA + 16;
@@ -550,7 +561,8 @@ for (const told of [true, false])
         {
             table.add(ROUTINE, routine.length);
         }
-        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        const remote = await createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1, engineUrl: ENGINE_URL,
             config: { ...CONFIG, executors: 2 }, unbroken: table.buffer });
         try
         {
@@ -594,7 +606,8 @@ test('an executor whose worker is lost before it is ready fails its start, and d
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
     for (const body of ['throw new Error("broken at load")', 'process.exit(3)'])
     {
-        await assert.rejects(createRemoteExecutor({ host: process, index: 1,
+        await assert.rejects(createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1,
             engineUrl: ENGINE_URL, config: { ...CONFIG, executors: 2 },
             workerUrl: new URL(`data:text/javascript,${encodeURIComponent(body)}`) }),
         /executor 1: .*(broken at load|exited \(3\))/);
@@ -606,7 +619,8 @@ test('an executor whose worker goes after it is ready ends the slice out on it, 
     // A worker gone after its `ready` said nothing: the slice out on it never
     // ended, and the process waited on the bell for good with its thread.
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, executors: 2 },
         workerUrl: new URL('./executor-lost.fixture.js', import.meta.url) });
     /** @type {string[]} */
@@ -651,4 +665,106 @@ test('an executor whose worker goes after it is ready ends the slice out on it, 
     {
         await remote.close();
     }
+});
+
+/**
+ * Programs run on another executor of a process whose account is full, until
+ * its translator holds something of the account: its takes ask the process
+ * across the link (`account`), answered inside the process's slices, so
+ * nothing here waits on the worker between them.
+ *
+ * @param {import('@bottlify/cellar').AccountMemory} memoryBudget
+ * @param {{ room: ((bytes: number) => boolean) | null, refused: (refusal: any) => void }} account
+ * @param {() => void} fill  takes the rest of the account, once the executor is open
+ */
+async function runFull(memoryBudget, account, fill){
+    const config = { ...CONFIG, memoryBudget, executors: 2 };
+    const process = createCorkHost({ ...config, engine });
+    handle(process);
+    const remote = await createRemoteExecutor({ account, host: process, index: 1,
+        engineUrl: ENGINE_URL, config });
+    fill();
+    const translated = ()=>openAccount(memoryBudget).report().kinds.translation.bytes > 0;
+    try
+    {
+        const next = random(0xacc0);
+        for (let index = 0; index < 40 && !translated(); index++)
+        {
+            begin(process, program(next), random(next(1 << 30)));
+            remote.block().set(process.block());
+            let slice = remote.runSlice(500);
+            for (let turn = 1; turn < 2000 && !slice.halted; turn++)
+            {
+                await settle();
+                slice = remote.runSlice(500);
+            }
+        }
+        assert.ok(translated(), 'the executor translated, its modules taken from the account');
+    }
+    finally
+    {
+        remote.close();
+    }
+}
+
+test('an executor\'s take that does not fit asks the process across its link: a cold body of the '
+    + 'run\'s cache goes for it, and the take is made', async()=>{
+    const memoryBudget = testAccount({ machineMemory: 1 << 30 });
+    const run = await openRunCache({ account: memoryBudget });
+    try
+    {
+        assert.equal(run.reader.put('cold/1', new Uint8Array(1 << 20).fill(5)), true);
+        const guest = openAccount(memoryBudget);
+        /** @type {number[]} */
+        const asked = [];
+        await runFull(memoryBudget, {
+            room: bytes=>{
+                asked.push(bytes);
+                return run.room(bytes);
+            },
+            refused: refusal=>assert.fail(`refused: ${JSON.stringify(refusal)}`),
+        }, ()=>{
+            /** All the account has left taken: none of it room. */
+            const fill = ()=>{
+                const { used, limit } = guest.report();
+                assert.equal(guest.take(/** @type {number} */ (limit) - used, 'guest'), true);
+            };
+            fill();
+            // The cache's empty segments let go and taken too: what room is
+            // made next is the cold body's.
+            run.room(4096);
+            fill();
+        });
+        assert.ok(asked.length >= 1, 'the executor asked the process for room');
+        assert.equal(run.reader.look('cold/1'), null, 'the cold body went for it');
+        assert.equal(guest.report().overdrawn, 0, 'within the account');
+    }
+    finally
+    {
+        run.close();
+    }
+});
+
+test('an executor\'s take no room can be made for is taken past the account, and the loss lands '
+    + 'in the process\'s journal', async()=>{
+    const memoryBudget = testAccount({ machineMemory: 1 << 30 });
+    const guest = openAccount(memoryBudget);
+    const log = await testLog();
+    const { memoryRefused } = accountLosses({}, log);
+    let asked = 0;
+    await runFull(memoryBudget, {
+        room: ()=>{
+            asked++;
+            return false;
+        },
+        refused: memoryRefused,
+    }, ()=>{
+        const { used, limit } = guest.report();
+        assert.equal(guest.take(/** @type {number} */ (limit) - used, 'guest'), true);
+    });
+    assert.ok(asked >= 1, 'room was asked first');
+    assert.ok(guest.report().overdrawn >= 1, 'the code it runs taken past the account, counted');
+    const said = log.recent(64).filter((/** @type {any} */ record)=>
+        /the translator holds \d+ bytes past the machine's memory/.test(JSON.stringify(record)));
+    assert.ok(said.length >= 1, 'said in the process\'s journal');
 });

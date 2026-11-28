@@ -77,7 +77,8 @@ export const noCache = Object.freeze({
     serve: /** @type {Serve} */ (()=>null), owner: /** @type {Owner} */ (()=>null),
     scratch: /** @type {(name: string) => Scratch} */ (name=>noScratches.scratch(name)),
     hold: /** @type {(name: string, length: number) => Held} */ ((name, length)=>
-        noScratches.hold(name, length)) });
+        noScratches.hold(name, length)),
+    room: /** @type {((bytes: number) => boolean) | null} */ (null) });
 
 /**
  * Names of the run's cache an owner on this thread holds alone (`ownedSpace`),
@@ -538,20 +539,24 @@ export function createCacheModule(){
 
         /**
          * @param {{ reader?: Reader | null, join?: Join | null,
-         *     serve?: Serve | null, own?: Own | null } | null} config
+         *     serve?: Serve | null, own?: Own | null,
+         *     room?: ((bytes: number) => boolean) | null } | null} config
          *     `join`: how another thread of this process (an executor) is joined to
          *     the run's cache, to read it in place too; `serve`: a channel a worker
          *     that writes the cache calls the keeper through (`channelSpace`);
          *     `own`: names an owner on this thread holds alone (`owner`, and the
          *     process's scratches), numbered by the keeper. A reader with no `own`
-         *     (a test's cache) numbers its owners itself, their names left to the cache
+         *     (a test's cache) numbers its owners itself, their names left to the cache;
+         *     `room`: room made in the run's account for `bytes` more, its cold
+         *     bodies let go for it (`RunCache.room`, or its keeper's across a link)
          * @returns {Promise<{ space: (name: string, options?: { onlyCopy?: boolean,
          *     disk?: 'kept' | 'run' | 'never', idle?: 'go' | 'stay' }) => CacheSpace,
          *     join: Join,
          *     serve: Serve,
          *     owner: Owner,
          *     scratch: (name: string) => Scratch,
-         *     hold: (name: string, length: number) => Held }>}
+         *     hold: (name: string, length: number) => Held,
+         *     room: ((bytes: number) => boolean) | null }>}
          *     `scratch`: memory a layer keeps between calls, held in the run's cache
          *     (`scratch.js`); `hold`: memory of one length an object keeps for its
          *     life, likewise
@@ -588,6 +593,7 @@ export function createCacheModule(){
                 scratch: name=>rooms.scratch(name),
                 /** @param {string} name @param {number} length */
                 hold: (name, length)=>rooms.hold(name, length),
+                room: config?.room ?? null,
             };
         },
 

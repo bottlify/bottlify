@@ -25,6 +25,7 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
 import { createBell, createRemoteExecutor } from './executor.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { testAccount, testAccountCalls } from '../testing.fixture.js';
 
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 const MEMORY = 4 << 20;
@@ -40,7 +41,8 @@ const TRAP_PORT = 0xb077;
 /** One region a module, no callee formed into its caller: every call crosses modules. */
 const CORK = { hotThreshold: 4, wasmInterpreter: true, sliceMs: Infinity, leafBytes: 1,
     batchRegions: 1, maxBatchRegions: 1, relinkAfter: 0, bundleId: 'test' };
-const CONFIG = { memorySize: MEMORY, trapPort: TRAP_PORT, entryVector: 0x7000,
+const CONFIG = {
+    memoryBudget: testAccount(), memorySize: MEMORY, trapPort: TRAP_PORT, entryVector: 0x7000,
     initialStack: STACKS[0], closedBelow: 0x10000, executors: 2 };
 
 /** @param {number} value */
@@ -132,7 +134,8 @@ async function together(code, drivers, ceilings, between){
         faults.push(fault);
         return false;
     });
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, cork: { ...CORK, cacheBytes: ceilings[1] } }, store,
         bell: createBell() });
     try

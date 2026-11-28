@@ -22,6 +22,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { testAccount } from '../testing.fixture.js';
 
 const ENTRY_VECTOR = 0x7000;
 const CODE = 0x11000;
@@ -70,7 +71,8 @@ function program(seed, count){
  * @param {string} code @param {32 | 64} bits @param {Record<string, unknown>} cork
  */
 async function run(code, bits, cork){
-    const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
+    const h = createCorkHost({ memoryBudget: testAccount(),
+        engine, memorySize: 16 << 20, trapPort: 0x1234,
         entryVector: ENTRY_VECTOR, initialStack: 0x300000, ...bits === 64 ? { bits } : {},
         cork: { sliceMs: Infinity, ...cork } });
     h.writePhysical(CODE, Uint8Array.from(code.match(/../g) ?? [], byte=>parseInt(byte, 16)));

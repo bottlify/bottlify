@@ -66,15 +66,19 @@
  *           The machine's memory in bytes: every process of the run together, as
  *           Windows' processes share its RAM. A process's memory is made and grown
  *           only within it (each memory counted at its whole length, the browser's
- *           measure); a grow past it is the guest's allocation refused, a process
- *           asked for while it is full waits for others to end. Unset, each process
- *           is bounded by `memorySize` alone.
+ *           measure); a grow past it has the run's cache let cold bodies go first,
+ *           and where that makes no room is the guest's allocation refused, said as
+ *           a loss; a process asked for while it is full waits for others to end.
+ *           It is the limit of the run's account, which counts every kind the run
+ *           holds (`createRunAccount`). Unset, the account has no limit and each
+ *           process is bounded by `memorySize` alone.
  * @property {number} [machineWaitMs]  How long a process asked for while the
  *           machine's memory is full waits for another to end before it fails to
  *           start (STATUS_NO_MEMORY): ten minutes unless said.
- * @property {SharedArrayBuffer | ArrayBuffer} [memoryBudget]
- *           The run's machine's memory (`memory-budget.js`), made from
- *           `machineMemory` and carried to every process: set by the run.
+ * @property {import('@bottlify/cellar').AccountMemory} [memoryBudget]
+ *           The run's account (Cellar's, `createRunAccount`), made from
+ *           `machineMemory` and `cache.budget` and carried to every process, the
+ *           run's cache's segments one kind of it: set by the run.
  * @property {number} [memoryHolder]
  *           The holder of the machine's memory a process in a worker of its
  *           own holds what it takes on, claimed by its parent: set by the run.
@@ -291,14 +295,18 @@
  * @property {{ budget?: number, reader?: any, figures?: () => any,
  *           join?: ((post: (message: any) => void) => any) | null,
  *           serve?: import('./layers/cache/module.js').Serve | null,
- *           own?: import('./layers/cache/module.js').Own | null }} [cache]  The run's
- *           cache (Cellar): `budget`, the bytes of shared memory it holds bodies in at most
- *           (`RUN_CACHE_BYTES` by default); `reader`, the reader a process reads it through,
+ *           own?: import('./layers/cache/module.js').Own | null,
+ *           room?: ((bytes: number) => boolean) | null,
+ *           roomFrom?: (make: (bytes: number) => boolean) => () => void }} [cache]  The run's
+ *           cache (Cellar): `budget`, the bytes of shared memory it holds bodies in at most,
+ *           its kind's ceiling in the run's account (`RUN_CACHE_BYTES` by default);
+ *           `reader`, the reader a process reads it through,
  *           `figures`, its keeper's, where the keeper is on the process's thread, and `join`,
  *           how the process's other threads (its executors) are given readers of their own,
  *           `serve`, a channel a worker that writes the cache (the graphics worker) calls
- *           the keeper through, and `own`, names an owner on the process's thread holds
- *           alone, numbered by the keeper -- all set by the run, not by its caller.
+ *           the keeper through, `own`, names an owner on the process's thread holds
+ *           alone, numbered by the keeper, and `room`, room made in the run's account,
+ *           cold bodies let go for it -- all set by the run, not by its caller.
  * @property {(name: string, payload: any) => void} [relay]
  *           Told every event this process emits, for a process in a worker of its own
  *           to tell the bus of the run that started it.

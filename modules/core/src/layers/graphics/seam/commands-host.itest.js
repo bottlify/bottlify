@@ -26,6 +26,7 @@ import { COMMANDS, commandSlot } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import { COMMAND_MIRRORS as MIRRORS_9, HOST_COMMAND_MIRRORS as HOST_9 } from './d3d9.js';
 import { COMMAND_MIRRORS as MIRRORS_8, HOST_COMMAND_MIRRORS as HOST_8 } from './d3d8.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const LOW = 0x8000;
 const PROGRAM = 0x8000;
@@ -70,7 +71,7 @@ const setters = (commands, slotOf, mirrors, hostMirrors)=>Object.entries(command
  * @param {{ name: string, shape: any, mirror: any, host: any }[]} list
  */
 function gate(version, list){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
