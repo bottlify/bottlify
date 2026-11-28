@@ -1100,9 +1100,7 @@ export function createRemoting(host){
      * @returns {import('../oleaut32/marshal.js').MarshalSide}
      */
     const sideOn = thread=>({
-        pointerSize: POINTER,
-        readMemory: guest.snapshot,
-        writeMemory: guest.setBytes,
+        guest,
         allocate: bytes=>host.heap.allocate(bytes),
         free: address=>{
             host.heap.free(address);

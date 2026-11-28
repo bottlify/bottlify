@@ -28,9 +28,9 @@ const IID_ISETUPCABFILE = '{91814EC1-B5F0-11D2-80B9-00104B1F6CEA}';
  * is live, BSTRs with their length prefix, and interfaces that cross as
  * labelled references.
  *
- * @param {string} name
+ * @param {string} name @param {4 | 8} [width]
  */
-function side(name){
+function side(name, width = 4){
     const bytes = new Uint8Array(0x20000);
     const view = new DataView(bytes.buffer);
     /** @type {Map<number, number>} */
@@ -47,6 +47,7 @@ function side(name){
     };
     const self = {
         name, bytes, live, said,
+        guest: guestOver(bytes, width),
         /** @param {number} at @param {number} length */
         readMemory: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} data */
@@ -377,12 +378,11 @@ test('IOleWindow and IOleClientSite cross apartments with no library, as ole32 m
  * @param {string} name
  */
 function longSide(name){
-    const self = side(name);
+    const self = side(name, 8);
     const view = new DataView(self.bytes.buffer);
     /** @type {Map<number, number>} */
     const arrays = new Map();
     return Object.assign(self, {
-        pointerSize: /** @type {8} */ (8),
         // SAFEARRAY at 64 bits: cDims, fFeatures, cbElements, cLocks, pvData at 16,
         // rgsabound at 24. Of dwords alone, which is all a test here sends.
         /** @param {number} _vt @param {{ elements: number, lower: number }[]} bounds */

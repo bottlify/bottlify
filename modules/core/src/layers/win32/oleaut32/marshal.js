@@ -41,7 +41,6 @@ import { STDOLE_GUID, STDOLE_TYPES, parseTypeLibrary } from './sltg.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { decodeAnsi } from '../kernel32/locale.js';
-import { readToTerminator } from '../common/scan-windows.js';
 import { safeArrayLayout } from '../common/safearray.js';
 import { struct, union } from '../../../system/layout.js';
 
@@ -139,10 +138,9 @@ const SYS_WIN64 = 3;
  * needs there.
  *
  * @typedef {Object} MarshalSide
- * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its pointers, the structures
- *           that hold them and the slots of its calls' arguments are quadwords.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  its memory, at its width: 8 in a
+ *           64-bit process, whose pointers, the structures that hold them and the
+ *           slots of its calls' arguments are quadwords
  * @property {(bytes: number) => number} allocate       Task memory.
  * @property {(address: number) => void} free
  * @property {(bytes: Uint8Array) => number} allocateBstr  From its content.
@@ -173,7 +171,7 @@ const SYS_WIN64 = 3;
  */
 
 /** @param {number} bytes */
-const word = bytes=>/** @type {WireType} */ ({ kind: 'word', bytes });
+const integer = bytes=>/** @type {WireType} */ ({ kind: 'word', bytes });
 /** @param {number} bytes */
 const real = bytes=>/** @type {WireType} */ ({ kind: 'word', bytes, float: true });
 /** @param {string} why */
@@ -181,10 +179,10 @@ const unsupported = why=>/** @type {WireType} */ ({ kind: 'unsupported', why });
 /** @param {string | null} iid */
 const iface = iid=>/** @type {WireType} */ ({ kind: 'interface', iid });
 /** @param {WireType} to */
-const pointer = to=>/** @type {WireType} */ ({ kind: 'pointer', to });
+const pointerTo = to=>/** @type {WireType} */ ({ kind: 'pointer', to });
 
 /** A GUID passed by reference, as REFIID and REFCLSID are. */
-const REFGUID = pointer({ kind: 'record', bytes: 16, fields: [] });
+const REFGUID = pointerTo({ kind: 'record', bytes: 16, fields: [] });
 
 /**
  * EXCEPINFO: three strings, and two words that point into the process that
@@ -211,18 +209,18 @@ function typeOfVartype(vt){
     {
         case VT_I1:
         case VT_UI1:
-            return word(1);
+            return integer(1);
         case VT_I2:
         case VT_UI2:
         case VT_BOOL:
-            return word(2);
+            return integer(2);
         case VT_I4:
         case VT_UI4:
         case VT_INT:
         case VT_UINT:
         case VT_ERROR:
         case VT_HRESULT:
-            return word(4);
+            return integer(4);
         case VT_R4:
             return real(4);
         case VT_R8:
@@ -231,7 +229,7 @@ function typeOfVartype(vt){
         case VT_CY:
         case VT_I8:
         case VT_UI8:
-            return word(8);
+            return integer(8);
         case VT_BSTR:
             return { kind: 'bstr' };
         case VT_UNKNOWN:
@@ -246,15 +244,15 @@ function typeOfVartype(vt){
 }
 
 /** @param {Uint8Array} bytes @param {number} at */
-const u16 = (bytes, at)=>bytes[at] | (bytes[at + 1] << 8);
+const u16Of = (bytes, at)=>bytes[at] | (bytes[at + 1] << 8);
 /** @param {Uint8Array} bytes @param {number} at */
-const u32 = (bytes, at)=>(bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
+const u32Of = (bytes, at)=>(bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
     | (bytes[at + 3] << 24)) >>> 0;
 /** @param {number} value */
 const le32 = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff,
     (value >>> 24) & 0xff);
 /** @param {Uint8Array} bytes @param {number} at @param {number} value */
-const put32 = (bytes, at, value)=>bytes.set(le32(value), at);
+const put32In = (bytes, at, value)=>bytes.set(le32(value), at);
 
 /**
  * Where a process of one width keeps what crosses: its pointer, and with it the
@@ -309,9 +307,9 @@ export function layoutOf(pointerSize = 4){
         dispParams: Object.freeze({ named: dispParams.rgdispidNamedArgs,
             count: dispParams.cArgs, namedCount: dispParams.cNamedArgs, size: dispParams.SIZE }),
         read: long
-            ? (/** @type {Uint8Array} */ bytes, /** @type {number} */ at)=>u32(bytes, at)
-                + u32(bytes, at + 4) * 2 ** 32
-            : u32,
+            ? (/** @type {Uint8Array} */ bytes, /** @type {number} */ at)=>u32Of(bytes, at)
+                + u32Of(bytes, at + 4) * 2 ** 32
+            : u32Of,
         bytes: long
             ? (/** @type {number} */ value)=>Uint8Array.of(...le32(value % 2 ** 32),
                 ...le32(Math.floor(value / 2 ** 32)))
@@ -424,7 +422,7 @@ const stackSize = (type, layout)=>(layout.slot === 8 ? 8 : (sizeOf(type, layout)
 /** @param {number[]} words */
 function bytesOfWords(words){
     const bytes = new Uint8Array(words.length * 4);
-    words.forEach((value, index)=>put32(bytes, index * 4, value >>> 0));
+    words.forEach((value, index)=>put32In(bytes, index * 4, value >>> 0));
     return bytes;
 }
 
@@ -433,7 +431,7 @@ function wordsOfBytes(bytes){
     const words = [];
     for (let at = 0; at < bytes.length; at += 4)
     {
-        words.push(u32(bytes, at));
+        words.push(u32Of(bytes, at));
     }
     return words;
 }
@@ -479,7 +477,7 @@ function libraryTypes(library){
                 {
                     return to;
                 }
-                return pointer(to);
+                return pointerTo(to);
             }
             case VT_CARRAY: {
                 const array = type.array;
@@ -533,7 +531,7 @@ function libraryTypes(library){
         switch (reference.kind)
         {
             case TKIND_ENUM:
-                return word(4);
+                return integer(4);
             case TKIND_ALIAS:
                 return reference.alias
                     ? wireOf(reference.alias, within)
@@ -598,32 +596,32 @@ const UNKNOWN_SLOTS = 3;
  */
 const DISPATCH_METHODS = [
     { name: 'GetTypeInfoCount', slot: 3, unsupported: null, parameters: [
-        { name: 'pctinfo', flags: PARAMFLAG_FOUT, type: pointer(word(4)) },
+        { name: 'pctinfo', flags: PARAMFLAG_FOUT, type: pointerTo(integer(4)) },
     ] },
     { name: 'GetTypeInfo', slot: 4, unsupported: null, parameters: [
-        { name: 'iTInfo', flags: PARAMFLAG_FIN, type: word(4) },
-        { name: 'lcid', flags: PARAMFLAG_FIN, type: word(4) },
-        { name: 'ppTInfo', flags: PARAMFLAG_FOUT, type: pointer(iface(IID_ITYPEINFO)) },
+        { name: 'iTInfo', flags: PARAMFLAG_FIN, type: integer(4) },
+        { name: 'lcid', flags: PARAMFLAG_FIN, type: integer(4) },
+        { name: 'ppTInfo', flags: PARAMFLAG_FOUT, type: pointerTo(iface(IID_ITYPEINFO)) },
     ] },
     { name: 'GetIDsOfNames', slot: 5, unsupported: null, parameters: [
         { name: 'riid', flags: PARAMFLAG_FIN, type: REFGUID },
         { name: 'rgszNames', flags: PARAMFLAG_FIN,
             type: { kind: 'array', to: { kind: 'lpwstr' }, countFrom: 2 } },
-        { name: 'cNames', flags: PARAMFLAG_FIN, type: word(4) },
-        { name: 'lcid', flags: PARAMFLAG_FIN, type: word(4) },
+        { name: 'cNames', flags: PARAMFLAG_FIN, type: integer(4) },
+        { name: 'lcid', flags: PARAMFLAG_FIN, type: integer(4) },
         { name: 'rgDispId', flags: PARAMFLAG_FOUT,
-            type: { kind: 'array', to: word(4), countFrom: 2 } },
+            type: { kind: 'array', to: integer(4), countFrom: 2 } },
     ] },
     { name: 'Invoke', slot: 6, unsupported: null, parameters: [
-        { name: 'dispIdMember', flags: PARAMFLAG_FIN, type: word(4) },
+        { name: 'dispIdMember', flags: PARAMFLAG_FIN, type: integer(4) },
         { name: 'riid', flags: PARAMFLAG_FIN, type: REFGUID },
-        { name: 'lcid', flags: PARAMFLAG_FIN, type: word(4) },
-        { name: 'wFlags', flags: PARAMFLAG_FIN, type: word(2) },
+        { name: 'lcid', flags: PARAMFLAG_FIN, type: integer(4) },
+        { name: 'wFlags', flags: PARAMFLAG_FIN, type: integer(2) },
         { name: 'pDispParams', flags: PARAMFLAG_FIN | PARAMFLAG_FOUT,
             type: { kind: 'dispparams' } },
-        { name: 'pVarResult', flags: PARAMFLAG_FOUT, type: pointer({ kind: 'variant' }) },
-        { name: 'pExcepInfo', flags: PARAMFLAG_FOUT, type: pointer(EXCEPINFO) },
-        { name: 'puArgErr', flags: PARAMFLAG_FOUT, type: pointer(word(4)) },
+        { name: 'pVarResult', flags: PARAMFLAG_FOUT, type: pointerTo({ kind: 'variant' }) },
+        { name: 'pExcepInfo', flags: PARAMFLAG_FOUT, type: pointerTo(EXCEPINFO) },
+        { name: 'puArgErr', flags: PARAMFLAG_FOUT, type: pointerTo(integer(4)) },
     ] },
 ];
 
@@ -640,10 +638,10 @@ const IID_IOLECONTAINER = '{0000011B-0000-0000-C000-000000000046}';
  */
 const OLE_WINDOW_METHODS = [
     { name: 'GetWindow', slot: 3, unsupported: null, parameters: [
-        { name: 'phwnd', flags: PARAMFLAG_FOUT, type: pointer(word(4)) },
+        { name: 'phwnd', flags: PARAMFLAG_FOUT, type: pointerTo(integer(4)) },
     ] },
     { name: 'ContextSensitiveHelp', slot: 4, unsupported: null, parameters: [
-        { name: 'fEnterMode', flags: PARAMFLAG_FIN, type: word(4) },
+        { name: 'fEnterMode', flags: PARAMFLAG_FIN, type: integer(4) },
     ] },
 ];
 
@@ -651,16 +649,16 @@ const OLE_WINDOW_METHODS = [
 const OLE_CLIENT_SITE_METHODS = [
     { name: 'SaveObject', slot: 3, unsupported: null, parameters: [] },
     { name: 'GetMoniker', slot: 4, unsupported: null, parameters: [
-        { name: 'dwAssign', flags: PARAMFLAG_FIN, type: word(4) },
-        { name: 'dwWhichMoniker', flags: PARAMFLAG_FIN, type: word(4) },
-        { name: 'ppmk', flags: PARAMFLAG_FOUT, type: pointer(iface(IID_IMONIKER)) },
+        { name: 'dwAssign', flags: PARAMFLAG_FIN, type: integer(4) },
+        { name: 'dwWhichMoniker', flags: PARAMFLAG_FIN, type: integer(4) },
+        { name: 'ppmk', flags: PARAMFLAG_FOUT, type: pointerTo(iface(IID_IMONIKER)) },
     ] },
     { name: 'GetContainer', slot: 5, unsupported: null, parameters: [
-        { name: 'ppContainer', flags: PARAMFLAG_FOUT, type: pointer(iface(IID_IOLECONTAINER)) },
+        { name: 'ppContainer', flags: PARAMFLAG_FOUT, type: pointerTo(iface(IID_IOLECONTAINER)) },
     ] },
     { name: 'ShowObject', slot: 6, unsupported: null, parameters: [] },
     { name: 'OnShowWindow', slot: 7, unsupported: null, parameters: [
-        { name: 'fShow', flags: PARAMFLAG_FIN, type: word(4) },
+        { name: 'fShow', flags: PARAMFLAG_FIN, type: integer(4) },
     ] },
     { name: 'RequestNewObjectLayout', slot: 8, unsupported: null, parameters: [] },
 ];
@@ -677,10 +675,10 @@ const BUILT_IN = new Map([
             { name: 'pUnkOuter', flags: PARAMFLAG_FIN, type: iface(IID_IUNKNOWN) },
             { name: 'riid', flags: PARAMFLAG_FIN, type: REFGUID },
             { name: 'ppvObject', flags: PARAMFLAG_FOUT,
-                type: pointer({ kind: 'interface', iid: null, iidFrom: 1 }) },
+                type: pointerTo({ kind: 'interface', iid: null, iidFrom: 1 }) },
         ] },
         { name: 'LockServer', slot: 4, unsupported: null, parameters: [
-            { name: 'fLock', flags: PARAMFLAG_FIN, type: word(4) },
+            { name: 'fLock', flags: PARAMFLAG_FIN, type: integer(4) },
         ] },
     ] }],
     [IID_IOLEWINDOW, { iid: IID_IOLEWINDOW, name: 'IOleWindow',
@@ -881,7 +879,8 @@ export function createInterfaceCatalog(host){
  * @param {MarshalSide} side
  */
 function createWire(side){
-    const layout = layoutOf(side.pointerSize);
+    const { guest } = side;
+    const layout = layoutOf(guest.pointerSize);
     /** @param {WireType} type */
     const size = type=>sizeOf(type, layout);
     /** A pointer where it is stored. @param {Uint8Array} bytes @param {number} [at] */
@@ -890,20 +889,15 @@ function createWire(side){
     const SAFEARRAY = layout.safeArray;
     const DISPPARAMS = layout.dispParams;
     /**
-     * A string's bytes before its terminator, at most LONGEST_STRING of them;
-     * read a window at a time, so one at the end of what the program
-     * allocated is not read past.
+     * A string's bytes before its terminator, at most LONGEST_STRING of them,
+     * kept: they cross after the call that read them.
      *
      * @param {number} address @param {boolean} wide
      */
-    const readString = (address, wide)=>
-        readToTerminator(side, address, wide ? 2 : 1, LONGEST_STRING / (wide ? 2 : 1)).bytes;
+    const stringOf = (address, wide)=>guest.stringBytes(address, wide, LONGEST_STRING).slice();
 
     /** @param {number} address */
-    const readBstr = address=>{
-        const length = u32(side.readMemory(address - 4, 4), 0);
-        return side.readMemory(address, length).slice();
-    };
+    const bstrOf = address=>guest.snapshot(address, guest.u32(address - 4));
 
     /**
      * The element type of an array that says what it holds.
@@ -947,12 +941,12 @@ function createWire(side){
                 return null;
             case 'bstr': {
                 const at = pointerIn(bytes);
-                return at === 0 ? null : readBstr(at);
+                return at === 0 ? null : bstrOf(at);
             }
             case 'lpstr':
             case 'lpwstr': {
                 const at = pointerIn(bytes);
-                return at === 0 ? null : readString(at, type.kind === 'lpwstr');
+                return at === 0 ? null : stringOf(at, type.kind === 'lpwstr');
             }
             case 'interface': {
                 const at = pointerIn(bytes);
@@ -968,7 +962,7 @@ function createWire(side){
                 const to = /** @type {WireType} */ (type.to);
                 return at === 0
                     ? null
-                    : { value: await decode(to, side.readMemory(at, size(to)), context) };
+                    : { value: await decode(to, guest.snapshot(at, size(to)), context) };
             }
             case 'record': {
                 const record = recordIn(type, layout);
@@ -993,7 +987,7 @@ function createWire(side){
                 for (let index = 0; index < count; index++)
                 {
                     elements.push(await decode(to,
-                        side.readMemory(at + index * size(to), size(to)), context));
+                        guest.snapshot(at + index * size(to), size(to)), context));
                 }
                 return elements;
             }
@@ -1007,19 +1001,19 @@ function createWire(side){
                 {
                     return null;
                 }
-                const head = side.readMemory(at, DISPPARAMS.size);
-                const count = u32(head, DISPPARAMS.count);
-                const named = u32(head, DISPPARAMS.namedCount);
+                const head = guest.snapshot(at, DISPPARAMS.size);
+                const count = u32Of(head, DISPPARAMS.count);
+                const named = u32Of(head, DISPPARAMS.namedCount);
                 const args = [];
                 for (let index = 0; index < count; index++)
                 {
                     args.push(await decodeVariant(
-                        side.readMemory(pointerIn(head) + index * VARIANT, VARIANT),
+                        guest.snapshot(pointerIn(head) + index * VARIANT, VARIANT),
                         context));
                 }
                 const ids = named === 0
                     ? new Uint8Array(0)
-                    : side.readMemory(pointerIn(head, DISPPARAMS.named), named * 4);
+                    : guest.snapshot(pointerIn(head, DISPPARAMS.named), named * 4);
                 return { args, named: wordsOfBytes(ids) };
             }
             default:
@@ -1029,7 +1023,7 @@ function createWire(side){
 
     /** @param {Uint8Array} bytes @param {WireContext} context */
     const decodeVariant = async(bytes, context)=>{
-        const vt = u16(bytes, 0);
+        const vt = u16Of(bytes, 0);
         const base = vt & VT_TYPEMASK;
         if (base === VT_DECIMAL && (vt & VT_BYREF) === 0)
         {
@@ -1038,7 +1032,7 @@ function createWire(side){
         if (vt & VT_ARRAY)
         {
             const at = (vt & VT_BYREF)
-                ? pointerIn(side.readMemory(pointerIn(bytes, 8), layout.pointer))
+                ? pointerIn(guest.snapshot(pointerIn(bytes, 8), layout.pointer))
                 : pointerIn(bytes, 8);
             return { vt, value: await decodeArray(at, context) };
         }
@@ -1058,7 +1052,7 @@ function createWire(side){
             // but the first, as COM hands it.
             const at = pointerIn(bytes, 8);
             return at === 0 ? { vt, value: null, absent: true }
-                : { vt, value: await decode(type, side.readMemory(at, size(type)), context) };
+                : { vt, value: await decode(type, guest.snapshot(at, size(type)), context) };
         }
         return { vt, value: await decode(type, bytes.subarray(8, 8 + size(type)), context) };
     };
@@ -1069,30 +1063,30 @@ function createWire(side){
         {
             return null;
         }
-        const head = side.readMemory(at, SAFEARRAY.BOUNDS);
-        const dims = u16(head, 0);
-        const features = u16(head, 2);
-        const elementBytes = u32(head, 4);
+        const head = guest.snapshot(at, SAFEARRAY.BOUNDS);
+        const dims = u16Of(head, 0);
+        const features = u16Of(head, 2);
+        const elementBytes = u32Of(head, 4);
         const bounds = [];
         let count = 1;
         for (let index = 0; index < dims; index++)
         {
-            const bound = side.readMemory(at + SAFEARRAY.BOUNDS + index * 8, 8);
-            bounds.push({ elements: u32(bound, 0), lower: u32(bound, 4) | 0 });
-            count *= u32(bound, 0);
+            const bound = guest.snapshot(at + SAFEARRAY.BOUNDS + index * 8, 8);
+            bounds.push({ elements: u32Of(bound, 0), lower: u32Of(bound, 4) | 0 });
+            count *= u32Of(bound, 0);
         }
         const vt = vartypeOfArray(features, elementBytes);
         const type = typeOfVartype(vt);
         const data = pointerIn(head, SAFEARRAY.DATA);
         if (!type || type.kind === 'word')
         {
-            return { vt, bounds, data: side.readMemory(data, count * elementBytes).slice() };
+            return { vt, bounds, data: guest.snapshot(data, count * elementBytes) };
         }
         const elements = [];
         for (let index = 0; index < count; index++)
         {
             elements.push(await decode(type,
-                side.readMemory(data + index * elementBytes, elementBytes), context));
+                guest.snapshot(data + index * elementBytes, elementBytes), context));
         }
         return { vt, bounds, elements };
     };
@@ -1124,8 +1118,8 @@ function createWire(side){
                 }
                 const unit = type.kind === 'lpwstr' ? 2 : 1;
                 const at = side.allocate(wire.length + unit);
-                side.writeMemory(at, wire);
-                side.writeMemory(at + wire.length, new Uint8Array(unit));
+                guest.setBytes(at, wire);
+                guest.setBytes(at + wire.length, new Uint8Array(unit));
                 return layout.bytes(at);
             }
             case 'interface':
@@ -1139,7 +1133,7 @@ function createWire(side){
                 }
                 const to = /** @type {WireType} */ (type.to);
                 const at = side.allocate(size(to));
-                side.writeMemory(at, await encode(to, wire.value, context));
+                guest.setBytes(at, await encode(to, wire.value, context));
                 return layout.bytes(at);
             }
             case 'record': {
@@ -1159,7 +1153,7 @@ function createWire(side){
                 const at = side.allocate(Math.max(wire.length, 1) * size(to));
                 for (const [index, element] of wire.entries())
                 {
-                    side.writeMemory(at + index * size(to), await encode(to, element, context));
+                    guest.setBytes(at + index * size(to), await encode(to, element, context));
                 }
                 return layout.bytes(at);
             }
@@ -1175,18 +1169,18 @@ function createWire(side){
                 const args = side.allocate(Math.max(wire.args.length, 1) * VARIANT);
                 for (const [index, argument] of wire.args.entries())
                 {
-                    side.writeMemory(args + index * VARIANT,
+                    guest.setBytes(args + index * VARIANT,
                         await encodeVariant(argument, context));
                 }
                 const named = side.allocate(Math.max(wire.named.length, 1) * 4);
-                side.writeMemory(named, bytesOfWords(wire.named));
+                guest.setBytes(named, bytesOfWords(wire.named));
                 const head = side.allocate(DISPPARAMS.size);
                 const block = new Uint8Array(DISPPARAMS.size);
                 block.set(layout.bytes(args), 0);
                 block.set(layout.bytes(named), DISPPARAMS.named);
-                put32(block, DISPPARAMS.count, wire.args.length);
-                put32(block, DISPPARAMS.namedCount, wire.named.length);
-                side.writeMemory(head, block);
+                put32In(block, DISPPARAMS.count, wire.args.length);
+                put32In(block, DISPPARAMS.namedCount, wire.named.length);
+                guest.setBytes(head, block);
                 return layout.bytes(head);
             }
             default:
@@ -1210,7 +1204,7 @@ function createWire(side){
             if (wire.vt & VT_BYREF)
             {
                 const cell = side.allocate(layout.pointer);
-                side.writeMemory(cell, layout.bytes(array));
+                guest.setBytes(cell, layout.bytes(array));
                 context.owned.push({ type: { kind: 'safearray' }, address: cell });
                 out.set(layout.bytes(cell), 8);
             }
@@ -1234,7 +1228,7 @@ function createWire(side){
             // Nothing a byref variant is cleared by frees what it points at,
             // so the block is the stub's to give back.
             const cell = side.allocate(size(type));
-            side.writeMemory(cell, await encode(type, wire.value, context));
+            guest.setBytes(cell, await encode(type, wire.value, context));
             context.owned.push({ type, address: cell });
             out.set(layout.bytes(cell), 8);
             return out;
@@ -1254,18 +1248,18 @@ function createWire(side){
         {
             return 0;
         }
-        const head = side.readMemory(at, SAFEARRAY.BOUNDS);
+        const head = guest.snapshot(at, SAFEARRAY.BOUNDS);
         const data = pointerIn(head, SAFEARRAY.DATA);
-        const elementBytes = u32(head, 4);
+        const elementBytes = u32Of(head, 4);
         if (wire.data)
         {
-            side.writeMemory(data, wire.data);
+            guest.setBytes(data, wire.data);
             return at;
         }
         const type = /** @type {WireType} */ (typeOfVartype(wire.vt));
         for (const [index, element] of wire.elements.entries())
         {
-            side.writeMemory(data + index * elementBytes, await encode(type, element, context));
+            guest.setBytes(data + index * elementBytes, await encode(type, element, context));
         }
         return at;
     };
@@ -1307,7 +1301,7 @@ function createWire(side){
                     return;
                 }
                 const to = /** @type {WireType} */ (type.to);
-                await dispose(to, side.readMemory(at, size(to)), context, transferred);
+                await dispose(to, guest.snapshot(at, size(to)), context, transferred);
                 side.free(at);
                 return;
             }
@@ -1328,14 +1322,14 @@ function createWire(side){
                 const count = context.countOf(type.countFrom ?? -1);
                 for (let index = 0; index < count; index++)
                 {
-                    await dispose(to, side.readMemory(at + index * size(to), size(to)),
+                    await dispose(to, guest.snapshot(at + index * size(to), size(to)),
                         context, transferred);
                 }
                 side.free(at);
                 return;
             }
             case 'variant': {
-                const vt = u16(bytes, 0);
+                const vt = u16Of(bytes, 0);
                 if (vt & VT_BYREF)
                 {
                     return;
@@ -1367,11 +1361,11 @@ function createWire(side){
                 {
                     return;
                 }
-                const head = side.readMemory(at, DISPPARAMS.size);
-                for (let index = 0; index < u32(head, DISPPARAMS.count); index++)
+                const head = guest.snapshot(at, DISPPARAMS.size);
+                for (let index = 0; index < u32Of(head, DISPPARAMS.count); index++)
                 {
                     await dispose({ kind: 'variant' },
-                        side.readMemory(pointerIn(head) + index * VARIANT, VARIANT),
+                        guest.snapshot(pointerIn(head) + index * VARIANT, VARIANT),
                         context, transferred);
                 }
                 side.free(pointerIn(head));
@@ -1388,7 +1382,7 @@ function createWire(side){
     const disposeOwned = async context=>{
         for (const { type, address } of context.owned.splice(0))
         {
-            await dispose(type, side.readMemory(address, size(type)), context);
+            await dispose(type, guest.snapshot(address, size(type)), context);
             side.free(address);
         }
     };
@@ -1464,9 +1458,9 @@ function argumentsOf(frame, width){
     const values = [];
     for (let at = 0; at < frame.length; at += 8)
     {
-        const high = u32(frame, at + 4);
-        values.push(high === 0 ? u32(frame, at)
-            : (BigInt(high) << 32n) | BigInt(u32(frame, at)));
+        const high = u32Of(frame, at + 4);
+        values.push(high === 0 ? u32Of(frame, at)
+            : (BigInt(high) << 32n) | BigInt(u32Of(frame, at)));
     }
     return values;
 }
@@ -1487,7 +1481,7 @@ function contextOver(request, transfer){
         },
         countOf: index=>{
             const value = request[index];
-            return value instanceof Uint8Array ? u32(Uint8Array.from([...value, 0, 0, 0, 0]), 0)
+            return value instanceof Uint8Array ? u32Of(Uint8Array.from([...value, 0, 0, 0, 0]), 0)
                 : 0;
         },
         owned: [],
@@ -1510,6 +1504,7 @@ const isOut = flags=>(flags & PARAMFLAG_FOUT) !== 0;
 export async function marshalRequest(side, method, args){
     const wire = createWire(side);
     const { layout } = wire;
+    const { guest } = side;
     const bytes = bytesOfWords(args);
     const { offsets } = frameOf(method, layout);
     /** @type {any[]} */
@@ -1527,7 +1522,7 @@ export async function marshalRequest(side, method, args){
             layout));
         // A value passed by reference is read where the slot points.
         const at = byReference(parameter.type, layout)
-            ? side.readMemory(layout.read(slot, 0), sizeOf(parameter.type, layout))
+            ? guest.snapshot(layout.read(slot, 0), sizeOf(parameter.type, layout))
             : slot.subarray(0, sizeOf(parameter.type, layout));
         // A caller's array of results is a buffer, not a value: it crosses
         // as whether there is one, like a pointer that is only [out].
@@ -1555,6 +1550,7 @@ export async function marshalRequest(side, method, args){
 export async function unmarshalRequest(side, method, request){
     const wire = createWire(side);
     const { layout } = wire;
+    const { guest } = side;
     const context = contextOver(request, false);
     /** @type {Uint8Array[]} */
     const laid = [];
@@ -1575,7 +1571,7 @@ export async function unmarshalRequest(side, method, request){
                         * sizeOf(/** @type {WireType} */ (type.to), layout)
                     : sizeOf(/** @type {WireType} */ (type.to), layout);
                 address = side.allocate(bytes);
-                side.writeMemory(address, new Uint8Array(bytes));
+                guest.setBytes(address, new Uint8Array(bytes));
             }
             const given = new Uint8Array(stackSize(type, layout));
             given.set(layout.bytes(address));
@@ -1590,7 +1586,7 @@ export async function unmarshalRequest(side, method, request){
         if (byReference(type, layout))
         {
             const copy = side.allocate(bytes.length);
-            side.writeMemory(copy, bytes);
+            guest.setBytes(copy, bytes);
             copies.push(copy);
             const slot = new Uint8Array(8);
             slot.set(layout.bytes(copy));
@@ -1619,6 +1615,7 @@ export async function unmarshalRequest(side, method, request){
 export async function marshalReply(side, method, request, call){
     const wire = createWire(side);
     const { layout } = wire;
+    const { guest } = side;
     const context = { ...contextOver(request, true), owned: call.context.owned };
     /** @type {any[]} */
     const reply = [];
@@ -1641,7 +1638,7 @@ export async function marshalReply(side, method, request, call){
             reply[index] = await wire.decode(type, call.laid[index], context);
             continue;
         }
-        reply[index] = await wire.decode(to, side.readMemory(at, sizeOf(to, layout)), context);
+        reply[index] = await wire.decode(to, guest.snapshot(at, sizeOf(to, layout)), context);
     }
     for (const [index, parameter] of method.parameters.entries())
     {
@@ -1658,7 +1655,7 @@ export async function marshalReply(side, method, request, call){
                 else
                 {
                     await wire.dispose(/** @type {WireType} */ (type.to),
-                        side.readMemory(at, sizeOf(/** @type {WireType} */ (type.to), layout)),
+                        guest.snapshot(at, sizeOf(/** @type {WireType} */ (type.to), layout)),
                         context, true);
                     side.free(at);
                 }
@@ -1684,13 +1681,14 @@ export async function marshalReply(side, method, request, call){
  */
 async function byrefValues(side, wire, at, context){
     const { layout } = wire;
-    const head = side.readMemory(at, layout.dispParams.size);
+    const { guest } = side;
+    const head = guest.snapshot(at, layout.dispParams.size);
     const updates = [];
-    for (let index = 0; index < u32(head, layout.dispParams.count); index++)
+    for (let index = 0; index < u32Of(head, layout.dispParams.count); index++)
     {
-        const variant = side.readMemory(layout.read(head, 0) + index * layout.variant,
+        const variant = guest.snapshot(layout.read(head, 0) + index * layout.variant,
             layout.variant);
-        if (u16(variant, 0) & VT_BYREF)
+        if (u16Of(variant, 0) & VT_BYREF)
         {
             updates.push({ index, value: await wire.decodeVariant(variant, context) });
         }
@@ -1708,6 +1706,7 @@ async function byrefValues(side, wire, at, context){
 export async function unmarshalReply(side, method, args, request, reply){
     const wire = createWire(side);
     const { layout } = wire;
+    const { guest } = side;
     const context = contextOver(request, false);
     const bytes = bytesOfWords(args);
     const { offsets } = frameOf(method, layout);
@@ -1721,19 +1720,19 @@ export async function unmarshalReply(side, method, args, request, reply){
         }
         if (type.kind === 'dispparams')
         {
-            const head = side.readMemory(at, layout.dispParams.size);
+            const head = guest.snapshot(at, layout.dispParams.size);
             for (const update of reply[index])
             {
-                const variant = side.readMemory(layout.read(head, 0)
+                const variant = guest.snapshot(layout.read(head, 0)
                     + update.index * layout.variant, layout.variant);
-                const target = typeOfVartype(u16(variant, 0) & VT_TYPEMASK);
+                const target = typeOfVartype(u16Of(variant, 0) & VT_TYPEMASK);
                 const cell = layout.read(variant, 8);
                 if (!target || cell === 0 || update.value.absent)
                 {
                     continue;
                 }
-                await wire.dispose(target, side.readMemory(cell, sizeOf(target, layout)), context);
-                side.writeMemory(cell, await wire.encode(target, update.value.value, context));
+                await wire.dispose(target, guest.snapshot(cell, sizeOf(target, layout)), context);
+                guest.setBytes(cell, await wire.encode(target, update.value.value, context));
             }
             continue;
         }
@@ -1742,7 +1741,7 @@ export async function unmarshalReply(side, method, args, request, reply){
             const to = /** @type {WireType} */ (type.to);
             for (const [element, value] of reply[index].entries())
             {
-                side.writeMemory(at + element * sizeOf(to, layout),
+                guest.setBytes(at + element * sizeOf(to, layout),
                     await wire.encode(to, value, context));
             }
             continue;
@@ -1750,9 +1749,9 @@ export async function unmarshalReply(side, method, args, request, reply){
         const to = /** @type {WireType} */ (type.to);
         if ((parameter.flags & PARAMFLAG_FIN) !== 0)
         {
-            await wire.dispose(to, side.readMemory(at, sizeOf(to, layout)), context);
+            await wire.dispose(to, guest.snapshot(at, sizeOf(to, layout)), context);
         }
-        side.writeMemory(at, await wire.encode(to, reply[index], context));
+        guest.setBytes(at, await wire.encode(to, reply[index], context));
     }
 }
 
