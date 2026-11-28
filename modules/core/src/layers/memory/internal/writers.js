@@ -33,6 +33,8 @@
  */
 
 export const WRITER_COLUMNS = ['name', 'bytes', 'writes'];
+/** Added to at every write a host makes, never down: counting columns, two words and nothing made. */
+export const WRITER_COUNTS = ['bytes', 'writes'];
 
 /**
  * How many writers are named. Beyond this they share one row: a program has

@@ -365,7 +365,8 @@ export function createScheduler(options){
     // A gigabyte's worth of pages when nobody says: what a machine is given
     // by default, and small enough to make for every scheduler a test builds.
     const pages = options.pages ?? openTable(createTableMemory(
-        { rows: 1024 * 1024 * 1024 / PAGE + 1, columns: ['instructions'] }));
+        { rows: 1024 * 1024 * 1024 / PAGE + 1, columns: ['instructions'],
+            counting: ['instructions'] }));
     const counters = options.counters
         ?? openTable(createTableMemory({ rows: 1, columns: SCHEDULER_COUNTERS }));
     /** The routines a slice does not end inside, as sorted, disjoint [start, end) spans. */

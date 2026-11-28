@@ -32,7 +32,8 @@ import { createTableMemory, openTable } from '@bottlify/cellar';
  * @typedef {Object} MetricsRegistry
  * @property {(layer: string, names: string[]) => import('@bottlify/cellar').Table} counters
  * @property {(layer: string, name: string) => import('@bottlify/cellar').Table | null} find
- * @property {(layer: string, name: string, spec: { rows: number, columns: string[] })
+ * @property {(layer: string, name: string,
+ *     spec: { rows: number, columns: string[], counting?: string[] })
  *     => import('@bottlify/cellar').Table} table
  * @property {(sampler: () => void) => () => void} onFrame
  * @property {() => void} sample
@@ -49,7 +50,7 @@ export function createMetrics(){
     const samplers = [];
 
     /** @type {MetricsRegistry['table']} */
-    const table = (layer, name, { rows, columns })=>{
+    const table = (layer, name, { rows, columns, counting })=>{
         let tables = layers.get(layer);
         if (!tables)
         {
@@ -60,7 +61,7 @@ export function createMetrics(){
         {
             throw new Error(`log: ${layer} already publishes a table named "${name}"`);
         }
-        const made = openTable(createTableMemory({ rows, columns }));
+        const made = openTable(createTableMemory({ rows, columns, counting }));
         tables.set(name, made);
         return made;
     };

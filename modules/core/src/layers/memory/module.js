@@ -7,7 +7,7 @@
 import { Access, RegionKind, createRegionMap } from './internal/regions.js';
 import { createAccessors } from './internal/accessors.js';
 import { DwordReader } from './internal/reader.js';
-import { WRITER_COLUMNS, WRITER_ROWS, createWriterAccount } from './internal/writers.js';
+import { WRITER_COLUMNS, WRITER_COUNTS, WRITER_ROWS, createWriterAccount } from './internal/writers.js';
 import { createPort } from '../../system/port.js';
 
 /** @typedef {import('../../system/port.js').Port} Port */
@@ -133,7 +133,8 @@ export function createMemoryModule(){
 
             // Who wrote what into the guest, by name.
             const account = createWriterAccount({ table: log.metrics.table('memory', 'writers',
-                { rows: WRITER_ROWS, columns: WRITER_COLUMNS }), intern: log.intern });
+                { rows: WRITER_ROWS, columns: WRITER_COLUMNS, counting: WRITER_COUNTS }),
+            intern: log.intern });
             state.writers = account;
             const counters = log.metrics.counters('memory', MEMORY_COUNTERS);
             log.metrics.onFrame(()=>{

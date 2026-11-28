@@ -112,7 +112,8 @@ function published(cpu, log){
     const pageRows = Math.ceil(memorySize / 0x10000) + 1;
     const metrics = log.metrics;
     return {
-        pages: metrics.table('kernel', 'pages', { rows: pageRows, columns: ['instructions'] }),
+        pages: metrics.table('kernel', 'pages', { rows: pageRows, columns: ['instructions'],
+            counting: ['instructions'] }),
         counters: metrics.counters('kernel', SCHEDULER_COUNTERS),
         threadTable: metrics.table('kernel', 'threads',
             { rows: THREAD_ROWS, columns: THREAD_COLUMNS }),
