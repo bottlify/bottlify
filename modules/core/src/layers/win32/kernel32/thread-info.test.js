@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { THREAD_INFO, createThreadInfoFunctions } from './thread-info.js';
-import { createProcessors } from './processor.js';
+import { testProcessors } from '../kernel.fixture.js';
 import { TEB } from './teb.js';
 
 const STATUS_SUCCESS = 0;
@@ -65,8 +65,8 @@ function setup({ processors: count = 4, onChildThread } = {}){
         block: ()=>{},
     };
     // The caller runs on processor 1.
-    const processors = createProcessors({ processors: ()=>count, threads: ()=>threads,
-        processorOf: thread=>(thread === self ? 1 : 0) });
+    const processors = testProcessors({ processors: ()=>count, threads: ()=>threads,
+        processorOf: (/** @type {any} */ thread)=>(thread === self ? 1 : 0) });
     const fns = /** @type {Record<string, any>} */ (createThreadInfoFunctions({
         kernel,
         processors,

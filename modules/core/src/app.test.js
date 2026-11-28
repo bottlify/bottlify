@@ -56,6 +56,7 @@ import { Access, RegionKind, createRegionMap } from './layers/memory/internal/re
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { findResource, RT_STRING } from './layers/loader/internal/resources.js';
 import { buildImage, buildResources } from './layers/loader/internal/resources.test.js';
+import { logHost } from './layers/log/testing.fixture.js';
 
 /** Fast enough that a test does not pay for the backoff it is checking. */
 const QUICK = { attempts: 4, baseDelayMs: 1, maxDelayMs: 4 };
@@ -640,7 +641,7 @@ test('a library missing beside the program is read from system32', async()=>{
     const d3dx = new Uint8Array([1, 2, 3, 4]);
     const filesystem = await filesystemModule.create({ pageFile: await testPageFile(),
         drives: { C: { source: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }) } },
-    });
+    }, await logHost());
     const read = shippedLibraryReader(filesystem, null, IMAGE);
 
     assert.deepEqual([.../** @type {Uint8Array} */ (await read('d3dx9_26.dll'))],
@@ -655,7 +656,7 @@ test('a file beside the program still wins over system32', async()=>{
         drives: { C: { source: createMemoryStore({
             'WINDOWS\\system32\\d3dx9_26.dll': system, 'App\\d3dx9_26.dll': beside,
         }) } },
-    });
+    }, await logHost());
     const read = shippedLibraryReader(filesystem, null, IMAGE);
     assert.deepEqual([.../** @type {Uint8Array} */ (await read('d3dx9_26.dll'))], [9]);
 });
@@ -681,7 +682,8 @@ test('an import the engine answers is its own over a file in system32, not over 
             isKnownDll: (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll',
             readLibrary: shippedLibraryReader(await filesystemModule.create({
                 pageFile: await testPageFile(),
-                drives: { C: { source: createMemoryStore(files) } } }), null, IMAGE, ours),
+                drives: { C: { source: createMemoryStore(files) } } },
+            await logHost()), null, IMAGE, ours),
         });
 
         const covered = await plan({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx });
@@ -725,7 +727,7 @@ async function mapBeside(files, executable, space){
     const filesystem = await filesystemModule.create({ pageFile: await testPageFile(),
         drives: { C: { source: createMemoryStore(Object.fromEntries(
             Object.entries(files).map(([name, bytes])=>[`App\\${name}`, bytes]))) } },
-    });
+    }, await logHost());
     /** @type {{ name: string, region: string, base: number, size: number }[]} */
     const placed = [];
     /** @type {any[]} */
@@ -1739,21 +1741,16 @@ test('a call through createKernelGl counts, and journals only when traced() is t
     assert.deepEqual(journalled, [{ name: 'OPENGL32.dll!glEnable', args: [0xb90], result: '0x0' }]);
 });
 
-test('a seam that throws makes every entry answer null rather than throwing', ()=>{
+test('a seam that throws, or none made, is an error to the kernel that asked', ()=>{
     const gl = createKernelGl({
         entry(){
-            throw new Error('no OpenGL seam in this build');
+            throw new Error('the seam refused');
         },
     }, ()=>{}, ()=>true, { calls: 0 });
-    assert.equal(gl.entry('glEnable'), null);
-});
-
-test('resolveOpenglEntry remembers a seam that throws once, and reuses one that resolves', ()=>{
-    let calls = 0;
-    const throwing = resolveOpenglEntry({ opengl(){ calls++; throw new Error('no seam'); } });
-    assert.equal(throwing.entry('glEnable'), null);
-    assert.equal(throwing.entry('glEnable'), null);
-    assert.equal(calls, 1, 'the failure is remembered, not retried');
+    assert.throws(()=>gl.entry('glEnable'), /the seam refused/);
+    const none = resolveOpenglEntry({ opengl: ()=>undefined });
+    assert.throws(()=>none.entry('glEnable'),
+        /OPENGL32.dll!glEnable: the graphics layer has made no OpenGL seam/);
 
     const layer = fakeOpengl({ glEnable: ()=>0 });
     const resolving = resolveOpenglEntry({ opengl: ()=>layer });

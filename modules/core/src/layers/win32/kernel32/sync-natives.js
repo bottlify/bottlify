@@ -103,7 +103,7 @@ export function createSyncNatives(host){
         {
             return host.object(handle >>> 0) ? STATUS.OBJECT_TYPE_MISMATCH : STATUS.INVALID_HANDLE;
         }
-        if (right !== undefined && !allows(kernel.handles.access?.(handle >>> 0) ?? null, right))
+        if (right !== undefined && !allows(kernel.handles.access(handle >>> 0), right))
         {
             return STATUS.ACCESS_DENIED;
         }

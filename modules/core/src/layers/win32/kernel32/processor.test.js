@@ -8,9 +8,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     CPUID, PROCESSOR, PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL,
-    PROCESSOR_REVISION, createProcessors, processorMask,
+    PROCESSOR_REVISION, processorMask,
 } from './processor.js';
 import { CPUID_LEAVES } from '../../../../../cork/src/cpuid.js';
+import { testProcessors } from '../kernel.fixture.js';
 
 test('family, model and stepping come out of the CPUID signature', ()=>{
     // Family 6's model is the extended model above the model: 0x1A, Nehalem.
@@ -71,8 +72,8 @@ test('an affinity mask names the processors from the first, up to all 32 bits', 
         [1, 3, 0xf, 0x7fffffff, 0xffffffff]);
 });
 
-test('a machine whose kernel says nothing has one processor, and nothing else can be set', ()=>{
-    const processors = createProcessors();
+test('a machine of one processor has one mask, and nothing else can be set', ()=>{
+    const processors = testProcessors();
     assert.deepEqual([processors.count(), processors.systemMask(), processors.processMask()],
         [1, 1, 1]);
     assert.equal(processors.setProcessMask(3), false, 'a second processor it does not have');
@@ -84,7 +85,7 @@ test('a machine whose kernel says nothing has one processor, and nothing else ca
 
 test('the count is the kernel\'s, asked each time, and no more than a mask has bits', ()=>{
     let executors = 4;
-    const processors = createProcessors({ processors: ()=>executors });
+    const processors = testProcessors({ processors: ()=>executors });
     assert.deepEqual([processors.count(), processors.systemMask()], [4, 0xf]);
     executors = 64;
     assert.deepEqual([processors.count(), processors.systemMask()], [32, 0xffffffff]);
@@ -97,7 +98,7 @@ test('narrowing the process narrows every thread of it, and a thread made after 
         // Wine's ntdll test_affinity and kernel32 test_thread_processor: the
         // process's mask is each thread's, a thread created later included.
         const threads = [{ affinityMask: 1 }, {}];
-        const processors = createProcessors({ processors: ()=>4, threads: ()=>threads });
+        const processors = testProcessors({ processors: ()=>4, threads: ()=>threads });
         assert.equal(processors.setProcessMask(0x10), false, 'past the machine');
         assert.equal(processors.setProcessMask(0), false);
         assert.deepEqual(threads, [{ affinityMask: 1 }, {}], 'nothing changed by a refusal');
@@ -119,7 +120,7 @@ test('narrowing the process narrows every thread of it, and a thread made after 
 
 test('a thread\'s mask loses the bits past the machine and must name only the process\'s', ()=>{
     // Wine's ntdll test_affinity, as Windows from Vista on answers.
-    const processors = createProcessors({ processors: ()=>4 });
+    const processors = testProcessors({ processors: ()=>4 });
     assert.equal(processors.threadMaskFor(0x1f), 0xf, 'bits past the processors dropped');
     assert.equal(processors.threadMaskFor(0xfffffffe), 0xe);
     assert.equal(processors.threadMaskFor(0x10), 0, 'nothing left');
@@ -133,8 +134,8 @@ test('a thread\'s mask loses the bits past the machine and must name only the pr
 
 test('the processor a thread runs on is the kernel\'s answer', ()=>{
     const thread = {};
-    const processors = createProcessors({ processors: ()=>4,
-        processorOf: one=>(one === thread ? 3 : 0) });
+    const processors = testProcessors({ processors: ()=>4,
+        processorOf: (/** @type {any} */ one)=>(one === thread ? 3 : 0) });
     assert.equal(processors.processorOf(thread), 3);
     assert.equal(processors.processorOf({}), 0);
 });

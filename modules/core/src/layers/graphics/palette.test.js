@@ -32,6 +32,8 @@ import { graphicsModule } from './module.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { createGdiFunctions } from '../win32/gdi32/functions.js';
 import { BITMAPINFOHEADER, LOGPALETTE } from '../win32/gdi32/structs.js';
+import { graphicsWin32 } from './win32.fixture.js';
+import { testLog } from '../log/testing.fixture.js';
 
 const SRCCOPY = 0x00cc0020;
 const DIB_PAL_COLORS = 1;
@@ -50,6 +52,7 @@ const SCREEN = { width: 8, height: 4, bitsPerPixel: 32 };
  * way app.js wires the real layers together.
  */
 async function assemble(){
+    const log = await testLog();
     const ram = new Uint8Array(0x40000);
     const view = new DataView(ram.buffer);
     /** @type {Map<number, { type: string, object: any }>} */
@@ -89,13 +92,17 @@ async function assemble(){
                     readU32: (/** @type {number} */ address)=>view.getUint32(address, true),
                 };
             }
+            if (name === 'log')
+            {
+                return log;
+            }
             if (name === 'cache')
             {
                 return roomy.api;
             }
             if (name === 'win32')
             {
-                return {
+                return graphicsWin32({
                     gdi: ()=>({
                         createSurfaceDc: (/** @type {any} */ attributes)=>
                             gdi.createSurfaceDc(attributes),
@@ -106,9 +113,9 @@ async function assemble(){
                     }),
                     heap: ()=>heap,
                     windows: ()=>[],
-                };
+                });
             }
-            return { callGuest: ()=>Promise.resolve(0) };
+            return { callGuest: ()=>Promise.resolve(0), callerThread: ()=>null };
         },
     }));
 

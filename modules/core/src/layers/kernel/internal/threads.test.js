@@ -14,6 +14,7 @@ import { createTableMemory, openTable } from '@bottlify/cellar';
 import { createSwitcher } from './switch.js';
 import { createSyncObjects } from './sync.js';
 import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
+import { oneExecutorCpu } from './cpu.fixture.js';
 
 /**
  * A cpu whose slices retire a fixed number of instructions, so scheduling can
@@ -25,6 +26,7 @@ function fakeCpu(perSlice = 1000){
     /** @type {number[]} */
     const restored = [];
     return {
+        ...oneExecutorCpu,
         restored,
         captureContext: ()=>({ saved: true }),
         /** @param {any} context @param {number} threadBase */
@@ -1076,6 +1078,7 @@ function wakingCpu(during){
     let stopped = false;
     let pending = /** @type {(() => void) | null} */ (during);
     const cpu = {
+        ...oneExecutorCpu,
         stops: 0,
         captureContext: ()=>({ saved: true }),
         restoreContext: ()=>{},

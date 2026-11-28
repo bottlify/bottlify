@@ -160,13 +160,6 @@ const HIGH_MEMORY = 1;
 const FIRMWARE_TYPE_UEFI = 2;
 
 /**
- * The handle values a probe for open handles walks, from the table's first
- * (`kernel/internal/handles.js`), when the kernel does not count them itself.
- */
-const FIRST_HANDLE = 0x40;
-const HANDLE_PROBE = 1 << 20;
-
-/**
  * @typedef {Object} ProcessPolicyHost
  * @property {any} kernel
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -883,25 +876,8 @@ export function createProcessPolicyFunctions(host){
     /** WerSetFlags's flags, which WerGetFlags answers. */
     let werFlags = 0;
 
-    /**
-     * How many handles this process holds: the kernel's own count where it
-     * keeps one, the table probed otherwise.
-     */
-    const handleCount = ()=>{
-        if (typeof kernel.handles.count === 'function')
-        {
-            return kernel.handles.count();
-        }
-        let count = 0;
-        for (let handle = FIRST_HANDLE; handle < FIRST_HANDLE + HANDLE_PROBE * 4; handle += 4)
-        {
-            if (kernel.handles.typeOf(handle) !== null)
-            {
-                count++;
-            }
-        }
-        return count;
-    };
+    /** How many handles this process holds. */
+    const handleCount = ()=>kernel.handles.list().length;
 
     /**
      * NTSTATUS NtContinue(PCONTEXT ContextRecord, BOOLEAN TestAlert)
@@ -1472,7 +1448,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const ms = process === SELF ? kernel.processCpuMs?.() ?? 0 : 0;
+                const ms = process === SELF ? kernel.processCpuMs() : 0;
                 writeQword(wholeAddress(out), BigInt(Math.round(ms * PROCESSOR.mhz * 1000)));
                 return 1;
             },
@@ -1760,7 +1736,7 @@ export function createProcessPolicyFunctions(host){
         FlushProcessWriteBuffers: {
             argBytes: 0,
             handler: ()=>{
-                const flushed = kernel.flushProcessWrites?.() ?? true;
+                const flushed = kernel.flushProcessWrites();
                 return flushed === true ? 0 : flushed.then(()=>0);
             },
         },

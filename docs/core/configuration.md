@@ -12,8 +12,8 @@ not settings to ship with.
 - `requires` names the layers it may use. `host.requireApi(name)` answers only for those, and
   `host.provide(name, api)` only for the layer's own name (`src/system/host.js`).
 - `assembleModules(config)` (`src/core.js`) takes `{ layerName: true | false | config }`, orders the
-  layers by `requires` and creates them. A disabled layer that another needs is replaced by a stub
-  whose every method throws `NOT_IMPLEMENTED`; one nothing needs is left out.
+  layers by `requires` and creates them. A disabled layer that another needs is an error before
+  anything is created, naming the layer and the one that requires it; one nothing needs is left out.
 - An unknown name or a cycle is a configuration error before anything is created
   (`src/system/registry.js`).
 - `npm run check:boundaries` checks that a layer imports only what its `requires` names.

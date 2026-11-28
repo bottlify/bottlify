@@ -326,7 +326,7 @@ export function createDebuggerFunctions(host){
 
     // A wait that ran out of time hears nothing more: WaitForDebugEvent says
     // ERROR_SEM_TIMEOUT, the native wait answers STATUS_TIMEOUT.
-    kernel.onTimeout?.((/** @type {any} */ thread)=>{
+    kernel.onTimeout((/** @type {any} */ thread)=>{
         const gone = waiting.find(waiter=>waiter.thread === thread);
         waiting = waiting.filter(waiter=>waiter.thread !== thread);
         if (gone?.win32)
@@ -336,7 +336,7 @@ export function createDebuggerFunctions(host){
     });
 
     /** @param {number} id @returns {any} the child of that id the kernel knows */
-    const processOf = id=>(kernel.processes?.all() ?? []).find(
+    const processOf = id=>kernel.processes.all().find(
         (/** @type {any} */ made)=>(made.id >>> 0) === (id >>> 0)) ?? null;
 
     /**
@@ -350,7 +350,7 @@ export function createDebuggerFunctions(host){
         setLastErrorFor: host.setLastErrorFor }, child, { call, args: [] }, []) : null);
 
     /** @returns {any[]} */
-    const debuggees = ()=>(kernel.processes?.all() ?? []).filter(
+    const debuggees = ()=>kernel.processes.all().filter(
         (/** @type {any} */ child)=>child.debugged);
 
     /**
@@ -360,7 +360,7 @@ export function createDebuggerFunctions(host){
      */
     const objectOf = handle=>{
         const plain = untagged(handle >>> 0);
-        return plain !== 0 && kernel.handles.typeOf?.(plain) === 'debug-object'
+        return plain !== 0 && kernel.handles.typeOf(plain) === 'debug-object'
             ? kernel.handles.resolve(plain) : null;
     };
 
@@ -420,7 +420,7 @@ export function createDebuggerFunctions(host){
      * @returns {Promise<number> | number} 1, or 0 with ERROR_ACCESS_DENIED set
      */
     const attach = (child, object)=>{
-        if (child.debugged || kernel.processes?.finished?.(child))
+        if (child.debugged || kernel.processes.finished(child))
         {
             host.setLastError?.(ERROR_ACCESS_DENIED);
             return 0;
@@ -453,7 +453,7 @@ export function createDebuggerFunctions(host){
     /** @param {number} handle @returns {any} the process a handle names, or null */
     const processHandle = handle=>{
         const plain = untagged(handle >>> 0);
-        return kernel.handles.typeOf?.(plain) === 'process' ? kernel.handles.resolve(plain) : null;
+        return kernel.handles.typeOf(plain) === 'process' ? kernel.handles.resolve(plain) : null;
     };
 
     /** @param {number} address @param {number} value */
@@ -649,7 +649,7 @@ export function createDebuggerFunctions(host){
      */
     const timeoutAt = pointer=>((pointer >>> 0) === 0 ? INFINITE
         : Math.min(Math.ceil(dueInMs(readLargeInteger(read, pointer),
-            kernel.clock.wallClock?.() ?? 0)), INFINITE - 1));
+            kernel.clock.wallClock())), INFINITE - 1));
 
     /**
      * NtWaitForDebugEvent's wait, on a debug object: STATUS_SUCCESS with the
@@ -737,7 +737,7 @@ export function createDebuggerFunctions(host){
          * @param {DebugObject} object
          */
         closed(object){
-            if (!kernel.handles.holds?.(object))
+            if (!kernel.handles.holds(object))
             {
                 debuggees().filter(child=>child.debugged.object === object)
                     .forEach(debuggerGone);
@@ -869,7 +869,7 @@ export function createDebuggerFunctions(host){
                         return host.debugged?.() ? host.breakIn?.() ?? 1 : 1;
                     }
                     const plain = untagged(handle >>> 0);
-                    const child = kernel.handles.typeOf?.(plain) === 'process'
+                    const child = kernel.handles.typeOf(plain) === 'process'
                         ? kernel.handles.resolve(plain) : null;
                     if (!child)
                     {
@@ -897,7 +897,7 @@ export function createDebuggerFunctions(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([id])=>{
-                    const child = (kernel.processes?.all() ?? []).find(
+                    const child = kernel.processes.all().find(
                         (/** @type {any} */ made)=>(made.id >>> 0) === (id >>> 0));
                     if (!child)
                     {

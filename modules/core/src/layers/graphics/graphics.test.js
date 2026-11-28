@@ -25,25 +25,25 @@ import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK } from '
 import { D3DLOCK, D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
 import { IID_IDirectDraw } from './seam/iids.js';
 import { testCache, testScratch } from '../cache/testing.fixture.js';
+import { graphicsWin32 } from './win32.fixture.js';
+import { testLog } from '../log/testing.fixture.js';
 
 /** A host that hands over only what the module declares it requires. */
 async function hostWith(/** @type {any} */ memory){
     /** @type {Record<string, any>} */
     const apis = {
-        memory,
+        // A dword written as its four bytes, where the memory given writes bytes alone.
+        memory: { writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+            memory.writeBytes(at, Uint8Array.of(value, value >>> 8, value >>> 16, value >>> 24)),
+        ...memory },
         // Only the part this layer reaches for: a device context over a surface
         // it owns rather than gdi32 does.
-        win32: {
-            gdi: ()=>({
-                createSurfaceDc: ()=>0, deleteSurfaceDc: ()=>false, describeDrawable: ()=>null,
-            }),
-            heap: ()=>({ allocate: ()=>0 }),
-        },
-        bridge: { callGuest: ()=>Promise.resolve(0) },
+        win32: graphicsWin32(),
+        bridge: { callGuest: ()=>Promise.resolve(0), callerThread: ()=>null },
         // A run's cache in memory, as every run has: one a host, gone with it.
         cache: (await testCache({ budget: 64 << 20, segmentBytes: 16 << 20 })).api,
-        // A log with nowhere to publish: the layer's figures are another test's.
-        log: {},
+        // A log of its own, as every layer is handed one.
+        log: await testLog(),
     };
     return /** @type {any} */ ({
         requireApi: (/** @type {string} */ name)=>{
@@ -115,6 +115,25 @@ test('the backend is built once, on first use', async()=>{
     assert.equal(api.backend(), first, 'a second ask gets the same backend');
     assert.equal(built, 0, 'and nothing was presented merely by asking');
 
+    await graphicsModule.dispose();
+});
+
+test('a Direct3D 8 or 9 root drawn here with no device holds no names for texels: it has no '
+    + 'renderer to keep any', async()=>{
+    const host = await hostWith(fakeMemory());
+    const cache = host.requireApi('cache');
+    /** @type {string[]} */
+    const owned = [];
+    const owner = cache.owner;
+    cache.owner = (/** @type {string} */ name)=>{
+        owned.push(name);
+        return owner(name);
+    };
+    const api = await graphicsModule.create({ allocate: ()=>0x1000 }, host);
+    api.create('d3d8');
+    api.create('d3d9');
+    assert.deepEqual(owned.filter(name=>name === 'texels'), [],
+        'no owner for a root drawn on the processor');
     await graphicsModule.dispose();
 });
 

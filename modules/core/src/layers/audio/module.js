@@ -14,7 +14,6 @@ import { TABLE_BYTES } from './output/mix.js';
 import { createMp3Provider } from './asi/provider.js';
 import { createMinimp3Decoder } from './asi/minimp3.js';
 import { splitFrames } from './asi/mp3.js';
-import { isStub } from '../../system/stub.js';
 
 /** The level at which the program writes the primary buffer itself. */
 const DSSCL_WRITEPRIMARY = 4;
@@ -91,8 +90,7 @@ export function createAudioModule(){
             // system a callback and expects it run before the call returns -- an
             // enumeration that never calls back is read as "there is no device
             // here" -- so a table that cannot call the guest cannot answer those
-            // calls truthfully. Optional, because a caller assembling this module
-            // for a test has no bridge and no guest to call.
+            // calls truthfully.
             const bridge = host.requireApi('bridge');
 
             // DirectMusic's classes, which a program asks for by CLSID rather
@@ -100,19 +98,11 @@ export function createAudioModule(){
             // exist, because what plays a segment's waves is the one and what
             // decodes them is the other.
             const win32 = host.requireApi('win32');
-            // A build with win32 stubbed -- one where nothing asked for win32
-            // and it was switched off -- has no class registry to put
-            // DirectMusic's classes in, nor the codec manager Windows keeps
-            // the MPEG Layer-3 codec in, for an engine that decodes its MP3
-            // WAVs there: both are simply absent. A real win32 that refuses
-            // either is a failure, and goes to the caller.
-            const win32Here = win32 && !isStub(win32);
-            /** @type {any} */
-            const com = win32Here ? win32.com?.() ?? null : null;
-            if (win32Here)
-            {
-                win32.installAcmCodec?.(createMp3AcmCodec());
-            }
+            // The class registry DirectMusic's classes and the standard effects
+            // go in, and the codec manager Windows keeps the MPEG Layer-3 codec
+            // in, for an engine that decodes its MP3 WAVs there.
+            const com = win32.com();
+            win32.installAcmCodec(createMp3AcmCodec());
             /** @type {any} */
             let dmusic = null;
 
@@ -193,7 +183,7 @@ export function createAudioModule(){
                 publishInterface: config?.publishInterface ?? (()=>0),
                 signal: config?.signal,
                 divergence: config?.divergence,
-                mtaUsage: com?.mtaUsage,
+                mtaUsage: com.mtaUsage,
                 pointerSize: config?.pointerSize === 8 ? 8 : 4,
                 /**
                  * Runs a guest routine and answers with what it returned. The
@@ -209,22 +199,19 @@ export function createAudioModule(){
                 callerThread: config?.callerThread ?? (()=>bridge.callerThread()),
                 // A buffer's effects are made through COM, as a program would
                 // make them, so its own registered effect is found too.
-                createInstance: config?.createInstance ?? win32?.createInstance,
+                createInstance: config?.createInstance ?? win32.createInstance,
                 played: (/** @type {any} */ buffer)=>attachVoice(buffer),
             });
             // The standard effects SetFX names, for COM to find.
-            if (com)
-            {
-                registerStandardEffects(com, {
-                    /** @param {number} address @param {number} length */
-                    readMemory: (address, length)=>memory.readBytes(address, length),
-                    /** @param {number} address @param {Uint8Array} bytes */
-                    writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
-                    /** @param {number} address @param {4 | 8} bytes */
-                    readPointer: (address, bytes)=>memory.readPointer(address, bytes),
-                    divergence: config?.divergence,
-                }, config?.pointerSize === 8 ? 8 : 4);
-            }
+            registerStandardEffects(com, {
+                /** @param {number} address @param {number} length */
+                readMemory: (address, length)=>memory.readBytes(address, length),
+                /** @param {number} address @param {Uint8Array} bytes */
+                writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                /** @param {number} address @param {4 | 8} bytes */
+                readPointer: (address, bytes)=>memory.readPointer(address, bytes),
+                divergence: config?.divergence,
+            }, config?.pointerSize === 8 ? 8 : 4);
 
             // What decodes behind the provider. The library asks for its samples
             // in a call and holds a lock while it asks, so a decoder that answers
@@ -281,43 +268,40 @@ export function createAudioModule(){
                 });
             };
 
-            if (com)
-            {
-                dmusic = registerDirectMusic({
-                    registry: com,
-                    divergence: config?.divergence ?? (()=>{}),
-                    memory: {
-                        readBytes: (/** @type {number} */ address, /** @type {number} */ length)=>
-                            memory.readBytes(address, length),
-                        writeBytes: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
-                            memory.writeBytes(address, bytes),
-                    },
-                    publishInterface: config?.publishInterface ?? (()=>0),
-                    // The bridge owns the map from a published pointer back to
-                    // its object; a segment a program made by class id is
-                    // published there and not by this module, so a
-                    // performance asked to play it has to look there.
-                    objectAt: (/** @type {number} */ pointer)=>
-                        bridge?.interfaceObject?.(pointer) ?? null,
-                    allocate: config?.allocate,
-                    free: config?.free,
-                    // DirectMusic's notification message is the event the
-                    // performance sets when a segment reaches a point a
-                    // program asked about; it is signalled from the audio
-                    // tick, the same place the sound notifier's is.
-                    signal: config?.signal,
-                    // A segment's bytes may arrive through an IStream, which is
-                    // guest code: reading it is a callback the bridge makes on
-                    // the thread whose call is running.
-                    callGuest: (/** @type {number} */ entry, /** @type {number[]} */ args,
-                        /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread }),
-                    callerThread: ()=>bridge.callerThread(),
-                    output: ()=>output,
-                    now: config?.now ?? (()=>Date.now()),
-                    readFile: config?.readFile,
-                    decodeWave,
-                });
-            }
+            dmusic = registerDirectMusic({
+                registry: com,
+                divergence: config?.divergence ?? (()=>{}),
+                memory: {
+                    readBytes: (/** @type {number} */ address, /** @type {number} */ length)=>
+                        memory.readBytes(address, length),
+                    writeBytes: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+                        memory.writeBytes(address, bytes),
+                },
+                publishInterface: config?.publishInterface ?? (()=>0),
+                // The bridge owns the map from a published pointer back to
+                // its object; a segment a program made by class id is
+                // published there and not by this module, so a
+                // performance asked to play it has to look there.
+                objectAt: (/** @type {number} */ pointer)=>
+                    bridge.interfaceObject(pointer),
+                allocate: config?.allocate,
+                free: config?.free,
+                // DirectMusic's notification message is the event the
+                // performance sets when a segment reaches a point a
+                // program asked about; it is signalled from the audio
+                // tick, the same place the sound notifier's is.
+                signal: config?.signal,
+                // A segment's bytes may arrive through an IStream, which is
+                // guest code: reading it is a callback the bridge makes on
+                // the thread whose call is running.
+                callGuest: (/** @type {number} */ entry, /** @type {number[]} */ args,
+                    /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread }),
+                callerThread: ()=>bridge.callerThread(),
+                output: ()=>output,
+                now: config?.now ?? (()=>Date.now()),
+                readFile: config?.readFile,
+                decodeWave,
+            });
 
             // The MPEG decoder a sound library of this era loads beside a program
             // as a provider of its own. Hosted, because decoding it in the guest

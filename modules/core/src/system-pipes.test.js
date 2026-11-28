@@ -45,6 +45,9 @@ function processOf({ table, id, across }){
                 return true;
             },
             clock: { virtualTime: ()=>0 },
+            onTimeout: ()=>{},
+            setEvent: ()=>{},
+            resetEvent: ()=>{},
         },
         handles: {
             open: (type, object)=>{
@@ -62,6 +65,7 @@ function processOf({ table, id, across }){
                 return entry.object;
             },
             typeOf: handle=>handles.get(handle)?.type ?? null,
+            access: ()=>null,
         },
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),

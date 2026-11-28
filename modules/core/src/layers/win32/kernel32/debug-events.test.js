@@ -45,7 +45,7 @@ function debuggerOf(children, extra = {}, table = new Map()){
     const errorsFor = [];
     const thread = { id: 0x10 };
     const kernel = {
-        processes: { all: ()=>children },
+        processes: { all: ()=>children, finished: ()=>false },
         handles: { open: (/** @type {string} */ type, /** @type {any} */ object)=>{
             opened.push({ type, object });
             const handle = 0x100 + opened.length * 4;
@@ -58,7 +58,7 @@ function debuggerOf(children, extra = {}, table = new Map()){
         block: (/** @type {any} */ who, /** @type {string} */ why, /** @type {any} */ timed)=>
             blocked.push({ who, timed }),
         wake: (/** @type {any} */ who, /** @type {number} */ value)=>woken.push([who, value]),
-        clock: { virtualTime: ()=>1000 },
+        clock: { virtualTime: ()=>1000, wallClock: ()=>0 },
         onTimeout: (/** @type {(thread: any) => void} */ handler)=>expiries.push(handler),
     };
     let slot = 0;

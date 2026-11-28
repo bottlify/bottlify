@@ -67,11 +67,6 @@ const SEEN_READS = 256;
  */
 const SETTLED_MS = 2000;
 
-/** A volume with no cache to keep reads in. @type {import('../../cache/module.js').CacheSpace} */
-const KEEP_NOTHING = Object.freeze({
-    look: ()=>null, with: ()=>undefined, put: ()=>false, drop: ()=>{}, hold: ()=>null,
-});
-
 const CHANGE_FILE_NAME = 0x001;
 const CHANGE_DIR_NAME = 0x002;
 const CHANGE_ATTRIBUTES = 0x004;
@@ -124,15 +119,20 @@ export const readIntoBy = read=>(node, offset, length, put)=>
 
 /**
  * @param {any} fs  The filesystem layer's API.
- * @param {((blocks: any[]) => Promise<void>) | null} [fetchBlocks]
+ * @param {((blocks: any[]) => Promise<void>) | null} fetchBlocks
  *        Brings absent bundle blocks in. Absent itself when nothing is mounted
  *        from a bundle, in which case a miss is a fault rather than a wait.
  * @param {{ now?: () => number,
- *     kept?: import('../../cache/module.js').CacheSpace }} [options]
+ *     kept: import('../../cache/module.js').CacheSpace }} options
  *        `now`: the clock a last write is aged against, in milliseconds
- *        (`Date.now`); `kept`: where ranges read again are kept (none: never)
+ *        (`Date.now`); `kept`: the space of the run's cache ranges read again
+ *        are kept in
  */
-export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KEEP_NOTHING } = {}){
+export function createVolume(fs, fetchBlocks, { now = Date.now, kept }){
+    if (!kept)
+    {
+        throw new Error('a volume with no space of the run\'s cache to keep its reads in');
+    }
     const { ErrorCode, Disposition, SeekFrom } = fs;
 
     /**

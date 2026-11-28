@@ -2696,7 +2696,7 @@ test('DXGI names the adapter, the output and the monitor as user32 and Direct3D 
         scratches: testScratch,
         graphics: { create: (/** @type {string} */ name, /** @type {any} */ caps)=>
             createDirect3D10({ ...deviceRooms(), ...caps }), available: ()=>false,
-        adapter: ()=>({ vendor: 'nvidia' }) },
+        adapter: ()=>({ vendor: 'nvidia' }), videoMemory: ()=>null },
         only: ['D3D10.dll', 'DXGI.dll'],
         memory: box.services,
         publishInterface: box.publishInterface,

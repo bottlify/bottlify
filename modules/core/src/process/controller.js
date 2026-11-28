@@ -1413,15 +1413,12 @@ export function processController(deps){
          * at once, the first report of a run would say nothing of them.
          */
         async report(){
-            // A build without the graphics layer, or with its stub, has no
-            // worker to wait for.
+            // A build without the graphics layer has no worker to wait for.
             const answeredByGraphics = async()=>{
-                try
+                if (core.modules.some((/** @type {{ name: string }} */ module)=>
+                    module.name === 'graphics'))
                 {
                     await core.api('graphics').answered();
-                }
-                catch {
-                    // Nothing was asked of anything that could answer.
                 }
             };
             this.diagnostics();

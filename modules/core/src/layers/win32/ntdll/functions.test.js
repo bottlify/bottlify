@@ -12,6 +12,7 @@ import { STATUS } from './status.js';
 import { UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES } from '../advapi32/tokens.js';
 import { IN_PLACE, externalGrowth, guestOver } from '../common/guest.fixture.js';
+import { testProcessors } from '../kernel.fixture.js';
 
 const PROCESS_HEAP = 0x8;
 
@@ -77,6 +78,7 @@ function fakeHost({ registers = true } = {}){
     };
 
     return {
+        processors: testProcessors(),
         bytes,
         allocations,
         written,

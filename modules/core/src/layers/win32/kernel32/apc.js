@@ -304,7 +304,7 @@ export function createApcs(host){
         {
             return STATUS_OBJECT_TYPE_MISMATCH;
         }
-        const type = kernel.handles.typeOf?.(value) ?? null;
+        const type = kernel.handles.typeOf(value);
         if (type === null)
         {
             return STATUS_INVALID_HANDLE;
@@ -499,7 +499,7 @@ export function createApcs(host){
                 argBytes: 16,
                 /** @param {number[]} args */
                 handler: ([signal, waitOn, milliseconds, alertable])=>{
-                    const kind = kernel.handles.typeOf?.(signal >>> 0);
+                    const kind = kernel.handles.typeOf(signal >>> 0);
                     const signalled = kind === 'event'
                         ? host.call('SetEvent')([signal])
                         : kind === 'mutex'

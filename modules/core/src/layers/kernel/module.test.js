@@ -17,6 +17,18 @@ import assert from 'node:assert/strict';
 import { flushWrites, kernelModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { openTable } from '@bottlify/cellar';
+import { testLog } from '../log/testing.fixture.js';
+import { oneExecutorCpu } from './internal/cpu.fixture.js';
+
+/**
+ * The apis a kernel is built over, with a real log of its own.
+ *
+ * @param {(name: string) => any} apis @returns {Promise<(name: string) => any>}
+ */
+const withLog = async apis=>{
+    const log = await testLog();
+    return name=>(name === 'log' ? log : apis(name));
+};
 
 const PARK = 0xf000dead;
 const STACK_BASE = 0x00300000;
@@ -25,6 +37,7 @@ const STACK_SIZE = 0x10000;
 /** @param {number} [esp]  What the stack pointer reads while a call is in flight. */
 function fakeCpu(esp = 0){
     return {
+        ...oneExecutorCpu,
         parkAddress: ()=>PARK,
         /** @param {any} state */
         newContext: state=>({ ...state, reg32: new Int32Array(8) }),
@@ -43,6 +56,7 @@ function fakeMemory(){
         regions,
         RegionKind: { STACK: 'stack' },
         Access: { READ_WRITE: 'rw' },
+        charge: ()=>true,
         /** @param {any} region */
         register: region=>{
             const clash = regions.find(other=>
@@ -55,6 +69,9 @@ function fakeMemory(){
         },
         /** @param {string} name */
         unregister: name=>regions.splice(regions.findIndex(region=>region.name === name), 1),
+        /** @param {number} address */
+        find: address=>regions.find(region=>
+            address >= region.base && address < region.base + region.size),
         /** @param {number} address @param {number} value */
         writeU32: (address, value)=>words.set(address >>> 0, value >>> 0),
         /** @param {number} address */
@@ -91,7 +108,7 @@ async function makeKernel(esp){
         { stacks: { base: STACK_BASE, size: STACK_SIZE } },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? fakeCpu(esp) : memory),
+            requireApi: await withLog(name=>(name === 'cpu' ? fakeCpu(esp) : memory)),
             provide: ()=>{},
         }),
     );
@@ -218,7 +235,7 @@ async function makeRunningKernel(slots, size = STACK_SIZE){
         { stacks: { base: STACK_BASE, size, limit: STACK_BASE + slots * size } },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? cpu : name === 'log' ? {} : memory),
+            requireApi: await withLog(name=>(name === 'cpu' ? cpu : memory)),
             provide: ()=>{},
         }),
     );
@@ -353,6 +370,18 @@ function fakeLog(){
         },
     };
 }
+
+test('a kernel is made over a log with tables to publish in, and one without is an error',
+    async()=>{
+        await assert.rejects(()=>kernelModule.create(
+            { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+            /** @type {any} */ ({
+                /** @param {string} name */
+                requireApi: name=>(name === 'cpu' ? fakeCpu() : name === 'log' ? {} : fakeMemory()),
+                provide: ()=>{},
+            })), TypeError);
+        await kernelModule.dispose();
+    });
 
 test('the kernel publishes its figures as tables and keeps the object tables cold', async()=>{
     const log = fakeLog();
@@ -497,7 +526,7 @@ test('a thread parked or held in its call ends its turn there', async()=>{
         { stacks: { base: STACK_BASE, size: STACK_SIZE } },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? cpu : memory),
+            requireApi: await withLog(name=>(name === 'cpu' ? cpu : memory)),
             provide: ()=>{},
         }),
     );
@@ -540,9 +569,8 @@ test('a parked thread resumes on the stack it was told, however far the stub got
         { stacks: { base: STACK_BASE, size: STACK_SIZE } },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? cpu
-                : name === 'log' ? { debug: ()=>{} }
-                    : { ...memory, readU32: (/** @type {number} */ at)=>words.get(at >>> 0) ?? 0 }),
+            requireApi: await withLog(name=>(name === 'cpu' ? cpu
+                : { ...memory, readU32: (/** @type {number} */ at)=>words.get(at >>> 0) ?? 0 })),
             provide: ()=>{},
         }),
     );
@@ -662,7 +690,7 @@ test('the clock is not moved to a deadline while another process of the run may 
         { stacks: { base: STACK_BASE, size: STACK_SIZE } },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? cpu : memory),
+            requireApi: await withLog(name=>(name === 'cpu' ? cpu : memory)),
             provide: ()=>{},
         }),
     );
@@ -696,7 +724,7 @@ test('the cpu layer is given the guest\'s clock, for the time-stamp counter', as
         { stacks: { base: STACK_BASE, size: STACK_SIZE } },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? cpu : fakeMemory()),
+            requireApi: await withLog(name=>(name === 'cpu' ? cpu : fakeMemory())),
             provide: ()=>{},
         }),
     );
@@ -728,7 +756,7 @@ test('a process is found by id in the run\'s directory, whichever process starte
         { stacks: { base: STACK_BASE, size: STACK_SIZE }, ...config },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            requireApi: await withLog(name=>(name === 'cpu' ? fakeCpu() : fakeMemory())),
             provide: ()=>{},
         })));
     const ids = { thread: 1, process: 0x2000 };
@@ -752,7 +780,7 @@ test('a child that outlives the process that made it sets its exit when it ends,
         { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            requireApi: await withLog(name=>(name === 'cpu' ? fakeCpu() : fakeMemory())),
             provide: ()=>{},
         })));
     const launcherModule = createKernelModule();
@@ -781,7 +809,7 @@ test('a thread of another process that waits on a child\'s exit before its maker
         { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            requireApi: await withLog(name=>(name === 'cpu' ? fakeCpu() : fakeMemory())),
             provide: ()=>{},
         })));
     const launcherModule = createKernelModule();
@@ -813,7 +841,7 @@ test('a gone process\'s record in the run\'s directory keeps its exit, not its m
             { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
             /** @type {any} */ ({
                 /** @param {string} name */
-                requireApi: name=>(name === 'cpu' ? fakeCpu() : memory),
+                requireApi: await withLog(name=>(name === 'cpu' ? fakeCpu() : memory)),
                 provide: ()=>{},
             })));
         // As a COM server enters itself: its own record, its own exit event.
@@ -851,7 +879,7 @@ test('a gone process on this thread gives its names back, and a name another pro
             { stacks: { base: STACK_BASE, size: STACK_SIZE }, ids },
             /** @type {any} */ ({
                 /** @param {string} name */
-                requireApi: name=>(name === 'cpu' ? fakeCpu() : memory),
+                requireApi: await withLog(name=>(name === 'cpu' ? fakeCpu() : memory)),
                 provide: ()=>{},
             })));
         const named = createNamedObjects({ table });
@@ -915,7 +943,7 @@ test('a process in a worker of its own finds a process of the run by id across t
             remoteObjects: { ...objects, onWake(){} } },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            requireApi: await withLog(name=>(name === 'cpu' ? fakeCpu() : fakeMemory())),
             provide: ()=>{},
         })));
     const found = kernel.processes.find(0x1fb8);
@@ -969,8 +997,8 @@ test('a 64-bit thread parked or held keeps a return past 4 GiB whole, and the pa
             { stacks: { base: STACK_BASE, size: STACK_SIZE } },
             /** @type {any} */ ({
                 /** @param {string} name */
-                requireApi: name=>(name === 'cpu'
-                    ? { ...fakeCpu(0x2ffed0), bits: ()=>64 } : memory),
+                requireApi: await withLog(name=>(name === 'cpu'
+                    ? { ...fakeCpu(0x2ffed0), bits: ()=>64 } : memory)),
                 provide: ()=>{},
             }),
         );
@@ -999,13 +1027,13 @@ test('a 64-bit thread starts with a parameter and a routine past 4 GiB whole', a
         { stacks: { base: STACK_BASE, size: STACK_SIZE } },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? {
+            requireApi: await withLog(name=>(name === 'cpu' ? {
                 ...fakeCpu(), bits: ()=>64,
                 /** @param {any} state */
                 newContext: state=>({ ...state, reg32: new Array(8).fill(0) }),
                 /** @param {any} context @param {{ gpr: bigint[] }} long */
                 setContextLong: (context, long)=>set.push(long),
-            } : memory),
+            } : memory)),
             provide: ()=>{},
         }),
     );

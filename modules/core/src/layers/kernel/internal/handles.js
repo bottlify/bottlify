@@ -146,11 +146,6 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
             return entry.object;
         },
 
-        /** @param {number} handle @returns {boolean} */
-        has(handle){
-            return entries.has(handle);
-        },
-
         /**
          * Whether anything still holds a handle to this object.
          *

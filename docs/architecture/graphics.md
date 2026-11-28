@@ -284,7 +284,8 @@ flowchart TB
   in workers, it is the same manager.
 - **When something breaks.** If the graphics thread does not open, Direct3D and OpenGL draw on the
   engine thread and a warning goes to the console. A lost WebGPU device is not recovered
-  ([`core/limits.md`](../core/limits/graphics.md)).
+  ([`core/limits.md`](../core/limits/graphics.md)). An OpenGL entry point that is declared and
+  not implemented answers 0, and each call is a loss in the report (`opengl/exports.js`).
 
 Where to look in the code: [`core/src/layers/graphics/`](../../modules/core/src/layers/graphics/) (`d3d7`, `d3d8`, `d3d9`, `d3d10`, `ddraw`,
 `gdi`, `opengl`, `glu`, `vulkan`, `webgpu`, and `seam`: the interfaces and exports the program

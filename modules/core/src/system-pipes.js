@@ -57,8 +57,9 @@ export function pipeHandlers(inherited, table = new Map(), divergence = undefine
     /** The process asking, and the rights the last end made here was opened with. */
     const asking = { processId: 0, access: /** @type {number | null} */ (null) };
     const engine = createNamedPipes(/** @type {any} */ ({
-        // Nothing waits on this thread's behalf: what waits is the link's (`EndAcross`).
-        kernel: {},
+        // Nothing waits on this thread's behalf: what waits is the link's
+        // (`EndAcross`), so no thread here times out and no event here is signalled.
+        kernel: { onTimeout: ()=>{}, setEvent: ()=>{}, resetEvent: ()=>{} },
         handles: {
             open: (/** @type {string} */ type, /** @type {any} */ end,
                 /** @type {number | null} */ access = null)=>

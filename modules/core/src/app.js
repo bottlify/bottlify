@@ -3942,6 +3942,8 @@ export async function createApp(options){
     // A process in a worker of its own is handed the run's across a link
     // (`system-link.js`), and joins it rather than making one.
     const system = options.system ?? { namedObjects, registry: null, bundle: null, windows: null,
+        // The descriptors programs set on files (`named-security.js`).
+        fileSecurity: new Map(),
         // Views of one page-file section, kept agreeing at the edges of each
         // process's turns (`shared-views.js`).
         sharedViews: createSharedViews(),

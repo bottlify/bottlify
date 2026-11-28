@@ -90,11 +90,12 @@ function threadsOf(session){
  * Replays a recorded session and answers with what it did.
  *
  * @param {Session} session
+ * @param {any} log  the log layer the bridge is built over, as every layer is
  * @returns {Promise<{ events: number, refusals: string[], startedGuest: any[] }>}
  *   `refusals` is what the bridge refused to do, in order -- which for a
  *   session recorded from a failure is the failure itself, named.
  */
-export async function replaySession(session){
+export async function replaySession(session, log){
     const threads = threadsOf(session);
     /** @type {Record<string, number>} */
     const regs = { esp: 0, ecx: 0, eax: 0 };
@@ -109,6 +110,7 @@ export async function replaySession(session){
     /** @type {any} */
     const apis = {
         cpu: {
+            bits: ()=>32,
             /** @param {string} which */
             readReg32: which=>regs[which] ?? 0,
             /** @param {string} which @param {number} value */
@@ -132,13 +134,14 @@ export async function replaySession(session){
             scheduleResume: ()=>{},
         },
         memory: {
+            writer: ()=>-1,
             /** @param {number} at */
             readU32: at=>cells.get(at >>> 0) ?? 0,
             /** @param {number} at @param {number} value */
             writeU32: (at, value)=>cells.set(at >>> 0, value >>> 0),
             readBytes: ()=>new Uint8Array(0),
         },
-        log: { begin: ()=>{}, end: ()=>{} },
+        log,
     };
 
     const bridge = await createBridgeModule().create({}, /** @type {any} */ ({
@@ -275,7 +278,7 @@ export async function replaySession(session){
 
     // A refusal raised inside a suspended handler has nowhere to go but the
     // bridge's own record of it, so it is collected here too.
-    const held = bridge.failure?.();
+    const held = bridge.failure();
     if (held)
     {
         refusals.push(String(held.message ?? held));

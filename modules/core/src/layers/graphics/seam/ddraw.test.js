@@ -218,6 +218,7 @@ function seamed(build = {}){
         },
         available: ()=>false,
         adapter: ()=>build.adapter ?? null,
+        videoMemory: ()=>null,
     };
     // The display, as the app keeps it: a mode set is its size from then on.
     const display = { ...SCREEN };

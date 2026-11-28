@@ -12,6 +12,7 @@ import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
 import { createNamedObjects } from './named-objects.js';
 import { CLOSE_HANDLE, createFileFunctions } from './files.js';
 import { createHandleTable, FIRST_HANDLE } from '../../kernel/internal/handles.js';
+import { kernelLayerAnswers } from '../kernel.fixture.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -118,6 +119,7 @@ function fakeKernel(handles = createHandleTable()){
     };
 
     const kernel = {
+        ...kernelLayerAnswers,
         /** @param {any} thread @param {() => void} work */
         whenResumed: (thread, work)=>{
             thread.whenResumed = work;
@@ -367,7 +369,7 @@ test('CreateRemoteThread into a child is the child\'s CreateThread, the handle t
         host.setLastErrorFor = (thread, code)=>errors.push([thread, code]);
         const child = { imagePath: 'C:\\App\\child.exe', threadId: 0x2c };
         const process = kernel.handles.open('process', child);
-        Object.assign(kernel, { processes: { all: ()=>[child] } });
+        Object.assign(kernel, { processes: { ...kernelLayerAnswers.processes, all: ()=>[child] } });
 
         const handle = await fns.CreateRemoteThread.handler(
             [process, 0, 0x10000, 0x7f0000, 37, 4, 0x405000]);
@@ -1539,7 +1541,7 @@ test('a snapshot lists the children still running and every thread, each walk to
     kernel.threads = ()=>[{ id: 0x10, state: 'running' }, { id: 0x14, state: 'terminated' },
         { id: 0x18, state: 'blocked' }];
     kernel.processes = {
-        STILL_ACTIVE: 259,
+        ...kernelLayerAnswers.processes,
         all: ()=>[
             { id: 0x300, threadId: 0x304, imagePath: 'C:\\App\\child.exe', exitCode: 259 },
             { id: 0x310, threadId: 0x314, imagePath: 'C:\\App\\gone.exe', exitCode: 0 },
@@ -1580,8 +1582,10 @@ test('the run\'s processes list a process\'s threads in the order they were made
     const kernel = {
         threads: ()=>[{ id: 0x18, state: 'ready' }, { id: 0x10, state: 'running' },
             { id: 0x1c, state: 'terminated' }, { id: 0x14, state: 'blocked' }],
+        handles: { holds: ()=>false },
         processes: { STILL_ACTIVE: 259, all: ()=>[
-            { id: 0x300, threadId: 0x304, imagePath: 'C:\\App\\child.exe', exitCode: 259 }] },
+            { id: 0x300, threadId: 0x304, imagePath: 'C:\\App\\child.exe', exitCode: 259 }],
+        run: ()=>[] },
     };
     assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe' }), [
         { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe', threads: [0x10, 0x14, 0x18] },
@@ -1616,7 +1620,7 @@ test('an ended thread stays in its process\'s list, and opens by id, while a han
     const kernel = {
         threads: ()=>[{ id: 0x10, state: 'running' }, ended],
         handles: { holds: (/** @type {any} */ object)=>held && object === ended },
-        processes: { STILL_ACTIVE: 259, all: ()=>[] },
+        processes: { STILL_ACTIVE: 259, all: ()=>[], run: ()=>[] },
     };
     assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: '' })[0].threads,
         [0x10, 0x1c]);
@@ -1632,7 +1636,7 @@ test("OpenThread opens a live thread or a child's first, and refuses any other",
     const live = { id: 0x10, state: 'blocked' };
     const child = { id: 0x300, threadId: 0x304, exitCode: 259 };
     kernel.threads = ()=>[live, { id: 0x14, state: 'terminated' }];
-    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
+    kernel.processes = { ...kernelLayerAnswers.processes, all: ()=>[child] };
     /** @type {[string, any][]} */
     const opened = [];
     const open = kernel.handles.open;
@@ -1659,7 +1663,7 @@ test('GetProcessId, GetThreadId and GetProcessIdOfThread read the ids behind han
     const live = { id: 0x10, state: 'blocked' };
     const child = { id: 0x300, threadId: 0x304, exitCode: 259 };
     kernel.threads = ()=>[live];
-    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
+    kernel.processes = { ...kernelLayerAnswers.processes, all: ()=>[child] };
     const process = kernel.handles.open('process', child);
     const childThread = fns.OpenThread.handler([0x1f03ff, 0, 0x304]);
     const ownThread = fns.OpenThread.handler([0x1f03ff, 0, 0x10]);

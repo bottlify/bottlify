@@ -6,16 +6,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { noCache } from '../cache/module.js';
+import { roomy } from '../cache/testing.fixture.js';
 import { CPU_COUNTERS, cpuModule } from './module.js';
-import { createMetrics } from '../log/internal/metrics.js';
 import { openTable } from '@bottlify/cellar';
+import { testLog } from '../log/testing.fixture.js';
 
 test('the cpu registers its counters with the log layer and samples them once a frame',
     async()=>{
-        const metrics = createMetrics();
+        const log = await testLog();
+        const metrics = log.metrics;
         await cpuModule.create({}, /** @type {any} */ ({
-            requireApi: ()=>({ metrics, intern: ()=>-1 }),
+            requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api : log),
             provide: ()=>{},
         }));
         const table = metrics.describe().cpu.counters;
@@ -29,20 +30,11 @@ test('the cpu registers its counters with the log layer and samples them once a 
         await cpuModule.dispose();
     });
 
-test('a build without a log registry still creates', async()=>{
-    const api = await cpuModule.create({}, /** @type {any} */ ({
-        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {}),
-        provide: ()=>{},
-    }));
-    assert.equal(typeof api.boot, 'function');
-    assert.equal(cpuModule.diagnostics().status, 'created');
-    await cpuModule.dispose();
-});
-
-/** A cpu instance with no log registry, for tests that never boot the machine. */
+/** A cpu instance over a log of its own, for tests that never boot the machine. */
 async function open(){
+    const log = await testLog();
     return cpuModule.create({}, /** @type {any} */ ({
-        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {}),
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api : log),
         provide: ()=>{},
     }));
 }

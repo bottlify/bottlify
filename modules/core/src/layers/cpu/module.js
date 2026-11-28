@@ -46,22 +46,13 @@ export const TRANSLATION_ZONE_BYTES = 256 * 1024 * 1024;
  * The run's cache as the translator is given it (`KeptStore`): its emitted
  * functions under `cork/`, bodies that stay however long idle - one is read
  * again only at a relink, long after it was written - and leave when their
- * room is wanted, never to a disk (one is made again by emitting it). None
- * where the cache layer joins no one (no reader under it, a tool's machine).
+ * room is wanted, never to a disk (one is made again by emitting it).
  *
  * @param {any} cache  the cache layer's api
- * @returns {{ kept?: import('./engine.js').KeptStore }}
+ * @returns {import('./engine.js').KeptStore}
  */
-const keptStore = cache=>{
-    const probe = cache.join(()=>{});
-    if (probe === null)
-    {
-        return {};
-    }
-    probe.leave?.();
-    return { kept: { space: cache.space(KEPT_SPACE, KEPT_OPTIONS), prefix: `${KEPT_SPACE}/`,
-        join: cache.join } };
-};
+const keptStore = cache=>({ space: cache.space(KEPT_SPACE, KEPT_OPTIONS), prefix: `${KEPT_SPACE}/`,
+    join: cache.join });
 
 /**
  * What an executor's worker costs the tab while it stands: its JavaScript
@@ -318,14 +309,14 @@ export function createCpuModule(){
 
         /**
          * @param {any} config
-         * @param {import('../../system/contract.js').ScopedModuleHost} [moduleHost]
+         * @param {import('../../system/contract.js').ScopedModuleHost} moduleHost
          * @returns {Promise<any>}
          */
         async create(config, moduleHost){
-            const log = moduleHost?.requireApi('log');
+            const log = moduleHost.requireApi('log');
             // The run's cache, where a translation another executor of the process
             // asks for is put once and read there in place (`createRemoteExecutor`).
-            const cache = moduleHost?.requireApi('cache') ?? null;
+            const cache = moduleHost.requireApi('cache');
 
             /**
              * Who is told the guest's memory grew (`onGrow`), kept from before
@@ -452,53 +443,50 @@ export function createCpuModule(){
                 cork.translatePending().catch(()=>{});
             };
 
-            if (typeof log?.metrics?.counters === 'function')
-            {
-                const counters = log.metrics.counters('cpu', CPU_COUNTERS);
-                // Where the guest ran, by bucket, as the sampler credits it:
-                // the keeper ranks them, so a live view costs this thread nothing.
-                state.samples = createSampleTable(log.metrics.table('cpu', 'samples',
-                    { rows: BUCKET_CAP, columns: SAMPLE_COLUMNS }));
-                log.metrics.onFrame(()=>{
-                    if (!state.host)
-                    {
-                        return;
-                    }
-                    counters.set(0, 0, state.running ? 1 : 0);
-                    counters.set(0, 1, retiredEverywhere(state));
-                    counters.set(0, 2, state.thunks ? state.thunks.size : 0);
-                    counters.set(0, 3, state.thunks ? state.thunks.capacity : 0);
-                    counters.set(0, 4, state.host.eip());
-                    counters.set(0, 5, state.host.trapCrossings());
-                    counters.set(0, 6, state.host.hostWrittenBytes());
-                    feedTranslator();
-                    if (state.cork)
-                    {
-                        const cork = state.cork.counters();
-                        counters.set(0, CORK_AT, cork.regions);
-                        counters.set(0, CORK_AT + 1, cork.invalidations);
-                        counters.set(0, CORK_AT + 2, cork.translatedShare * 1e6);
-                        const leaves = cork.exits.untranslated + cork.exits.budget + cork.exits.trap
-                            + cork.exits.halt + cork.exits.fault + cork.exits.stale
-                            + (cork.exits.interpreted ?? 0);
-                        const instructions = state.host.instructionCount();
-                        const last = state.corkFrame;
-                        const ran = instructions - last.instructions;
-                        counters.set(0, CORK_AT + 3,
-                            ran > 0 ? (cork.retired - last.retired) / ran * 1e6 : 0);
-                        counters.set(0, CORK_AT + 4, (cork.translateMs - last.translateMs) * 1e6);
-                        counters.set(0, CORK_AT + 5, leaves - last.leaves);
-                        state.corkFrame = {
-                            instructions, retired: cork.retired, translateMs: cork.translateMs,
-                            leaves,
-                        };
-                    }
-                    counters.set(0, FRAME_INTERPRETED, state.worstInterpreted);
-                    counters.set(0, FRAME_INTERPRETED + 1, state.worstInterpretedAt);
-                    state.worstInterpreted = 0;
-                    state.worstInterpretedAt = 0;
-                });
-            }
+            const frameCounters = log.metrics.counters('cpu', CPU_COUNTERS);
+            // Where the guest ran, by bucket, as the sampler credits it:
+            // the keeper ranks them, so a live view costs this thread nothing.
+            state.samples = createSampleTable(log.metrics.table('cpu', 'samples',
+                { rows: BUCKET_CAP, columns: SAMPLE_COLUMNS }));
+            log.metrics.onFrame(()=>{
+                if (!state.host)
+                {
+                    return;
+                }
+                frameCounters.set(0, 0, state.running ? 1 : 0);
+                frameCounters.set(0, 1, retiredEverywhere(state));
+                frameCounters.set(0, 2, state.thunks ? state.thunks.size : 0);
+                frameCounters.set(0, 3, state.thunks ? state.thunks.capacity : 0);
+                frameCounters.set(0, 4, state.host.eip());
+                frameCounters.set(0, 5, state.host.trapCrossings());
+                frameCounters.set(0, 6, state.host.hostWrittenBytes());
+                feedTranslator();
+                if (state.cork)
+                {
+                    const cork = state.cork.counters();
+                    frameCounters.set(0, CORK_AT, cork.regions);
+                    frameCounters.set(0, CORK_AT + 1, cork.invalidations);
+                    frameCounters.set(0, CORK_AT + 2, cork.translatedShare * 1e6);
+                    const leaves = cork.exits.untranslated + cork.exits.budget + cork.exits.trap
+                        + cork.exits.halt + cork.exits.fault + cork.exits.stale
+                        + (cork.exits.interpreted ?? 0);
+                    const instructions = state.host.instructionCount();
+                    const last = state.corkFrame;
+                    const ran = instructions - last.instructions;
+                    frameCounters.set(0, CORK_AT + 3,
+                        ran > 0 ? (cork.retired - last.retired) / ran * 1e6 : 0);
+                    frameCounters.set(0, CORK_AT + 4, (cork.translateMs - last.translateMs) * 1e6);
+                    frameCounters.set(0, CORK_AT + 5, leaves - last.leaves);
+                    state.corkFrame = {
+                        instructions, retired: cork.retired, translateMs: cork.translateMs,
+                        leaves,
+                    };
+                }
+                frameCounters.set(0, FRAME_INTERPRETED, state.worstInterpreted);
+                frameCounters.set(0, FRAME_INTERPRETED + 1, state.worstInterpretedAt);
+                state.worstInterpreted = 0;
+                state.worstInterpretedAt = 0;
+            });
             const settings = {
                 // Half a gigabyte, because that is the order a program of this era
                 // expects once it starts loading its own data. Two different things
@@ -576,7 +564,7 @@ export function createCpuModule(){
                 state.executorsRefused = `${settings.executors} asked, 1 run: `
                     + 'a program past 4 GiB (the wide window) runs on one executor';
                 settings.executors = 1;
-                log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
+                log.warn('cpu', `executors: ${state.executorsRefused}`);
             }
             // The process's executor waits on the others with Atomics.wait,
             // which a page's window may not call even where it shares memory
@@ -586,7 +574,7 @@ export function createCpuModule(){
                 state.executorsRefused = `${settings.executors} asked, 1 run: `
                     + 'the engine\'s thread may not block (a page\'s window)';
                 settings.executors = 1;
-                log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
+                log.warn('cpu', `executors: ${state.executorsRefused}`);
             }
 
             /** @type {(id: number) => void} */
@@ -660,7 +648,7 @@ export function createCpuModule(){
                         }
                         else
                         {
-                            log?.error?.('cpu', detail);
+                            log.error('cpu', detail);
                         }
                     });
                     const learned = state.learned;
@@ -674,7 +662,7 @@ export function createCpuModule(){
                 }, (/** @type {any} */ error)=>{
                     state.opening.delete(index);
                     state.unopened.add(index);
-                    log?.warn?.('cpu', `executor ${index} did not open:`
+                    log.warn('cpu', `executor ${index} did not open:`
                         + ` ${error?.message ?? error}`);
                 }));
                 return true;
@@ -803,7 +791,7 @@ export function createCpuModule(){
                     const nudging = gcNudgeOf(config?.gcNudge, undefined, settings.memorySize);
                     if (keepsTableImporters())
                     {
-                        log?.warn?.('cpu', 'this host\'s WebAssembly (V8 before 13, Node.js 22)'
+                        log.warn('cpu', 'this host\'s WebAssembly (V8 before 13, Node.js 22)'
                             + ' keeps every module that imports a table while the table lives:'
                             + ' every module the translator made stays, and memory grows with'
                             + ' all the code the run ever translated. Node.js 24 or later lets'
@@ -824,7 +812,7 @@ export function createCpuModule(){
                         // stops forming while another executor waits for this
                         // one's answer (`awaitedBy`).
                         cork: { ...settings.cork,
-                            ...keptStore(cache),
+                            kept: keptStore(cache),
                             ...several ? { atomic: true,
                                 awaited: ()=>state.awaited?.() === true } : {} },
                         closedBelow: settings.closedBelow,
@@ -857,7 +845,7 @@ export function createCpuModule(){
                             // The process's own host grows the guest's memory: cold
                             // bodies of the run's cache let go for a take that does
                             // not fit, and one refused even so is a loss.
-                            memoryRoom: cache?.room ?? null,
+                            memoryRoom: cache.room,
                             onMemoryRefused: (/** @type {any} */ refusal)=>{
                                 const detail = 'the machine\'s memory has no room for'
                                     + ` ${refusal.bytes} bytes of ${refusal.kind} (${refusal.used}`
@@ -914,8 +902,7 @@ export function createCpuModule(){
                                 ? { workerUrl: new URL(settings.executorWorker) } : {}),
                             unbroken: state.unbroken.buffer,
                             store: hostConfig.cork?.store ?? null,
-                            ...cache?.join ? { cache: { join: cache.join,
-                                space: cache.space(STORE_SPACE) } } : {},
+                            cache: { join: cache.join, space: cache.space(STORE_SPACE) },
                             config: { ...hostConfig, cork } }).then(remote=>{
                             if (lending === null)
                             {
@@ -1465,7 +1452,7 @@ export function createCpuModule(){
                 noteUnbroken(address, length){
                     if (!state.unbroken.add(address, length))
                     {
-                        log?.warn?.('cpu', `unbroken routines past ${state.unbroken.size()}:`
+                        log.warn('cpu', `unbroken routines past ${state.unbroken.size()}:`
                             + ` 0x${(address >>> 0).toString(16)} is the process's`
                             + ' executor\'s alone');
                     }

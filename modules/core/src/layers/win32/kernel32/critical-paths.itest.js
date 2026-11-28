@@ -22,6 +22,7 @@ import * as cork from '../../../../../cork/src/index.js';
 import { COUNTERS, CS, createCriticalSections, criticalLayout, enterCode, leaveCode,
     tryEnterCode } from './critical.js';
 import { createSyncFunctions } from './sync.js';
+import { kernelLayerAnswers } from '../kernel.fixture.js';
 
 const PROGRAM = 0x10000;
 const ENTER = 0x8100;
@@ -219,7 +220,8 @@ function throughTraps(steps, size){
     });
     /** @type {Record<string, any>} */
     const fns = createSyncFunctions(/** @type {any} */ ({
-        ...memory, kernel: {}, critical, pointerSize: size, currentThread: ()=>thread,
+        ...memory, kernel: kernelLayerAnswers, critical, pointerSize: size,
+        currentThread: ()=>thread,
         park: ()=>assert.fail('a sequence never parks'),
     }));
     const layout = criticalLayout(size);

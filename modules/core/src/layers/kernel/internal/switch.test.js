@@ -15,6 +15,7 @@ function recordingCpu(){
     let nextContext = 0;
     return {
         calls,
+        bits: ()=>32,
         captureContext(){
             const context = { id: `saved-${nextContext++}` };
             calls.push({ op: 'capture', context });

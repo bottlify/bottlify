@@ -10,6 +10,8 @@ import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import { memoryModule } from '../../memory/module.js';
 import { createGuest } from './guest.js';
 import { IN_PLACE, externalGrowth, guestOver } from './guest.fixture.js';
+import { cpuForMemory } from '../../memory/cpu.fixture.js';
+import { testLog } from '../../log/testing.fixture.js';
 
 const SIZE = 0x10000;
 
@@ -29,8 +31,9 @@ async function runMemory(ram){
         writeU32Data: (/** @type {number} */ at, /** @type {number} */ value)=>
             view.setUint32(at, value >>> 0, true),
     };
+    const log = await testLog();
     const memory = await memoryModule.create({}, /** @type {any} */ ({
-        requireApi: (/** @type {string} */ name)=>(name === 'cpu' ? cpu : {}),
+        requireApi: (/** @type {string} */ name)=>(name === 'cpu' ? cpuForMemory(cpu) : log),
     }));
     memory.register({ name: 'ram', base: 0, size: ram.length, kind: memory.RegionKind.STACK,
         access: memory.Access.READ_WRITE });

@@ -648,7 +648,7 @@ export function createWin32Module(){
                 /** @param {any} report @returns {Promise<number>} */
                 report: report=>{
                     const held = kernel.threads().filter((/** @type {any} */ thread)=>
-                        thread.state !== kernel.ThreadState?.TERMINATED);
+                        thread.state !== kernel.ThreadState.TERMINATED);
                     held.forEach((/** @type {any} */ thread)=>kernel.freezeThread(thread));
                     return Promise.resolve(/** @type {any} */ (config.debugger).report(report))
                         .finally(()=>held.forEach((/** @type {any} */ thread)=>
@@ -696,7 +696,7 @@ export function createWin32Module(){
             if (machine64 && pointerSize === 4)
             {
                 const view = wow64View(folders.Windows);
-                filesystem.redirect?.((/** @type {string} */ drive,
+                filesystem.redirect((/** @type {string} */ drive,
                     /** @type {string[]} */ components)=>(fsRedirection.disabled() ? null
                     : view(drive, components)));
             }
@@ -725,7 +725,8 @@ export function createWin32Module(){
             // The processors this process is told of -- one for each executor
             // the kernel runs its threads on -- and its affinity: one record,
             // which every interface that counts or sets them asks at the call.
-            const processors = createProcessors(kernel);
+            const processors = createProcessors(
+                /** @type {import('./kernel32/processor.js').ProcessorKernel} */ (kernel));
             /**
              * A thread made here starts on its process's processors, and with a
              * block of its own, made by whoever owns the process's, which win32
@@ -845,7 +846,8 @@ export function createWin32Module(){
             // its own. The one namespace a mutex, event, semaphore, timer and
             // file mapping all share is part of it.
             /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
-             *     objects?: any, fileSecurity?: Map<string, any>,
+             *     objects?: any,
+             *     fileSecurity?: import('./advapi32/named-security.js').FileSecurity,
              *     processTables?: Map<number, any>,
              *     pipes?: import('./kernel32/pipes.js').PipesAcross,
              *     sharedViews?: ReturnType<typeof import('./kernel32/shared-views.js')
@@ -857,7 +859,7 @@ export function createWin32Module(){
                 ? createRemoteNamedObjects({ objects: system.objects, kernel,
                     handles: kernel.handles })
                 : createNamedObjects({ table: system?.namedObjects, handles: kernel.handles });
-            leaveNames = ()=>runObjects.ended(object=>kernel.forsake?.(object));
+            leaveNames = ()=>runObjects.ended(object=>kernel.forsake(object));
             // The objects a running Steam client offers by name (its
             // SteamStart lock and section), made when a process first opens
             // one, as the client made them before the game ran.
@@ -1270,7 +1272,7 @@ export function createWin32Module(){
                 /** @param {number} handle @param {string} [type] */
                 resolve: (handle, type)=>kernel.handles.resolve(handle, type),
                 /** The rights a handle holds, null for every one. @param {number} handle */
-                access: handle=>kernel.handles.access?.(handle) ?? null,
+                access: handle=>kernel.handles.access(handle),
                 /** @param {number} handle @param {number} mask @param {number} flags */
                 setFlags: (handle, mask, flags)=>kernel.handles.setFlags(handle, mask, flags),
                 /** @param {number} handle @param {boolean} [ending]  the process's end */
@@ -1293,7 +1295,7 @@ export function createWin32Module(){
              * @type {import('./kernel32/cross-process.js').AskHost['askChild']}
              */
             const askChild = config?.askChild && ((record, call)=>{
-                kernel.answeredElsewhere?.(kernel.currentThread());
+                kernel.answeredElsewhere(kernel.currentThread());
                 return /** @type {Function} */ (config.askChild)(record, call);
             });
             // Absent unless a bundle is mounted, in which case a read of a block
@@ -1399,8 +1401,9 @@ export function createWin32Module(){
             // The descriptors programs set on files are the run's, not a
             // process's: a setup that writes one and a service that reads it
             // run in different processes of the one run. Kept beside the
-            // hive, in the system half when there is one.
-            const fileSecurity = system ? (system.fileSecurity ??= new Map()) : new Map();
+            // hive, in the system half; a caller with no run to share it
+            // with keeps its own, as it does its namespace.
+            const fileSecurity = system?.fileSecurity ?? new Map();
             // A window handle is the run's, and a window of another process is
             // found and posted to through it (`user32/directory.js`).
             const windowDirectory = system?.windows ?? createWindowDirectory();
@@ -1725,7 +1728,7 @@ export function createWin32Module(){
                 }
                 /** @type {import('./kernel32/pipes.js').InheritedEnd & { access: number | null }} */
                 const entry = { handle, type: 'file', object: open,
-                    access: kernel.handles.access?.(handle) ?? null, held: true,
+                    access: kernel.handles.access(handle), held: true,
                     drop(){
                         if (entry.held)
                         {
@@ -2103,7 +2106,7 @@ export function createWin32Module(){
                 // Past 0x7FFE0000 the RAM held is past 2 GiB, and the page with it
                 // at its own address, which the heap keeps out of its hands.
                 const want = end <= 0x7ffe0000 ? end + SHARED_PAGE_GUARD : end;
-                if ((memory.reach?.(want) ?? Infinity) < want)
+                if (memory.reach(want) < want)
                 {
                     return false;
                 }
@@ -2112,7 +2115,7 @@ export function createWin32Module(){
                 // given once are the tab's already, whatever it freed.
                 if (end > arenaReached)
                 {
-                    if (memory.charge?.(end - arenaReached) === false)
+                    if (memory.charge(end - arenaReached) === false)
                     {
                         return false;
                     }
@@ -2175,7 +2178,7 @@ export function createWin32Module(){
             // A thread's stack once the kernel's pool is full: the arena's
             // address space, as VirtualAlloc's is, given back when the thread
             // is gone - on Windows every stack is such a reservation.
-            kernel.lendStacks?.({
+            kernel.lendStacks({
                 take: (/** @type {number} */ bytes)=>allocator.allocate(bytes,
                     { alignment: 0x10000, owner: STACKS }) || 0,
                 give: (/** @type {number} */ base)=>{
@@ -2733,7 +2736,7 @@ export function createWin32Module(){
             // A host call's refused guest access is the program's exception,
             // as Windows raises it in the DLL, not the end of the run; so is
             // an exception a handler raises (`common/raise.js`).
-            bridge.onGuestFault?.((/** @type {any} */ raised)=>(raised.code === GUEST_EXCEPTION
+            bridge.onGuestFault((/** @type {any} */ raised)=>(raised.code === GUEST_EXCEPTION
                 ? seh.raiseException(raised) : seh.raiseAccess(raised)));
 
             // The same, table-based, for a 64-bit process: no chain at FS:[0],
@@ -2792,7 +2795,7 @@ export function createWin32Module(){
                     ] : []),
                     // A routine the host called back -- a comparator a throw
                     // leaves -- returns into the code that called the host.
-                    callbackCaller: (thread, stack)=>bridge.callbackCaller?.(thread, stack) ?? null,
+                    callbackCaller: (thread, stack)=>bridge.callbackCaller(thread, stack) ?? null,
                     /** @param {string} text */
                     trace: text=>trace(text),
                     terminate: ({ code })=>{
@@ -3353,7 +3356,6 @@ export function createWin32Module(){
                 // A timer's due time and a wait's time-out are read
                 // from the caller's FILETIME, against the wall clock.
                 readMemory,
-                wallClock: ()=>kernel.clock.wallClock(),
                 register: (name, fn)=>bridge.register(name, fn),
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
@@ -3515,7 +3517,7 @@ export function createWin32Module(){
                 const self = kernel.currentThread();
                 for (const thread of kernel.threads())
                 {
-                    if (thread !== self && thread.state !== kernel.ThreadState?.TERMINATED)
+                    if (thread !== self && thread.state !== kernel.ThreadState.TERMINATED)
                     {
                         kernel.exitThread(thread, code);
                     }
@@ -4062,8 +4064,8 @@ export function createWin32Module(){
                         teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                         allocate: bytes=>heap.allocate(bytes),
                         free: address=>heap.free(address),
-                        allocateStack: asked=>kernel.allocateStack?.(asked) ?? null,
-                        releaseStack: stack=>kernel.releaseStack?.(stack),
+                        allocateStack: asked=>kernel.allocateStack(asked) ?? null,
+                        releaseStack: stack=>kernel.releaseStack(stack),
                         threadReturn: ()=>threadReturnAddress(),
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
                         setLastError: setError,
@@ -4116,12 +4118,12 @@ export function createWin32Module(){
                             /** @type {any} */ region)=>Math.max(top, region.base + region.size), 0),
                         /** @param {number} address @param {number} length @param {boolean} open */
                         pageAccess: (address, length, open)=>
-                            memory.pageAccess?.(address, length, open) === true,
-                        farSpace: ()=>memory.farSpace?.() ?? null,
+                            memory.pageAccess(address, length, open) === true,
+                        farSpace: ()=>memory.farSpace() ?? null,
                         /** @param {number} address @param {number} frame */
                         mapFar: (address, frame)=>memory.mapFar(address, frame),
                         /** @param {number} bytes */
-                        charge: bytes=>memory.charge?.(bytes) !== false,
+                        charge: bytes=>memory.charge(bytes) !== false,
                         /** @param {number} base @param {number} size @param {boolean} made */
                         held: (base, size, made)=>{
                             const name = `far 0x${base.toString(16)}`;
@@ -4137,9 +4139,9 @@ export function createWin32Module(){
                         },
                         /** @param {number} address @param {number} length */
                         watchWrites: (address, length)=>
-                            memory.watchWrites?.(address, length) ?? null,
+                            memory.watchWrites(address, length) ?? null,
                         systemCounts: ()=>({
-                            processes: Math.max(1, (kernel.processes?.all() ?? []).length),
+                            processes: Math.max(1, kernel.processes.all().length),
                             threads: Math.max(1, kernel.threads().length),
                         }),
                     }),
@@ -4154,7 +4156,7 @@ export function createWin32Module(){
                         writeMemory,
                         compareExchangeU64: (address, expected, value)=>
                             memory.compareExchangeU64(address, expected, value),
-                        wordsOver: (address, length)=>memory.wordsOver?.(address, length) ?? null,
+                        wordsOver: (address, length)=>memory.wordsOver(address, length) ?? null,
                         readCString,
                         readWideString,
                         currentThread: ()=>kernel.currentThread(),
@@ -4204,9 +4206,7 @@ export function createWin32Module(){
                         // not at all -- every timed wait of theirs stood still.
                         // Where Sleep's guest code reads how many threads wait
                         // to run: the kernel keeps the word (`mirrorReady`).
-                        readyWord: typeof kernel.mirrorReady === 'function'
-                            ? (/** @type {number} */ address)=>kernel.mirrorReady(address)
-                            : undefined,
+                        readyWord: (/** @type {number} */ address)=>kernel.mirrorReady(address),
                         yieldTurn: ()=>{
                             const self = kernel.currentThread();
                             const mine = self?.priority ?? 0;
@@ -4346,7 +4346,7 @@ export function createWin32Module(){
                         readCString, readWideString, readMemory, writeMemory,
                         setLastError: setError,
                         drives: ()=>filesystem.drives(),
-                        volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
+                        volume: (/** @type {string} */ letter)=>filesystem.volume(letter) ?? null,
                         currentDirectory: ()=>filesystem.currentDirectory(),
                         stat: (/** @type {string} */ path)=>volume.stat(path),
                         handles,
@@ -4369,9 +4369,9 @@ export function createWin32Module(){
                         viewRegions,
                         /** @param {number} address @param {number} length */
                         watchWrites: (address, length)=>
-                            memory.watchWrites?.(address, length) ?? null,
+                            memory.watchWrites(address, length) ?? null,
                         handleAccess: (/** @type {number} */ handle)=>
-                            kernel.handles.access?.(handle) ?? null,
+                            kernel.handles.access(handle),
                         // Views of one page-file section agree at the edges of
                         // a turn, across the processes on this thread.
                         sharedViews: system?.sharedViews
@@ -4555,7 +4555,7 @@ export function createWin32Module(){
                         allocate: bytes=>allocator.allocate(bytes),
                         park: ()=>bridge.park(),
                         handleType: (/** @type {number} */ handle)=>
-                            kernel.handles.typeOf?.(handle) ?? null,
+                            kernel.handles.typeOf(handle),
                         resolveHandle: (/** @type {number} */ handle,
                             /** @type {string | undefined} */ type)=>
                             kernel.handles.resolve(handle, type),
@@ -4685,9 +4685,7 @@ export function createWin32Module(){
                             }
                         },
                         readMemory,
-                        windowMemory: typeof memory.window === 'function'
-                            ? (address, length)=>memory.window(address, length)
-                            : undefined,
+                        windowMemory: (address, length)=>memory.window(address, length),
                         writeMemory,
                         readCString,
                         readWideString,
@@ -4699,7 +4697,7 @@ export function createWin32Module(){
                             libraries['ADVAPI32.dll'])?.[RECORD_SECURITY]?.(
                             filesystem.resolve(path).path, sd),
                         drives: ()=>filesystem.drives(),
-                        volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
+                        volume: (/** @type {string} */ letter)=>filesystem.volume(letter) ?? null,
                         systemLibraries: systemLibraryNames,
                         systemPrograms: systemProgramFiles,
                         directories: shellFolderDirectories(windows, machine64),
@@ -6233,7 +6231,7 @@ export function createWin32Module(){
                         (/** @type {{ id: number }} */ thread)=>(thread.id >>> 0) === id),
                     // The processes OpenProcess finds, for AllowSetForegroundWindow.
                     /** @param {number} id */
-                    processExists: id=>(kernel.processes?.all() ?? []).some(
+                    processExists: id=>kernel.processes.all().some(
                         (/** @type {any} */ made)=>made.id === id),
                     setLastError: setError,
                     park: ()=>bridge.park(),
