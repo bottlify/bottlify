@@ -209,13 +209,13 @@ export function createMeshFunctions(host, buffers){
     const indicesOf = async(mesh, thread, at)=>{
         const faces = await method(thread, mesh, MESH.GetNumFaces, []);
         const wide = (await method(thread, mesh, MESH.GetOptions, []) & D3DXMESH_32BIT) !== 0;
-        guest.set32s(at, [0]);
+        guest.setPtr(at, 0);
         const locked = await method(thread, mesh, MESH.LockIndexBuffer, [D3DLOCK_READONLY, at]);
         if (locked !== D3D_OK)
         {
             return locked;
         }
-        const bytes = guest.snapshot(guest.u32(at), faces * 3 * (wide ? 4 : 2));
+        const bytes = guest.snapshot(guest.ptr(at), faces * 3 * (wide ? 4 : 2));
         await method(thread, mesh, MESH.UnlockIndexBuffer, []);
         return [...(wide ? new Uint32Array(bytes.buffer) : new Uint16Array(bytes.buffer))];
     };
@@ -229,7 +229,8 @@ export function createMeshFunctions(host, buffers){
     const computeNormals = async(mesh, adjacency, thread)=>{
         await null;
         const vertices = await method(thread, mesh, MESH.GetNumVertices, []);
-        const answer = await withScratch(DECLARATION_BYTES + 4 + vertices * 4, async at=>{
+        // The declaration, an out pointer the locks answer in, the point representatives.
+        const answer = await withScratch(DECLARATION_BYTES + 8 + vertices * 4, async at=>{
             const declared = await method(thread, mesh, MESH.GetDeclaration, [at]);
             if (declared !== D3D_OK)
             {
@@ -264,7 +265,7 @@ export function createMeshFunctions(host, buffers){
                 return E_NOTIMPL;
             }
             const out = at + DECLARATION_BYTES;
-            const repsAt = out + 4;
+            const repsAt = out + 8;
             const indices = await indicesOf(mesh, thread, out);
             if (typeof indices === 'number')
             {
@@ -284,13 +285,13 @@ export function createMeshFunctions(host, buffers){
                     .map((rep, i)=>(rep < vertices ? rep : i));
             }
             const stride = await method(thread, mesh, MESH.GetNumBytesPerVertex, []);
-            guest.set32s(out, [0]);
+            guest.setPtr(out, 0);
             const locked = await method(thread, mesh, MESH.LockVertexBuffer, [0, out]);
             if (locked !== D3D_OK)
             {
                 return locked;
             }
-            const data = guest.u32(out);
+            const data = guest.ptr(out);
             const positions = Array.from({ length: vertices }, (_, i)=>
                 position(data + i * stride + where.offset));
             vertexNormals(positions, indices, reps).forEach((n, i)=>n.forEach((value, axis)=>
@@ -310,8 +311,9 @@ export function createMeshFunctions(host, buffers){
     const convertSubset = async(mesh, attribute, options, out, countOut, thread)=>{
         await null;
         const api = 'D3DXConvertMeshSubsetToSingleStrip';
-        return withScratch(8, async at=>{
-            guest.set32s(at, [0]);
+        // Two slots of a pointer's room: what a call answers through.
+        return withScratch(16, async at=>{
+            guest.set32(at, 0);
             const sized = await method(thread, mesh, MESH.GetAttributeTable, [0, at]);
             if (sized !== D3D_OK)
             {
@@ -360,35 +362,35 @@ export function createMeshFunctions(host, buffers){
             {
                 return D3DERR_INVALIDCALL;
             }
-            guest.set32s(at, [0, 0]);
+            guest.fill(at, 0, 16);
             const got = await method(thread, mesh, MESH.GetDevice, [at]);
             if (got !== D3D_OK)
             {
                 return got;
             }
-            const device = guest.u32(at);
+            const device = guest.ptr(at);
             const width = format === D3DFMT_INDEX32 ? 4 : 2;
             const made = await method(thread, device, DEVICE.CreateIndexBuffer, [strip.length
-                * width, usage, format, pool, at + 4, 0]);
+                * width, usage, format, pool, at + 8, 0]);
             await method(thread, device, UNKNOWN_RELEASE, []);
             if (made !== D3D_OK)
             {
                 return made;
             }
-            const buffer = guest.u32(at + 4);
+            const buffer = guest.ptr(at + 8);
             const locked = await method(thread, buffer, INDEX_BUFFER.Lock, [0, 0, at, 0]);
             if (locked !== D3D_OK)
             {
                 await method(thread, buffer, UNKNOWN_RELEASE, []);
                 return locked;
             }
-            guest.setBytes(guest.u32(at), new Uint8Array((width === 4 ? Uint32Array.from(strip)
+            guest.setBytes(guest.ptr(at), new Uint8Array((width === 4 ? Uint32Array.from(strip)
                 : Uint16Array.from(strip)).buffer));
             await method(thread, buffer, INDEX_BUFFER.Unlock, []);
-            guest.set32s(out, [buffer]);
+            guest.setPtr(out, buffer);
             if (countOut !== 0)
             {
-                guest.set32s(countOut, [strip.length]);
+                guest.set32(countOut, strip.length);
             }
             return D3D_OK;
         });
@@ -453,7 +455,7 @@ export function createMeshFunctions(host, buffers){
             handler: ([mesh, adjacency, out])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    guest.set32s(out, [0]);
+                    guest.setPtr(out, 0);
                 }
                 if (wholeAddress(mesh) === 0 || wholeAddress(adjacency) === 0 || !host.callGuest
                     || !host.heap)
@@ -488,9 +490,9 @@ export function createMeshFunctions(host, buffers){
             handler: ([, mesh, adjacency, meshOut, adjacencyOut, out])=>{
                 for (const at of [meshOut, out])
                 {
-                    if ((at >>> 0) !== 0)
+                    if (at !== 0)
                     {
-                        guest.set32s(at, [0]);
+                        guest.setPtr(at, 0);
                     }
                 }
                 if (wholeAddress(mesh) === 0 || wholeAddress(adjacency) === 0
@@ -517,7 +519,7 @@ export function createMeshFunctions(host, buffers){
                             guest.copy(adjacencyOut, adjacency, faces * 12);
                         }
                         await method(thread, mesh, UNKNOWN_ADDREF, []);
-                        guest.set32s(meshOut, [mesh]);
+                        guest.setPtr(meshOut, mesh);
                         return D3D_OK;
                     });
             },
@@ -539,7 +541,7 @@ export function createMeshFunctions(host, buffers){
             handler: ([mesh, attribute, options, out, countOut])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    guest.set32s(out, [0]);
+                    guest.setPtr(out, 0);
                 }
                 if (wholeAddress(mesh) === 0 || wholeAddress(out) === 0 || !host.callGuest
                     || !host.heap)
