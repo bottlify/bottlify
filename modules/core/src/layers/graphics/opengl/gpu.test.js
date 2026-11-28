@@ -53,6 +53,7 @@ function rig(services = {}){
     const renderer = createGpuRenderer({
         backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+        texelCache: roomy.api.owner('texels'),
         divergence: detail=>divergences.push(detail),
         ...services,
     });

@@ -712,6 +712,8 @@ export function serveGraphics(scope, deps){
         {
             played = playedDirect3D7({
                 ...options,
+                cacheLink: undefined,
+                texelCache,
                 ...roomServices,
                 liveDump,
                 backend,

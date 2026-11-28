@@ -6,9 +6,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { KEPT_FROM, createTexelStore } from './texel-store.js';
+import { grainsOf } from '@bottlify/cellar';
+import { createTexelStore } from './texel-store.js';
 import { openRunCache } from '../../../process/run-cache.js';
 import { channelSpace } from '../../cache/module.js';
+
+/** A body of a few grains, placed alone. */
+const KEPT_FROM = 4 * grainsOf(1);
 
 const turn = ()=>new Promise(resolve=>setTimeout(resolve, 0));
 
@@ -103,28 +107,23 @@ test('a body dropped before its room came leaves nothing in the cache and no roo
         assert.deepEqual(cache.run.figures().ownerTails, { owners: 0, bodies: 0, bytes: 0 });
     });
 
-test('below the unit of room a body keeps the same contract in plain memory, with a cache or none',
+test('every body goes to the run\'s cache in its grains: one under a grain with no group alone',
     async()=>{
         const cache = await owner();
         try
         {
-            for (const store of [createTexelStore(),
-                createTexelStore({ cache: cache.names })])
-            {
-                const small = bytesOf(KEPT_FROM - 1, 8);
-                store.put('big', bytesOf(KEPT_FROM - 1, 7));
-                store.put('small', small);
-                await turn();
-                assert.equal(store.with('small', bytes=>bytes), small, 'read where it lies');
-                assert.equal(store.lengthOf('small'), small.length);
-                assert.equal(store.take('small'), small, 'taken back without a copy');
-                assert.equal(store.with('small', ()=>1), undefined, 'gone once taken');
-                assert.equal(store.take('small'), null);
-                store.drop('big');
-                assert.equal(store.has('big'), false);
-                assert.equal(store.figures().moved, 0);
-                assert.equal(store.figures().plainBytes, 0);
-            }
+            const store = createTexelStore({ cache: cache.names });
+            const small = bytesOf(5, 8);
+            store.put('small', small.slice());
+            store.put('grain', bytesOf(grainsOf(1) + 1, 7));
+            await until(()=>store.figures().moved === 2);
+            assert.deepEqual(cache.under(), { bodies: 2, bytes: grainsOf(1) + 6,
+                hotBytes: grainsOf(1) + 6, placedBytes: 3 * grainsOf(1) },
+            'each placed in its grains: one, and two');
+            assert.equal(store.figures().plainBytes, 0, 'nothing left in this heap');
+            assert.deepEqual(store.take('small'), small);
+            store.drop('grain');
+            await until(()=>cache.under().bodies === 0);
             assert.equal(cache.under().bodies, 0);
         }
         finally
@@ -132,6 +131,53 @@ test('below the unit of room a body keeps the same contract in plain memory, wit
             await cache.close();
         }
     });
+
+test('bodies under a grain of one group put in a turn go to the cache as one body, each read'
+    + ' there in place and taken back as it was, the body let go of with the last', async()=>{
+    const cache = await owner();
+    try
+    {
+        const store = createTexelStore({ cache: cache.names });
+        const texture = {};
+        const tail = [256, 64, 16, 4].map((length, at)=>bytesOf(length, at + 1));
+        tail.forEach((bytes, at)=>store.put(`level${at}`, bytes.slice(), texture));
+        store.put('top', bytesOf(KEPT_FROM, 9), texture);
+        // Readable at once, before the turn that packs them.
+        assert.deepEqual(store.with('level2', bytes=>bytes.slice()), tail[2]);
+        await until(()=>store.figures().moved === 2);
+        assert.deepEqual(cache.under(), { bodies: 2, bytes: KEPT_FROM + 340,
+            hotBytes: KEPT_FROM + 340, placedBytes: KEPT_FROM + grainsOf(340) },
+        'the top level alone, the four under a grain as one body');
+        assert.equal(store.figures().plainBytes, 0);
+        tail.forEach((bytes, at)=>{
+            assert.equal(store.lengthOf(`level${at}`), bytes.length);
+            assert.deepEqual(store.with(`level${at}`, read=>({ shared: read.buffer instanceof
+                SharedArrayBuffer, bytes: read.slice() })), { shared: true, bytes });
+        });
+        const back = /** @type {Uint8Array} */ (store.take('level1'));
+        assert.ok(!(back.buffer instanceof SharedArrayBuffer), 'the caller\'s own bytes');
+        assert.deepEqual(back, tail[1]);
+        assert.equal(store.has('level1'), false);
+        store.drop('level0');
+        store.put('level2', bytesOf(16, 7), texture);
+        assert.deepEqual(store.with('level3', bytes=>bytes.slice()), tail[3],
+            'the others read as they were');
+        await until(()=>store.figures().moved === 3);
+        assert.equal(cache.under().bodies, 3, 'the first packed body held while one of it is');
+        store.drop('level3');
+        await until(()=>cache.under().bodies === 2);
+        assert.equal(cache.under().bodies, 2, 'and let go of with it');
+        store.drop('top');
+        store.drop('level2');
+        await until(()=>cache.under().bodies === 0);
+        assert.equal(cache.under().bodies, 0, 'and let go of with its last');
+        assert.equal(store.figures().bodies, 0);
+    }
+    finally
+    {
+        await cache.close();
+    }
+});
 
 test('a body the cache cannot give back is a loss, said and counted, and reads as zeros',
     async()=>{

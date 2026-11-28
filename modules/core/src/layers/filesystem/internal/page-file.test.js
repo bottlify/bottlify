@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { grainsOf } from '@bottlify/cellar';
 import { PIECE_SIZE, bytesOf } from './memory-store.js';
 import { createMemoryStore } from './memory-store.fixture.js';
 import { createPageFile, createPageFileStore } from './page-file.js';
@@ -351,7 +352,7 @@ test('a small file costs a small body, not a whole piece', async()=>{
     {
         store.write(`small${index}.ini`, 0, new Uint8Array(300).fill(index));
     }
-    assert.equal(keeper.under('pages/').bytes, 100 * 4096);
+    assert.equal(keeper.under('pages/').bytes, 100 * grainsOf(1), 'a grain each');
     assert.deepEqual([...store.read('small42.ini', 299, 2)], [42]);
 });
 

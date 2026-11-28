@@ -13,9 +13,9 @@
  * the bytes back as the level's own (a write in place meets them); set, it
  * lets them go; an upload reads them in place (`readLevel`). An accessor
  * already there (a sized level's RGBA, a view's) is not the level's bytes.
+ * A level's bytes go with its texture's others (the store's group), so the
+ * small levels of a chain's tail share one body of the cache.
  */
-
-import { KEPT_FROM } from '../internal/texel-store.js';
 
 /**
  * A kind of a level's bytes: `bytesOf` names the bytes a value holds and
@@ -100,8 +100,8 @@ export function createLevelSpill({ store, kinds }){
         kinds: spillable,
 
         /**
-         * A level's bytes of every kind that is a plain value large enough
-         * handed to the store.
+         * A level's bytes of every kind that is a plain value handed to the
+         * store, with its texture's others.
          *
          * @param {object} texture @param {object} image
          * @returns {number}  the bytes handed over
@@ -113,12 +113,12 @@ export function createLevelSpill({ store, kinds }){
                 const held = Object.getOwnPropertyDescriptor(image, kind.property);
                 const was = held && 'value' in held ? held.value : null;
                 const bytes = kind.bytesOf(was);
-                if (bytes === null || bytes.byteLength < KEPT_FROM)
+                if (bytes === null)
                 {
                     continue;
                 }
                 const key = String(++names);
-                store.put(key, bytes);
+                store.put(key, bytes, texture);
                 counts.levels++;
                 counts.bytes += bytes.byteLength;
                 counts.blockBytes += kind.property === 'compressed' ? bytes.byteLength : 0;

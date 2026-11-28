@@ -14,7 +14,7 @@
  */
 
 import { ErrorCode, fsError } from './errors.js';
-import { PIECE_SIZE, zeroes } from './memory-store.js';
+import { PIECE_SIZE, SMALLEST_PIECE, zeroes } from './memory-store.js';
 
 /** @typedef {import('./memory-store.js').WritableStore} WritableStore */
 /** @typedef {import('./memory-store.js').FileContents} FileContents */
@@ -208,7 +208,7 @@ export function createMemoryStore(seed = {}){
         {
             return piece;
         }
-        let length = Math.max(piece?.length ?? 0, index > 0 ? PIECE_SIZE : 4096);
+        let length = Math.max(piece?.length ?? 0, index > 0 ? PIECE_SIZE : SMALLEST_PIECE);
         while (length < needed)
         {
             length *= 2;

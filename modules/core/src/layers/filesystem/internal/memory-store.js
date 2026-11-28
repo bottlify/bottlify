@@ -17,6 +17,8 @@
  * there is exactly one place where those rules can be wrong.
  */
 
+import { grainsOf } from '@bottlify/cellar';
+
 /**
  * @typedef {Object} StoredStat
  * @property {boolean} directory
@@ -150,6 +152,12 @@ export function readFromInto(store, path, offset, length, put){
  * the install, and a piece larger than a browser will allocate past two.
  */
 export const PIECE_SIZE = 1 << 20;
+
+/**
+ * The first piece of a small file, which doubles as the file grows up to
+ * PIECE_SIZE: the cache's grain, the least room a body of it takes.
+ */
+export const SMALLEST_PIECE = grainsOf(1);
 
 /**
  * The bytes of contents a store handed out, whole: what a reader that wants

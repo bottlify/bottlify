@@ -123,6 +123,8 @@ const FILTER_NUMBERING = Object.freeze({
  *     renderer's (`createRenderer`).
  * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
  *     The renderer's (`createRenderer`).
+ * @property {import('../internal/texel-store.js').TexelCache | null} [texelCache]  The
+ *     renderer's: the root's names in the run's cache, where the texels a frame keeps wait.
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]  told of
  *     every frame a present puts on the queue, to count and time it; what it answers is
  *     not waited on - DirectDraw's flips hold nothing here
@@ -390,6 +392,7 @@ export function createDirect3D7(ddraw, services = {}){
             driverRules: services.driverRules,
             scratches: services.scratches,
             holds: services.holds,
+            texelCache: services.texelCache ?? null,
         })
         : null;
 

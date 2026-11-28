@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { grainsOf } from '@bottlify/cellar';
 import { PIECE_SIZE, bytesOf } from './memory-store.js';
 import { createMemoryStore } from './memory-store.fixture.js';
 import { assembled } from './read-into.fixture.js';
@@ -174,7 +175,7 @@ test('what the store holds is counted as it is written, cut, handed on and remov
     const store = createMemoryStore({ 'seed.ini': 'abc' });
     assert.equal(store.heldBytes?.(), 3);
     store.write('log.txt', 0, new Uint8Array(100));
-    assert.equal(store.heldBytes?.(), 3 + 4096, 'a small file holds its first piece');
+    assert.equal(store.heldBytes?.(), 3 + grainsOf(1), 'a small file holds a grain');
     store.write('log.txt', 5000, new Uint8Array(10));
     assert.equal(store.heldBytes?.(), 3 + 8192, 'and doubles it as it grows');
     store.write('big.bin', 0, new Uint8Array(PIECE_SIZE + 1));

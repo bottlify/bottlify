@@ -5812,7 +5812,7 @@ export function createRenderer(options){
             const key = String(++keptUploads);
             // The texels are the caller's own when ordered: handed over, not copied,
             // and the command holds only their key.
-            texelStore.put(key, upload.texels);
+            texelStore.put(key, upload.texels, frame);
             frame.texels.push(key);
             frame.commands.push({ kind: 'upload', surface, ...upload, texels: null, key });
             return;
