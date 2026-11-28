@@ -729,10 +729,8 @@ test('an executor\'s take that does not fit asks the process across its link: a 
                 const { used, limit } = guest.report();
                 assert.equal(guest.take(/** @type {number} */ (limit) - used, 'guest'), true);
             };
-            fill();
-            // The cache's empty segments let go and taken too: what room is
-            // made next is the cold body's.
-            run.room(4096);
+            // The cache's spare segment holds nothing: what room is made
+            // next is the cold body's.
             fill();
         });
         assert.ok(asked.length >= 1, 'the executor asked the process for room');

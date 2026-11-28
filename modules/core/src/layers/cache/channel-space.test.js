@@ -164,12 +164,11 @@ test('an owner that goes lets go of every name it held, after the calls it sent 
             post({ prefix: space.prefix, held, granted, released });`,
         { joined, channels: memories });
         assert.equal(said.held, 4);
-        assert.deepEqual(said.released, { bodies: 5, bytes: 500, waiting: 1 },
-            'the four it held and the room granted it, which waits for a writer that is gone');
+        assert.deepEqual(said.released, { bodies: 5, bytes: 500, waiting: 0 },
+            'the four it held and the room granted it, taken back with its writer gone');
         await unserved(run);
         assert.deepEqual(run.under(said.prefix),
-            { bodies: 1, bytes: 100, hotBytes: 100, placedBytes: grainsOf(100) },
-            'only the reservation left, which the keeper takes back after its age');
+            { bodies: 0, bytes: 0, hotBytes: 0, placedBytes: 0 }, 'nothing left');
         assert.deepEqual(tails, []);
     }
     finally

@@ -39,10 +39,17 @@ function sequenceOf(seed, count){
     const ops = ['put', 'put', 'put', 'read', 'read', 'look', 'drop', 'reserve', 'own', 'ownPut',
         'ownPut', 'ownPut', 'release'];
     // Lengths up to the largest body the run's one segment shares, a quarter
-    // of it: a few such only copies outgrow it, however densely they lie.
-    return Array.from({ length: count }, ()=>[ops[Math.floor(next() * ops.length)],
-        `m/${Math.floor(next() * NAMES)}`, 1 + Math.floor(next() * (4 << 20)),
-        Math.floor(next() * 256)]);
+    // of it: a few such only copies outgrow it, however densely they lie. Half
+    // the reads and looks name what the op before them named, so a sequence
+    // reads what it put rather than a name a few bodies seldom hold.
+    let last = 'm/0';
+    return Array.from({ length: count }, ()=>{
+        const op = ops[Math.floor(next() * ops.length)];
+        const drawn = `m/${Math.floor(next() * NAMES)}`;
+        const name = (op === 'read' || op === 'look') && next() < 0.5 ? last : drawn;
+        last = name;
+        return [op, name, 1 + Math.floor(next() * (4 << 20)), Math.floor(next() * 256)];
+    });
 }
 
 /** What an owner's bodies ask for: the only copy, on the disk for this run. */
@@ -187,8 +194,6 @@ for (const seed of [1, 2, 3, 0x5eed])
                 });
                 assert.equal(/** @type {any} */ (said).error, undefined);
                 const answers = /** @type {any} */ (said).answers;
-                // Drops are not waited on: the last ones may still be crossing.
-                await new Promise(resolve=>setTimeout(resolve, 50));
                 const got = { answers, ...standing(remote) };
                 for (const [n, answer] of answers.entries())
                 {

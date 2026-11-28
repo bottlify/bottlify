@@ -113,14 +113,14 @@ test('a session is listed whole and nothing of it is read until a read asks', as
  * @param {any} t @param {any[]} files @param {number} room
  */
 async function sessionWithRoom(t, files, room){
-    // Room for `room` of pieces, each a segment of its own, and the shared
-    // segment the keeper keeps beside them; the reader told of each segment.
+    // Room for `room` of pieces, each a segment of its own (the shared spare
+    // the keeper keeps beside them holds nothing); the reader told of each segment.
     // Its clock moves before each read, as a run's sweep moves it: the piece
     // read the longest ago goes first.
     /** @type {import('@bottlify/cellar').Reader | null} */
     let told = null;
     let clock = 0;
-    const keeper = await openKeeper({ budget: 2 * room, segmentBytes: room, now: ()=>clock,
+    const keeper = await openKeeper({ budget: room, segmentBytes: room, now: ()=>clock,
         announce: message=>told?.adopt(message) });
     t.after(()=>keeper.close());
     const reader = told = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),

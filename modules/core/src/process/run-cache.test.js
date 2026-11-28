@@ -396,8 +396,8 @@ test('a take of the run\'s account that does not fit lets this keeper\'s cold bo
             return false;
         });
         const guest = openAccount(account, { room: run.room });
-        assert.equal(guest.take(56 << 20, 'guest'), true, 'its spare segment let go for it');
-        assert.equal(run.figures().roomMade, 1);
+        assert.equal(guest.take(56 << 20, 'guest'), true, 'its spare segment holds nothing');
+        assert.equal(run.figures().roomMade, 0);
         assert.deepEqual(asked, [], 'this keeper made the room: the other not asked');
         assert.equal(guest.take(32 << 20, 'guest'), false);
         assert.deepEqual(asked, [32 << 20], 'then the other');

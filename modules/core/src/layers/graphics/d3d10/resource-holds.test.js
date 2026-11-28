@@ -489,5 +489,5 @@ test('a resource past a segment of the run\'s cache is held there at its length,
     scratches.releaseAll();
     assert.equal(cache.keeper.under('scratch/').bodies, 0);
     cache.idle(1);
-    assert.equal(cache.keeper.figures().segmentBytes, 16 << 20, 'its segment went with it');
+    assert.equal(cache.keeper.figures().segmentBytes, 0, 'its segment went with it');
 });
