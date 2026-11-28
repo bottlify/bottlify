@@ -27,8 +27,7 @@ const BLOCK_LIMIT = 0x100000;
 
 /**
  * @typedef {Object} EnvironmentHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {Record<string, { handler: Function }>} kernel32
  * @property {(bytes: number) => number} allocate  From the process heap.
  * @property {(address: number) => boolean} free
@@ -38,18 +37,10 @@ const BLOCK_LIMIT = 0x100000;
  * @param {EnvironmentHost} host
  * @returns {Record<string, { argBytes: number, sizes?: number[], handler: Function }>}
  */
-export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, allocate, free }){
-    /** @param {number} address */
-    const u32 = address=>new DataView(readMemory(address, 4).buffer.slice(0)).getUint32(0, true);
-    /** @param {number} address @param {number} value */
-    const setU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        writeMemory(address, bytes);
-    };
+export function createEnvironmentFunctions({ guest, kernel32, allocate, free }){
     /** @param {number} address @param {number} units */
     const readUnits = (address, units)=>{
-        const bytes = readMemory(address, units * 2);
+        const bytes = guest.view(address, units * 2);
         let text = '';
         for (let at = 0; at + 1 < bytes.length; at += 2)
         {
@@ -58,8 +49,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         return text;
     };
     /** A UNICODE_STRING's text. @param {number} address */
-    const counted = address=>readUnits(u32(address + 4), (readMemory(address, 2)[0]
-        | readMemory(address, 2)[1] << 8) >>> 1);
+    const counted = address=>readUnits(guest.u32(address + 4), guest.u16(address) >>> 1);
 
     /**
      * The entries of a block, in order.
@@ -74,8 +64,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         let entry = '';
         for (let units = 0; units < BLOCK_LIMIT; units++, at += 2)
         {
-            const pair = readMemory(at, 2);
-            const code = pair[0] | pair[1] << 8;
+            const code = guest.u16(at);
             if (code !== 0)
             {
                 entry += String.fromCharCode(code);
@@ -161,13 +150,13 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             {
                 if (written + text.length + 1 <= count)
                 {
-                    writeMemory(destination + written * 2, utf16z(text));
+                    guest.setBytes(destination + written * 2, utf16z(text));
                     written += text.length;
                     continue;
                 }
                 if (written < count)
                 {
-                    writeMemory(destination + written * 2, utf16('\0'));
+                    guest.setBytes(destination + written * 2, utf16('\0'));
                 }
                 stopped = true;
                 break;
@@ -175,7 +164,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             const fits = Math.max(0, Math.min(text.length, count - 1 - written));
             if (fits > 0)
             {
-                writeMemory(destination + written * 2, utf16(text.slice(0, fits)));
+                guest.setBytes(destination + written * 2, utf16(text.slice(0, fits)));
                 written += fits;
             }
             if (fits < text.length)
@@ -186,7 +175,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         }
         if (!stopped && written < count)
         {
-            writeMemory(destination + written * 2, utf16('\0'));
+            guest.setBytes(destination + written * 2, utf16('\0'));
         }
         return total;
     };
@@ -196,7 +185,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         const at = allocate(text.length * 2);
         if (at !== 0)
         {
-            writeMemory(at, utf16(text));
+            guest.setBytes(at, utf16(text));
         }
         return at;
     };
@@ -211,7 +200,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         {
             return STATUS.BUFFER_TOO_SMALL;
         }
-        writeMemory(buffer, utf16(value.length * 2 + 2 <= room ? `${value}\0` : value));
+        guest.setBytes(buffer, utf16(value.length * 2 + 2 <= room ? `${value}\0` : value));
         return STATUS.SUCCESS;
     };
 
@@ -232,11 +221,9 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 {
                     return STATUS_VARIABLE_NOT_FOUND;
                 }
-                const head = readMemory(wholeAddress(value), 4);
-                const room = head[2] | head[3] << 8;
-                writeMemory(wholeAddress(value), Uint8Array.of(found.length * 2 & 0xff,
-                    found.length * 2 >>> 8 & 0xff));
-                return put(found, u32(wholeAddress(value) + 4), room);
+                const room = guest.u16(wholeAddress(value) + 2);
+                guest.set16(wholeAddress(value), found.length * 2);
+                return put(found, guest.u32(wholeAddress(value) + 4), room);
             },
         },
 
@@ -262,10 +249,10 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 // terminator needs too.
                 if (found.length + 1 > (valueLength >>> 0))
                 {
-                    setU32(wholeAddress(returned), found.length + 1);
+                    guest.set32(wholeAddress(returned), found.length + 1);
                     return STATUS.BUFFER_TOO_SMALL;
                 }
-                setU32(wholeAddress(returned), found.length);
+                guest.set32(wholeAddress(returned), found.length);
                 return put(found, wholeAddress(value), (valueLength >>> 0) * 2);
             },
         },
@@ -282,19 +269,18 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             /** @param {number[]} args */
             handler: ([block, source, destination, returned])=>{
                 const pieces = expand(wholeAddress(block), counted(wholeAddress(source)));
-                const head = readMemory(wholeAddress(destination), 4);
-                const room = (head[2] | head[3] << 8) >>> 1;
-                const total = writeExpanded(pieces, u32(wholeAddress(destination) + 4), room);
+                const room = guest.u16(wholeAddress(destination) + 2) >>> 1;
+                const total = writeExpanded(pieces, guest.u32(wholeAddress(destination) + 4),
+                    room);
                 if (wholeAddress(returned) !== 0)
                 {
-                    setU32(wholeAddress(returned), total * 2);
+                    guest.set32(wholeAddress(returned), total * 2);
                 }
                 if (total > room)
                 {
                     return STATUS.BUFFER_TOO_SMALL;
                 }
-                writeMemory(wholeAddress(destination), Uint8Array.of(total * 2 - 2 & 0xff,
-                    total * 2 - 2 >>> 8 & 0xff));
+                guest.set16(wholeAddress(destination), total * 2 - 2);
                 return STATUS.SUCCESS;
             },
         },
@@ -318,7 +304,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                     destinationLength >>> 0);
                 if (wholeAddress(returned) !== 0)
                 {
-                    setU32(wholeAddress(returned), total);
+                    guest.set32(wholeAddress(returned), total);
                 }
                 return total > (destinationLength >>> 0) ? STATUS.BUFFER_TOO_SMALL
                     : STATUS.SUCCESS;
@@ -349,7 +335,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                     set(key, text);
                     return STATUS.SUCCESS;
                 }
-                const old = u32(wholeAddress(where));
+                const old = guest.u32(wholeAddress(where));
                 const list = (old === 0 ? [] : entries(old))
                     .filter(([entry])=>foldName(entry) !== foldName(key));
                 if (text !== null)
@@ -361,7 +347,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 {
                     return STATUS.NO_MEMORY;
                 }
-                setU32(wholeAddress(where), fresh);
+                guest.set32(wholeAddress(where), fresh);
                 if (old !== 0)
                 {
                     free(old);
@@ -384,7 +370,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 {
                     return STATUS.NO_MEMORY;
                 }
-                setU32(wholeAddress(out), fresh);
+                guest.set32(wholeAddress(out), fresh);
                 return STATUS.SUCCESS;
             },
         },
@@ -413,7 +399,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 const before = processEntries();
                 if (wholeAddress(old) !== 0)
                 {
-                    setU32(wholeAddress(old), blockOf(before));
+                    guest.set32(wholeAddress(old), blockOf(before));
                 }
                 // No block is no variables at all.
                 const after = wholeAddress(block) === 0 ? [] : entries(wholeAddress(block));
@@ -439,7 +425,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         const scratch = allocate((key.length + (value?.length ?? 0) + 2) * 2);
         try
         {
-            writeMemory(scratch, utf16(`${key}\0${value ?? ''}\0`));
+            guest.setBytes(scratch, utf16(`${key}\0${value ?? ''}\0`));
             kernel32.SetEnvironmentVariableW.handler([scratch,
                 value === null ? 0 : scratch + (key.length + 1) * 2]);
         }

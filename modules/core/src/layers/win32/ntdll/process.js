@@ -138,8 +138,7 @@ const DOS_DEVICES = '\\??\\';
 
 /**
  * @typedef {Object} ProcessHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {Record<string, { handler: Function } | undefined>} kernel32
  * @property {() => number} teb
  * @property {(bytes: number) => number} allocate  The process heap.
@@ -162,6 +161,7 @@ const DOS_DEVICES = '\\??\\';
  * @param {ProcessHost} host
  */
 export function createProcessFunctions(host){
+    const { guest } = host;
     const { kernel32 } = host;
     /** The exit code an earlier NtTerminateProcess with no handle kept, or null. */
     /** @type {number | null} */
@@ -172,23 +172,6 @@ export function createProcessFunctions(host){
     /** The flags NtCreateThreadEx was handed and does not honour, each said once. */
     /** @type {Set<number>} */
     const unhonoured = new Set();
-
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address */
-    const readU16 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 2);
-        return bytes[0] | bytes[1] << 8;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
 
     /**
      * A kernel32 call made for a native one: its answer, with the thread's
@@ -235,7 +218,7 @@ export function createProcessFunctions(host){
             const id = quietly(idOf, [previous]).result >>> 0;
             if (id === 0)
             {
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 return STATUS.INVALID_HANDLE;
             }
             from = listed.indexOf(id) + 1;
@@ -246,11 +229,11 @@ export function createProcessFunctions(host){
             const handle = quietly(open, [access, inherit, id]).result >>> 0;
             if (handle !== 0)
             {
-                writeU32(out, handle);
+                guest.set32(out, handle);
                 return STATUS.SUCCESS;
             }
         }
-        writeU32(out, 0);
+        guest.set32(out, 0);
         return STATUS.NO_MORE_ENTRIES;
     };
 
@@ -280,13 +263,13 @@ export function createProcessFunctions(host){
         {
             return null;
         }
-        const length = readU16(pointer);
-        const buffer = readU32(pointer + 4);
+        const length = guest.u16(pointer);
+        const buffer = guest.u32(pointer + 4);
         if (length === 0 || buffer === 0)
         {
             return '';
         }
-        const units = host.readMemory((base + buffer) >>> 0, length & ~1);
+        const units = guest.snapshot((base + buffer) >>> 0, length & ~1);
         return String.fromCharCode(...new Uint16Array(units.buffer, 0, units.length >> 1));
     };
 
@@ -296,7 +279,7 @@ export function createProcessFunctions(host){
         const at = wholeAddress(host.allocate(bytes.length));
         if (at !== 0)
         {
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
         }
         return at;
     };
@@ -304,8 +287,8 @@ export function createProcessFunctions(host){
     /** The running process's own parameters block, or 0. */
     const ownParameters = ()=>{
         const teb = host.teb();
-        const peb = teb === 0 ? 0 : readU32(teb + TEB_PEB);
-        return peb === 0 ? 0 : readU32(peb + PEB_PROCESS_PARAMETERS);
+        const peb = teb === 0 ? 0 : guest.u32(teb + TEB_PEB);
+        return peb === 0 ? 0 : guest.u32(peb + PEB_PROCESS_PARAMETERS);
     };
 
     /**
@@ -314,7 +297,7 @@ export function createProcessFunctions(host){
      * @param {number} block @param {number} field
      */
     const parameter = (block, field)=>{
-        const flags = readU32(block + PARAMETERS.Flags);
+        const flags = guest.u32(block + PARAMETERS.Flags);
         return counted(block + field,
             (flags & PROCESS_PARAMS_FLAG_NORMALIZED) !== 0 ? 0 : block);
     };
@@ -328,7 +311,7 @@ export function createProcessFunctions(host){
      */
     const source = (pointer, base = 0)=>{
         const text = counted(pointer, base);
-        return text === null ? null : { text, room: readU16(pointer + 2) };
+        return text === null ? null : { text, room: guest.u16(pointer + 2) };
     };
 
     /**
@@ -343,7 +326,7 @@ export function createProcessFunctions(host){
         const current = block === 0 && kernel32.GetEnvironmentStringsW
             ? kernel32.GetEnvironmentStringsW.handler([]) >>> 0 : 0;
         const from = block !== 0 ? block
-            : current !== 0 ? current : own !== 0 ? readU32(own + PARAMETERS.Environment) : 0;
+            : current !== 0 ? current : own !== 0 ? guest.u32(own + PARAMETERS.Environment) : 0;
         if (from === 0)
         {
             return Uint8Array.of(0, 0, 0, 0);
@@ -351,7 +334,7 @@ export function createProcessFunctions(host){
         let units = 0;
         for (let previous = 1; units < ENVIRONMENT_LIMIT; units++)
         {
-            const unit = readU16(from + units * 2);
+            const unit = guest.u16(from + units * 2);
             if (unit === 0 && previous === 0)
             {
                 units++;
@@ -359,7 +342,7 @@ export function createProcessFunctions(host){
             }
             previous = unit;
         }
-        const bytes = host.readMemory(from, Math.max(units, 2) * 2);
+        const bytes = guest.snapshot(from, Math.max(units, 2) * 2);
         if (current !== 0)
         {
             kernel32.FreeEnvironmentStringsW?.handler([current]);
@@ -393,7 +376,7 @@ export function createProcessFunctions(host){
             return STATUS.INVALID_PARAMETER;
         }
         const own = ownParameters();
-        const flags = own ? readU32(own + PARAMETERS.Flags) : 0;
+        const flags = own ? guest.u32(own + PARAMETERS.Flags) : 0;
         const ownBase = (flags & PROCESS_PARAMS_FLAG_NORMALIZED) !== 0 ? 0 : own;
         /** @param {number} field */
         const inherited = field=>(own ? source(own + field, ownBase) : null);
@@ -451,8 +434,8 @@ export function createProcessFunctions(host){
         bytes.set(environmentCopy, size);
         view.setUint32(PARAMETERS.Environment, block + size, true);
         view.setUint32(PARAMETERS.EnvironmentSize, total - size, true);
-        host.writeMemory(block, bytes);
-        writeU32(out, block);
+        guest.setBytes(block, bytes);
+        guest.set32(out, block);
         return STATUS.SUCCESS;
     };
 
@@ -465,13 +448,13 @@ export function createProcessFunctions(host){
      * @returns {Map<number, { size: number, value: number }>}
      */
     const attributeList = list=>{
-        const total = readU32(list);
+        const total = guest.u32(list);
         /** @type {Map<number, { size: number, value: number }>} */
         const found = new Map();
         for (let at = ATTRIBUTE_LIST_HEADER; at + ATTRIBUTE_SIZE <= total; at += ATTRIBUTE_SIZE)
         {
-            found.set(readU32(list + at), {
-                size: readU32(list + at + 4), value: readU32(list + at + 8) });
+            found.set(guest.u32(list + at), {
+                size: guest.u32(list + at + 4), value: guest.u32(list + at + 8) });
         }
         return found;
     };
@@ -496,7 +479,7 @@ export function createProcessFunctions(host){
         const path = named.startsWith(DOS_DEVICES) ? named.slice(DOS_DEVICES.length) : named;
         const commandLine = parameter(parameters, PARAMETERS.CommandLine) ?? '';
         const directory = parameter(parameters, PARAMETERS.CurrentDirectory) ?? '';
-        const environment = readU32(parameters + PARAMETERS.Environment);
+        const environment = guest.u32(parameters + PARAMETERS.Environment);
 
         const application = heapString(path);
         const line = heapString(commandLine);
@@ -511,7 +494,7 @@ export function createProcessFunctions(host){
         }
         const startup = new Uint8Array(STARTUPINFO_SIZE + 16);
         new DataView(startup.buffer).setUint32(0, STARTUPINFO_SIZE, true);
-        host.writeMemory(scratch, startup);
+        guest.setBytes(scratch, startup);
         const before = kernel32.GetLastError?.handler([]) ?? 0;
         const created = create.handler([application, line, 0, 0,
             inherit ? 1 : 0,
@@ -527,8 +510,8 @@ export function createProcessFunctions(host){
                 release();
                 return { status: ERROR_TO_STATUS.get(error) ?? STATUS.UNSUCCESSFUL };
             }
-            const child = { process: readU32(information), thread: readU32(information + 4),
-                processId: readU32(information + 8), threadId: readU32(information + 12) };
+            const child = { process: guest.u32(information), thread: guest.u32(information + 4),
+                processId: guest.u32(information + 8), threadId: guest.u32(information + 12) };
             release();
             return child;
         };
@@ -558,7 +541,7 @@ export function createProcessFunctions(host){
             scratch]);
         /** @param {number} handle */
         const settle = handle=>{
-            const id = readU32(scratch);
+            const id = guest.u32(scratch);
             host.free(scratch);
             if ((handle >>> 0) === 0)
             {
@@ -590,7 +573,7 @@ export function createProcessFunctions(host){
         const asked = scratch === 0 ? null : host.native?.('NtQueryInformationThread')
             ?.handler([handle, THREAD_BASIC_INFORMATION, scratch, THREAD_BASIC_INFORMATION_BYTES,
                 0]);
-        const teb = asked === STATUS.SUCCESS ? readU32(scratch + THREAD_BASIC_TEB) : 0;
+        const teb = asked === STATUS.SUCCESS ? guest.u32(scratch + THREAD_BASIC_TEB) : 0;
         if (scratch !== 0)
         {
             host.free(scratch);
@@ -601,9 +584,9 @@ export function createProcessFunctions(host){
                 + ' the libraries are told of the thread all the same');
             return;
         }
-        const word = readU16(teb + TEB.SAME_TEB_FLAGS) | SKIP_THREAD_ATTACH;
-        host.writeMemory(teb + TEB.SAME_TEB_FLAGS, Uint8Array.of(word & 0xff, word >>> 8));
-        writeU32(teb + TEB.TLS_POINTER, 0);
+        const word = guest.u16(teb + TEB.SAME_TEB_FLAGS) | SKIP_THREAD_ATTACH;
+        guest.set16(teb + TEB.SAME_TEB_FLAGS, word);
+        guest.set32(teb + TEB.TLS_POINTER, 0);
     };
 
     /**
@@ -670,7 +653,7 @@ export function createProcessFunctions(host){
                     }
                     if (wholeAddress(count) !== 0)
                     {
-                        writeU32(count, previous);
+                        guest.set32(count, previous);
                     }
                     return STATUS.SUCCESS;
                 };
@@ -696,7 +679,7 @@ export function createProcessFunctions(host){
                     }
                     if (wholeAddress(count) !== 0)
                     {
-                        writeU32(count, previous);
+                        guest.set32(count, previous);
                     }
                     return STATUS.SUCCESS;
                 };
@@ -812,7 +795,7 @@ export function createProcessFunctions(host){
                             quietly('ResumeThread', [thread.handle]);
                         }
                     }
-                    writeU32(out, thread.handle);
+                    guest.set32(out, thread.handle);
                     return STATUS.SUCCESS;
                 };
                 return made instanceof Promise ? made.then(settle) : settle(made);
@@ -847,7 +830,7 @@ export function createProcessFunctions(host){
                     }
                     if (wholeAddress(out) !== 0)
                     {
-                        writeU32(out, thread.handle);
+                        guest.set32(out, thread.handle);
                     }
                     else
                     {
@@ -855,8 +838,9 @@ export function createProcessFunctions(host){
                     }
                     if (wholeAddress(client) !== 0)
                     {
-                        writeU32(client, quietly('GetProcessIdOfThread', [thread.handle]).result);
-                        writeU32(client + 4, thread.id);
+                        guest.set32(client,
+                            quietly('GetProcessIdOfThread', [thread.handle]).result);
+                        guest.set32(client + 4, thread.id);
                     }
                     return STATUS.SUCCESS;
                 };
@@ -927,12 +911,12 @@ export function createProcessFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER_MIX;
                 }
-                const { result } = quietly('OpenProcess', [access, 0, readU32(client)]);
+                const { result } = quietly('OpenProcess', [access, 0, guest.u32(client)]);
                 if ((result >>> 0) === 0)
                 {
                     return STATUS.INVALID_CID;
                 }
-                writeU32(out, result);
+                guest.set32(out, result);
                 return STATUS.SUCCESS;
             },
         },
@@ -972,7 +956,7 @@ export function createProcessFunctions(host){
                 const id = quietly('GetProcessId', [process]).result >>> 0;
                 if (id === 0)
                 {
-                    writeU32(out, 0);
+                    guest.set32(out, 0);
                     return STATUS.INVALID_HANDLE;
                 }
                 return nextOpened(()=>(host.processes?.() ?? [])
@@ -1008,20 +992,20 @@ export function createProcessFunctions(host){
                     return STATUS.RESOURCE_DATA_NOT_FOUND;
                 }
                 const wanted = id >>> 0;
-                const blocks = readU32(table);
+                const blocks = guest.u32(table);
                 for (let block = 0; block < blocks && 4 + (block + 1) * 12 <= size; block++)
                 {
                     const at = table + 4 + block * 12;
-                    const low = readU32(at);
-                    const high = readU32(at + 4);
+                    const low = guest.u32(at);
+                    const high = guest.u32(at + 4);
                     if (wanted < low || wanted > high)
                     {
                         continue;
                     }
-                    let entry = table + readU32(at + 8);
+                    let entry = table + guest.u32(at + 8);
                     for (let skip = low; skip < wanted; skip++)
                     {
-                        const length = readU16(entry);
+                        const length = guest.u16(entry);
                         if (length === 0 || entry + length > table + size)
                         {
                             return STATUS.MESSAGE_NOT_FOUND;
@@ -1030,7 +1014,7 @@ export function createProcessFunctions(host){
                     }
                     if (wholeAddress(out) !== 0)
                     {
-                        writeU32(out, entry);
+                        guest.set32(out, entry);
                     }
                     return STATUS.SUCCESS;
                 }
@@ -1128,7 +1112,7 @@ export function createProcessFunctions(host){
                     view.setUint32(PROCESS_INFORMATION.ThreadHandle, child.thread, true);
                     view.setUint32(PROCESS_INFORMATION.UniqueProcess, child.processId, true);
                     view.setUint32(PROCESS_INFORMATION.UniqueThread, child.threadId, true);
-                    host.writeMemory(wholeAddress(information), answer);
+                    guest.setBytes(wholeAddress(information), answer);
                     return STATUS.SUCCESS;
                 };
                 return made instanceof Promise ? made.then(settle) : settle(made);
@@ -1170,7 +1154,7 @@ export function createProcessFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const units = host.readMemory(imageName.value, imageName.size & ~1);
+                const units = guest.snapshot(imageName.value, imageName.size & ~1);
                 const image = String.fromCharCode(
                     ...new Uint16Array(units.buffer, 0, units.length >> 1));
                 const made = spawn(image, wholeAddress(parameters),
@@ -1181,17 +1165,17 @@ export function createProcessFunctions(host){
                     {
                         return child.status;
                     }
-                    writeU32(processOut, child.process);
-                    writeU32(threadOut, child.thread);
+                    guest.set32(processOut, child.process);
+                    guest.set32(threadOut, child.thread);
                     const client = list.get(PS_ATTRIBUTE_CLIENT_ID);
                     if (client && client.size >= 8)
                     {
-                        writeU32(client.value, child.processId);
-                        writeU32(client.value + 4, child.threadId);
+                        guest.set32(client.value, child.processId);
+                        guest.set32(client.value + 4, child.threadId);
                     }
                     if (wholeAddress(createInfo) !== 0)
                     {
-                        writeU32(createInfo + CREATE_INFO_STATE, PS_CREATE_SUCCESS);
+                        guest.set32(createInfo + CREATE_INFO_STATE, PS_CREATE_SUCCESS);
                     }
                     if (((threadFlags >>> 0) & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) === 0)
                     {

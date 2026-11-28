@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createProcessFunctions } from './process.js';
 
 const STATUS_SUCCESS = 0;
@@ -122,8 +123,7 @@ function setup(){
         } },
     };
     const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         kernel32,
         teb: ()=>TEB,
         allocate: size=>{
@@ -413,8 +413,7 @@ test('NtTerminateProcess with no handle ends the other threads, then the process
         }),
     };
     const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
-        readMemory: ()=>new Uint8Array(4),
-        writeMemory: ()=>{},
+        guest: guestOver(new Uint8Array(0x10000)),
         kernel32,
         teb: ()=>0,
         allocate: ()=>0,
@@ -485,8 +484,7 @@ test('NtCreateThreadEx and RtlCreateUserThread are CreateRemoteThreadEx, their f
     /** @type {string[]} */
     const said = [];
     const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         kernel32,
         teb: ()=>0,
         allocate: size=>{
@@ -598,8 +596,7 @@ test('NtGetNextProcess and NtGetNextThread walk the system\'s list, opening what
         } },
     };
     const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         kernel32,
         teb: ()=>0,
         allocate: ()=>0,

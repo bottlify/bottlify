@@ -295,19 +295,19 @@ const MAX_MODULES = 0x10000;
  * the loader's list goes through this one, bounded by what a process can
  * hold, so a list a program broke into a loop is not walked for ever.
  *
- * @param {(address: number) => number} readU32
+ * @param {{ u32: (address: number) => number }} guest  the process's memory
  * @param {number} peb  the process block, zero for none yet
  * @param {{ peb: { LDR: number }, ldr: { IN_LOAD_ORDER_MODULE_LIST: number },
  *     entry: { IN_LOAD_ORDER_LINKS: number } }} layout  `blockLayouts`'s
  */
-export function* loadOrder(readU32, peb, layout){
+export function* loadOrder(guest, peb, layout){
     if (peb === 0)
     {
         return;
     }
-    const head = readU32(peb + layout.peb.LDR) + layout.ldr.IN_LOAD_ORDER_MODULE_LIST;
-    for (let link = readU32(head), seen = 0; link !== head && link !== 0 && seen < MAX_MODULES;
-        link = readU32(link), seen++)
+    const head = guest.u32(peb + layout.peb.LDR) + layout.ldr.IN_LOAD_ORDER_MODULE_LIST;
+    for (let link = guest.u32(head), seen = 0; link !== head && link !== 0 && seen < MAX_MODULES;
+        link = guest.u32(link), seen++)
     {
         yield link - layout.entry.IN_LOAD_ORDER_LINKS;
     }
@@ -335,8 +335,7 @@ const NORMAL_BASE_PRIORITY = 8;
 
 /**
  * @typedef {Object} QueryHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => number} teb  The running thread's block, the route to the
  *           process block a program would take itself.
  * @property {() => number} [processBlock]  The process block, where no thread runs:
@@ -520,6 +519,7 @@ export function systemProcessInformation(processes, base){
  * @param {QueryHost} host
  */
 export function createQueryFunctions(host){
+    const { guest } = host;
     const machine = host.version ?? windowsVersion();
     const processors = host.processors;
     const layout = blockLayouts(host.pointerSize);
@@ -544,19 +544,11 @@ export function createQueryFunctions(host){
         return address;
     };
 
-    /** @param {number} at */
-    const readU32 = at=>{
-        const bytes = host.readMemory(at, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-
     /** @param {number} at @param {number} value */
     const writeU32If = (at, value)=>{
         if (at !== 0)
         {
-            const bytes = new Uint8Array(4);
-            new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-            host.writeMemory(at, bytes);
+            guest.set32(at, value);
         }
     };
 
@@ -590,7 +582,7 @@ export function createQueryFunctions(host){
                 view.setUint16(head + at * 2, text.charCodeAt(at), true);
             }
         }
-        host.writeMemory(buffer, struct);
+        guest.setBytes(buffer, struct);
         return STATUS.SUCCESS;
     };
 
@@ -623,7 +615,7 @@ export function createQueryFunctions(host){
             return wholeAddress(block);
         }
         const teb = host.teb() >>> 0;
-        return teb === 0 ? 0 : readU32(teb + TEB.PEB);
+        return teb === 0 ? 0 : guest.u32(teb + TEB.PEB);
     };
 
     /**
@@ -649,11 +641,11 @@ export function createQueryFunctions(host){
                 }
                 if (answer.outs[2] && buffer !== 0)
                 {
-                    host.writeMemory(buffer, answer.outs[2]);
+                    guest.setBytes(buffer, answer.outs[2]);
                 }
                 if (answer.outs[4] && returned !== 0)
                 {
-                    host.writeMemory(returned, answer.outs[4]);
+                    guest.setBytes(returned, answer.outs[4]);
                 }
                 return answer.result >>> 0;
             });
@@ -686,11 +678,11 @@ export function createQueryFunctions(host){
         // A probe changes nothing: what is there is written back.
         if (length > 0)
         {
-            host.writeMemory(buffer, host.readMemory(buffer, length));
+            guest.copy(buffer, buffer, length);
         }
         if (returned !== 0)
         {
-            host.writeMemory(returned, host.readMemory(returned, 4));
+            guest.copy(returned, returned, 4);
         }
         if (length !== 4)
         {
@@ -741,7 +733,7 @@ export function createQueryFunctions(host){
         view.setUint32(PROCESS_BASIC.BASE_PRIORITY, NORMAL_BASE_PRIORITY, true);
         view.setUint32(PROCESS_BASIC.PROCESS_ID, (child.id ?? 0) >>> 0, true);
         view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID, (child.parentId ?? 0) >>> 0, true);
-        host.writeMemory(buffer, struct);
+        guest.setBytes(buffer, struct);
         return STATUS.SUCCESS;
     };
 
@@ -753,12 +745,12 @@ export function createQueryFunctions(host){
      * @returns {import('../kernel32/versions.js').ComparedVersion}
      */
     const versionIn = block=>{
-        const buildAndPack = readU32(block + PEB.OS_BUILD_NUMBER);
+        const buildAndPack = guest.u32(block + PEB.OS_BUILD_NUMBER);
         return {
-            major: readU32(block + PEB.OS_MAJOR_VERSION),
-            minor: readU32(block + PEB.OS_MINOR_VERSION),
+            major: guest.u32(block + PEB.OS_MAJOR_VERSION),
+            minor: guest.u32(block + PEB.OS_MINOR_VERSION),
             build: buildAndPack & 0xffff,
-            platformId: readU32(block + PEB.OS_PLATFORM_ID),
+            platformId: guest.u32(block + PEB.OS_PLATFORM_ID),
             servicePackMajor: buildAndPack >>> 24,
             servicePackMinor: buildAndPack >>> 16 & 0xff,
             suiteMask: machine.suiteMask,
@@ -791,10 +783,10 @@ export function createQueryFunctions(host){
                     return STATUS.INVALID_PARAMETER;
                 }
                 const wanted = wholeAddress(address);
-                for (const entry of loadOrder(readU32, block, layout))
+                for (const entry of loadOrder(guest, block, layout))
                 {
-                    const base = readU32(entry + ENTRY.DLL_BASE);
-                    if (wanted >= base && wanted - base < readU32(entry + ENTRY.SIZE_OF_IMAGE))
+                    const base = guest.u32(entry + ENTRY.DLL_BASE);
+                    if (wanted >= base && wanted - base < guest.u32(entry + ENTRY.SIZE_OF_IMAGE))
                     {
                         writeU32If(wholeAddress(out), entry);
                         if (pointerBytes === 8)
@@ -820,7 +812,7 @@ export function createQueryFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>{
                 const at = wholeAddress(pointer);
-                const declared = readU32(at + OSVERSIONINFO.SIZE_FIELD);
+                const declared = guest.u32(at + OSVERSIONINFO.SIZE_FIELD);
                 if (declared !== OSVERSIONINFOW_SIZE && declared !== OSVERSIONINFOEXW_SIZE)
                 {
                     return STATUS.INVALID_PARAMETER;
@@ -845,12 +837,12 @@ export function createQueryFunctions(host){
                 view.setUint32(OSVERSIONINFO.PLATFORM, version.platformId, true);
                 // The rest of szCSDVersion stays zeroed rather than whatever
                 // the caller left there.
-                const csdLength = Math.min(readU32(block + PEB.CSD_VERSION) & 0xffff,
+                const csdLength = Math.min(guest.u32(block + PEB.CSD_VERSION) & 0xffff,
                     (CSD_VERSION_CHARACTERS - 1) * 2);
-                const csdText = readU32(block + PEB.CSD_VERSION + pointerBytes);
+                const csdText = guest.u32(block + PEB.CSD_VERSION + pointerBytes);
                 if (csdLength > 0 && csdText !== 0)
                 {
-                    struct.set(host.readMemory(csdText, csdLength), OSVERSIONINFO.CSD_VERSION);
+                    struct.set(guest.snapshot(csdText, csdLength), OSVERSIONINFO.CSD_VERSION);
                 }
                 if (declared === OSVERSIONINFOEXW_SIZE)
                 {
@@ -861,7 +853,7 @@ export function createQueryFunctions(host){
                     view.setUint16(OSVERSIONINFO.SUITE_MASK, version.suiteMask, true);
                     view.setUint8(OSVERSIONINFO.PRODUCT_TYPE, version.productType);
                 }
-                host.writeMemory(at + 4, struct.subarray(4));
+                guest.setBytes(at + 4, struct.subarray(4));
                 return STATUS.SUCCESS;
             },
         },
@@ -886,13 +878,13 @@ export function createQueryFunctions(host){
                     return STATUS.UNSUCCESSFUL;
                 }
                 const at = wholeAddress(pointer);
-                const extended = host.readMemory(at + OSVERSIONINFO.SERVICE_PACK_MAJOR, 8);
+                const extended = guest.snapshot(at + OSVERSIONINFO.SERVICE_PACK_MAJOR, 8);
                 const fields = new DataView(extended.buffer);
                 const answer = verifyVersion(versionIn(block), {
-                    major: readU32(at + OSVERSIONINFO.MAJOR),
-                    minor: readU32(at + OSVERSIONINFO.MINOR),
-                    build: readU32(at + OSVERSIONINFO.BUILD),
-                    platformId: readU32(at + OSVERSIONINFO.PLATFORM),
+                    major: guest.u32(at + OSVERSIONINFO.MAJOR),
+                    minor: guest.u32(at + OSVERSIONINFO.MINOR),
+                    build: guest.u32(at + OSVERSIONINFO.BUILD),
+                    platformId: guest.u32(at + OSVERSIONINFO.PLATFORM),
                     servicePackMajor: fields.getUint16(0, true),
                     servicePackMinor: fields.getUint16(2, true),
                     suiteMask: fields.getUint16(4, true),
@@ -937,7 +929,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    host.writeMemory(wholeAddress(buffer), chain);
+                    guest.setBytes(wholeAddress(buffer), chain);
                     return STATUS.SUCCESS;
                 }
                 const extended = (infoClass >>> 0) === SYSTEM_EXTENDED_HANDLE_INFORMATION;
@@ -957,7 +949,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.ACCESS_VIOLATION;
                     }
-                    host.writeMemory(wholeAddress(buffer), table);
+                    guest.setBytes(wholeAddress(buffer), table);
                     return STATUS.SUCCESS;
                 }
                 const other = host.systemClasses?.[infoClass >>> 0];
@@ -981,7 +973,7 @@ export function createQueryFunctions(host){
                     const written = other.partial ? bytes.subarray(0, given) : bytes;
                     if (written.length > 0)
                     {
-                        host.writeMemory(wholeAddress(buffer), written);
+                        guest.setBytes(wholeAddress(buffer), written);
                     }
                     writeU32If(wholeAddress(returnLength), written.length);
                     return STATUS.SUCCESS;
@@ -1025,7 +1017,7 @@ export function createQueryFunctions(host){
                 // The machine's processors, whatever the process is narrowed to.
                 view.setUint32(SYSTEM_BASIC.ACTIVE_PROCESSORS, processors.systemMask(), true);
                 view.setUint8(SYSTEM_BASIC.PROCESSOR_COUNT, processors.count());
-                host.writeMemory(wholeAddress(buffer), struct);
+                guest.setBytes(wholeAddress(buffer), struct);
                 return STATUS.SUCCESS;
             },
         },
@@ -1123,12 +1115,12 @@ export function createQueryFunctions(host){
                     // The process's own, whichever thread runs or none: a call
                     // its parent makes in it runs between its threads' turns.
                     view.setUint32(PROCESS_BASIC.PROCESS_ID, host.processId
-                        ?? (teb === 0 ? 0 : readU32(teb + TEB.PROCESS_ID)), true);
+                        ?? (teb === 0 ? 0 : guest.u32(teb + TEB.PROCESS_ID)), true);
                     // The process list names this process first, with the
                     // process that started it; 0 where none did.
                     view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID,
                         (host.processes?.()[0]?.parent ?? 0) >>> 0, true);
-                    host.writeMemory(wholeAddress(buffer), struct);
+                    guest.setBytes(wholeAddress(buffer), struct);
                     return STATUS.SUCCESS;
                 }
                 if (wanted === PROCESS_DEBUG_PORT || wanted === PROCESS_EXECUTE_FLAGS)
@@ -1155,7 +1147,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    host.writeMemory(wholeAddress(buffer), information);
+                    guest.setBytes(wholeAddress(buffer), information);
                     writeU32If(wholeAddress(returnLength), SECTION_IMAGE_INFORMATION_SIZE);
                     return STATUS.SUCCESS;
                 }
@@ -1182,7 +1174,7 @@ export function createQueryFunctions(host){
             argBytes: 0,
             handler: ()=>{
                 const teb = host.teb() >>> 0;
-                return teb === 0 ? 0 : readU32(teb + TEB.HARD_ERROR_MODE);
+                return teb === 0 ? 0 : guest.u32(teb + TEB.HARD_ERROR_MODE);
             },
         },
         RtlSetThreadErrorMode: {
@@ -1198,7 +1190,7 @@ export function createQueryFunctions(host){
                 {
                     return STATUS.UNSUCCESSFUL;
                 }
-                writeU32If(wholeAddress(old), readU32(teb + TEB.HARD_ERROR_MODE));
+                writeU32If(wholeAddress(old), guest.u32(teb + TEB.HARD_ERROR_MODE));
                 writeU32If(teb + TEB.HARD_ERROR_MODE, mode >>> 0);
                 return STATUS.SUCCESS;
             },
@@ -1252,7 +1244,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    host.writeMemory(wholeAddress(buffer), types);
+                    guest.setBytes(wholeAddress(buffer), types);
                     return STATUS.SUCCESS;
                 }
                 const named = wholeAddress(handle);
@@ -1270,7 +1262,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    host.writeMemory(wholeAddress(buffer),
+                    guest.setBytes(wholeAddress(buffer),
                         Uint8Array.of(flags & 1, flags >>> 1 & 1));
                     return STATUS.SUCCESS;
                 }
@@ -1296,7 +1288,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    host.writeMemory(wholeAddress(buffer), struct);
+                    guest.setBytes(wholeAddress(buffer), struct);
                     return STATUS.SUCCESS;
                 }
                 if ((infoClass >>> 0) === OBJECT_NAME_INFORMATION && host.objectName)
@@ -1322,7 +1314,7 @@ export function createQueryFunctions(host){
                 view.setUint32(OBJECT_BASIC.GRANTED_ACCESS, granted ?? ALL_ACCESS, true);
                 view.setUint32(OBJECT_BASIC.HANDLE_COUNT, 1, true);
                 view.setUint32(OBJECT_BASIC.POINTER_COUNT, 1, true);
-                host.writeMemory(wholeAddress(buffer), struct);
+                guest.setBytes(wholeAddress(buffer), struct);
                 host.divergence?.('NtQueryObject',
                     'handle and reference counts are not kept; one handle answered');
                 return STATUS.SUCCESS;

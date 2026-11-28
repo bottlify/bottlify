@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createSecureFunctions, STRUNCATE } from './secure.js';
 import { fakeMemory } from './harness.test.js';
 import { guestWindow } from './guest-window.fixture.js';
-import { writeMade } from '../common/guest.js';
+import { writeMade } from '../../../system/port.js';
 
 const EINVAL = 22;
 const ERANGE = 34;

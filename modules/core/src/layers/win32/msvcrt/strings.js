@@ -243,7 +243,7 @@ export function createStringFunctions(host){
                 {
                     return 0;
                 }
-                const bytes = guest.bytes(source, length);
+                const bytes = guest.snapshot(source, length);
                 for (let at = 0; at < length; at += 2)
                 {
                     const first = bytes[at];
@@ -341,8 +341,8 @@ export function createStringFunctions(host){
                     host.errno?.(EINVAL);
                     return NLS_COMPARE_ERROR;
                 }
-                const a = guest.bytes(left, length);
-                const b = guest.bytes(right, length);
+                const a = guest.snapshot(left, length);
+                const b = guest.snapshot(right, length);
                 for (let at = 0; at < length; at++)
                 {
                     const difference = inGuest.LOWER[a[at]] - inGuest.LOWER[b[at]];

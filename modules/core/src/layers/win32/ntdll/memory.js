@@ -69,8 +69,7 @@ const ERROR_INVALID_ADDRESS = 487;
 
 /**
  * @typedef {Object} MemoryHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  at the process's pointer width
  * @property {Record<string, Entry>} kernel32
  * @property {(bytes: number) => number} allocate  scratch for a region's query
  * @property {() => any} [currentThread]
@@ -115,20 +114,7 @@ export function createMemoryFunctions(host){
             ? lastErrorOf(thread) >>> 0 : kernel32.GetLastError.handler([]) >>> 0)));
     };
 
-    /** @param {number} address */
-    const read32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
-        .getUint32(0, true);
-    /**
-     * A PVOID or SIZE_T out-parameter, as wide as the process's: its high
-     * half zero at 64 bits, every address and size below 4 GiB.
-     *
-     * @param {number} address @param {number} value
-     */
-    const write32 = (address, value)=>{
-        const bytes = new Uint8Array(pointer);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
+    const { guest } = host;
 
     /** Where a region's MEMORY_BASIC_INFORMATION is read into, once given. */
     let scratch = 0;
@@ -162,23 +148,22 @@ export function createMemoryFunctions(host){
                     host.divergence?.('NtQueryVirtualMemory', `a mapped file's name past ${
                         NAME_ROOM - 1} characters is cut`);
                 }
-                const characters = host.readMemory(at, (count >>> 0) * 2);
-                const needed = UNICODE_STRING_SIZE + characters.length + 2;
+                const characters = (count >>> 0) * 2;
+                const needed = UNICODE_STRING_SIZE + characters + 2;
                 if ((returned >>> 0) !== 0)
                 {
-                    write32(returned, needed);
+                    guest.setPtr(wholeAddress(returned), needed);
                 }
                 if ((length >>> 0) < needed)
                 {
                     return STATUS_BUFFER_OVERFLOW;
                 }
-                const answer = new Uint8Array(needed);
-                const view = new DataView(answer.buffer);
-                view.setUint16(0, characters.length, true);
-                view.setUint16(2, characters.length + 2, true);
-                view.setUint32(4, (buffer + UNICODE_STRING_SIZE) >>> 0, true);
-                answer.set(characters, UNICODE_STRING_SIZE);
-                host.writeMemory(wholeAddress(buffer), answer);
+                const out = wholeAddress(buffer);
+                guest.set16(out, characters);
+                guest.set16(out + 2, characters + 2);
+                guest.set32(out + 4, out + UNICODE_STRING_SIZE);
+                guest.copy(out + UNICODE_STRING_SIZE, at, characters);
+                guest.set16(out + UNICODE_STRING_SIZE + characters, 0);
                 return STATUS.SUCCESS;
             });
     };
@@ -210,8 +195,9 @@ export function createMemoryFunctions(host){
         /** @param {number} where @returns {any} */
         const query = where=>settled(
             kernel32.VirtualQueryEx.handler([process, where, at, BASIC.SIZE]),
-            wrote=>(wrote ? { allocation: read32(at + BASIC.AllocationBase),
-                size: read32(at + BASIC.RegionSize), state: read32(at + BASIC.State) } : null));
+            wrote=>(wrote ? { allocation: guest.u32(at + BASIC.AllocationBase),
+                size: guest.u32(at + BASIC.RegionSize), state: guest.u32(at + BASIC.State) }
+                : null));
         return after(query(page), first=>{
             if (!first || first.state === MEM_FREE)
             {
@@ -267,8 +253,8 @@ export function createMemoryFunctions(host){
     const report = (baseOut, sizeOut, start, end)=>{
         const first = (start & ~(PAGE - 1)) >>> 0;
         const last = Math.ceil(end / PAGE) * PAGE;
-        write32(baseOut, first);
-        write32(sizeOut, last - first);
+        guest.setPtr(wholeAddress(baseOut), first);
+        guest.setPtr(wholeAddress(sizeOut), last - first);
     };
 
     return {
@@ -281,8 +267,8 @@ export function createMemoryFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([process, baseOut, , sizeOut, type, protect])=>{
-                const asked = read32(baseOut);
-                const size = read32(sizeOut);
+                const asked = guest.u32(baseOut);
+                const size = guest.u32(sizeOut);
                 return settled(kernel32.VirtualAllocEx.handler(
                     [process, asked, size, type, protect]), (got, error)=>{
                     if ((got >>> 0) === 0)
@@ -313,8 +299,8 @@ export function createMemoryFunctions(host){
                 {
                     return STATUS.INVALID_HANDLE;
                 }
-                const asked = read32(baseOut);
-                const size = read32(sizeOut);
+                const asked = guest.u32(baseOut);
+                const size = guest.u32(sizeOut);
                 return settled(kernel32.VirtualAlloc2.handler(
                     [process, asked, size, type, protect, list, count]), (got, error)=>{
                     if ((got >>> 0) === 0)
@@ -341,8 +327,8 @@ export function createMemoryFunctions(host){
                 {
                     return STATUS.INVALID_HANDLE;
                 }
-                const base = read32(baseOut);
-                const size = read32(sizeOut);
+                const base = guest.u32(baseOut);
+                const size = guest.u32(sizeOut);
                 /** @param {number} at @param {number} bytes @param {number} extent */
                 const free = (at, bytes, extent)=>settled(
                     kernel32.VirtualFreeEx.handler([process, at, bytes, type]),
@@ -419,8 +405,8 @@ export function createMemoryFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([process, baseOut, sizeOut, protect, old])=>{
-                const base = read32(baseOut);
-                const size = read32(sizeOut);
+                const base = guest.u32(baseOut);
+                const size = guest.u32(sizeOut);
                 return settled(kernel32.VirtualProtectEx.handler(
                     [process, base, size, protect, old]), (changed, error)=>{
                     if (!changed)
@@ -465,7 +451,7 @@ export function createMemoryFunctions(host){
                         }
                         if (wholeAddress(returned) !== 0)
                         {
-                            write32(returned, wrote >>> 0);
+                            guest.setPtr(wholeAddress(returned), wrote >>> 0);
                         }
                         return STATUS.SUCCESS;
                     });

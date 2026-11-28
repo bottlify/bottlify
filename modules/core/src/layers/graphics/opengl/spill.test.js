@@ -241,7 +241,7 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
     assert.ok(blocksBack, 'the blocks come back as they were');
 });
 
-test('a level of the cache\'s unit of room moves, one below it stays', async()=>{
+test('every level moves on its own, in its grains, one under a grain in one', async()=>{
     const fake = createFakeDevice({});
     const backend = createBackend({ scratches: testScratch,
         device: fake.device, queue: fake.queue, presentTo: ()=>{} });
@@ -259,7 +259,7 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
     gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
     gl.glGenTextures(1);
     gl.glBindTexture(GL.TEXTURE_2D, 1);
-    // A 32x32 chain: 4 KiB on top, then 1 KiB, 256 bytes and on.
+    // A 32x32 chain: 4 KiB on top, then 1 KiB, and 256, 64, 16 and 4 bytes under a grain.
     for (let level = 0, side = 32; side >= 1; level++, side >>= 1)
     {
         gl.glTexImage2D(GL.TEXTURE_2D, level, GL.RGBA, side, side, 0, GL.RGBA,
@@ -268,7 +268,7 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
     const all = [...gl.shareGroup.textures.objects.values()];
     renderer.spill(all);
     const figures = ()=>/** @type {any} */ (renderer.diagnostics()).spills;
-    for (let turns = 0; turns < 1000 && figures().store.moved + figures().store.refused < 1;
+    for (let turns = 0; turns < 1000 && figures().store.moved + figures().store.refused < 6;
         turns++)
     {
         await turn();
@@ -278,12 +278,15 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
         await turn();
     }
     const moved = { levels: figures().store.moved, bytes: figures().store.movedBytes };
-    const back = gl.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE)
-        .every((/** @type {number} */ byte)=>byte === 1);
+    const placed = runCache.under(texels.prefix);
+    const back = [0, 1, 2, 3, 4, 5].every(level=>gl.glGetTexImage(GL.TEXTURE_2D, level, GL.RGBA,
+        GL.UNSIGNED_BYTE).every((/** @type {number} */ byte)=>byte === level + 1));
     runCache.close();
     texels.close();
-    assert.deepEqual(moved, { levels: 1, bytes: 4096 }, 'the top level alone moved');
-    assert.ok(back, 'and reads back as it was');
+    assert.deepEqual(moved, { levels: 6, bytes: 4096 + 1024 + 340 }, 'every level moved');
+    assert.deepEqual({ bodies: placed.bodies, placedBytes: placed.placedBytes },
+        { bodies: 6, placedBytes: 4096 + 1024 + 4 * 512 }, 'each body in its grains');
+    assert.ok(back, 'and every level reads back as it was');
 });
 
 test('a texture the program deleted gives back what of it waited in the run\'s cache at the next '

@@ -64,8 +64,8 @@ flowchart TB
   thread's reader as a body is put), let go of with the graphics layer. A process in a worker
   of its own is served names the same way, numbered by the keeper across its link, its roots in
   the graphics worker by a channel it sends the keeper's thread (`process/run-cache.js`
-  `remoteCacheOwners`). A body under 4 KiB (the cache's unit of room) stays as it was handed
-  over. A body the cache refused room for (none left), one with no
+  `remoteCacheOwners`). Every body goes to the cache on its own and takes its length in the cache's
+  grains (512 bytes), a body under a grain one grain. A body the cache refused room for (none left), one with no
   names under its store, or one the cache cannot give back is a `loss` and reads as zeros: no
   copy is kept outside the cache. An OpenGL level's texels are the
   device's once a draw uploads them. Until then the graphics thread hands them, and the blocks of

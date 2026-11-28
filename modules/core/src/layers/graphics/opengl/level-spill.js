@@ -15,8 +15,6 @@
  * already there (a sized level's RGBA, a view's) is not the level's bytes.
  */
 
-import { KEPT_FROM } from '../internal/texel-store.js';
-
 /**
  * A kind of a level's bytes: `bytesOf` names the bytes a value holds and
  * `made` makes the value again from them; `names` the key a level's bytes
@@ -100,8 +98,8 @@ export function createLevelSpill({ store, kinds }){
         kinds: spillable,
 
         /**
-         * A level's bytes of every kind that is a plain value large enough
-         * handed to the store.
+         * A level's bytes of every kind that is a plain value handed to the
+         * store.
          *
          * @param {object} texture @param {object} image
          * @returns {number}  the bytes handed over
@@ -113,7 +111,7 @@ export function createLevelSpill({ store, kinds }){
                 const held = Object.getOwnPropertyDescriptor(image, kind.property);
                 const was = held && 'value' in held ? held.value : null;
                 const bytes = kind.bytesOf(was);
-                if (bytes === null || bytes.byteLength < KEPT_FROM)
+                if (bytes === null)
                 {
                     continue;
                 }

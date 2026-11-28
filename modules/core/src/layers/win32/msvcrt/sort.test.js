@@ -109,13 +109,13 @@ test('qsort_s sorts a hundred values and refuses what it cannot sort', async()=>
 
 test('qsort_s makes no buffer a swap: each element is read into the two it holds', async()=>{
     const { memory, table, put, read } = build();
-    const { bytes } = memory.guest;
+    const { snapshot } = memory.guest;
     let made = 0;
     let reads = 0;
-    memory.guest.bytes = (address, length, into)=>{
+    memory.guest.snapshot = (address, length, into)=>{
         reads++;
         made += into ? 0 : 1;
-        return bytes(address, length, into);
+        return snapshot(address, length, into);
     };
     const values = Array.from({ length: 100 }, (_, i)=>(i * 7919) % 1000);
     put(values);

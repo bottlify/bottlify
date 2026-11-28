@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createDebugBufferFunctions, PDI } from './debug-buffer.js';
 
 function machine(){
@@ -17,8 +18,7 @@ function machine(){
     /** @type {string[]} */
     const said = [];
     const fns = createDebugBufferFunctions({
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
         allocate: bytes=>{
             const at = next;
             next += (bytes + 15) & ~15;

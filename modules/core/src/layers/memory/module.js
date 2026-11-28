@@ -8,6 +8,9 @@ import { Access, RegionKind, createRegionMap } from './internal/regions.js';
 import { createAccessors } from './internal/accessors.js';
 import { DwordReader } from './internal/reader.js';
 import { WRITER_COLUMNS, WRITER_ROWS, createWriterAccount } from './internal/writers.js';
+import { createPort } from '../../system/port.js';
+
+/** @typedef {import('../../system/port.js').Port} Port */
 
 /**
  * memory — the guest address space: what is mapped, who may touch it, and typed
@@ -221,9 +224,20 @@ export function createMemoryModule(){
             });
 
             current = state;
-            return {
+            /** The port at each pointer width, made once. @type {Record<number, Port>} */
+            const ports = {};
+            const api = {
                 Access,
                 RegionKind,
+
+                /**
+                 * The guest memory port at a process's pointer width
+                 * (`system/port.js`): how every layer reads and writes the
+                 * guest's memory, over this layer's checked accessors.
+                 *
+                 * @param {4 | 8} [pointerSize] @returns {Port}
+                 */
+                port: (pointerSize = 4)=>(ports[pointerSize] ??= createPort(api, pointerSize)),
 
                 /** @param {any} region */
                 register: region=>{
@@ -658,6 +672,7 @@ export function createMemoryModule(){
                 scanWideString: (address, limit)=>
                     live() ? state.accessors.scanWideString(address, limit) : -1,
             };
+            return api;
         },
 
         /** @returns {import('../../system/contract.js').ModuleDiagnostics} */

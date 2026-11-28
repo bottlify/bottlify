@@ -1581,6 +1581,7 @@ export function createGraphicsModule(){
                     presenter: state.shown,
                     scratches,
                     holds,
+                    texelCache: device && !remote ? ownTexels() : null,
                 }),
 
                 // Enumeration is the one thing here that runs guest code: the

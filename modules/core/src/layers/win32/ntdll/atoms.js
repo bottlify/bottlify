@@ -44,8 +44,7 @@ const ATOM_BASIC_INFORMATION = 0;
 
 /**
  * @typedef {Object} AtomTableHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(bytes: number) => number} allocate  The process heap.
  * @property {(address: number) => boolean} free
@@ -55,12 +54,6 @@ const ATOM_BASIC_INFORMATION = 0;
  * @typedef {{ name: string, references: number, pinned: boolean }} Named
  * @typedef {Map<number, Named>} Table
  */
-
-/** @param {number} value @returns {Uint8Array} */
-const u16 = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff);
-/** @param {number} value @returns {Uint8Array} */
-const u32 = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff,
-    value >>> 24 & 0xff);
 
 /**
  * What a name argument stands for: an integer atom, a name, or the status
@@ -99,6 +92,7 @@ export function parseAtomName(given){
  * @param {AtomTableHost} host
  */
 export function createAtomTableFunctions(host){
+    const { guest } = host;
     /** @type {Map<number, Table>} */
     const tables = new Map();
     /** The system's table, the one NtAddAtom and its kin keep. */
@@ -112,7 +106,7 @@ export function createAtomTableFunctions(host){
     const putAtom = (at, atom)=>{
         if (at !== 0)
         {
-            host.writeMemory(wholeAddress(at), u16(atom));
+            guest.set16(wholeAddress(at), atom);
         }
     };
 
@@ -228,12 +222,6 @@ export function createAtomTableFunctions(host){
         return entry ? { status: STATUS.SUCCESS, ...entry } : { status: STATUS.INVALID_HANDLE };
     };
 
-    /** @param {number} at @returns {number} */
-    const readU32 = at=>{
-        const bytes = host.readMemory(wholeAddress(at), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-
     return {
         /** NTSTATUS RtlCreateAtomTable(ULONG Buckets, PRTL_ATOM_TABLE *Table) */
         RtlCreateAtomTable: {
@@ -249,9 +237,9 @@ export function createAtomTableFunctions(host){
                 {
                     return STATUS.NO_MEMORY;
                 }
-                host.writeMemory(block, u32(SIGNATURE));
+                guest.set32(block, SIGNATURE);
                 tables.set(block, new Map());
-                host.writeMemory(wholeAddress(out), u32(block));
+                guest.set32(wholeAddress(out), block);
                 return STATUS.SUCCESS;
             },
         },
@@ -390,25 +378,25 @@ export function createAtomTableFunctions(host){
                 }
                 if (refCount !== 0)
                 {
-                    host.writeMemory(wholeAddress(refCount), u32(/** @type {number} */ (found.references)));
+                    guest.set32(wholeAddress(refCount), /** @type {number} */ (found.references));
                 }
                 if (pinCount !== 0)
                 {
-                    host.writeMemory(wholeAddress(pinCount), u32(found.pinned ? 1 : 0));
+                    guest.set32(wholeAddress(pinCount), found.pinned ? 1 : 0);
                 }
                 if (name === 0 || nameLength === 0)
                 {
                     return STATUS.SUCCESS;
                 }
-                const room = readU32(nameLength);
+                const room = guest.u32(nameLength);
                 if (room < 2)
                 {
-                    host.writeMemory(wholeAddress(nameLength), u32(found.name.length * 2));
+                    guest.set32(wholeAddress(nameLength), found.name.length * 2);
                     return STATUS.BUFFER_TOO_SMALL;
                 }
                 const text = found.name.slice(0, Math.floor(room / 2) - 1);
-                host.writeMemory(wholeAddress(name), utf16z(text));
-                host.writeMemory(wholeAddress(nameLength), u32(text.length * 2));
+                guest.setBytes(wholeAddress(name), utf16z(text));
+                guest.set32(wholeAddress(nameLength), text.length * 2);
                 return STATUS.SUCCESS;
             },
         },
@@ -475,22 +463,21 @@ export function createAtomTableFunctions(host){
                 {
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
-                const head = new Uint8Array(BASIC_NAME_AT);
-                head.set(u16(/** @type {number} */ (found.references)), 0);
-                head.set(u16(found.pinned ? 1 : 0), 2);
-                head.set(u16(found.name.length * 2), 4);
-                host.writeMemory(wholeAddress(buffer), head);
+                const at = wholeAddress(buffer);
+                guest.fill(at, 0, BASIC_NAME_AT);
+                guest.set16(at, /** @type {number} */ (found.references));
+                guest.set16(at + 2, found.pinned ? 1 : 0);
+                guest.set16(at + 4, found.name.length * 2);
                 if (size <= BASIC_SIZE)
                 {
                     return STATUS.BUFFER_TOO_SMALL;
                 }
                 const text = found.name.slice(0, Math.floor((size - BASIC_NAME_AT) / 2) - 1);
-                host.writeMemory((buffer + BASIC_NAME_AT) >>> 0, utf16z(text));
-                host.writeMemory((buffer + 4) >>> 0, u16(text.length * 2));
+                guest.setBytes((buffer + BASIC_NAME_AT) >>> 0, utf16z(text));
+                guest.set16((buffer + 4) >>> 0, text.length * 2);
                 if (returned !== 0)
                 {
-                    host.writeMemory(wholeAddress(returned),
-                        u32(BASIC_NAME_AT + (text.length + 1) * 2));
+                    guest.set32(wholeAddress(returned), BASIC_NAME_AT + (text.length + 1) * 2);
                 }
                 return STATUS.SUCCESS;
             },
@@ -508,7 +495,7 @@ export function createAtomTableFunctions(host){
         {
             return { status: STATUS.INVALID_PARAMETER };
         }
-        const bytes = host.readMemory(wholeAddress(pointer), Math.min(length >>> 0,
+        const bytes = guest.view(wholeAddress(pointer), Math.min(length >>> 0,
             MAX_READ_BYTES) & ~1);
         let text = '';
         for (let at = 0; at + 1 < bytes.length; at += 2)

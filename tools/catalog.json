@@ -619,7 +619,7 @@
    "category": "checks",
    "kind": "check",
    "browser": false,
-   "question": "Does a win32 library read or write guest memory past host.guest: a local accessor or string helper of its own, a read copied again?",
+   "question": "Does a layer read or write guest memory past the memory port (memory.port, host.guest): a local accessor or string helper of its own, a read copied again?",
    "command": "node tools/checks/check-guest-access.mjs [--write] [--list]",
    "tests": [
     "tools/checks/check-guest-access.test.js"

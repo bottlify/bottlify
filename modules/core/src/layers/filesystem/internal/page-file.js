@@ -28,10 +28,7 @@
  */
 
 import { ErrorCode, fsError } from './errors.js';
-import { PIECE_SIZE, zeroes } from './memory-store.js';
-
-/** The first piece of a small file; it doubles as the file grows, up to PIECE_SIZE. */
-const SMALLEST_PIECE = 4096;
+import { PIECE_SIZE, SMALLEST_PIECE, zeroes } from './memory-store.js';
 
 /**
  * Where the pieces are kept: one space of the run's cache, its bodies only

@@ -82,7 +82,7 @@ test('a count past the buffer faults where the memory ends, nothing drawn for it
     // wrong length.
     const memory = new Uint8Array(0x1000);
     const guest = guestOver(memory);
-    const io = { writeMemory: guest.setBytes, readMemory: guest.bytes, guest };
+    const io = { writeMemory: guest.setBytes, readMemory: guest.snapshot, guest };
     const prng = createBcryptPrimitivesFunctions(io).ProcessPrng;
     const generate = createBcryptFunctions(io).BCryptGenRandom;
     for (const [name, call] of /** @type {[string, () => unknown][]} */ ([

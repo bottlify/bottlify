@@ -37,7 +37,7 @@ import { createSecurityFunctions } from './security.js';
 import { createLsaFunctions } from './lsa.js';
 import { isTextUnicode } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
-import { writeZeros } from '../common/guest.js';
+import { writeZeros } from '../../../system/port.js';
 import { utf16 } from '../common/utf16.js';
 import { foldName, utf8 } from '../../../system/text.js';
 

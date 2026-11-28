@@ -82,7 +82,7 @@ export function createLocaleFunctions(host){
             const text = guest.cstr(pointer, MAX_STRING);
             return encodeAnsi(terminated ? `${text}\0` : text);
         }
-        const bytes = guest.bytes(pointer, count | 0);
+        const bytes = guest.snapshot(pointer, count | 0);
         const end = bytes.indexOf(0);
         return end < 0 ? bytes : bytes.subarray(0, end);
     };

@@ -14,13 +14,13 @@
  *
  * A body is handed over (`put`) and is the store's from then on: readable at
  * once, in place (`with`), or taken back as the caller's own (`take`), until
- * it is dropped. Where it lies is the store's to say: as it was handed over
+ * it is dropped. Every body goes to the cache, where it takes its length in
+ * grains (Cellar's one packing rule); it lies as it was handed over only
  * while the cache has not granted its room (room is asked for without
- * waiting), and for a body smaller than the cache's unit of room - the same
- * contract, the bytes in this heap. A body whose room the cache refused, or
- * that has no cache under it, is a loss, as one it cannot give back. Each body is the
- * only copy of what it holds for this run (a level's texels as the program
- * made them, an upload's as they stood when it was recorded), which is why
+ * waiting). A body whose room the cache refused, or that has no cache under
+ * it, is a loss, as one it cannot give back. Each body is the only copy of
+ * what it holds for this run (a level's texels as the program made them, an
+ * upload's as they stood when it was recorded), which is why
  * the owner's names go to the disk when idle (`disk: 'run'`) and never away;
  * what a device can make again from guest memory at once (an upload that goes
  * to the GPU in the same call) is never kept here.
@@ -30,17 +30,6 @@
  * once a body (`divergence(detail, 'loss')`), counted, and read as zeros of
  * its length, so the level draws blank instead of the device stopping.
  */
-
-/**
- * Bytes of a body below which it stays in plain memory: the cache's unit of
- * room. A body there holds at least a unit while it is hot (4 KiB, Cellar's
- * buddy block), and its name and record cost about 0.6 KB here and 90 bytes
- * of the cache's index: a smaller body would hold more of the cache than it
- * lets go of here. A mip chain's levels are each a quarter of the one above,
- * so its one level from a unit up to four holds three quarters of the bytes
- * of its levels under four units.
- */
-export const KEPT_FROM = 4 * 1024;
 
 /**
  * What a store keeps its bodies in: an owner's names in the run's cache
@@ -67,12 +56,11 @@ export const KEPT_FROM = 4 * 1024;
 
 /**
  * @param {{ cache?: TexelCache | null,
- *     divergence?: ((detail: string, severity: 'loss') => void) | null,
- *     from?: number }} [options]
+ *     divergence?: ((detail: string, severity: 'loss') => void) | null }} [options]
  *     `cache`: the owner's names, none to refuse every body kept; `divergence`: where a
- *     loss is said; `from`: the bytes below which a body stays in plain memory
+ *     loss is said
  */
-export function createTexelStore({ cache = null, divergence = null, from = KEPT_FROM } = {}){
+export function createTexelStore({ cache = null, divergence = null } = {}){
     /** @type {Map<string, Body>} */
     const bodies = new Map();
     /** The cache's names, one a body put: a key put again while its room is asked is another. */
@@ -212,10 +200,6 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
             counts.put++;
             counts.putBytes += body.length;
             counts.plainBytes += body.length;
-            if (body.length < from)
-            {
-                return;
-            }
             // No names in the cache under the store: refused, as no room is.
             if (cache)
             {

@@ -277,9 +277,6 @@ const PROCESS_ENTRIES = ['ResumeThread', 'OpenProcess', 'FindResourceExW', 'Load
 /** Where a thread block keeps its process's block. */
 const TEB_PEB = 0x30;
 
-/** @param {Uint8Array} bytes  Four of them, little-endian. */
-const readU32 = bytes=>(bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-
 /** TEB.LastStatusValue: where the last status turned into an error is kept. */
 const LAST_STATUS = { 4: 0xbf4, 8: 0x1250 };
 /** The option bits NtOpenKeyEx knows: REG_OPTION_BACKUP_RESTORE and REG_OPTION_OPEN_LINK. */
@@ -298,10 +295,10 @@ const ERROR_INVALID_PARAMETER = 87;
  * nothing was kept for has no flags, and its value is left unwritten.
  *
  * @param {Record<string, Entry>} kernel32
- * @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @param {import('../common/guest.js').Guest} guest
  * @returns {Record<string, Entry>}
  */
-function createUserInfoFunctions(kernel32, writeMemory){
+function createUserInfoFunctions(kernel32, guest){
     const records = /** @type {any} */ (kernel32)[HEAP_USER_INFO];
     /** @param {number} heap @param {number} block @param {boolean} [make] */
     const infoOf = (heap, block, make = false)=>{
@@ -311,12 +308,6 @@ function createUserInfoFunctions(kernel32, writeMemory){
             kernel32.SetLastError?.handler([ERROR_INVALID_PARAMETER]);
         }
         return info;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        writeMemory(address, bytes);
     };
     return {
         /** BOOLEAN RtlGetUserInfoHeap(HANDLE, ULONG, PVOID, PVOID *UserValue, PULONG UserFlags) */
@@ -331,11 +322,11 @@ function createUserInfoFunctions(kernel32, writeMemory){
                 }
                 if (wholeAddress(value) !== 0 && info.value !== undefined)
                 {
-                    writeU32(wholeAddress(value), info.value);
+                    guest.set32(wholeAddress(value), info.value);
                 }
                 if (wholeAddress(flags) !== 0)
                 {
-                    writeU32(wholeAddress(flags), info.flags);
+                    guest.set32(wholeAddress(flags), info.flags);
                 }
                 return 1;
             },
@@ -387,7 +378,7 @@ function createUserInfoFunctions(kernel32, writeMemory){
  * @returns {Record<string, Entry>}
  */
 export function createNtdllFunctions(host){
-    const { kernel32, crt } = host;
+    const { kernel32, crt, guest } = host;
 
     // The process heap, reached the way a program reaches it. What this library
     // hands a caller has to be what RtlFreeHeap and HeapFree both take back, and
@@ -509,8 +500,7 @@ export function createNtdllFunctions(host){
         return classes;
     };
 
-    const time = createTimeFunctions({ readMemory: host.readMemory,
-        writeMemory: host.writeMemory, kernel32, allocate, free });
+    const time = createTimeFunctions({ guest: host.guest, kernel32, allocate, free });
 
     const table = {
         ...alias(kernel32, KERNEL32_ALIASES),
@@ -558,16 +548,14 @@ export function createNtdllFunctions(host){
         // advapi32's is ntdll's on Windows (advapi32.spec forwards it).
         ...host.advapi32?.IsTextUnicode ? { RtlIsTextUnicode: host.advapi32.IsTextUnicode } : {},
         // The SID, ACL and descriptor calls are advapi32's (`security.js`).
-        ...createSecurityFunctions({ advapi32: host.advapi32 ?? {}, readMemory: host.readMemory,
-            writeMemory: host.writeMemory, teb: host.teb }),
+        ...createSecurityFunctions({ advapi32: host.advapi32 ?? {}, guest, teb: host.teb }),
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
         // Where ntdll's own runtime answers otherwise than msvcrt (`crt.js`).
         ...createNtdllCrt({ readMemory: host.readMemory, writeMemory: host.writeMemory,
             crt }),
 
         ...createCountedStringFunctions({
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
+            guest,
             readCString: host.readCString,
             readWideString: host.readWideString,
             allocate,
@@ -575,24 +563,22 @@ export function createNtdllFunctions(host){
         }),
 
         ...createStringOperations({
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
+            guest,
             readCString: host.readCString,
             readWideString: host.readWideString,
             allocate,
         }),
 
-        ...createImageFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+        ...createImageFunctions({ guest }),
 
         ...createRandomFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
         ...createChecksumFunctions({ readMemory: host.readMemory }),
-        ...createIpStringFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
-        ...createCompressionFunctions({ readMemory: host.readMemory,
-            writeMemory: host.writeMemory }),
+        ...createIpStringFunctions({ guest }),
+        ...createCompressionFunctions({ guest }),
         ...createHandleTableFunctions({ readMemory: host.readMemory,
             writeMemory: host.writeMemory, allocate, free }),
 
-        ...createAtomTableFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
+        ...createAtomTableFunctions({ guest,
             readWideString: host.readWideString, allocate, free }),
 
         ...createBitmapFunctions({ guest: host.guest }),
@@ -600,8 +586,7 @@ export function createNtdllFunctions(host){
         ...time.table,
 
         ...(host.pool && POOL_ENTRIES.every(name=>kernel32[name])
-            ? createPoolFunctions({ kernel32, deletions: host.pool,
-                writeMemory: host.writeMemory })
+            ? createPoolFunctions({ kernel32, deletions: host.pool, guest: host.guest })
             : {}),
 
         ...(LOADER_ENTRIES.every(name=>kernel32[name])
@@ -610,31 +595,28 @@ export function createNtdllFunctions(host){
             : {}),
 
         ...(['GetEnvironmentStringsW', 'SetEnvironmentVariableW'].every(name=>kernel32[name])
-            ? createEnvironmentFunctions({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, kernel32, allocate, free })
+            ? createEnvironmentFunctions({ guest: host.guest, kernel32, allocate, free })
             : {}),
 
         ...(host.processId !== undefined && kernel32.GetProcessHeaps
             ? createDebugBufferFunctions({
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
+                guest: host.guest,
                 allocate,
                 free,
                 processId: host.processId,
                 otherProcess: id=>(host.processes?.() ?? []).some(process=>process.id === id),
                 modules: ()=>{
                     const layout = blockLayouts(host.pointerSize);
-                    const word = (/** @type {number} */ at)=>readU32(host.readMemory(at, 4));
                     const teb = host.teb() >>> 0;
-                    const peb = teb === 0 ? 0 : word(teb + layout.teb.PEB);
-                    return [...loadOrder(word, peb, layout)].map(entry=>{
+                    const peb = teb === 0 ? 0 : guest.u32(teb + layout.teb.PEB);
+                    return [...loadOrder(guest, peb, layout)].map(entry=>{
                         const name = entry + layout.entry.FULL_DLL_NAME;
-                        const units = (word(name) & 0xffff) >>> 1;
+                        const units = guest.u16(name) >>> 1;
                         return {
-                            base: word(entry + layout.entry.DLL_BASE),
-                            size: word(entry + layout.entry.SIZE_OF_IMAGE),
+                            base: guest.u32(entry + layout.entry.DLL_BASE),
+                            size: guest.u32(entry + layout.entry.SIZE_OF_IMAGE),
                             path: units === 0 ? ''
-                                : host.readWideString(word(name + 4), units * 2),
+                                : host.readWideString(guest.u32(name + 4), units * 2),
                         };
                     });
                 },
@@ -646,9 +628,9 @@ export function createNtdllFunctions(host){
                         return [];
                     }
                     kernel32.GetProcessHeaps.handler([count, list]);
-                    const bytes = host.readMemory(list, count * 4);
+                    const heaps = Array.from({ length: count }, (_, at)=>guest.u32(list + at * 4));
                     free(list);
-                    return Array.from({ length: count }, (_, at)=>readU32(bytes.subarray(at * 4)));
+                    return heaps;
                 },
                 pointerSize: host.pointerSize,
                 divergence: host.divergence,
@@ -656,8 +638,7 @@ export function createNtdllFunctions(host){
             : {}),
 
         ...createQueryFunctions({
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
+            guest,
             teb: host.teb,
             ...host.processBlock ? { processBlock: host.processBlock } : {},
             arena: host.arena,
@@ -777,18 +758,16 @@ export function createNtdllFunctions(host){
         ...(HANDLE_ENTRIES.every(name=>kernel32[name]) ? createHandleNatives({ kernel32 }) : {}),
 
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
-            ? createMemoryFunctions({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, kernel32, allocate, pointerSize: host.pointerSize,
+            ? createMemoryFunctions({ guest, kernel32, allocate, pointerSize: host.pointerSize,
                 currentThread: host.currentThread, lastErrorOf: host.lastErrorOf,
                 ...host.divergence ? { divergence: host.divergence } : {} })
             : {}),
 
         ...(/** @type {any} */ (kernel32)[HEAP_USER_INFO]
-            ? createUserInfoFunctions(kernel32, host.writeMemory) : {}),
+            ? createUserInfoFunctions(kernel32, guest) : {}),
 
         ...createDebugFunctions({
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
+            guest,
             readCString: host.readCString,
             kernel32,
             crt,
@@ -801,8 +780,7 @@ export function createNtdllFunctions(host){
 
         ...(PROCESS_ENTRIES.every(name=>kernel32[name])
             ? createProcessFunctions({
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
+                guest: host.guest,
                 kernel32,
                 teb: host.teb,
                 allocate,
@@ -875,9 +853,7 @@ export function createNtdllFunctions(host){
                     handler: ([user, out])=>{
                         const lcid = ((user & 0xff) !== 0 ? kernel32.GetUserDefaultLCID
                             : kernel32.GetSystemDefaultLCID).handler([]);
-                        host.writeMemory(wholeAddress(out), Uint8Array.of(lcid & 0xff,
-                            lcid >>> 8 & 0xff,
-                            lcid >>> 16 & 0xff, lcid >>> 24 & 0xff));
+                        guest.set32(wholeAddress(out), lcid);
                         return STATUS.SUCCESS;
                     },
                 },
@@ -915,14 +891,12 @@ export function createNtdllFunctions(host){
                     /** @param {number[]} args */
                     handler: ([attributes])=>{
                         const name = wholeAddress(attributes) === 0 ? 0
-                            : readU32(host.readMemory(wholeAddress(attributes) + 8, 4));
+                            : guest.u32(wholeAddress(attributes) + 8);
                         if (name === 0)
                         {
                             return STATUS.INVALID_PARAMETER;
                         }
-                        const length = host.readMemory(name, 2);
-                        const buffer = readU32(host.readMemory(name + 4, 4));
-                        const units = host.readMemory(buffer, length[0] | length[1] << 8);
+                        const units = guest.view(guest.u32(name + 4), guest.u16(name));
                         let path = '';
                         for (let at = 0; at + 1 < units.length; at += 2)
                         {
@@ -989,8 +963,7 @@ export function createNtdllFunctions(host){
                 const teb = host.teb();
                 if (teb !== 0)
                 {
-                    host.writeMemory(teb + lastStatusOffset, Uint8Array.of(status & 0xff,
-                        status >>> 8 & 0xff, status >>> 16 & 0xff, status >>> 24 & 0xff));
+                    guest.set32(teb + lastStatusOffset, status);
                 }
                 return toDosError(status);
             },
@@ -1001,7 +974,7 @@ export function createNtdllFunctions(host){
             argBytes: 0,
             handler: ()=>{
                 const teb = host.teb();
-                return teb === 0 ? 0 : readU32(host.readMemory(teb + lastStatusOffset, 4));
+                return teb === 0 ? 0 : guest.u32(teb + lastStatusOffset);
             },
         },
 
@@ -1069,16 +1042,12 @@ export function createNtdllFunctions(host){
                 {
                     return 0;
                 }
-                const read = (/** @type {number} */ address)=>{
-                    const bytes = host.readMemory(address, 4);
-                    return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-                };
-                if ((read(at) & 0xffff) !== IMAGE_DOS_SIGNATURE)
+                if (guest.u16(at) !== IMAGE_DOS_SIGNATURE)
                 {
                     return 0;
                 }
-                const headers = (at + read(at + 0x3c)) >>> 0;
-                return read(headers) === IMAGE_NT_SIGNATURE ? headers : 0;
+                const headers = (at + guest.u32(at + 0x3c)) >>> 0;
+                return guest.u32(headers) === IMAGE_NT_SIGNATURE ? headers : 0;
             },
         },
 
@@ -1092,8 +1061,7 @@ export function createNtdllFunctions(host){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(teb + TEB_PEB, 4);
-                return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+                return guest.u32(teb + TEB_PEB);
             },
         },
 
@@ -1245,18 +1213,17 @@ export function createNtdllFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const relation = readU32(host.readMemory(wholeAddress(input), 4));
+                const relation = guest.u32(wholeAddress(input));
                 const size = allocate(4);
                 try
                 {
-                    host.writeMemory(size, Uint8Array.of(length & 0xff, length >>> 8 & 0xff,
-                        length >>> 16 & 0xff, length >>> 24 & 0xff));
+                    guest.set32(size, length);
                     const ok = kernel32.GetLogicalProcessorInformationEx.handler(
                         [relation, buffer >>> 0, size]) !== 0;
-                    const needed = readU32(host.readMemory(size, 4));
+                    const needed = guest.u32(size);
                     if ((returnLength >>> 0) !== 0)
                     {
-                        host.writeMemory(wholeAddress(returnLength), host.readMemory(size, 4));
+                        guest.copy(wholeAddress(returnLength), size, 4);
                     }
                     if (ok)
                     {

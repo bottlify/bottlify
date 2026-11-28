@@ -107,24 +107,34 @@ own source in every win32 library as built, a helper's spec too (`check-wide-add
 while its handler runs: a high half the handler never read (`pointerArg` reads it) is a loss,
 said once a function - its bytes would be read or written 4 GiB below.
 
-A handler reads and writes guest memory through one view, `host.guest`
-([`common/guest.js`](../../modules/core/src/layers/win32/common/guest.js)), which the win32 layer
-builds once per process over the memory layer's accessors and hands to each library, and to the
-sound and input layers through its api: `u8`, `u16`, `u32`, `i32`, `u64`, `f32`, `f64` and `ptr`
-read a value where it lies, `set8` to `setPtr` and `set32s` write one, `cstr` and `wstr` read a
-string to its terminator or to a limit in bytes (cut there, a fault only where memory ends),
-`writeAnsi` and `writeWide` write one cut to its room, `guid` and `setGuid` a GUID in its
-canonical form, and `bytes` is the one read that copies, into a buffer it is given or into one it
-makes. `ptr` and `setPtr` are as wide as the process's pointers. A write whose length is the
-program's is never made on the host first: `fill` is the memory layer's own, and `setMade`
+Every layer reads and writes guest memory through one port, the memory layer's `port(pointerSize)`
+([`system/port.js`](../../modules/core/src/system/port.js)), made once per width over its checked
+accessors: `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `u64`, `i64`, `f32`, `f64` and `ptr` read a
+value where it lies, `set8` to `setPtr` and `set32s` write one (a quadword in one store, so one
+that faults on its second half writes nothing of its first), `snapshot` copies a block into a
+buffer it is given or one it makes, `view` is the block in place until anything else runs,
+`setBytes`, `fill` and `copy` (as memmove) write one. An address not there, or not for this, is
+the memory layer's `GUEST_ACCESS` fault, at the first such byte: an access across regions side by
+side that permit it is one access, as on Windows, and a write that runs on into code is told to
+the translator; an unaligned access answers as its bytes do, as x86
+does; `ptr` and `setPtr` are as wide as the process's pointers, and an address past 4 GiB is
+reached. The gate is [`memory/port.itest.js`](../../modules/core/src/layers/memory/port.itest.js):
+seeded accesses of every kind through the port and through a plain model of memory, answers,
+faults, bytes and the write path told compared. A handler has it as `host.guest`
+([`common/guest.js`](../../modules/core/src/layers/win32/common/guest.js)), with the process's
+text beside it, which the win32 layer builds once per process and hands to each library, and to
+the sound and input layers through its api: `cstr` and `wstr` read a string to its terminator or
+to a limit in bytes (cut there, a fault only where memory ends), `writeAnsi` and `writeWide` write
+one cut to its room, `guid` and `setGuid` a GUID in its canonical form. A write whose length is
+the program's is never made on the host first: `fill` is the memory layer's own, and `setMade`
 (`writeMade` for a library handed only a write, `writeZeros` for zeros) makes a pattern or random
 bytes a 64 KiB chunk at a time as it writes them, so a length the destination does not have
 faults where it ends, as Windows' loop does, rather than allocating gigabytes first
 (`tools/checks/check-guest-pointers.mjs` fails a call that grows the host's memory by more than
-64 MiB). A library makes no accessor of
+64 MiB). A layer makes no accessor of
 its own and copies no read again: `tools/checks/check-guest-access.mjs` (`npm run
-check:boundaries`) fails a new one, and lists in its baseline the ones the layer still has, which
-only shrinks. A routine that runs in the guest answers through the same view when it is asked as
+check:boundaries`) fails a new one in any layer but memory, and lists in its baseline the ones
+the layers still have, which only shrinks. A routine that runs in the guest answers through the same view when it is asked as
 a handler ([`msvcrt/guest-code.js`](../../modules/core/src/layers/win32/msvcrt/guest-code.js)
 `guestEntry`), so the C runtime's libraries are handed the view and nothing else; a structure
 they lay out in guest memory, `__pioinfo`'s entries among them, is declared once with

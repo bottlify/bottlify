@@ -43,22 +43,12 @@ const SECTION_RAW_POINTER = 20;
 
 /**
  * @typedef {Object} ImageHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  */
 
 /** @param {ImageHost} host */
 export function createImageFunctions(host){
-    /** @param {number} at */
-    const u16 = at=>{
-        const bytes = host.readMemory(at, 2);
-        return bytes[0] | bytes[1] << 8;
-    };
-    /** @param {number} at */
-    const u32 = at=>{
-        const bytes = host.readMemory(at, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
+    const { guest } = host;
 
     /**
      * The address of one data directory's contents, or 0.
@@ -66,49 +56,47 @@ export function createImageFunctions(host){
      * @param {number} base @param {boolean} mapped @param {number} entry @param {number} sizeOut
      */
     const directoryData = (base, mapped, entry, sizeOut)=>{
-        if (base === 0 || u16(base) !== DOS_MAGIC)
+        if (base === 0 || guest.u16(base) !== DOS_MAGIC)
         {
             return 0;
         }
-        const nt = base + u32(base + LFANEW);
-        if (u32(nt) !== NT_SIGNATURE)
+        const nt = base + guest.u32(base + LFANEW);
+        if (guest.u32(nt) !== NT_SIGNATURE)
         {
             return 0;
         }
         const optional = nt + OPTIONAL_AT;
-        const countAt = DIRECTORY_COUNT[u16(optional)];
-        if (countAt === undefined || entry >= u32(optional + countAt))
+        const countAt = DIRECTORY_COUNT[guest.u16(optional)];
+        if (countAt === undefined || entry >= guest.u32(optional + countAt))
         {
             return 0;
         }
         const directory = optional + countAt + 4 + entry * 8;
-        const rva = u32(directory);
+        const rva = guest.u32(directory);
         if (sizeOut !== 0)
         {
-            const bytes = new Uint8Array(4);
-            new DataView(bytes.buffer).setUint32(0, u32(directory + 4), true);
-            host.writeMemory(sizeOut, bytes);
+            guest.set32(sizeOut, guest.u32(directory + 4));
         }
         if (rva === 0)
         {
             return 0;
         }
-        if (mapped || rva < u32(optional + OPTIONAL_SIZE_OF_HEADERS))
+        if (mapped || rva < guest.u32(optional + OPTIONAL_SIZE_OF_HEADERS))
         {
             return (base + rva) >>> 0;
         }
         // A file laid out as on disk: the RVA is found through the section
         // that holds it, and the answer is where that section's bytes sit.
-        const sections = optional + u16(nt + FILE_OPTIONAL_SIZE);
-        for (let index = 0; index < u16(nt + FILE_SECTION_COUNT); index++)
+        const sections = optional + guest.u16(nt + FILE_OPTIONAL_SIZE);
+        for (let index = 0; index < guest.u16(nt + FILE_SECTION_COUNT); index++)
         {
             const section = sections + index * SECTION_SIZE;
-            const start = u32(section + SECTION_VIRTUAL_ADDRESS);
-            const span = Math.max(u32(section + SECTION_VIRTUAL_SIZE),
-                u32(section + SECTION_RAW_SIZE));
+            const start = guest.u32(section + SECTION_VIRTUAL_ADDRESS);
+            const span = Math.max(guest.u32(section + SECTION_VIRTUAL_SIZE),
+                guest.u32(section + SECTION_RAW_SIZE));
             if (rva >= start && rva < start + span)
             {
-                return (base + u32(section + SECTION_RAW_POINTER) + rva - start) >>> 0;
+                return (base + guest.u32(section + SECTION_RAW_POINTER) + rva - start) >>> 0;
             }
         }
         return 0;
@@ -122,28 +110,21 @@ export function createImageFunctions(host){
      * @param {number} type @param {number} at @param {number} delta
      */
     const relocate = (type, at, delta)=>{
-        const word = new DataView(host.readMemory(at, type === REL_DIR64 ? 8 : 4).buffer);
-        const out = new DataView(new ArrayBuffer(8));
         switch (type)
         {
             case REL_ABSOLUTE:
                 return true;
             case REL_HIGH:
-                out.setUint16(0, word.getUint16(0, true) + (delta >>> 16) & 0xffff, true);
-                host.writeMemory(at, new Uint8Array(out.buffer, 0, 2));
+                guest.set16(at, guest.u16(at) + (delta >>> 16));
                 return true;
             case REL_LOW:
-                out.setUint16(0, word.getUint16(0, true) + delta & 0xffff, true);
-                host.writeMemory(at, new Uint8Array(out.buffer, 0, 2));
+                guest.set16(at, guest.u16(at) + delta);
                 return true;
             case REL_HIGHLOW:
-                out.setUint32(0, word.getUint32(0, true) + delta >>> 0, true);
-                host.writeMemory(at, new Uint8Array(out.buffer, 0, 4));
+                guest.set32(at, guest.u32(at) + delta);
                 return true;
             case REL_DIR64:
-                out.setBigUint64(0, BigInt.asUintN(64, word.getBigUint64(0, true)
-                    + BigInt(delta | 0)), true);
-                host.writeMemory(at, new Uint8Array(out.buffer, 0, 8));
+                guest.set64(at, guest.u64(at) + BigInt(delta | 0));
                 return true;
             default:
                 return false;
@@ -165,7 +146,7 @@ export function createImageFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([page, count, entries, delta])=>{
-                const list = new DataView(host.readMemory(wholeAddress(entries),
+                const list = new DataView(guest.snapshot(wholeAddress(entries),
                     (count >>> 0) * 2).buffer);
                 for (let i = 0; i < (count >>> 0); i++)
                 {

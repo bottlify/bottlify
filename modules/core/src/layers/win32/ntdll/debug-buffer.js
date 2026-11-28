@@ -71,8 +71,7 @@ const HEAP = Object.freeze({ BASE_ADDRESS: 0x00, SIZE: 0x40 });
 
 /**
  * @typedef {Object} DebugBufferHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} allocate  Zeroed bytes of the process heap.
  * @property {(address: number) => boolean} free
  * @property {number} processId  This process's id.
@@ -88,18 +87,13 @@ const HEAP = Object.freeze({ BASE_ADDRESS: 0x00, SIZE: 0x40 });
  * @param {DebugBufferHost} host
  */
 export function createDebugBufferFunctions(host){
+    const { guest } = host;
     /**
      * The blocks each live buffer's last query allocated, to give back.
      *
      * @type {Map<number, number[]>}
      */
     const blocks = new Map();
-    /** @param {number} at @param {number} value */
-    const writeU32 = (at, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at, bytes);
-    };
     const release = (/** @type {number} */ buffer)=>{
         for (const block of blocks.get(buffer) ?? [])
         {
@@ -151,8 +145,8 @@ export function createDebugBufferFunctions(host){
                 {
                     return 0;
                 }
-                host.writeMemory(buffer, new Uint8Array(DEBUG_BUFFER.SIZE));
-                writeU32(buffer + DEBUG_BUFFER.ALLOCATED_SIZE, DEBUG_BUFFER.SIZE);
+                guest.fill(buffer, 0, DEBUG_BUFFER.SIZE);
+                guest.set32(buffer + DEBUG_BUFFER.ALLOCATED_SIZE, DEBUG_BUFFER.SIZE);
                 blocks.set(buffer, []);
                 return buffer;
             },
@@ -219,9 +213,9 @@ export function createDebugBufferFunctions(host){
                     {
                         return false;
                     }
-                    host.writeMemory(block, data);
+                    guest.setBytes(block, data);
                     /** @type {number[]} */ (blocks.get(at)).push(block);
-                    writeU32(at + field, block);
+                    guest.set32(at + field, block);
                     size += data.length;
                     return true;
                 };
@@ -243,8 +237,8 @@ export function createDebugBufferFunctions(host){
                         'heap figures, blocks and tags, back traces and locks are not kept; '
                         + 'the heaps are listed with none');
                 }
-                writeU32(at + DEBUG_BUFFER.INFO_CLASS_MASK, asked);
-                writeU32(at + DEBUG_BUFFER.SIZE_OF_INFO, size);
+                guest.set32(at + DEBUG_BUFFER.INFO_CLASS_MASK, asked);
+                guest.set32(at + DEBUG_BUFFER.SIZE_OF_INFO, size);
                 return STATUS_SUCCESS;
             },
         },

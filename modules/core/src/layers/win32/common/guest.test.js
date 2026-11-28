@@ -200,11 +200,11 @@ test('bytes are one copy, or none into a buffer given; a copy moves as memmove',
     const ram = new Uint8Array(0x100);
     ram.set([1, 2, 3, 4, 5, 6, 7, 8], 0x10);
     const guest = guestOver(ram);
-    const copy = guest.bytes(0x10, 4);
+    const copy = guest.snapshot(0x10, 4);
     ram[0x10] = 9;
     assert.deepEqual([...copy], [1, 2, 3, 4], 'a copy, not a window');
     const into = new Uint8Array(6);
-    assert.equal(guest.bytes(0x11, 3, into), into);
+    assert.equal(guest.snapshot(0x11, 3, into), into);
     assert.deepEqual([...into], [2, 3, 4, 0, 0, 0]);
     guest.copy(0x12, 0x10, 6);
     assert.deepEqual([...ram.subarray(0x10, 0x18)], [9, 2, 9, 2, 3, 4, 5, 6]);

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createStringOperations, parseInteger } from './string-ops.js';
 import { unitsFromUtf8, utf8FromUnits } from '../kernel32/utf8.js';
 import { STATUS } from './status.js';
@@ -20,8 +21,7 @@ function machine(){
     const view = new DataView(bytes.buffer);
     let next = 0x2000;
     const ops = createStringOperations({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         readCString: address=>{
             let text = '';
             for (let at = address; bytes[at] !== 0; at++)

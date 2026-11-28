@@ -622,7 +622,7 @@ export function createNdr(host){
             return;
         }
         // Widened where memory holds more than the wire (an enum16), its high bytes zero.
-        guest.setBytes(memory, guest.bytes(at, type.wire, new Uint8Array(type.memory)));
+        guest.setBytes(memory, guest.snapshot(at, type.wire, new Uint8Array(type.memory)));
     };
 
     // --- layouts ----------------------------------------------------------------
@@ -1074,7 +1074,7 @@ export function createNdr(host){
     const interfaceId = (call, format)=>{
         if (guest.u8(format + 1) === FC.CONSTANT_IID)
         {
-            return guest.bytes(format + 2, 16);
+            return guest.snapshot(format + 2, 16);
         }
         const at = conformance(call, format + 2, field(call, STUB_MESSAGE.MEMORY));
         if (at === 0)
@@ -1083,7 +1083,7 @@ export function createNdr(host){
                 `iid_is names no IID: format 0x${format.toString(16)}, correlation 0x${
                     guest.u32(format + 2).toString(16)}`);
         }
-        return guest.bytes(at, 16);
+        return guest.snapshot(at, 16);
     };
 
     // --- user-marshal types ---------------------------------------------------
@@ -1478,7 +1478,7 @@ export function createNdr(host){
                     throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA,
                         'an interface pointer whose two counts differ');
                 }
-                const objref = guest.bytes(take(call, 1, bytes), bytes);
+                const objref = guest.snapshot(take(call, 1, bytes), bytes);
                 // No IID: the one the OBJREF carries, as NdrInterfacePointerUnmarshall
                 // passes IID_NULL. An iid_is correlation is set by the generated
                 // code only for sizing and marshalling, and reads nothing here.

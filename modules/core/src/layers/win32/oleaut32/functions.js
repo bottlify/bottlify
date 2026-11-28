@@ -405,7 +405,7 @@ export function createAutomationFunctions(host){
                 return { ...none, exact: { value: guest.i64(at), scale: 4 } };
             case VT_DECIMAL:
                 // A DECIMAL fills the variant, its reserved word over the type.
-                return { ...none, exact: readDecimal(guest.bytes(byref ? at : pvar, 16)) };
+                return { ...none, exact: readDecimal(guest.snapshot(byref ? at : pvar, 16)) };
             case VT_DISPATCH:
             case VT_UNKNOWN:
             case VT_ERROR:
@@ -492,7 +492,7 @@ export function createAutomationFunctions(host){
             return '';
         }
         const units = byteLengthOf(bstr) >> 1;
-        const bytes = guest.bytes(bstr, units * 2);
+        const bytes = guest.snapshot(bstr, units * 2);
         let text = '';
         for (let index = 0; index < units; index++)
         {
@@ -521,7 +521,7 @@ export function createAutomationFunctions(host){
     const allocateFrom = (source, cch)=>{
         const data = source === 0
             ? new Uint8Array(cch * 2)
-            : guest.bytes(source, cch * 2);
+            : guest.snapshot(source, cch * 2);
         return allocateBstr(data);
     };
 
@@ -1243,7 +1243,7 @@ export function createAutomationFunctions(host){
                 return DISP_E_TYPEMISMATCH;
             }
             const data = array.data === 0 ? new Uint8Array(0)
-                : guest.bytes(array.data, array.bounds[0].elements);
+                : guest.snapshot(array.data, array.bounds[0].elements);
             const bstr = allocateBstr(data);
             if (bstr === 0)
             {
@@ -1258,7 +1258,7 @@ export function createAutomationFunctions(host){
         {
             const bstr = guest.u32(src + VARIANT_VALUE);
             const data = bstr === 0 ? new Uint8Array(0)
-                : guest.bytes(bstr, byteLengthOf(bstr));
+                : guest.snapshot(bstr, byteLengthOf(bstr));
             const psa = /** @type {number} */ (createArray(VT_UI1, 1, 0, 0,
                 { lower: 0, elements: data.length }));
             if (psa === 0)
@@ -1312,7 +1312,7 @@ export function createAutomationFunctions(host){
     };
 
     const typeLibraries = host.vtables ? createTypeLibraryObjects({
-        readMemory: guest.bytes,
+        readMemory: guest.snapshot,
         writeMemory: guest.setBytes,
         // The task allocator's heap and the BSTR heap are one heap here, so
         // a descriptor is freed by the Release that matches it either way.
@@ -1337,7 +1337,7 @@ export function createAutomationFunctions(host){
     }) : null;
 
     const stdDispatches = host.vtables && host.call ? createStdDispatchObjects({
-        readMemory: guest.bytes,
+        readMemory: guest.snapshot,
         writeMemory: guest.setBytes,
         publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
         call: (entry, args)=>(host.call
@@ -1347,7 +1347,7 @@ export function createAutomationFunctions(host){
     }) : null;
 
     const recordInfos = host.vtables && host.call ? createRecordInfoObjects({
-        readMemory: guest.bytes,
+        readMemory: guest.snapshot,
         writeMemory: guest.setBytes,
         heap: host.heap,
         publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
@@ -1365,14 +1365,14 @@ export function createAutomationFunctions(host){
             return settle(owed, thread, copyVariant(dest, src, owed));
         },
         copyBstr: bstr=>(bstr === 0 ? 0
-            : allocateBstr(guest.bytes(bstr, byteLengthOf(bstr)))),
+            : allocateBstr(guest.snapshot(bstr, byteLengthOf(bstr)))),
         freeBstr,
         allocateBstr: text=>allocateBstr(utf16(text)),
         divergence: report,
     }) : null;
 
     const errorInfos = host.vtables ? createErrorInfoObjects({
-        readMemory: guest.bytes,
+        readMemory: guest.snapshot,
         writeMemory: guest.setBytes,
         publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
         allocateBstr: text=>allocateBstr(utf16(text)),
@@ -1381,7 +1381,7 @@ export function createAutomationFunctions(host){
 
     // The standard picture (`picture.js`), over GDI and user32.
     const pictures = host.vtables && host.call ? createPictureObjects({
-        readMemory: guest.bytes,
+        readMemory: guest.snapshot,
         writeMemory: guest.setBytes,
         allocate: bytes=>host.heap.allocate(bytes),
         free: address=>host.heap.free(address),
@@ -1615,7 +1615,7 @@ export function createAutomationFunctions(host){
             // No string at all is copied as an empty one.
             const source = guest.u32(src + VARIANT_VALUE);
             const copy = allocateBstr(source === 0 ? new Uint8Array(0)
-                : guest.bytes(source, byteLengthOf(source)));
+                : guest.snapshot(source, byteLengthOf(source)));
             if (copy === 0)
             {
                 return E_OUTOFMEMORY;
@@ -1924,7 +1924,7 @@ export function createAutomationFunctions(host){
         // The copy is the copier's own: whatever storage flags the original
         // had for its own memory do not come with it, and its IID, VARTYPE
         // or record information does.
-        const header = guest.bytes(psa, descriptorBytes);
+        const header = guest.snapshot(psa, descriptorBytes);
         guest.setBytes(descriptor, header);
         guest.set16(descriptor + 2, array.features
             & ~(FADF_AUTO | FADF_STATIC | FADF_EMBEDDED | FADF_FIXEDSIZE | FADF_CREATEVECTOR));
@@ -1989,7 +1989,7 @@ export function createAutomationFunctions(host){
                 {
                     const source = guest.ptr(array.data + index * POINTER);
                     const copy = source === 0 ? 0 : allocateBstr(
-                        guest.bytes(source, byteLengthOf(source)));
+                        guest.snapshot(source, byteLengthOf(source)));
                     guest.setPtr(data + index * POINTER, copy);
                 }
             }
@@ -2228,7 +2228,7 @@ export function createAutomationFunctions(host){
             case VT_CY:
                 return { exact: { value: guest.i64(at), scale: 4 } };
             case VT_DECIMAL: {
-                const exact = readDecimal(guest.bytes(base, 16));
+                const exact = readDecimal(guest.snapshot(base, 16));
                 return exact.scale > 28 ? null : { exact };
             }
             case VT_I8:
@@ -2447,7 +2447,7 @@ export function createAutomationFunctions(host){
                 return variantValue(type,
                     { exact: { value: view.getBigInt64(0, true), scale: 4 } });
             case VT_DECIMAL: {
-                const bytes = guest.bytes(wholeAddress(args[0]), 16);
+                const bytes = guest.snapshot(wholeAddress(args[0]), 16);
                 return bytes[2] > 28 || (bytes[3] & 0x7f) !== 0 ? E_INVALIDARG
                     : variantValue(type, { exact: readDecimal(bytes) });
             }
@@ -2731,7 +2731,7 @@ export function createAutomationFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            const bytes = guest.bytes(wholeAddress(pin), 16);
+            const bytes = guest.snapshot(wholeAddress(pin), 16);
             bytes[3] = change(bytes[3]);
             guest.setBytes(wholeAddress(pout) + 2, bytes.subarray(2));
             return S_OK;
@@ -3571,7 +3571,7 @@ export function createAutomationFunctions(host){
                 }
                 const data = source === 0
                     ? new Uint8Array(bytes)
-                    : guest.bytes(source, bytes);
+                    : guest.snapshot(source, bytes);
                 return allocateBstr(data);
             },
         },
@@ -3619,11 +3619,11 @@ export function createAutomationFunctions(host){
                 const data = new Uint8Array(bytes);
                 if (wholeAddress(psz) !== 0)
                 {
-                    data.set(guest.bytes(wholeAddress(psz), bytes));
+                    data.set(guest.snapshot(wholeAddress(psz), bytes));
                 }
                 else if (old !== 0)
                 {
-                    data.set(guest.bytes(old, Math.min(oldBytes, bytes)));
+                    data.set(guest.snapshot(old, Math.min(oldBytes, bytes)));
                 }
                 if (old !== 0 && bytes <= oldBytes)
                 {
@@ -3688,11 +3688,11 @@ export function createAutomationFunctions(host){
                 const data = new Uint8Array(leftBytes + rightBytes);
                 if (leftBytes)
                 {
-                    data.set(guest.bytes(wholeAddress(left), leftBytes));
+                    data.set(guest.snapshot(wholeAddress(left), leftBytes));
                 }
                 if (rightBytes)
                 {
-                    data.set(guest.bytes(wholeAddress(right), rightBytes), leftBytes);
+                    data.set(guest.snapshot(wholeAddress(right), rightBytes), leftBytes);
                 }
                 const bstr = allocateBstr(data);
                 if (bstr === 0)
@@ -3727,8 +3727,8 @@ export function createAutomationFunctions(host){
                     return leftEmpty === rightEmpty ? VARCMP_EQ
                         : leftEmpty ? VARCMP_LT : VARCMP_GT;
                 }
-                const a = guest.bytes(wholeAddress(left), leftBytes);
-                const b = guest.bytes(wholeAddress(right), rightBytes);
+                const a = guest.snapshot(wholeAddress(left), leftBytes);
+                const b = guest.snapshot(wholeAddress(right), rightBytes);
                 if ((lcid >>> 0) !== 0)
                 {
                     /** @param {Uint8Array} bytes */
@@ -3789,7 +3789,7 @@ export function createAutomationFunctions(host){
                 view.setUint32(pad + 8, units, true);
                 if (units > 0)
                 {
-                    wire.set(guest.bytes(bstr, units * 2), pad + WIRE_BSTR_HEADER);
+                    wire.set(guest.snapshot(bstr, units * 2), pad + WIRE_BSTR_HEADER);
                 }
                 guest.setBytes(from, wire);
                 return wholeAddress(from + wire.length);
@@ -3812,7 +3812,7 @@ export function createAutomationFunctions(host){
                 const units = guest.u32(at + 8);
                 const slot = wholeAddress(pbstr);
                 freeBstr(guest.ptr(slot));
-                guest.setPtr(slot, bytes === 0xffffffff ? 0 : allocateBstr(guest.bytes(
+                guest.setPtr(slot, bytes === 0xffffffff ? 0 : allocateBstr(guest.snapshot(
                     at + WIRE_BSTR_HEADER, Math.min(bytes, units * 2))));
                 return wholeAddress(at + WIRE_BSTR_HEADER + units * 2);
             },
@@ -3987,7 +3987,7 @@ export function createAutomationFunctions(host){
                     const bytes = new Uint8Array(VARIANT_BYTES);
                     const size = (reference & VT_ARRAY) !== 0 ? 4
                         : ELEMENT_BYTES[reference & VT_TYPEMASK];
-                    bytes.set(guest.bytes(at, size),
+                    bytes.set(guest.snapshot(at, size),
                         (reference & VT_TYPEMASK) === VT_DECIMAL && size === 16 ? 0
                             : VARIANT_VALUE);
                     new DataView(bytes.buffer).setUint16(0, reference & ~VT_BYREF, true);
@@ -3999,7 +3999,7 @@ export function createAutomationFunctions(host){
                     // A variant referred to is copied, and a reference it
                     // holds followed in turn -- unless that is to yet
                     // another variant.
-                    bytes = guest.bytes(target, VARIANT_BYTES);
+                    bytes = guest.snapshot(target, VARIANT_BYTES);
                     const inner = guest.u16(target);
                     if ((inner & VT_BYREF) !== 0)
                     {
@@ -4164,7 +4164,7 @@ export function createAutomationFunctions(host){
                     case VT_INT:
                     case VT_UINT:
                         return writeVariant(out, value.type,
-                            guest.bytes(wholeAddress(pin) + VARIANT_VALUE, 8));
+                            guest.snapshot(wholeAddress(pin) + VARIANT_VALUE, 8));
                     default:
                         return DISP_E_BADVARTYPE;
                 }
@@ -4460,7 +4460,7 @@ export function createAutomationFunctions(host){
                     return E_INVALIDARG;
                 }
                 const count = Math.max(guest.i32(numprs + NUMPARSE_C_DIG), 0);
-                const digits = [...guest.bytes(wholeAddress(rgbDig), count)];
+                const digits = [...guest.snapshot(wholeAddress(rgbDig), count)];
                 const negative = (guest.u32(numprs + NUMPARSE_OUT_FLAGS) & NUMPRS_NEG) !== 0;
                 const made = numberVariant(digits, guest.i32(numprs + NUMPARSE_PWR10),
                     guest.i32(numprs + NUMPARSE_BASE_SHIFT), negative, vtBits >>> 0);
@@ -4791,7 +4791,7 @@ export function createAutomationFunctions(host){
                 {
                     const source = guest.ptr(at.address);
                     const copy = source === 0 ? 0 : allocateBstr(
-                        guest.bytes(source, byteLengthOf(source)));
+                        guest.snapshot(source, byteLengthOf(source)));
                     if (source !== 0 && copy === 0)
                     {
                         return E_OUTOFMEMORY;
@@ -4837,7 +4837,7 @@ export function createAutomationFunctions(host){
                     // NULL is the empty string, as SysStringByteLen reads it.
                     const source = wholeAddress(pv);
                     const copy = allocateBstr(source === 0 ? new Uint8Array(0)
-                        : guest.bytes(source, byteLengthOf(source)));
+                        : guest.snapshot(source, byteLengthOf(source)));
                     if (copy === 0)
                     {
                         return E_OUTOFMEMORY;

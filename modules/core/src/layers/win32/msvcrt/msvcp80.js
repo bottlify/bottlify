@@ -151,7 +151,7 @@ export function createMsvcp80Functions(crt, host){
         }
         if (kept > 0)
         {
-            guest.setBytes(block, guest.bytes(textOf(self), kept));
+            guest.setBytes(block, guest.snapshot(textOf(self), kept));
         }
         tidy(self);
         setField(self + BUFFER, block);
@@ -177,7 +177,7 @@ export function createMsvcp80Functions(crt, host){
         {
             const kept = Math.min(wanted, length);
             const heap = field(self + BUFFER);
-            const text = guest.bytes(heap, kept);
+            const text = guest.snapshot(heap, kept);
             crt['??3@YAXPAX@Z'].handler([heap]);
             setField(self + RESERVED, STRING_INLINE);
             guest.setBytes(self + BUFFER, text);
@@ -193,7 +193,7 @@ export function createMsvcp80Functions(crt, host){
      * @param {number} self @param {number} from @param {number} length
      */
     const assign = (self, from, length)=>{
-        const text = guest.bytes(from, length);
+        const text = guest.snapshot(from, length);
         setField(self + RESERVED, STRING_INLINE);
         endAt(self, 0);
         if (length > STRING_INLINE)
@@ -245,9 +245,9 @@ export function createMsvcp80Functions(crt, host){
     };
 
     /** A string's text, copied out. @param {number} self */
-    const bytesOf = self=>guest.bytes(textOf(self), field(self + SIZE));
+    const bytesOf = self=>guest.snapshot(textOf(self), field(self + SIZE));
     /** A C string's bytes, copied out. @param {number} at */
-    const bytesAt = at=>guest.bytes(at, lengthOf(at));
+    const bytesAt = at=>guest.snapshot(at, lengthOf(at));
     /** @param {Uint8Array} a @param {Uint8Array} b */
     const same = (a, b)=>a.length === b.length && a.every((byte, at)=>byte === b[at]);
 

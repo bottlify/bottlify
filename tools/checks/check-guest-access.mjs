@@ -6,13 +6,16 @@
  */
 
 /**
- * Fails on a new copy of guest memory access in the win32 layer: a local
- * dword, word, float or pointer accessor, a local string reader or writer, or
- * a read copied again (`readMemory(...).slice()`, `readBytes(...).slice()`).
- * Every handler has the one view the win32 layer hands it, `host.guest`
- * (`win32/common/guest.js`), which reads and writes in place through the
- * memory layer; the layer had grown hundreds of copies of it, each a closure
- * and a buffer per read, and a read already a copy was copied once more.
+ * Fails on a new copy of guest memory access in any layer: a local dword,
+ * word, float or pointer accessor, a local string reader or writer, or a read
+ * copied again (`readMemory(...).slice()`, `readBytes(...).slice()`). Every
+ * layer has the one port the memory layer hands out (`memory.port`,
+ * `system/port.js`), which reads and writes in place through the memory
+ * layer's checked accessors, and win32's handlers have it with the process's
+ * text as `host.guest` (`win32/common/guest.js`); the layers had grown
+ * hundreds of copies of it, each a closure and a buffer per read, and a read
+ * already a copy was copied once more. The memory layer itself is the
+ * accessors the port is made over, and is not counted.
  *
  * Guest code is not counted: a function documented `@guestCode` is compiled
  * to the guest's own instructions and reads its memory as the processor does,
@@ -37,7 +40,9 @@ import { fileURLToPath } from 'node:url';
 import { isMain } from '../lib/common.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const WIN32 = join(ROOT, 'modules/core/src/layers/win32');
+const LAYERS = join(ROOT, 'modules/core/src/layers');
+/** The layer the port is made over: its accessors are the one definition. */
+const BASE = join(LAYERS, 'memory');
 const BASELINE = new URL('./guest-access-baseline.json', import.meta.url);
 
 /** A function's name that reads or writes one value of guest memory. */
@@ -140,18 +145,18 @@ const sources = dir=>readdirSync(dir).flatMap(name=>{
     const path = join(dir, name);
     if (statSync(path).isDirectory())
     {
-        return sources(path);
+        return path === BASE ? [] : sources(path);
     }
     return /\.m?js$/.test(name) && !/\.(test|itest|fixture)\.m?js$/.test(name) ? [path] : [];
 });
 
 /**
- * The tree's occurrences, by file under win32/, files with none left out.
+ * The tree's occurrences, by file under layers/, files with none left out.
  *
  * @param {string} [root]
  * @returns {Record<string, Record<string, number>>}
  */
-export function scan(root = WIN32){
+export function scan(root = LAYERS){
     /** @type {Record<string, Record<string, number>>} */
     const files = {};
     for (const path of sources(root).sort())
@@ -211,8 +216,8 @@ if (isMain(import.meta.url))
     {
         writeFileSync(BASELINE, `${JSON.stringify({
             about: 'Local guest memory accessors, string helpers and reads copied again in'
-                + ' win32 today (check-guest-access.mjs). Only shrinks: move a file onto'
-                + ' host.guest, then --write.',
+                + ' the layers today (check-guest-access.mjs). Only shrinks: move a file onto'
+                + ' the memory port (memory.port, host.guest), then --write.',
             files: now,
         }, null, 1)}\n`);
         console.log(`guest access: baseline written, ${total(now)} occurrences`);
@@ -229,8 +234,8 @@ if (isMain(import.meta.url))
     const { added, stale } = compare(now, baseline);
     if (added.length > 0)
     {
-        console.error('guest access: guest memory read or written past host.guest'
-            + ' (win32/common/guest.js):\n  ' + added.join('\n  '));
+        console.error('guest access: guest memory read or written past the port'
+            + ' (system/port.js, memory.port, host.guest):\n  ' + added.join('\n  '));
     }
     if (stale.length > 0)
     {

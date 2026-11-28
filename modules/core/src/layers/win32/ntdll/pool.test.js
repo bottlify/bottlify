@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createPoolFunctions } from './pool.js';
 import { STATUS } from './status.js';
 
@@ -37,11 +38,9 @@ function machine({ answer = 1, error = 0 } = {}){
             return STATUS.INVALID_HANDLE;
         },
     };
-    /** @type {Uint8Array[]} */
-    const written = [];
-    const table = createPoolFunctions({ kernel32, deletions,
-        writeMemory: (_, bytes)=>written.push(bytes) });
-    return { table, asked, written };
+    const ram = new Uint8Array(0x1000);
+    const table = createPoolFunctions({ kernel32, deletions, guest: guestOver(ram) });
+    return { table, asked, ram };
 }
 
 test('a timer is kernel32\'s with the queue and its place swapped, a status answered', ()=>{
@@ -69,31 +68,30 @@ test('a refusal is the status of its last error, and a queue is written where as
         [0x100, 4, 0x401000, 0, 0, 0]), STATUS.INVALID_HANDLE);
     assert.equal(machine({ answer: 0, error: 87 }).table.RtlQueueWorkItem.handler(
         [0, 0, 0]), STATUS.INVALID_PARAMETER);
-    const { table, written } = machine();
+    const { table, ram } = machine();
     assert.equal(table.RtlCreateTimerQueue.handler([0x200]), STATUS.SUCCESS);
-    assert.deepEqual([...written[0]], [0x44, 0, 0, 0]);
+    assert.deepEqual([...ram.subarray(0x200, 0x204)], [0x44, 0, 0, 0]);
 });
 
 test('the Tp* calls are the thread pool API\'s objects, a new one written where asked', ()=>{
     /** @type {[string, any[]][]} */
     const asked = [];
-    /** @type {Uint8Array[]} */
-    const written = [];
+    const ram = new Uint8Array(0x1000);
     const objects = new Proxy({}, { get: (_, name)=>(/** @type {any[]} */ ...args)=>{
         asked.push([String(name), args]);
         return { create: args[1] === 0 ? { error: 87 } : 0x500, allocPool: 0x600,
             allocGroup: 0, simple: 8, mayRunLong: false, setTimer: true }[String(name)];
     } });
-    const table = createPoolFunctions({ kernel32: {}, writeMemory: (_, bytes)=>written.push(bytes),
+    const table = createPoolFunctions({ kernel32: {}, guest: guestOver(ram),
         deletions: { deregisterWait: ()=>0, deleteTimer: ()=>0, deleteTimerQueue: ()=>0,
             objects } });
     assert.equal(table.TpAllocWork.handler([0x100, 0x401000, 7, 0]), STATUS.SUCCESS);
     assert.deepEqual(asked.at(-1), ['create', ['work', 0x401000, 7, 0]]);
-    assert.deepEqual([...written.at(-1) ?? []], [0, 5, 0, 0]);
+    assert.deepEqual([...ram.subarray(0x100, 0x104)], [0, 5, 0, 0]);
     assert.equal(table.TpAllocTimer.handler([0x100, 0, 7, 0]), STATUS.INVALID_PARAMETER,
         'refused, as its Win32 error\'s status');
     assert.equal(table.TpAllocPool.handler([0x104, 0]), STATUS.SUCCESS);
-    assert.deepEqual([...written.at(-1) ?? []], [0, 6, 0, 0]);
+    assert.deepEqual([...ram.subarray(0x104, 0x108)], [0, 6, 0, 0]);
     assert.equal(table.TpAllocCleanupGroup.handler([0x108]), STATUS.NO_MEMORY);
     assert.equal(table.TpSimpleTryPost.handler([0x401000, 0, 0]), STATUS.NO_MEMORY);
     assert.equal(table.TpCallbackMayRunLong.handler([0x8000]), 0xc0000129,

@@ -271,4 +271,37 @@ export class DwordReader {
         }
         return this.machine.readU32(address) >>> 0;
     }
+
+    /**
+     * A byte or a word read in place, checked as a dword is; -1 where the
+     * machine lends no RAM, and the caller reads it another way.
+     *
+     * @param {number} address @param {1 | 2} width
+     */
+    readSmall(address, width){
+        let data = this.data;
+        const span = data === null ? -1 : this.spanOf(address, address + width, this.oneAt);
+        if (span >= 0)
+        {
+            this.oneAt = span;
+        }
+        else
+        {
+            this.check(address, width);
+            data = this.ram();
+        }
+        if (data === null)
+        {
+            return -1;
+        }
+        try
+        {
+            return width === 1 ? data.getUint8(address) : data.getUint16(address, true);
+        }
+        catch {
+            // Detached: asked for again by the next read.
+            this.data = null;
+            return -1;
+        }
+    }
 }

@@ -32,6 +32,7 @@ function rig(){
     const renderer = createGpuRenderer({
         backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+        texelCache: roomy.api.owner('texels'),
         divergence: detail=>divergences.push(detail),
     });
     const bytes = new Uint8Array(0x10000);

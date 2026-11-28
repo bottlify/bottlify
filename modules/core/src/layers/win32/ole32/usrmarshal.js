@@ -556,7 +556,7 @@ export function createUserMarshalFunctions(host){
                     fault(RPC_X_BAD_STUB_DATA);
                 }
                 const make = lent(host.gdi ? maker(host.gdi) : undefined, `${type}_UserUnmarshal`);
-                setHandle(slot, make ? make(guest.bytes(at + 16, length)) : 0);
+                setHandle(slot, make ? make(guest.snapshot(at + 16, length)) : 0);
                 return at + 16 + length;
             },
             free: (flags, slot)=>{
@@ -619,8 +619,8 @@ export function createUserMarshalFunctions(host){
             }
             const { at } = arm;
             const length = guest.u32(at + 8);
-            const header = guest.bytes(at + 12, BITMAP_HEADER_BYTES);
-            const bits = guest.bytes(at + 12 + BITMAP_HEADER_BYTES, length);
+            const header = guest.snapshot(at + 12, BITMAP_HEADER_BYTES);
+            const bits = guest.snapshot(at + 12 + BITMAP_HEADER_BYTES, length);
             const make = lent(host.gdi?.createBitmap, 'HBITMAP_UserUnmarshal');
             setHandle(slot, make ? make(header, bits) : 0);
             return at + 12 + BITMAP_HEADER_BYTES + length;
@@ -742,7 +742,7 @@ export function createUserMarshalFunctions(host){
                 {
                     fault(RPC_S_INVALID_BOUND);
                 }
-                const name = wideText(guest.bytes(at + 20, (units - 1) * 2));
+                const name = wideText(guest.snapshot(at + 20, (units - 1) * 2));
                 const format = host.clipboardFormats?.register(name) ?? 0;
                 if (format === 0)
                 {
@@ -803,7 +803,7 @@ export function createUserMarshalFunctions(host){
         {
             fault(RPC_X_BAD_STUB_DATA);
         }
-        const objref = guest.bytes(at + 8, length);
+        const objref = guest.snapshot(at + 8, length);
         const decoded = decodeObjref(objref);
         const marshaler = host.marshaler?.();
         if (!decoded || !marshaler)
@@ -1104,7 +1104,7 @@ export function createUserMarshalFunctions(host){
                 guest.setPtr(slot, 0);
                 return at + 12;
             }
-            const characters = guest.bytes(at + 12, units * 2);
+            const characters = guest.snapshot(at + 12, units * 2);
             /** @type {number[]} */
             const starts = [];
             for (let index = 0, from = 0; index < units && starts.length < count; index++)

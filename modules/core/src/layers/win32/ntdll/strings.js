@@ -45,8 +45,7 @@ const MAX_WIDE_BYTES = 0xfffc;
 
 /**
  * @typedef {Object} CountedStringHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(bytes: number) => number} allocate  The process heap, so that what
@@ -58,31 +57,25 @@ const MAX_WIDE_BYTES = 0xfffc;
  * Reading and writing counted strings in guest memory: the descriptor, and the
  * characters it covers in either width. Shared by every function over them.
  *
- * @param {Pick<CountedStringHost, 'readMemory' | 'writeMemory'>} host
+ * @param {Pick<CountedStringHost, 'guest'>} host
  */
-export function countedStringAccess(host){
+export function countedStringAccess({ guest }){
     /** @param {number} at */
-    const readDescriptor = at=>{
-        const bytes = host.readMemory(at, COUNTED_STRING.SIZE);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, COUNTED_STRING.SIZE);
-        return {
-            length: view.getUint16(COUNTED_STRING.LENGTH, true),
-            maximumLength: view.getUint16(COUNTED_STRING.MAXIMUM_LENGTH, true),
-            buffer: view.getUint32(COUNTED_STRING.BUFFER, true),
-        };
-    };
+    const readDescriptor = at=>({
+        length: guest.u16(at + COUNTED_STRING.LENGTH),
+        maximumLength: guest.u16(at + COUNTED_STRING.MAXIMUM_LENGTH),
+        buffer: guest.u32(at + COUNTED_STRING.BUFFER),
+    });
 
     /**
      * @param {number} at
      * @param {{ length: number, maximumLength: number, buffer: number }} string
      */
     const writeDescriptor = (at, string)=>{
-        const bytes = new Uint8Array(COUNTED_STRING.SIZE);
-        const view = new DataView(bytes.buffer);
-        view.setUint16(COUNTED_STRING.LENGTH, string.length, true);
-        view.setUint16(COUNTED_STRING.MAXIMUM_LENGTH, string.maximumLength, true);
-        view.setUint32(COUNTED_STRING.BUFFER, string.buffer, true);
-        host.writeMemory(at, bytes);
+        guest.fill(at, 0, COUNTED_STRING.SIZE);
+        guest.set16(at + COUNTED_STRING.LENGTH, string.length);
+        guest.set16(at + COUNTED_STRING.MAXIMUM_LENGTH, string.maximumLength);
+        guest.set32(at + COUNTED_STRING.BUFFER, string.buffer);
     };
 
     /**
@@ -98,7 +91,7 @@ export function countedStringAccess(host){
         {
             return '';
         }
-        return decodeAnsi(host.readMemory(buffer, length));
+        return decodeAnsi(guest.view(buffer, length));
     };
 
     /** @param {number} buffer @param {number} length  In bytes, as the field is. */
@@ -108,12 +101,11 @@ export function countedStringAccess(host){
         {
             return '';
         }
-        const raw = host.readMemory(buffer, bytes);
-        const view = new DataView(raw.buffer, raw.byteOffset, bytes);
+        const raw = guest.view(buffer, bytes);
         let text = '';
         for (let at = 0; at + 1 < bytes; at += 2)
         {
-            text += String.fromCharCode(view.getUint16(at, true));
+            text += String.fromCharCode(raw[at] | raw[at + 1] << 8);
         }
         return text;
     };
@@ -131,10 +123,11 @@ export function countedStringAccess(host){
  */
 export function createCountedStringFunctions(host){
     const { readDescriptor, writeDescriptor, wideAt } = countedStringAccess(host);
+    const { guest } = host;
 
     /** @param {number} at @param {string} text  The terminator is written too. */
     const writeWide = (at, text)=>{
-        host.writeMemory(at, utf16z(text));
+        guest.setBytes(at, utf16z(text));
     };
 
     /**
@@ -199,7 +192,7 @@ export function createCountedStringFunctions(host){
         handler: ([destination, source, allocateDestination])=>{
             const from = readDescriptor(wholeAddress(source));
             const text = from.buffer === 0 || from.length === 0 ? ''
-                : decode(host.readMemory(from.buffer, from.length));
+                : decode(guest.snapshot(from.buffer, from.length));
             const total = text.length * 2 + 2;
             if (total > MAX_MAXIMUM)
             {
@@ -283,7 +276,7 @@ export function createCountedStringFunctions(host){
                 status = STATUS.BUFFER_OVERFLOW;
             }
 
-            host.writeMemory(buffer, encode(counted ? kept : `${kept}\0`));
+            guest.setBytes(buffer, encode(counted ? kept : `${kept}\0`));
             writeDescriptor(wholeAddress(destination), { length: kept.length, maximumLength,
                 buffer });
             return status;

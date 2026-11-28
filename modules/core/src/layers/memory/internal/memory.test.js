@@ -171,7 +171,8 @@ test('protect tightens a region after it has been filled in', ()=>{
     assert.throws(()=>regions.protect('nope', Access.READ), /No region named/);
 });
 
-test('a span may not run past its region, even into an adjacent one', ()=>{
+test('a span runs on into a region beside it that permits it too, as on Windows, and is refused'
+    + ' at its first byte not there or not for this', ()=>{
     const regions = createRegionMap();
     regions.register({
         name: 'first', base: 0x1000, size: 0x100,
@@ -181,10 +182,21 @@ test('a span may not run past its region, even into an adjacent one', ()=>{
         name: 'second', base: 0x1100, size: 0x100,
         kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
     });
+    regions.register({
+        name: 'third', base: 0x1200, size: 0x100,
+        kind: RegionKind.IMAGE, access: Access.READ,
+    });
 
-    regions.assert(0x10fc, 4, 'read');
-    assert.throws(()=>regions.assert(0x10fe, 4, 'read'), /runs past the end of region "first"/,
-        'adjacency is a coincidence of layout, not permission to span both');
+    assert.equal(regions.assert(0x10fe, 4, 'read').name, 'first', 'answered by where it starts');
+    regions.assert(0x10fe, 4, 'write');
+    regions.assert(0x11fe, 4, 'read');
+    assert.throws(()=>regions.assert(0x11fe, 4, 'write'), (/** @type {any} */ e)=>
+        /does not permit write/.test(e.message) && e.address === 0x1200);
+    assert.throws(()=>regions.assert(0x12fe, 4, 'read'), (/** @type {any} */ e)=>
+        /Unmapped read at 0x1300/.test(e.message) && e.address === 0x1300);
+    assert.equal(regions.extent(0x1010, 'read'), 0x1300);
+    assert.equal(regions.extent(0x1010, 'write'), 0x1200);
+    assert.equal(regions.executable(0x10f0, 0x20), false);
 });
 
 test('typed accessors round-trip little-endian values', ()=>{
@@ -233,7 +245,7 @@ test('accessors refuse what the region map refuses', ()=>{
 
     assert.throws(()=>accessors.writeU32(0x1000, 1), /does not permit write/);
     assert.throws(()=>accessors.readU32(0x9000), /Unmapped read/);
-    assert.throws(()=>accessors.readU32(0x2ffe), /runs past the end/);
+    assert.throws(()=>accessors.readU32(0x2ffe), /Unmapped read at 0x3000/);
 
     // Nothing was written by the rejected calls.
     assert.deepEqual([...raw.bytes.slice(0x1000, 0x1004)], [0, 0, 0, 0]);
@@ -448,7 +460,8 @@ test('a dword read remembers its region and forgets it when the map changes', ()
     view.setUint32(0x2ffc, 2, true);
     assert.equal(accessors.readU32(0x2000), 1);
     assert.equal(accessors.readU32(0x2ffc), 2, 'the last dword of the remembered region');
-    assert.throws(()=>accessors.readU32(0x2ffe), /runs past/, 'straddling its end is refused');
+    assert.throws(()=>accessors.readU32(0x2ffe), /Unmapped read at 0x3000/,
+        'straddling its end is refused');
     assert.throws(()=>accessors.readU32(0x3000), /Unmapped/);
 
     regions.register({
@@ -470,7 +483,7 @@ test('a read of bytes remembers its region the way a dword read does', ()=>{
     raw.bytes.set([1, 2, 3, 4], 0x2000);
     assert.deepEqual([...accessors.readBytes(0x2000, 4)], [1, 2, 3, 4]);
     assert.deepEqual([...accessors.readBytes(0x2ffc, 4)], [0, 0, 0, 0], 'to the end of the region');
-    assert.throws(()=>accessors.readBytes(0x2ffe, 4), /runs past/, 'not past it');
+    assert.throws(()=>accessors.readBytes(0x2ffe, 4), /Unmapped read at 0x3000/, 'not past it');
     assert.throws(()=>accessors.readBytes(0x3000, 4), /Unmapped/);
     regions.register({
         name: 'more', base: 0x3000, size: 0x1000,
@@ -713,7 +726,7 @@ test('a fill is refused where the region map refuses a write', ()=>{
     const accessors = createAccessors({ raw, regions: mapWithPages() });
 
     assert.throws(()=>accessors.fillBytes(0x3000, 1, 4), /Unmapped write/);
-    assert.throws(()=>accessors.fillBytes(0x7ff8, 1, 16), /runs past the end/);
+    assert.throws(()=>accessors.fillBytes(0x8ff8, 1, 16), /Unmapped write at 0x9000/);
     assert.deepEqual(raw.took, [], 'and nothing was written by either');
 });
 

@@ -238,7 +238,7 @@ export function createMsvcp60Functions(crt, host){
             : guest.set16(at, value & 0xffff));
         /** The elements at a place, as a copy. @param {number} at @param {number} count */
         const read = (at, count)=>(count === 0 ? new Uint8Array(0)
-            : guest.bytes(at, count * unit));
+            : guest.snapshot(at, count * unit));
         /**
          * The elements a program's pointer and count name, read only once the
          * member has judged its positions and lengths (`take`), as the

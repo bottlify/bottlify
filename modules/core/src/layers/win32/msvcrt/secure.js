@@ -110,7 +110,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
             writeUnits(destination, unit, terminated ? [...units, 0] : units);
             return terminated;
         }
-        const window = guest.bytes(wholeAddress(source), gap + most * unit);
+        const window = guest.snapshot(wholeAddress(source), gap + most * unit);
         for (let index = 0; index < most; index++)
         {
             const from = index * unit;
@@ -479,7 +479,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
                     return fail(wholeAddress(source) === 0 ? EINVAL : ERANGE);
                 }
                 guest.setMade(wholeAddress(destination), length, (chunk, offset)=>
-                    void guest.bytes(wholeAddress(source) + offset, chunk.length, chunk));
+                    void guest.snapshot(wholeAddress(source) + offset, chunk.length, chunk));
                 return 0;
             },
         }),

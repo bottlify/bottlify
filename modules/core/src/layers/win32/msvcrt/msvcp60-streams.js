@@ -1280,11 +1280,11 @@ export function createStreams(context){
             if (!(state & CONSTANT) && b.pptr(x) !== 0)
             {
                 const end = Math.max(b.pptr(x), u32(x + STRBUF.SEEKHIGH));
-                return guest.bytes(b.pbase(x), end - b.pbase(x));
+                return guest.snapshot(b.pbase(x), end - b.pbase(x));
             }
             if (!(state & NOREAD) && b.gptr(x) !== 0)
             {
-                return guest.bytes(b.eback(x), b.egptr(x) - b.eback(x));
+                return guest.snapshot(b.eback(x), b.egptr(x) - b.eback(x));
             }
             return new Uint8Array(0);
         };
@@ -1311,7 +1311,7 @@ export function createStreams(context){
                 const at = allocate(grown * unit);
                 if (old !== 0)
                 {
-                    guest.setBytes(at, guest.bytes(first, old * unit));
+                    guest.setBytes(at, guest.snapshot(first, old * unit));
                 }
                 const moved = (/** @type {number} */ p)=>at + (p - first);
                 if (old === 0)
@@ -1465,7 +1465,7 @@ export function createStreams(context){
             [`?str@${STRBC}QAEXABV${STRING}2@@Z`]: thiscall(8, ([x, text])=>setStr(x, text)),
             [`?_Init@${STRBC}IAEXPB${E}IH@Z`]: thiscall(16, ([x, at, count, state])=>{
                 initString(x, (count >>> 0) === 0 ? new Uint8Array(0)
-                    : guest.bytes(at, (count >>> 0) * unit), state);
+                    : guest.snapshot(at, (count >>> 0) * unit), state);
                 return 0;
             }),
             [`?_Tidy@${STRBC}IAEXXZ`]: thiscall(4, ([x])=>(tidyString(x), 0)),

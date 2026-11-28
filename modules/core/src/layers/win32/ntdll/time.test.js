@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTimeFunctions } from './time.js';
 import { STATUS } from './status.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const TIME = 0x100;
 const FIELDS = 0x120;
@@ -39,8 +40,7 @@ function machine({ bias = 0 } = {}){
         GetTickCount: { handler: ()=>60_000 },
     };
     const { table, systemClasses } = createTimeFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         kernel32,
         allocate: size=>{
             const at = next;

@@ -80,13 +80,12 @@ const AS_STATUS = {
 
 /**
  * @param {{ advapi32: Record<string, Entry>,
- *     readMemory: (address: number, length: number) => Uint8Array,
- *     writeMemory: (address: number, bytes: Uint8Array) => void,
+ *     guest: import('../common/guest.js').Guest,
  *     teb: () => number }} host
  * @returns {Record<string, Entry>}
  */
 export function createSecurityFunctions(host){
-    const { advapi32 } = host;
+    const { advapi32, guest } = host;
     /** @type {Record<string, Entry>} */
     const table = {};
     for (const [rtl, name] of Object.entries(SAME))
@@ -105,20 +104,19 @@ export function createSecurityFunctions(host){
      */
     const status = (entry, args)=>{
         const slot = (host.teb() + LAST_ERROR) >>> 0;
-        const kept = host.readMemory(slot, 4);
+        const kept = guest.u32(slot);
         try
         {
             if (entry.handler(args) !== 0)
             {
                 return STATUS_SUCCESS;
             }
-            const bytes = host.readMemory(slot, 4);
-            const error = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+            const error = guest.u32(slot);
             return STATUS_OF_ERROR.get(error) ?? STATUS_UNSUCCESSFUL;
         }
         finally
         {
-            host.writeMemory(slot, kept);
+            guest.set32(slot, kept);
         }
     };
     for (const [rtl, name] of Object.entries(AS_STATUS))
@@ -133,14 +131,6 @@ export function createSecurityFunctions(host){
             };
         }
     }
-    /** @param {number} at */
-    const dword = at=>new DataView(host.readMemory(wholeAddress(at), 4).buffer)
-        .getUint32(0, true);
-    /** @param {number} at */
-    const word = at=>dword(at) & 0xffff;
-    /** @param {number} at @param {number} value */
-    const putDword = (at, value)=>host.writeMemory(wholeAddress(at), Uint8Array.of(value & 0xff,
-        value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24));
 
     /**
      * NTSTATUS RtlGetOwnerSecurityDescriptor(PSECURITY_DESCRIPTOR, PSID *Owner,
@@ -159,17 +149,17 @@ export function createSecurityFunctions(host){
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            if ((dword(descriptor) & 0xff) !== SECURITY_DESCRIPTOR_REVISION)
+            if ((guest.u32(descriptor) & 0xff) !== SECURITY_DESCRIPTOR_REVISION)
             {
                 return STATUS_UNKNOWN_REVISION;
             }
-            const control = word(descriptor + 2);
-            const value = dword(descriptor + slot);
+            const control = guest.u16(descriptor + 2);
+            const value = guest.u32(descriptor + slot);
             const sid = (control & SE_SELF_RELATIVE) === 0 || value === 0 ? value
                 : (descriptor + value) >>> 0;
-            putDword(out, sid);
-            host.writeMemory(wholeAddress(defaulted), Uint8Array.of(sid !== 0
-                && (control & defaultedBit) !== 0 ? 1 : 0));
+            guest.set32(out, sid);
+            guest.set8(wholeAddress(defaulted),
+                sid !== 0 && (control & defaultedBit) !== 0 ? 1 : 0);
             return STATUS_SUCCESS;
         },
     });
@@ -187,14 +177,14 @@ export function createSecurityFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([acl, out])=>{
-            putDword(out, 0);
-            const revision = dword(acl) & 0xff;
+            guest.set32(out, 0);
+            const revision = guest.u32(acl) & 0xff;
             if (revision < MIN_ACL_REVISION || revision > MAX_ACL_REVISION)
             {
                 return 0;
             }
-            const end = wholeAddress(acl) + word(acl + 2);
-            const count = word(acl + 4);
+            const end = wholeAddress(acl) + guest.u16(acl + 2);
+            const count = guest.u16(acl + 4);
             let at = wholeAddress(acl) + ACL_HEADER;
             for (let index = 0; index < count; index++)
             {
@@ -202,11 +192,11 @@ export function createSecurityFunctions(host){
                 {
                     return 0;
                 }
-                at += word(at + 2);
+                at += guest.u16(at + 2);
             }
             if (at < end)
             {
-                putDword(out, at);
+                guest.set32(out, at);
             }
             return 1;
         },

@@ -293,16 +293,13 @@ function refused(format){
 /**
  * The Rtl compression calls over LZNT1.
  *
- * @param {{ readMemory: (address: number, length: number) => Uint8Array,
- *     writeMemory: (address: number, bytes: Uint8Array) => void }} host
+ * @param {{ guest: import('../common/guest.js').Guest }} host
  */
 export function createCompressionFunctions(host){
-    /** @param {number} at @param {number} value */
-    const putDword = (at, value)=>host.writeMemory(at, Uint8Array.of(value & 0xff,
-        value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24));
+    const { guest } = host;
     /** @param {number} address @param {number} length */
     const read = (address, length)=>((length >>> 0) === 0 ? new Uint8Array(0)
-        : host.readMemory(wholeAddress(address), length >>> 0));
+        : guest.snapshot(wholeAddress(address), length >>> 0));
 
     /**
      * Decompresses into the caller's buffer: RtlDecompressBuffer's body, and
@@ -325,9 +322,9 @@ export function createCompressionFunctions(host){
         const { bytes } = result;
         if (bytes.length > 0)
         {
-            host.writeMemory(wholeAddress(out), bytes);
+            guest.setBytes(wholeAddress(out), bytes);
         }
-        putDword(final >>> 0, bytes.length);
+        guest.set32(final >>> 0, bytes.length);
         return STATUS_SUCCESS;
     };
 
@@ -345,8 +342,8 @@ export function createCompressionFunctions(host){
                 {
                     return refusal;
                 }
-                putDword(wholeAddress(buffer), WORKSPACE);
-                putDword(wholeAddress(fragment), FRAGMENT_WORKSPACE);
+                guest.set32(wholeAddress(buffer), WORKSPACE);
+                guest.set32(wholeAddress(fragment), FRAGMENT_WORKSPACE);
                 return STATUS_SUCCESS;
             },
         },
@@ -375,9 +372,9 @@ export function createCompressionFunctions(host){
                 }
                 if (packed.length > 0)
                 {
-                    host.writeMemory(wholeAddress(out), packed);
+                    guest.setBytes(wholeAddress(out), packed);
                 }
-                putDword(wholeAddress(final), packed.length);
+                guest.set32(wholeAddress(final), packed.length);
                 return STATUS_SUCCESS;
             },
         },

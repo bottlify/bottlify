@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createAtomTableFunctions, parseAtomName } from './atoms.js';
 import { STATUS } from './status.js';
 
@@ -36,8 +37,7 @@ function machine(){
         return text;
     };
     const functions = createAtomTableFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         readWideString,
         allocate: size=>{
             const at = next;
