@@ -2781,7 +2781,7 @@ export function createGdiFunctions(host){
                     return STATUS_INVALID_PARAMETER;
                 }
                 const [memory, format, width, height, pitch, device, colors] =
-                    Array.from({ length: 7 }, (_, index)=>guest.u32((desc >>> 0) + index * 4));
+                    [0, 4, 8, 12, 16, 20, 24].map(at=>guest.u32(wholeAddress(desc) + at));
                 const layout = KMT_FORMATS.get(format);
                 // The device DC the memory is to be compatible with is required.
                 if (!layout || !dcOf(device) || memory === 0 || width === 0 || height === 0
@@ -2792,7 +2792,8 @@ export function createGdiFunctions(host){
                 }
                 const palette = layout.bitCount <= 8
                     ? Array.from({ length: 1 << layout.bitCount },
-                        (_, index)=>paletteEntryToPixel(guest.u32((colors >>> 0) + index * 4)))
+                        (_, index)=>paletteEntryToPixel(
+                            guest.u32(wholeAddress(colors) + index * 4)))
                     : undefined;
                 const bitmap = objects.create('bitmap', {
                     width, height, planes: 1, bitCount: layout.bitCount, topDown: true,
@@ -2840,7 +2841,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                if (wholeAddress(desc) === 0 || guest.u32(desc >>> 0) === 0)
+                if (wholeAddress(desc) === 0 || guest.u32(wholeAddress(desc)) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -2860,7 +2861,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                if (wholeAddress(desc) === 0 || guest.u32(desc >>> 0) !== KMT_ADAPTER)
+                if (wholeAddress(desc) === 0 || guest.u32(wholeAddress(desc)) !== KMT_ADAPTER)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -2884,7 +2885,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                const dc = wholeAddress(desc) === 0 ? null : dcOf(guest.u32(desc >>> 0));
+                const dc = wholeAddress(desc) === 0 ? null : dcOf(guest.u32(wholeAddress(desc)));
                 if (!dc || dc.kind === 'memory')
                 {
                     return STATUS_INVALID_PARAMETER;
@@ -2906,7 +2907,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                if (wholeAddress(desc) === 0 || guest.u32(desc >>> 0) !== KMT_ADAPTER)
+                if (wholeAddress(desc) === 0 || guest.u32(wholeAddress(desc)) !== KMT_ADAPTER)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -2924,8 +2925,8 @@ export function createGdiFunctions(host){
         D3DKMTCloseAdapter: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([desc])=>(wholeAddress(desc) !== 0 && guest.u32(desc >>> 0) === KMT_ADAPTER
-                ? 0 : STATUS_INVALID_PARAMETER),
+            handler: ([desc])=>(wholeAddress(desc) !== 0
+                && guest.u32(wholeAddress(desc)) === KMT_ADAPTER ? 0 : STATUS_INVALID_PARAMETER),
         },
 
         /** NTSTATUS D3DKMTDestroyDCFromMemory(const D3DKMT_DESTROYDCFROMMEMORY *desc) */
@@ -2937,7 +2938,7 @@ export function createGdiFunctions(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                const [hdc, bitmap] = [guest.u32(desc >>> 0), guest.u32((desc >>> 0) + 4)];
+                const [hdc, bitmap] = [0, 4].map(at=>guest.u32(wholeAddress(desc) + at));
                 const dc = dcOf(hdc);
                 if (dc)
                 {
