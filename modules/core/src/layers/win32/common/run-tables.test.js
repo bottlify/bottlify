@@ -29,7 +29,7 @@ const counted = ()=>{
 const secondProcess = cache=>createReader({ shared: cache.keeper.shared,
     segments: cache.keeper.segmentBuffers(),
     keeper: {
-        reserve: (name, length, options)=>cache.keeper.reserve(name, length, options),
+        reserve: cache.keeper.reserve,
         raise: (name, options)=>cache.keeper.raise(name, options),
         raiseLater: ()=>{},
         drop: name=>cache.keeper.drop(name),

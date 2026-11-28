@@ -11,8 +11,10 @@ import { createMemoryStore } from './memory-store.fixture.js';
 import { createOverlay } from './tree.js';
 import { createUnionSource } from './union-source.js';
 import { SESSION_LAYER, createSessionSource } from './session-source.js';
-import { createReader, openKeeper } from '@bottlify/cellar';
+import { createReader, openKeeper, reserveFlags } from '@bottlify/cellar';
 import { freshSpace } from '../../cache/testing.fixture.js';
+
+const NEVER = reserveFlags({ disk: 'never' });
 
 /**
  * A session's files as a store hands them out lazily, every read counted.
@@ -123,7 +125,7 @@ async function sessionWithRoom(t, files, room){
     t.after(()=>keeper.close());
     const reader = told = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
-            reserve: (name, length, options)=>keeper.reserve(name, length, options ?? {}),
+            reserve: keeper.reserve,
             raise: (name, options)=>keeper.raise(name, options),
             raiseLater: name=>{
                 keeper.raise(name);
@@ -139,7 +141,7 @@ async function sessionWithRoom(t, files, room){
             keeper.sweep();
             return reader.with(`session/${key}`, read, options);
         },
-        put: (key, bytes)=>reader.put(`session/${key}`, bytes, { disk: 'never' }),
+        put: (key, bytes)=>reader.put(`session/${key}`, bytes, NEVER),
     } });
 }
 

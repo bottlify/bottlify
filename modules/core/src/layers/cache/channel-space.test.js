@@ -7,8 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { answerKeeper, createChannel, grainsOf, openClient, openKeeper, serveKeeperChannel }
-    from '@bottlify/cellar';
+import {
+    answerKeeper, createChannel, grainsOf, openClient, openKeeper, reserveFlags, serveKeeperChannel,
+} from '@bottlify/cellar';
 import { createCacheModule } from './module.js';
 import { openRunCache } from '../../process/run-cache.js';
 
@@ -21,9 +22,9 @@ test('a worker\'s bodies reach the keeper as the only copy for this run, to its 
     const asked = [];
     const channel = createChannel();
     const served = serveKeeperChannel(channel, answerKeeper({ keeper: {
-        reserve: (name, length, options)=>{
-            asked.push(options);
-            return keeper.reserve(name, length, options);
+        reserve: (name, length, flags, known, place)=>{
+            asked.push(flags);
+            return keeper.reserve(name, length, flags, known, place);
         },
         raise: (name, options)=>keeper.raise(name, options),
         drop: name=>keeper.drop(name),
@@ -47,10 +48,9 @@ test('a worker\'s bodies reach the keeper as the only copy for this run, to its 
         });
         assert.equal(/** @type {any} */ (said).granted, true);
         assert.ok(asked.length >= 2, 'room asked ahead, and for the body put outright');
-        for (const options of asked)
+        for (const flags of asked)
         {
-            assert.equal(options.onlyCopy, true);
-            assert.equal(options.disk, 'run');
+            assert.equal(flags, reserveFlags({ onlyCopy: true, disk: 'run' }));
         }
     }
     finally

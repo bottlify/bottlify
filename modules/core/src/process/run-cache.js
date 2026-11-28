@@ -131,14 +131,14 @@ export async function openRunCache(opened = {}){
      * bodies the rounding to blocks costs.
      */
     const spaces = new Set();
-    /** @param {string} name @param {number} length @param {any} [options] */
-    const reserve = (name, length, options)=>{
+    /** @type {import('@bottlify/cellar').KeeperCalls['reserve']} */
+    const reserve = (name, length, flags, known, place)=>{
         const slash = name.indexOf('/');
         if (slash > 0)
         {
             spaces.add(name.slice(0, slash));
         }
-        return keeper.reserve(name, length, options ?? {});
+        return keeper.reserve(name, length, flags, known, place);
     };
     const reader = createReader({
         shared: keeper.shared, segments: keeper.segmentBuffers(),

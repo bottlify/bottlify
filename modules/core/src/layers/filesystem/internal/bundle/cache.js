@@ -218,7 +218,7 @@ export async function createBlockCache(options){
     await diskReady();
     const opened = keeper;
     reader = createReader({ shared: opened.shared, segments: opened.segmentBuffers(), keeper: {
-        reserve: (body, length, given)=>opened.reserve(body, length, given),
+        reserve: opened.reserve,
         raise: (body, given)=>opened.raise(body, given),
         raiseLater: ()=>{},
         drop: body=>{

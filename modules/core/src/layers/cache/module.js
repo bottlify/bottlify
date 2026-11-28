@@ -20,7 +20,8 @@
  * (`testing.fixture.js`).
  */
 
-import { ChannelClosed, createReader, openClient, openKeeperClient } from '@bottlify/cellar';
+import { ChannelClosed, createReader, openClient, openKeeperClient, reserveFlags }
+    from '@bottlify/cellar';
 import { createScratches } from './scratch.js';
 
 /** @typedef {import('./scratch.js').Scratch} Scratch */
@@ -65,7 +66,6 @@ import { createScratches } from './scratch.js';
  */
 
 /** @typedef {import('@bottlify/cellar').Reader} Reader */
-/** @typedef {import('@bottlify/cellar').Place} Place */
 
 /**
  * A channel one owner on a worker calls the run's keeper through, and the
@@ -74,6 +74,12 @@ import { createScratches } from './scratch.js';
  *
  * @typedef {(name: string) => { channel: SharedArrayBuffer, prefix: string } | null} Serve
  */
+
+/**
+ * What an owner's bodies ask for (`channelSpace`): texels a GPU was given,
+ * which nothing can make again while the run lasts and the next run cannot use.
+ */
+const OWNED = reserveFlags({ onlyCopy: true, disk: 'run' });
 
 /** Whole names a space keeps made, at most: past it it makes them again. */
 const NAMES_KEPT = 1 << 16;
@@ -100,6 +106,8 @@ export function cacheSpace(reader, name, { onlyCopy = false, disk = 'never', idl
         throw new Error(`cache: the space ${name} has no reader - a process always reads the`
             + ' run\'s cache');
     }
+    /** What every put of the space asks for, as the word Cellar reads. */
+    const flags = reserveFlags({ onlyCopy, disk, idle });
     /**
      * Each key's whole name, made once: a hit is then a lookup by the same
      * string, whose hash the engine keeps (a key is a caller's own string
@@ -125,7 +133,7 @@ export function cacheSpace(reader, name, { onlyCopy = false, disk = 'never', idl
     return {
         look: key=>reader.look(named(key)),
         with: (key, read, options)=>reader.with(named(key), read, options),
-        put: (key, bytes)=>reader.put(named(key), bytes, { onlyCopy, disk, idle }),
+        put: (key, bytes)=>reader.put(named(key), bytes, flags),
         drop: key=>reader.drop(named(key)),
         hold: (key, length)=>{
             const whole = `${name}/${key}`;
@@ -149,7 +157,7 @@ export function joinedSpace(joined, name){
     const reader = createReader({
         shared: joined.shared, segments: joined.segments,
         keeper: {
-            reserve: ()=>null,
+            reserve: ()=>false,
             raise: ()=>false,
             raiseLater: ()=>{},
             drop: ()=>{},
@@ -251,7 +259,12 @@ export function channelSpace(joined, { channel, prefix }){
     const client = openKeeperClient(carrier);
     /** The segments this side's reader has views of: room is asked for below them. */
     let known = joined.segments.length;
-    /** Room the keeper granted, by whole name, for the next reserve of it. @type {Map<string, Place>} */
+    /**
+     * Room the keeper granted, by whole name, for the next reserve of it: the
+     * place's words (Cellar's `PLACE_WORDS`).
+     *
+     * @type {Map<string, Int32Array>}
+     */
     const granted = new Map();
     /** Room asked for and not answered yet, a reservation the keeper may be holding. */
     let asking = 0;
@@ -259,10 +272,15 @@ export function channelSpace(joined, { channel, prefix }){
     const reader = createReader({
         shared: joined.shared, segments: joined.segments,
         keeper: { ...client.keeper,
-            reserve: (whole, length, options)=>{
-                const place = granted.get(whole);
+            reserve: (whole, length, flags, heard, place)=>{
+                const given = granted.get(whole);
+                if (given === undefined)
+                {
+                    return client.keeper.reserve(whole, length, flags, heard, place);
+                }
                 granted.delete(whole);
-                return place ?? client.keeper.reserve(whole, length, options);
+                place.set(given);
+                return true;
             } },
     });
     const { space, held, holds } = ownerNames(reader, prefix, ()=>!closed);
@@ -284,8 +302,7 @@ export function channelSpace(joined, { channel, prefix }){
         ask: async(key, length)=>{
             const whole = `${prefix}${key}`;
             asking++;
-            const place = await client.reserveLater(whole, length,
-                { known, onlyCopy: true, disk: 'run' })
+            const place = await client.reserveLater(whole, length, OWNED, known)
                 .finally(()=>{
                     asking--;
                 });
@@ -308,8 +325,7 @@ export function channelSpace(joined, { channel, prefix }){
          */
         forgo: (key, length)=>{
             const whole = `${prefix}${key}`;
-            if (granted.has(whole) && reader.reserve(whole, length,
-                { onlyCopy: true, disk: 'run' }) !== null)
+            if (granted.has(whole) && reader.reserve(whole, length, OWNED) !== null)
             {
                 reader.abandon(whole);
             }

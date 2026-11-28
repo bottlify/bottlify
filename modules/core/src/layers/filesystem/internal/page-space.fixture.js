@@ -37,7 +37,7 @@ export async function pieceSpace(cacheSpace, { budget = 64 << 20,
     });
     reader = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
-            reserve: (name, length, options)=>keeper.reserve(name, length, options),
+            reserve: keeper.reserve,
             raise: (name, options)=>keeper.raise(name, options),
             raiseLater: ()=>{},
             drop: name=>{

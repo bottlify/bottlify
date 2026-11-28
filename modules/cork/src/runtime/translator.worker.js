@@ -104,7 +104,7 @@ function connection(send){
                 // A reader that asks the keeper nothing: it reads, and its
                 // runtime's thread writes.
                 const reader = createReader({ shared, segments,
-                    keeper: { reserve: ()=>null, raise: ()=>false, raiseLater(){}, drop(){} } });
+                    keeper: { reserve: ()=>false, raise: ()=>false, raiseLater(){}, drop(){} } });
                 const space = readingSpace((name, read)=>reader.with(prefix + name, read));
                 kept = { reader, space };
                 cache = keptEmitCache(space);

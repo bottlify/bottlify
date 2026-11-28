@@ -8,12 +8,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { Worker } from 'node:worker_threads';
-import { createReader, openKeeper } from '@bottlify/cellar';
+import { createReader, openKeeper, reserveFlags } from '@bottlify/cellar';
 import { formRegion } from '../region.js';
 import { relinkBatch } from './emit-built.js';
 import { entryOf, keptEmitCache, keptName, putAll, readEntry, readingSpace } from './kept.js';
 import { ownLayout } from './layout.js';
 import { machine, piece, translateUntil, untilTranslatorsLoaded } from '../testing/seeded-pieces.js';
+
+/** What the translator's functions ask of the cache, as a run's do. */
+const KEPT = reserveFlags({ disk: 'never', idle: 'stay' });
 
 const FEATURES = { simd: true, tailCalls: true, defaultNaNNegative: false };
 const OPTIONS = { hash: true, place: true, trapPort: 0xb077, profileCalls: true };
@@ -40,7 +43,7 @@ async function cellarOf(budget = 8 << 20){
         announce: message=>told.forEach(tell=>tell(message)) });
     const reader = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
-            reserve: (name, length, options)=>keeper.reserve(name, length, options),
+            reserve: keeper.reserve,
             raise: (name, options)=>keeper.raise(name, options),
             raiseLater: name=>{
                 keeper.raise(name);
@@ -53,14 +56,14 @@ async function cellarOf(budget = 8 << 20){
     /** @type {import('./kept.js').KeptSpace} */
     const space = {
         with: (name, read)=>reader.with(PREFIX + name, read),
-        put: (name, bytes)=>reader.put(PREFIX + name, bytes, { disk: 'never', idle: 'stay' }),
+        put: (name, bytes)=>reader.put(PREFIX + name, bytes, KEPT),
     };
     return {
         keeper, reader, space,
         /** A reader of the same cache that asks the keeper nothing, as a worker's. */
         readOnly(){
             const other = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
-                keeper: { reserve: ()=>null, raise: ()=>false, raiseLater(){}, drop(){} } });
+                keeper: { reserve: ()=>false, raise: ()=>false, raiseLater(){}, drop(){} } });
             told.add(message=>other.adopt(message));
             return readingSpace((name, read)=>other.with(PREFIX + name, read));
         },
@@ -282,7 +285,7 @@ test('translators on threads of their own read what the writing thread keeps, ne
             Promise.all([import(${keptUrl}), import(${cellarUrl})]).then(async([kept, cellar])=>{
                 const reader = cellar.createReader({ shared: workerData.joined.shared,
                     segments: workerData.joined.segments,
-                    keeper: { reserve: ()=>null, raise: ()=>false, raiseLater(){}, drop(){} } });
+                    keeper: { reserve: ()=>false, raise: ()=>false, raiseLater(){}, drop(){} } });
                 parentPort.on('message', message=>reader.adopt(message));
                 const cache = kept.keptEmitCache(kept.readingSpace(
                     (name, read)=>reader.with('cork/' + name, read)));
