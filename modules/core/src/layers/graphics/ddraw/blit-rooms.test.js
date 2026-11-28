@@ -25,7 +25,7 @@ import {
     DDBLT_COLORFILL, DDBLT_DDFX, DDBLT_KEYDEST, DDBLT_KEYSRC,
 } from './constants.js';
 import { blitRooms, blt, bltFast } from './blit.js';
-import { createScratches } from '../../cache/scratch.js';
+import { createScratches, roomFor } from '../../cache/scratch.js';
 import { testCache } from '../../cache/testing.fixture.js';
 
 const MEMORY = 1 << 18;
@@ -195,7 +195,7 @@ test('a full-screen blit reused frame after frame grows its rooms once and makes
     assert.equal(scratches.figures().grows, grows, 'the counter of grows stays put');
     assert.equal(rooms.snapshot.bytes(width * height * 4), rooms.snapshot.bytes(width * height * 4),
         'the same view frame after frame');
-    assert.equal(scratches.figures().heldBytes, 2 * 1024 * 1024 + 4096,
-        'the snapshot (1.2 MB in a 2 MiB block) and a row, in the run\'s budget');
+    assert.equal(scratches.figures().heldBytes, roomFor(width * height * 4) + roomFor(width * 4),
+        'the snapshot and a row, each in the room its length takes, in the run\'s budget');
     assert.equal(cache.keeper.under('scratch/').hotBytes, scratches.figures().heldBytes);
 });
