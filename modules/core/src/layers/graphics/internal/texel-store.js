@@ -15,28 +15,21 @@
  * A body is handed over (`put`) and is the store's from then on: readable at
  * once, in place (`with`), or taken back as the caller's own (`take`), until
  * it is dropped. Every body goes to the cache, where it takes its length in
- * grains (`grainsOf`); it lies as it was handed over only while the cache has
- * not granted its room (room is asked for without waiting). A body under a
- * grain is too small to be worth an entry of its own: one of a group (a
- * texture's levels, a frame's uploads) goes with the others of its group put
- * in the same turn as one body, each read in place within it, the body let
- * go of with the last of them. Each body is the only copy of what it holds
- * for this run (a level's texels as the program made them, an upload's as
- * they stood when it was recorded), which is why the owner's names go to the
- * disk when idle (`disk: 'run'`) and never away; what a device can make again
- * from guest memory at once (an upload that goes to the GPU in the same call)
- * is never kept here.
+ * grains (Cellar's one packing rule); it lies as it was handed over only
+ * while the cache has not granted its room (room is asked for without
+ * waiting). A body whose room the cache refused, or that has no cache under
+ * it, is a loss, as one it cannot give back. Each body is the only copy of
+ * what it holds for this run (a level's texels as the program made them, an
+ * upload's as they stood when it was recorded), which is why
+ * the owner's names go to the disk when idle (`disk: 'run'`) and never away;
+ * what a device can make again from guest memory at once (an upload that goes
+ * to the GPU in the same call) is never kept here.
  *
  * A body the cache refused room for (none under the store refuses every
  * one), or cannot give back, is a loss: said
  * once a body (`divergence(detail, 'loss')`), counted, and read as zeros of
  * its length, so the level draws blank instead of the device stopping.
  */
-
-import { grainsOf } from '@bottlify/cellar';
-
-/** The cache's grain: a body under it goes with its group. */
-const GRAIN = grainsOf(1);
 
 /**
  * What a store keeps its bodies in: an owner's names in the run's cache
@@ -52,19 +45,9 @@ const GRAIN = grainsOf(1);
 
 /**
  * One body: its bytes while they are in plain memory, null once they are in
- * the cache under `name` (`name` null while none was asked for), or at
- * `offset` of the packed body of its group (`packed`).
+ * the cache under `name`; `name` null while none was asked for.
  *
- * @typedef {{ bytes: Uint8Array | null, length: number, name: string | null,
- *     packed: Packed | null, offset: number }} Body
- */
-
-/**
- * The bodies under a grain of one group put in one turn: `members` until the
- * turn's end packs them, then the store's body under `key`; `held` of them
- * not let go of.
- *
- * @typedef {{ key: string, members: Body[], held: number }} Packed
+ * @typedef {{ bytes: Uint8Array | null, length: number, name: string | null }} Body
  */
 
 /**
@@ -80,10 +63,6 @@ const GRAIN = grainsOf(1);
 export function createTexelStore({ cache = null, divergence = null } = {}){
     /** @type {Map<string, Body>} */
     const bodies = new Map();
-    /** The packed body each group fills this turn. @type {Map<unknown, Packed>} */
-    const filling = new Map();
-    /** Packed bodies' keys, apart from the callers' by their first character. */
-    let packs = 0;
     /** The cache's names, one a body put: a key put again while its room is asked is another. */
     let names = 0;
     const counts = {
@@ -97,18 +76,6 @@ export function createTexelStore({ cache = null, divergence = null } = {}){
 
     /** @param {Body} body */
     const letGo = body=>{
-        const packed = body.packed;
-        if (packed !== null)
-        {
-            body.packed = null;
-            packed.held--;
-            const whole = packed.members.length === 0 ? bodies.get(packed.key) : undefined;
-            if (whole && packed.held === 0)
-            {
-                bodies.delete(packed.key);
-                letGo(whole);
-            }
-        }
         if (body.bytes !== null)
         {
             counts.plainBytes -= body.length;
@@ -180,59 +147,6 @@ export function createTexelStore({ cache = null, divergence = null } = {}){
         counts.refused++;
     };
 
-    /** A body into the cache, or refused where there is none. @param {string} key @param {Body} body */
-    const place = (key, body)=>{
-        if (cache)
-        {
-            move(key, body, cache);
-            return;
-        }
-        refuse(body);
-    };
-
-    /** @param {Body} body @param {unknown} group */
-    const join = (body, group)=>{
-        let packed = filling.get(group);
-        if (!packed)
-        {
-            const fill = { key: `\0${++packs}`, members: /** @type {Body[]} */ ([]), held: 0 };
-            filling.set(group, packed = fill);
-            queueMicrotask(()=>pack(group, fill));
-        }
-        body.packed = packed;
-        packed.members.push(body);
-        packed.held++;
-    };
-
-    /**
-     * The turn's members of a group still held copied into one body, which
-     * goes to the cache as any other: their bytes are its, counted once.
-     *
-     * @param {unknown} group @param {Packed} packed
-     */
-    const pack = (group, packed)=>{
-        filling.delete(group);
-        const members = packed.members.filter(member=>member.packed === packed);
-        packed.members = [];
-        if (members.length === 0)
-        {
-            return;
-        }
-        const whole = new Uint8Array(members.reduce((sum, member)=>sum + member.length, 0));
-        let at = 0;
-        for (const member of members)
-        {
-            whole.set(/** @type {Uint8Array} */ (member.bytes), at);
-            member.offset = at;
-            member.bytes = null;
-            at += member.length;
-        }
-        /** @type {Body} */
-        const body = { bytes: whole, length: whole.length, name: null, packed: null, offset: 0 };
-        bodies.set(packed.key, body);
-        place(packed.key, body);
-    };
-
     /**
      * A body's bytes read in place inside `read`; zeros of its length where
      * the cache lost them, and the loss said. Undefined for a key not held.
@@ -245,15 +159,6 @@ export function createTexelStore({ cache = null, divergence = null } = {}){
         if (body.bytes !== null)
         {
             return read(body.bytes);
-        }
-        if (body.packed !== null)
-        {
-            const { offset, length } = body;
-            const whole = bodies.get(body.packed.key);
-            // Lost with its packed body, said once for all of them.
-            return whole ? readBody(body.packed.key, whole,
-                bytes=>read(bytes.subarray(offset, offset + length)))
-                : read(new Uint8Array(length));
         }
         let found = false;
         /** @type {T | undefined} */
@@ -279,28 +184,29 @@ export function createTexelStore({ cache = null, divergence = null } = {}){
 
         /**
          * Hands `bytes` over under `key`, replacing what it held: the caller
-         * writes them no more. Under a grain, they go with `group`'s others.
+         * writes them no more.
          *
-         * @param {string} key @param {Uint8Array} bytes @param {unknown} [group]
+         * @param {string} key @param {Uint8Array} bytes
          */
-        put(key, bytes, group){
+        put(key, bytes){
             const held = bodies.get(key);
             if (held)
             {
                 letGo(held);
             }
             /** @type {Body} */
-            const body = { bytes, length: bytes.byteLength, name: null, packed: null, offset: 0 };
+            const body = { bytes, length: bytes.byteLength, name: null };
             bodies.set(key, body);
             counts.put++;
             counts.putBytes += body.length;
             counts.plainBytes += body.length;
-            if (group !== undefined && body.length < GRAIN)
+            // No names in the cache under the store: refused, as no room is.
+            if (cache)
             {
-                join(body, group);
+                move(key, body, cache);
                 return;
             }
-            place(key, body);
+            refuse(body);
         },
 
         /**

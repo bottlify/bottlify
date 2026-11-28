@@ -132,53 +132,6 @@ test('every body goes to the run\'s cache in its grains: one under a grain with 
         }
     });
 
-test('bodies under a grain of one group put in a turn go to the cache as one body, each read'
-    + ' there in place and taken back as it was, the body let go of with the last', async()=>{
-    const cache = await owner();
-    try
-    {
-        const store = createTexelStore({ cache: cache.names });
-        const texture = {};
-        const tail = [256, 64, 16, 4].map((length, at)=>bytesOf(length, at + 1));
-        tail.forEach((bytes, at)=>store.put(`level${at}`, bytes.slice(), texture));
-        store.put('top', bytesOf(KEPT_FROM, 9), texture);
-        // Readable at once, before the turn that packs them.
-        assert.deepEqual(store.with('level2', bytes=>bytes.slice()), tail[2]);
-        await until(()=>store.figures().moved === 2);
-        assert.deepEqual(cache.under(), { bodies: 2, bytes: KEPT_FROM + 340,
-            hotBytes: KEPT_FROM + 340, placedBytes: KEPT_FROM + grainsOf(340) },
-        'the top level alone, the four under a grain as one body');
-        assert.equal(store.figures().plainBytes, 0);
-        tail.forEach((bytes, at)=>{
-            assert.equal(store.lengthOf(`level${at}`), bytes.length);
-            assert.deepEqual(store.with(`level${at}`, read=>({ shared: read.buffer instanceof
-                SharedArrayBuffer, bytes: read.slice() })), { shared: true, bytes });
-        });
-        const back = /** @type {Uint8Array} */ (store.take('level1'));
-        assert.ok(!(back.buffer instanceof SharedArrayBuffer), 'the caller\'s own bytes');
-        assert.deepEqual(back, tail[1]);
-        assert.equal(store.has('level1'), false);
-        store.drop('level0');
-        store.put('level2', bytesOf(16, 7), texture);
-        assert.deepEqual(store.with('level3', bytes=>bytes.slice()), tail[3],
-            'the others read as they were');
-        await until(()=>store.figures().moved === 3);
-        assert.equal(cache.under().bodies, 3, 'the first packed body held while one of it is');
-        store.drop('level3');
-        await until(()=>cache.under().bodies === 2);
-        assert.equal(cache.under().bodies, 2, 'and let go of with it');
-        store.drop('top');
-        store.drop('level2');
-        await until(()=>cache.under().bodies === 0);
-        assert.equal(cache.under().bodies, 0, 'and let go of with its last');
-        assert.equal(store.figures().bodies, 0);
-    }
-    finally
-    {
-        await cache.close();
-    }
-});
-
 test('a body the cache cannot give back is a loss, said and counted, and reads as zeros',
     async()=>{
         /** @type {[string, string][]} */

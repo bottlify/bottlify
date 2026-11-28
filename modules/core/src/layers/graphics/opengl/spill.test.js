@@ -241,7 +241,7 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
     assert.ok(blocksBack, 'the blocks come back as they were');
 });
 
-test('a level from a grain moves alone, those under it together as one body', async()=>{
+test('every level moves on its own, in its grains, one under a grain in one', async()=>{
     const fake = createFakeDevice({});
     const backend = createBackend({ scratches: testScratch,
         device: fake.device, queue: fake.queue, presentTo: ()=>{} });
@@ -268,7 +268,7 @@ test('a level from a grain moves alone, those under it together as one body', as
     const all = [...gl.shareGroup.textures.objects.values()];
     renderer.spill(all);
     const figures = ()=>/** @type {any} */ (renderer.diagnostics()).spills;
-    for (let turns = 0; turns < 1000 && figures().store.moved + figures().store.refused < 3;
+    for (let turns = 0; turns < 1000 && figures().store.moved + figures().store.refused < 6;
         turns++)
     {
         await turn();
@@ -283,10 +283,9 @@ test('a level from a grain moves alone, those under it together as one body', as
         GL.UNSIGNED_BYTE).every((/** @type {number} */ byte)=>byte === level + 1));
     runCache.close();
     texels.close();
-    assert.deepEqual(moved, { levels: 3, bytes: 4096 + 1024 + 340 },
-        'two levels alone, the four under a grain as one');
+    assert.deepEqual(moved, { levels: 6, bytes: 4096 + 1024 + 340 }, 'every level moved');
     assert.deepEqual({ bodies: placed.bodies, placedBytes: placed.placedBytes },
-        { bodies: 3, placedBytes: 4096 + 1024 + 512 }, 'each body in its grains');
+        { bodies: 6, placedBytes: 4096 + 1024 + 4 * 512 }, 'each body in its grains');
     assert.ok(back, 'and every level reads back as it was');
 });
 

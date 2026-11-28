@@ -558,7 +558,7 @@ export function createGpuRenderer(services){
      */
     const keptForReplay = (recording, bytes)=>{
         const key = `frame:${++keptForFrames}`;
-        texelStore.put(key, bytes, recording);
+        texelStore.put(key, bytes);
         recording.texels.push(key);
         return key;
     };

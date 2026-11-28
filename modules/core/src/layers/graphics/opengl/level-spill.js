@@ -13,8 +13,6 @@
  * the bytes back as the level's own (a write in place meets them); set, it
  * lets them go; an upload reads them in place (`readLevel`). An accessor
  * already there (a sized level's RGBA, a view's) is not the level's bytes.
- * A level's bytes go with its texture's others (the store's group), so the
- * small levels of a chain's tail share one body of the cache.
  */
 
 /**
@@ -101,7 +99,7 @@ export function createLevelSpill({ store, kinds }){
 
         /**
          * A level's bytes of every kind that is a plain value handed to the
-         * store, with its texture's others.
+         * store.
          *
          * @param {object} texture @param {object} image
          * @returns {number}  the bytes handed over
@@ -118,7 +116,7 @@ export function createLevelSpill({ store, kinds }){
                     continue;
                 }
                 const key = String(++names);
-                store.put(key, bytes, texture);
+                store.put(key, bytes);
                 counts.levels++;
                 counts.bytes += bytes.byteLength;
                 counts.blockBytes += kind.property === 'compressed' ? bytes.byteLength : 0;
