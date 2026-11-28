@@ -12,12 +12,13 @@
 
 import { createShlwapiFunctions } from './functions.js';
 import { guestOver } from '../common/guest.fixture.js';
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 
 /**
- * @param {Partial<import('./functions.js').ShlwapiHost>} [extra]
+ * @param {Partial<import('./functions.js').ShlwapiHost> & { pointerSize?: 4 | 8 }} [given]
+ *     what the test's host does, and the process's width (4 when not given)
  */
-export function shlwapiMachine(extra = {}){
+export function shlwapiMachine({ pointerSize = 4, ...extra } = {}){
     const memory = new Uint8Array(0x80000);
     const view = new DataView(memory.buffer);
     // Above the low 64 KiB, which a call may refuse as never mapped.
@@ -29,45 +30,8 @@ export function shlwapiMachine(extra = {}){
     const errors = [];
     /** @type {string[]} */
     const divergences = [];
-    // As the memory layer reads: the limit is in bytes, and a string with no
-    // terminator within it is refused, not cut.
-    const unterminated = ()=>Object.assign(new Error('unterminated'), { code: 'UNTERMINATED' });
-    const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
-        let end = address;
-        while (memory[end] !== 0)
-        {
-            if (++end >= Math.min(address + maxLength, memory.length))
-            {
-                throw unterminated();
-            }
-        }
-        return decodeAnsi(memory.subarray(address, end));
-    };
-    const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
-        let text = '';
-        for (let at = address; ; at += 2)
-        {
-            if (at + 2 > Math.min(address + maxLength, memory.length))
-            {
-                throw unterminated();
-            }
-            const unit = view.getUint16(at, true);
-            if (unit === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(unit);
-        }
-        return text;
-    };
     const base = {
-        guest: guestOver(memory),
-        readCString,
-        readWideString,
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            memory.subarray(address, address + length),
-        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, address),
+        guest: guestOver(memory, pointerSize),
         allocate: (/** @type {number} */ bytes)=>{
             const at = heap;
             heap += (bytes + 15) & ~15;
@@ -105,8 +69,7 @@ export function shlwapiMachine(extra = {}){
         return at;
     };
     /** @param {number} address @param {boolean} [wide] */
-    const read = (address, wide = false)=>(wide ? readWideString(address, 0x1000)
-        : readCString(address, 0x1000));
+    const read = (address, wide = false)=>base.guest.text(address, wide, 0x1000);
     /** A DWORD put in memory. @param {number} value */
     const count = value=>{
         const at = next;

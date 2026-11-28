@@ -40,7 +40,7 @@ function registryMachine(){
     // %X% expands to a longer string, as an environment variable would.
     const kernel32 = {
         ExpandEnvironmentStringsA: { handler: (/** @type {number[]} */ [from, to])=>{
-            const text = m.base.readCString(from, 0x1000).replace('%X%', 'expanded');
+            const text = m.read(from).replace('%X%', 'expanded');
             m.memory.set(new TextEncoder().encode(`${text}\0`), to);
             return text.length + 1;
         } },

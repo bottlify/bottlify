@@ -25,8 +25,7 @@ const C1_XDIGIT = 0x80;
 
 /**
  * @typedef {Object} CharacterHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }> | undefined}
@@ -38,6 +37,7 @@ const C1_XDIGIT = 0x80;
  * @param {{ A: import('./text.js').Width, W: import('./text.js').Width }} widths
  */
 export function createCharacterFunctions(host, { A, W }){
+    const { guest } = host;
     /** @param {string} name */
     const kernel32 = name=>host.library?.('KERNEL32.dll')?.[name];
 
@@ -50,18 +50,18 @@ export function createCharacterFunctions(host, { A, W }){
     const typeOf = (type, unit)=>{
         const call = kernel32('GetStringTypeW');
         const block = host.allocate?.(4) ?? 0;
-        if (!call || !block || !host.readMemory)
+        if (!call || !block)
         {
             return 0;
         }
         try
         {
-            host.writeMemory(block, Uint8Array.of(unit & 0xff, unit >>> 8 & 0xff, 0, 0));
+            guest.setBytes(block, Uint8Array.of(unit & 0xff, unit >>> 8 & 0xff, 0, 0));
             if (!call.handler([type, block, 1, block + 2]))
             {
                 return 0;
             }
-            const word = host.readMemory(block + 2, 2);
+            const word = guest.snapshot(block + 2, 2);
             return word[0] | word[1] << 8;
         }
         finally
@@ -104,16 +104,16 @@ export function createCharacterFunctions(host, { A, W }){
             // of it as fits copied back with a terminator.
             const needed = /** @type {number} */ (through.handler(args(page, source, 0, 0))) | 0;
             const block = needed > 0 ? host.allocate?.(needed * to.unit) ?? 0 : 0;
-            if (!block || !host.readMemory)
+            if (!block)
             {
                 return 0;
             }
             try
             {
                 through.handler(args(page, source, block, needed));
-                const kept = host.readMemory(block, ((room | 0) - 1) * to.unit).slice();
-                host.writeMemory(wholeAddress(destination), kept);
-                host.writeMemory(wholeAddress(destination) + kept.length, new Uint8Array(to.unit));
+                const kept = guest.snapshot(block, ((room | 0) - 1) * to.unit);
+                guest.setBytes(destination, kept);
+                guest.fill(destination + kept.length, 0, to.unit);
                 return room | 0;
             }
             finally
@@ -158,7 +158,7 @@ export function createCharacterFunctions(host, { A, W }){
                 const bracketed = text[at - 1] === '(' && text[at + 2] === ')';
                 const stripped = bracketed ? text.slice(0, at - 1) + text.slice(at + 3)
                     : text.slice(0, at) + text.slice(at + 1);
-                host.writeMemory(wholeAddress(label), width.sz(stripped));
+                guest.setBytes(label, width.sz(stripped));
                 return width.wide ? mnemonic.charCodeAt(0) : width.bytes(mnemonic)[0];
             }
             return 0;
@@ -221,7 +221,7 @@ export function createCharacterFunctions(host, { A, W }){
                 const text = A.read(source) ?? '';
                 if (wholeAddress(destination) !== 0 && (room | 0) > 0)
                 {
-                    host.writeMemory(wholeAddress(destination), A.sz(text.slice(0,
+                    guest.setBytes(destination, A.sz(text.slice(0,
                         (room | 0) - 1)));
                 }
                 return 1;
@@ -243,7 +243,7 @@ export function createCharacterFunctions(host, { A, W }){
                 if (wholeAddress(destination) !== 0 && (room | 0) > 0)
                 {
                     const kept = narrow.subarray(0, (room | 0) - 1);
-                    host.writeMemory(wholeAddress(destination), Uint8Array.from([...kept, 0]));
+                    guest.setBytes(destination, Uint8Array.from([...kept, 0]));
                 }
                 const back = [...narrow].map(byte=>A.char(byte)).join('');
                 return back === text ? 1 : 0;

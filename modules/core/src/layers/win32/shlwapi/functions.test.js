@@ -6,28 +6,20 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { guestOver } from '../common/guest.fixture.js';
 import { createShlwapiFunctions } from './functions.js';
 import { shlwapiMachine } from './memory.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { createRegistryFunctions } from '../advapi32/functions.js';
 import { createHive } from '../advapi32/registry.js';
 import { createRegistryService } from '../advapi32/registry-service.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const AT = 0x100;
 
 function machine(){
     const memory = new Uint8Array(0x400);
     const fns = createShlwapiFunctions({
-        readCString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; at < address + maxLength && memory[at] !== 0; at++)
-            {
-                text += String.fromCharCode(memory[at]);
-            }
-            return text;
-        },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
     });
     /** @param {string} text */
     const put = text=>{
@@ -54,23 +46,7 @@ test('a directory is answered with its attribute, a file and nothing with 0', ()
     /** @type {Record<string, boolean>} */
     const volume = { 'C:\\App': true, 'C:\\App\\Data': true, 'C:\\App\\game.exe': false };
     const fns = createShlwapiFunctions({
-        readCString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; at < address + maxLength && memory[at] !== 0; at++)
-            {
-                text += String.fromCharCode(memory[at]);
-            }
-            return text;
-        },
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; at < address + maxLength && memory[at] !== 0; at += 2)
-            {
-                text += String.fromCharCode(memory[at] | memory[at + 1] << 8);
-            }
-            return text;
-        },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         files: { stat: path=>({ exists: path in volume, isDirectory: volume[path] === true }),
             list: path=>Object.keys(volume).filter(other=>other.startsWith(`${path}\\`)
                 && !other.slice(path.length + 1).includes('\\')) },
@@ -135,16 +111,7 @@ test('the extension is removed in place, a directory dot and no extension are no
 test('a URL is unescaped in place or into a buffer with room, and the count says', ()=>{
     const memory = new Uint8Array(0x400);
     const fns = createShlwapiFunctions({
-        readCString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; at < address + maxLength && memory[at] !== 0; at++)
-            {
-                text += String.fromCharCode(memory[at]);
-            }
-            return text;
-        },
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
     });
     /** @param {number} address */
     const text = address=>{
@@ -233,28 +200,7 @@ function strings(){
     const fns = /** @type {any} */ (createShlwapiFunctions({
         // As the memory layer reads an ANSI string: in Windows-1252, which is
         // what the Encoding standard calls latin1.
-        readCString: (address, maxLength)=>{
-            let end = address;
-            while (end < address + maxLength && memory[end] !== 0)
-            {
-                end++;
-            }
-            return decodeAnsi(memory.subarray(address, end));
-        },
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; at < address + maxLength * 2; at += 2)
-            {
-                const unit = view.getUint16(at, true);
-                if (unit === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(unit);
-            }
-            return text;
-        },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
     }));
     /** @param {string} text @param {boolean} [wide] @param {number} [room] */
     const put = (text, wide = false, room = 0x200)=>{
@@ -472,10 +418,6 @@ function registryMachine(){
         guest: guestOver(memory),
         readCString,
         readWideString,
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            memory.subarray(address, address + length),
-        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, address),
         allocate: (/** @type {number} */ bytes)=>{
             const at = next;
             next += (bytes + 15) & ~15;
@@ -613,25 +555,7 @@ test('StrCatBuffA appends to what the buffer holds, terminator included', ()=>{
 function wideMachine(){
     const memory = new Uint8Array(0x400).fill(0xaa);
     const fns = /** @type {any} */ (createShlwapiFunctions({
-        readCString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; at < address + maxLength && memory[at] !== 0; at++)
-            {
-                text += String.fromCharCode(memory[at]);
-            }
-            return text;
-        },
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = address; at < address + maxLength * 2
-                && (memory[at] | memory[at + 1] << 8) !== 0; at += 2)
-            {
-                text += String.fromCharCode(memory[at] | memory[at + 1] << 8);
-            }
-            return text;
-        },
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
     }));
     /** @param {string} text */
     const put = text=>{

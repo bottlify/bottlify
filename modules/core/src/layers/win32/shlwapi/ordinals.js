@@ -16,8 +16,8 @@
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
-import { formatGuid, GUID_NULL, parseGuid } from '../../../system/guid.js';
-import { dword, u32 } from './text.js';
+import { GUID_NULL, parseGuid } from '../../../system/guid.js';
+import { dwordBytes, u32Of } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
@@ -177,16 +177,13 @@ const SLOT = Object.freeze({
 const ACCEPT_LANGUAGE_KEY = 'Software\\Microsoft\\Internet Explorer\\International';
 
 /** @param {number} value */
-const word = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff);
+const wordBytes = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff);
 
 /**
  * @typedef {Record<string, { handler: (args: number[]) => any }>} Exports
  *
  * @typedef {Object} OrdinalHost
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
  * @property {(code: number) => void} [setLastError]
@@ -202,6 +199,7 @@ const word = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff);
  *     handler: (args: number[]) => any }>}
  */
 export function createOrdinalFunctions(host){
+    const { guest } = host;
     /**
      * Another library's function, called with the arguments a program would
      * pass; what it answers, which an asynchronous one answers later.
@@ -241,7 +239,7 @@ export function createOrdinalFunctions(host){
         }
         try
         {
-            host.writeMemory(address, typeof what === 'number' ? new Uint8Array(size) : what);
+            guest.setBytes(address, typeof what === 'number' ? new Uint8Array(size) : what);
             return await body(address);
         }
         finally
@@ -249,21 +247,6 @@ export function createOrdinalFunctions(host){
             host.free?.(address);
         }
     };
-    /**
-     * Guest bytes; zeros in a build that cannot read them, where every
-     * caller of these has failed long before.
-     *
-     * @param {number} address @param {number} length
-     */
-    const readBytes = (address, length)=>(host.readMemory
-        ? host.readMemory(address, length) : new Uint8Array(length));
-    /** @param {number} address */
-    const readU32 = address=>u32(readBytes(wholeAddress(address), 4));
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), dword(value));
-    /** @param {number} address */
-    const wideAt = address=>((address >>> 0) === 0 || !host.readWideString ? null
-        : host.readWideString(wholeAddress(address), 0x10000));
 
     /**
      * A handle of another process brought into this one, or this one's own
@@ -287,7 +270,7 @@ export function createOrdinalFunctions(host){
             }
             return await scratch(4, async out=>((await kernel32('DuplicateHandle', [source, handle,
                 target, out, access, 0, options | (access === 0 ? DUPLICATE_SAME_ACCESS : 0)]))
-                ? readU32(out) : 0));
+                ? guest.u32(out) : 0));
         }
         finally
         {
@@ -310,9 +293,10 @@ export function createOrdinalFunctions(host){
      * @param {number} info
      */
     const fdsa = info=>{
-        const bytes = readBytes(wholeAddress(info), 16);
+        const bytes = guest.snapshot(wholeAddress(info), 16);
         return {
-            count: u32(bytes, FDSA.count), mem: u32(bytes, FDSA.mem), room: u32(bytes, FDSA.room),
+            count: u32Of(bytes, FDSA.count), mem: u32Of(bytes, FDSA.mem), room: u32Of(bytes,
+                FDSA.room),
             inc: bytes[FDSA.inc], size: bytes[FDSA.size], flags: bytes[FDSA.flags],
         };
     };
@@ -332,10 +316,10 @@ export function createOrdinalFunctions(host){
         {
             return 0;
         }
-        const name = wideAt(subKey);
+        const name = guest.optionalText(subKey, true, 0x10000);
         const path = name ? `${base}\\${name}` : base;
         return scratch(utf16z(path).length + 4, async at=>{
-            host.writeMemory(at + 4, utf16z(path));
+            guest.writeWide(at + 4, path);
             const status = create
                 ? await advapi32('RegCreateKeyExW',
                     [root, at + 4, 0, 0, 0, KEY_ALL_ACCESS, 0, at, 0])
@@ -345,7 +329,7 @@ export function createOrdinalFunctions(host){
                 host.setLastError?.(status);
                 return 0;
             }
-            return readU32(at);
+            return guest.u32(at);
         });
     };
     /** @param {number} status */
@@ -358,7 +342,7 @@ export function createOrdinalFunctions(host){
      * @param {number} fileTime @param {number} flagsAt
      */
     const formatDateTime = async(fileTime, flagsAt)=>{
-        const flags = (flagsAt >>> 0) === 0 ? FDTF_DEFAULT : readU32(flagsAt);
+        const flags = (flagsAt >>> 0) === 0 ? FDTF_DEFAULT : guest.u32(flagsAt);
         return scratch(8 + 16 + 2 * 128, async at=>{
             if (!await kernel32('FileTimeToLocalFileTime', [fileTime, at])
                 || !await kernel32('FileTimeToSystemTime', [at, at + 8]))
@@ -372,13 +356,13 @@ export function createOrdinalFunctions(host){
             if (dateFlags !== 0 && await kernel32('GetDateFormatW',
                 [LOCALE_USER_DEFAULT, dateFlags, at + 8, 0, text, 128]))
             {
-                parts.push(wideAt(text) ?? '');
+                parts.push(guest.optionalText(text, true, 0x10000) ?? '');
             }
             if ((flags & (FDTF_LONGTIME | FDTF_SHORTTIME)) !== 0 && await kernel32('GetTimeFormatW',
                 [LOCALE_USER_DEFAULT, (flags & FDTF_LONGTIME) !== 0 ? 0 : TIME_NOSECONDS, at + 8, 0,
                     text, 128]))
             {
-                parts.push(wideAt(text) ?? '');
+                parts.push(guest.optionalText(text, true, 0x10000) ?? '');
             }
             return parts.join(' ');
         });
@@ -398,7 +382,7 @@ export function createOrdinalFunctions(host){
                 return 0;
             }
             const cut = text.slice(0, (room | 0) - 1);
-            host.writeMemory(wholeAddress(buffer), wide ? utf16z(cut) : encodeAnsi(`${cut}\0`));
+            guest.setBytes(buffer, wide ? utf16z(cut) : encodeAnsi(`${cut}\0`));
             return cut.length + 1;
         },
     });
@@ -409,7 +393,7 @@ export function createOrdinalFunctions(host){
             [LOCALE_USER_DEFAULT, LOCALE_SISO639LANGNAME, at, 16]);
         const country = await kernel32('GetLocaleInfoA',
             [LOCALE_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, at + 16, 16]);
-        return language ? host.readCString(at, 16) + (country ? `-${host.readCString(at + 16, 16)}`
+        return language ? guest.cstr(at, 16) + (country ? `-${guest.cstr(at + 16, 16)}`
             : '') : 'en';
     });
 
@@ -430,42 +414,42 @@ export function createOrdinalFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            const room = readU32(countAt);
+            const room = guest.u32(countAt);
             if ((buffer >>> 0) !== 0 && room === 0)
             {
                 return E_INVALIDARG;
             }
             const stored = await scratch(2 * ACCEPT_LANGUAGE_KEY.length + 8 + 0x400, async at=>{
                 const key = encodeAnsi(`${ACCEPT_LANGUAGE_KEY}\0`);
-                host.writeMemory(at + 8, key);
+                guest.setBytes(at + 8, key);
                 if (await advapi32('RegOpenKeyExA', [HKEY_CURRENT_USER, at + 8, 0, KEY_READ, at])
                     !== ERROR_SUCCESS)
                 {
                     return null;
                 }
-                const handle = readU32(at);
+                const handle = guest.u32(at);
                 const name = at + 8 + key.length;
-                host.writeMemory(name, encodeAnsi('AcceptLanguage\0'));
+                guest.setBytes(name, encodeAnsi('AcceptLanguage\0'));
                 const data = name + 16;
-                writeU32(at + 4, 0x3f0);
+                guest.set32(at + 4, 0x3f0);
                 const status = await advapi32('RegQueryValueExA',
                     [handle, name, 0, 0, data, at + 4]);
                 await advapi32('RegCloseKey', [handle]);
-                return status === ERROR_SUCCESS ? host.readCString(data, 0x3f0) : null;
+                return status === ERROR_SUCCESS ? guest.cstr(data, 0x3f0) : null;
             });
             const text = stored ?? await defaultLanguage();
             if ((buffer >>> 0) === 0)
             {
-                writeU32(countAt, text.length);
+                guest.set32(countAt, text.length);
                 return S_OK;
             }
             if (text.length >= room)
             {
-                writeU32(countAt, 0);
+                guest.set32(countAt, 0);
                 return E_NOT_SUFFICIENT_BUFFER;
             }
-            host.writeMemory(wholeAddress(buffer), wide ? utf16z(text) : encodeAnsi(`${text}\0`));
-            writeU32(countAt, text.length);
+            guest.setBytes(buffer, wide ? utf16z(text) : encodeAnsi(`${text}\0`));
+            guest.set32(countAt, text.length);
             return S_OK;
         },
     });
@@ -478,8 +462,7 @@ export function createOrdinalFunctions(host){
      * @returns {Generator<{ entry: number, args: number[] }, number, number>}
      */
     function* method(object, slot, ...args){
-        const entry = readU32(readU32(object) + slot * 4);
-        return yield { entry, args: [object >>> 0, ...args] };
+        return yield { entry: guest.method(object, slot), args: [object, ...args] };
     }
     /** @param {number} object @param {number} iid @param {number} out */
     const queryInterface = (object, iid, out)=>method(object, SLOT.QueryInterface, iid, out);
@@ -509,7 +492,7 @@ export function createOrdinalFunctions(host){
         const bytes = new Uint8Array(room);
         IID_ORDER.forEach((name, index)=>bytes.set(/** @type {Uint8Array} */ (
             parseGuid(IIDS[name])), index * 16));
-        host.writeMemory(block, bytes);
+        guest.setBytes(block, bytes);
         const iid = (/** @type {keyof typeof IIDS} */ name)=>block + IID_ORDER.indexOf(name) * 16;
         const out = block + IID_ORDER.length * 16;
         function* steps(){
@@ -540,32 +523,32 @@ export function createOrdinalFunctions(host){
         const args = (params >>> 0) === 0 ? out + 32 : params >>> 0;
         if ((params >>> 0) === 0)
         {
-            host.writeMemory(args, new Uint8Array(16));
+            guest.fill(args, 0, 16);
         }
         if ((yield* method(point, SLOT.EnumConnections, out)) < 0)
         {
             return S_OK;
         }
-        const enumerator = readU32(out);
+        const enumerator = guest.u32(out);
         try
         {
             for (;;)
             {
-                host.writeMemory(out + 8, new Uint8Array(12));
+                guest.fill(out + 8, 0, 12);
                 if ((yield* method(enumerator, SLOT.Next, 1, out + 8, out + 16)) !== S_OK)
                 {
                     break;
                 }
-                const sink = readU32(out + 8);
+                const sink = guest.u32(out + 8);
                 if (sink === 0)
                 {
                     continue;
                 }
-                host.writeMemory(out + 4, dword(0));
+                guest.set32(out + 4, 0);
                 if ((yield* queryInterface(sink, iid('dispatch'), out + 4)) >= 0
-                    && readU32(out + 4))
+                    && guest.u32(out + 4))
                 {
-                    const dispatch = readU32(out + 4);
+                    const dispatch = guest.u32(out + 4);
                     yield* method(dispatch, SLOT.Invoke, dispId, iid('null'), 0, DISPATCH_METHOD,
                         args, 0, 0, 0);
                     yield* release(dispatch);
@@ -594,7 +577,7 @@ export function createOrdinalFunctions(host){
             handler: ([sink, riid, connect, unknown, cookie, pointOut])=>{
                 if (wholeAddress(pointOut) !== 0)
                 {
-                    writeU32(pointOut, 0);
+                    guest.set32(pointOut, 0);
                 }
                 if (wholeAddress(unknown) === 0)
                 {
@@ -606,25 +589,25 @@ export function createOrdinalFunctions(host){
                     {
                         return status;
                     }
-                    const container = readU32(out);
+                    const container = guest.u32(out);
                     status = yield* method(container, SLOT.FindConnectionPoint, riid, out + 4);
                     yield* release(container);
                     if (status < 0)
                     {
                         return status;
                     }
-                    const point = readU32(out + 4);
+                    const point = guest.u32(out + 4);
                     status = (connect | 0) !== 0
                         ? yield* method(point, SLOT.Advise, sink, cookie)
                         : yield* method(point, SLOT.Unadvise,
-                            wholeAddress(cookie) === 0 ? 0 : readU32(cookie));
+                            wholeAddress(cookie) === 0 ? 0 : guest.u32(cookie));
                     if (status < 0 || wholeAddress(pointOut) === 0)
                     {
                         yield* release(point);
                     }
                     else
                     {
-                        writeU32(pointOut, point);
+                        guest.set32(pointOut, point);
                     }
                     return status;
                 });
@@ -672,7 +655,7 @@ export function createOrdinalFunctions(host){
                     {
                         return status;
                     }
-                    const provider = readU32(out);
+                    const provider = guest.u32(out);
                     status = yield* method(provider, SLOT.QueryService, service,
                         iid('commandTarget'), out + 4);
                     yield* release(provider);
@@ -680,7 +663,7 @@ export function createOrdinalFunctions(host){
                     {
                         return status;
                     }
-                    const target = readU32(out + 4);
+                    const target = guest.u32(out + 4);
                     status = yield* method(target, SLOT.Exec, group, command, options, input,
                         output);
                     yield* release(target);
@@ -710,7 +693,7 @@ export function createOrdinalFunctions(host){
                     {
                         return status;
                     }
-                    const provider = readU32(out);
+                    const provider = guest.u32(out);
                     status = yield* method(provider, SLOT.QueryService, iid('profferService'),
                         iid('profferService'), out + 4);
                     yield* release(provider);
@@ -718,7 +701,7 @@ export function createOrdinalFunctions(host){
                     {
                         return status;
                     }
-                    const proffer = readU32(out + 4);
+                    const proffer = guest.u32(out + 4);
                     if (wholeAddress(provided) !== 0)
                     {
                         status = yield* method(proffer, SLOT.ProfferService, service, provided,
@@ -727,10 +710,10 @@ export function createOrdinalFunctions(host){
                     else
                     {
                         status = yield* method(proffer, SLOT.RevokeService,
-                            wholeAddress(cookie) === 0 ? 0 : readU32(cookie));
+                            wholeAddress(cookie) === 0 ? 0 : guest.u32(cookie));
                         if (wholeAddress(cookie) !== 0)
                         {
-                            writeU32(cookie, 0);
+                            guest.set32(cookie, 0);
                         }
                     }
                     yield* release(proffer);
@@ -753,7 +736,7 @@ export function createOrdinalFunctions(host){
                 {
                     if (wholeAddress(clsid) !== 0)
                     {
-                        host.writeMemory(wholeAddress(clsid), new Uint8Array(16));
+                        guest.fill(clsid, 0, 16);
                     }
                     return E_FAIL;
                 }
@@ -762,7 +745,7 @@ export function createOrdinalFunctions(host){
                     {
                         if ((yield* queryInterface(unknown, iid(name), out)) >= 0)
                         {
-                            const persist = readU32(out);
+                            const persist = guest.u32(out);
                             const status = yield* method(persist, SLOT.GetClassID, clsid);
                             yield* release(persist);
                             return status;
@@ -790,19 +773,19 @@ export function createOrdinalFunctions(host){
                 }
                 return withObjects(function* (iid, out){
                     const variant = new Uint8Array(VARIANT_SIZE);
-                    variant.set(word(VT_I4), 0);
-                    host.writeMemory(out, variant);
+                    variant.set(wordBytes(VT_I4), 0);
+                    guest.setBytes(out, variant);
                     const status = yield* method(bag, SLOT.Read, name, out, 0);
                     if (status < 0)
                     {
                         return status;
                     }
-                    const type = readBytes(out, 2)[0] | readBytes(out, 2)[1] << 8;
+                    const type = guest.snapshot(out, 2)[0] | guest.snapshot(out, 2)[1] << 8;
                     if (type !== VT_I4 || (type & VT_BYREF) !== 0)
                     {
                         return DISP_E_BADVARTYPE;
                     }
-                    writeU32(value, readU32(out + 8));
+                    guest.set32(value, guest.u32(out + 8));
                     return S_OK;
                 });
             },
@@ -830,7 +813,7 @@ export function createOrdinalFunctions(host){
                         [mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0])) >>> 0;
                     if (view)
                     {
-                        host.writeMemory(view, readBytes(wholeAddress(data), size >>> 0).slice());
+                        guest.setBytes(view, guest.snapshot(wholeAddress(data), size >>> 0));
                         await kernel32('UnmapViewOfFile', [view]);
                     }
                 }
@@ -991,12 +974,12 @@ export function createOrdinalFunctions(host){
                 // Read as the arrays they are: one past what is mapped faults
                 // at once, as Windows' walk would when it got there.
                 const count = Math.max(0, length | 0);
-                const list = new DataView(readBytes(wholeAddress(keys), count * 4).slice().buffer);
+                const list = new DataView(guest.snapshot(wholeAddress(keys), count * 4).buffer);
                 for (let at = 0; at < count; at++)
                 {
                     if (list.getInt32(at * 4, true) === (key | 0))
                     {
-                        return readU32(values + at * 4) | 0;
+                        return guest.u32(values + at * 4) | 0;
                     }
                 }
                 return -1;
@@ -1018,11 +1001,11 @@ export function createOrdinalFunctions(host){
                     return 0;
                 }
                 const bytes = new Uint8Array(16);
-                bytes.set(dword(mem), FDSA.mem);
-                bytes.set(dword(blocks), FDSA.room);
+                bytes.set(dwordBytes(mem), FDSA.mem);
+                bytes.set(dwordBytes(blocks), FDSA.room);
                 bytes[FDSA.inc] = (inc & 0xff) || 1;
                 bytes[FDSA.size] = size & 0xff;
-                host.writeMemory(wholeAddress(info), bytes.subarray(0, 15));
+                guest.setBytes(info, bytes.subarray(0, 15));
                 return 1;
             },
         },
@@ -1070,22 +1053,22 @@ export function createOrdinalFunctions(host){
                     {
                         return -1;
                     }
-                    host.writeMemory(grown, readBytes(mem, state.count * state.size).slice());
+                    guest.setBytes(grown, guest.snapshot(mem, state.count * state.size));
                     if ((state.flags & FDSA_FLAG_OWN) !== 0)
                     {
                         await kernel32('LocalFree', [mem]);
                     }
                     mem = grown;
-                    writeU32(info + FDSA.mem, mem);
-                    writeU32(info + FDSA.room, room);
-                    host.writeMemory(info + FDSA.flags, Uint8Array.of(state.flags | FDSA_FLAG_OWN));
+                    guest.set32(info + FDSA.mem, mem);
+                    guest.set32(info + FDSA.room, room);
+                    guest.setBytes(info + FDSA.flags, Uint8Array.of(state.flags | FDSA_FLAG_OWN));
                 }
-                const tail = readBytes(mem + at * state.size,
-                    (state.count - at) * state.size).slice();
-                host.writeMemory(mem + (at + 1) * state.size, tail);
-                host.writeMemory(mem + at * state.size,
-                    readBytes(wholeAddress(block), state.size).slice());
-                writeU32(info + FDSA.count, state.count + 1);
+                const tail = guest.snapshot(mem + at * state.size,
+                    (state.count - at) * state.size);
+                guest.setBytes(mem + (at + 1) * state.size, tail);
+                guest.setBytes(mem + at * state.size,
+                    guest.snapshot(wholeAddress(block), state.size));
+                guest.set32(info + FDSA.count, state.count + 1);
                 return at;
             },
         },
@@ -1101,10 +1084,10 @@ export function createOrdinalFunctions(host){
                     return 0;
                 }
                 const at = wholeAddress(where);
-                const tail = readBytes(state.mem + (at + 1) * state.size,
-                    (state.count - at - 1) * state.size).slice();
-                host.writeMemory(state.mem + at * state.size, tail);
-                writeU32(info + FDSA.count, state.count - 1);
+                const tail = guest.snapshot(state.mem + (at + 1) * state.size,
+                    (state.count - at - 1) * state.size);
+                guest.setBytes(state.mem + at * state.size, tail);
+                guest.set32(info + FDSA.count, state.count - 1);
                 return 1;
             },
         },
@@ -1122,15 +1105,15 @@ export function createOrdinalFunctions(host){
             /** @param {number[]} args */
             handler: ([procedure, parent, exStyle, style, menu, extra])=>
                 scratch(64, async at=>{
-                    host.writeMemory(at + 40, encodeAnsi('WorkerA\0'));
-                    host.writeMemory(at + 48, encodeAnsi('shlwapi.dll\0'));
+                    guest.setBytes(at + 40, encodeAnsi('WorkerA\0'));
+                    guest.setBytes(at + 48, encodeAnsi('shlwapi.dll\0'));
                     const instance = await kernel32('GetModuleHandleA', [at + 48]);
                     if (!await user32('GetClassInfoA', [instance, at + 40, at]))
                     {
                         // The class's procedure is user32's own export, as the
                         // program's GetProcAddress finds it.
-                        host.writeMemory(at, encodeAnsi('user32.dll\0'));
-                        host.writeMemory(at + 16, encodeAnsi('DefWindowProcA\0'));
+                        guest.setBytes(at, encodeAnsi('user32.dll\0'));
+                        guest.setBytes(at + 16, encodeAnsi('DefWindowProcA\0'));
                         const procedureAddress = await kernel32('GetProcAddress',
                             [await kernel32('GetModuleHandleA', [at]), at + 16]);
                         const fields = new Uint8Array(40);
@@ -1141,7 +1124,7 @@ export function createOrdinalFunctions(host){
                         const cursor = await user32('LoadCursorA', [0, IDC_ARROW]);
                         view.setUint32(24, cursor >>> 0, true);
                         view.setUint32(36, at + 40, true);
-                        host.writeMemory(at, fields);
+                        guest.setBytes(at, fields);
                         if (!procedureAddress)
                         {
                             return 0;
@@ -1168,12 +1151,12 @@ export function createOrdinalFunctions(host){
             /** @param {number[]} args */
             handler: ([text, guid])=>{
                 const bytes = wholeAddress(text) === 0 ? null
-                    : parseGuid(host.readCString(wholeAddress(text), 64));
+                    : parseGuid(guest.cstr(text, 64));
                 if (bytes === null || wholeAddress(guid) === 0)
                 {
                     return 0;
                 }
-                host.writeMemory(wholeAddress(guid), bytes);
+                guest.setBytes(guid, bytes);
                 return 1;
             },
         },
@@ -1183,13 +1166,13 @@ export function createOrdinalFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([text, guid])=>{
-                const bytes = wholeAddress(text) === 0 || !host.readWideString ? null
-                    : parseGuid(host.readWideString(wholeAddress(text), 64 * 2));
+                const bytes = wholeAddress(text) === 0 ? null
+                    : parseGuid(guest.wstr(text, 64 * 2));
                 if (bytes === null || wholeAddress(guid) === 0)
                 {
                     return 0;
                 }
-                host.writeMemory(wholeAddress(guid), bytes);
+                guest.setBytes(guid, bytes);
                 return 1;
             },
         },
@@ -1218,19 +1201,19 @@ export function createOrdinalFunctions(host){
                 {
                     const type = rest[next++] & 0xffff;
                     const variant = new Uint8Array(VARIANT_SIZE);
-                    variant.set(word(type === VT_EMPTY ? VT_I4 : type), 0);
-                    variant.set(dword(rest[next++] ?? 0), 8);
+                    variant.set(wordBytes(type === VT_EMPTY ? VT_I4 : type), 0);
+                    variant.set(dwordBytes(rest[next++] ?? 0), 8);
                     if (WIDE_VARIANTS.has(type))
                     {
-                        variant.set(dword(rest[next++] ?? 0), 12);
+                        variant.set(dwordBytes(rest[next++] ?? 0), 12);
                     }
-                    host.writeMemory(wholeAddress(variants) + (total - 1 - at) * VARIANT_SIZE,
+                    guest.setBytes(variants + (total - 1 - at) * VARIANT_SIZE,
                         variant.subarray(0, WIDE_VARIANTS.has(type) ? 16 : 12));
                 }
                 const head = new Uint8Array(16);
-                head.set(dword(total ? variants : 0), 0);
-                head.set(dword(total), 8);
-                host.writeMemory(wholeAddress(params), head);
+                head.set(dwordBytes(total ? variants : 0), 0);
+                head.set(dwordBytes(total), 8);
+                guest.setBytes(params, head);
                 return S_OK;
             },
         },
@@ -1253,7 +1236,7 @@ export function createOrdinalFunctions(host){
                 }
                 return scratch(2, async empty=>{
                     await kernel32('GetPrivateProfileStringW', [app, key, empty, out, room, file]);
-                    return (wideAt(out) ?? '').length;
+                    return (guest.optionalText(out, true, 0x10000) ?? '').length;
                 });
             },
         },
@@ -1287,21 +1270,21 @@ export function createOrdinalFunctions(host){
                 {
                     return 0;
                 }
-                const name = formatGuid(readBytes(wholeAddress(clsid), 16));
+                const name = guest.guid(clsid);
                 const path = encodeAnsi(`${COMPAT_OBJECTS}\\${name}\0`);
                 return scratch(path.length + 80, async at=>{
-                    host.writeMemory(at + 80, path);
+                    guest.setBytes(at + 80, path);
                     if (await advapi32('RegOpenKeyExA',
                         [HKEY_LOCAL_MACHINE, at + 80, 0, KEY_READ, at])
                         !== ERROR_SUCCESS)
                     {
                         return 0;
                     }
-                    const key = readU32(at);
+                    const key = guest.u32(at);
                     let flags = 0;
                     for (let index = 0; ; index++)
                     {
-                        writeU32(at + 4, 64);
+                        guest.set32(at + 4, 64);
                         if (await advapi32('RegEnumValueA',
                             [key, index, at + 8, at + 4, 0, 0, 0, 0])
                             !== ERROR_SUCCESS)
@@ -1309,7 +1292,7 @@ export function createOrdinalFunctions(host){
                             break;
                         }
                         flags |= COMPAT_FLAGS[/** @type {keyof typeof COMPAT_FLAGS} */ (
-                            host.readCString(at + 8, 64))] ?? 0;
+                            guest.cstr(at + 8, 64))] ?? 0;
                     }
                     await advapi32('RegCloseKey', [key]);
                     return flags >>> 0;
@@ -1413,7 +1396,7 @@ export function createOrdinalFunctions(host){
                         {
                             return fromWin32(status);
                         }
-                        const length = readU32(size);
+                        const length = guest.u32(size);
                         const block = (await kernel32('LocalAlloc',
                             [LMEM_ZEROINIT, length + 2])) >>> 0;
                         if (!block)
@@ -1427,10 +1410,10 @@ export function createOrdinalFunctions(host){
                             await kernel32('LocalFree', [block]);
                             return fromWin32(status);
                         }
-                        writeU32(dataOut, block);
+                        guest.set32(dataOut, block);
                         if (wholeAddress(count) !== 0)
                         {
-                            writeU32(count, readU32(size));
+                            guest.set32(count, guest.u32(size));
                         }
                         return S_OK;
                     });

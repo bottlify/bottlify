@@ -761,6 +761,15 @@ test('PathGetCharType classes each character; PathParseIconLocation splits off t
     }
 });
 
+test('in a 64-bit process PathFindSuffixArray reads its array of pointers at eight', ()=>{
+    const m = shlwapiMachine({ pointerSize: 8 });
+    const list = m.put('', false, 16);
+    const suffix = m.put('.TXT');
+    m.base.guest.setPtr(list, m.put('.doc'));
+    m.base.guest.setPtr(list + 8, suffix);
+    assert.equal(m.fns.PathFindSuffixArrayA.handler([m.put('notes.txt'), list, 2]), suffix);
+});
+
 test('PathFindSuffixArray, PathMatchSpecEx and the URL slash helpers', ()=>{
     const m = shlwapiMachine();
     const list = m.put('', false, 16);

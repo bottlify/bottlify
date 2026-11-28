@@ -5063,7 +5063,7 @@ export function createWin32Module(){
                 }),
 
                 'SHLWAPI.dll': ()=>({ ...createShlwapiFunctions({
-                    readCString, readWideString, readMemory, writeMemory, pointerSize,
+                    guest,
                     // The COM helpers call methods of the program's own objects.
                     drive: steps=>bridge.drive(steps),
                     // SHCreateStreamOnFile's streams are objects of shlwapi's own.
@@ -5120,7 +5120,7 @@ export function createWin32Module(){
                 }),
                 // The helpers over the program's own objects call their methods.
                 ...createUnknownFunctions({
-                    readMemory, writeMemory,
+                    guest,
                     /** @param {number} bytes */
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */

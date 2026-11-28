@@ -669,48 +669,6 @@
    "accessor dword": 1,
    "copy readMemory().slice()": 2
   },
-  "win32/shlwapi/characters.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/shlwapi/datablocks.js": {
-   "accessor readU32": 1,
-   "accessor u32": 1,
-   "copy readMemory().slice()": 1
-  },
-  "win32/shlwapi/functions.js": {
-   "accessor writeWord": 1,
-   "copy readMemory().slice()": 3
-  },
-  "win32/shlwapi/ordinals.js": {
-   "accessor readBytes": 1,
-   "accessor readU32": 1,
-   "accessor word": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 6,
-   "string wideAt": 1
-  },
-  "win32/shlwapi/registry.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/shlwapi/stream.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
-  "win32/shlwapi/strings.js": {
-   "copy readMemory().slice()": 1,
-   "string readString": 1,
-   "string readWideString": 1
-  },
-  "win32/shlwapi/text.js": {
-   "accessor dword": 1,
-   "accessor u32": 1
-  },
-  "win32/shlwapi/unknown.js": {
-   "accessor dword": 1,
-   "accessor readLong": 1,
-   "accessor u32": 1,
-   "copy readMemory().slice()": 2
-  },
   "win32/steamclient/functions.js": {
    "accessor dword": 1,
    "accessor writeDword": 1,
