@@ -39,9 +39,10 @@ test('a run answers its cache\'s figures, with the budget it was given and what 
         {
             assert.equal(typeof figures[name], 'number', name);
         }
-        // The sound output's table, a segment of its own, beside the shared one.
-        assert.ok(figures.peakSegmentBytes >= (16 << 20) + TABLE_BYTES,
-            `${figures.peakSegmentBytes}`);
+        // The sound output's table, a segment of its own, beside the shared
+        // one, which the budget counts only as far as its blocks reach.
+        assert.ok(figures.peakSegmentBytes > TABLE_BYTES
+            && figures.peakSegmentBytes <= (16 << 20) + TABLE_BYTES, `${figures.peakSegmentBytes}`);
 
         // Room for the sound table beside the shared segment, and little more.
         const smaller = await createApp({ executable: exitAtOnce(), cache: { budget: 48 << 20 } });
