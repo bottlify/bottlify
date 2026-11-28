@@ -5,6 +5,7 @@
  */
 
 import { test } from 'node:test';
+import { guestOver } from '../common/guest.fixture.js';
 import assert from 'node:assert/strict';
 import {
     REGCLS_MULTIPLEUSE, REGCLS_SUSPENDED, createClassTable, createRemoting,
@@ -135,8 +136,7 @@ function channel({ exporter, worker = true, window = false, modalPump, windowsFo
     const remoting = createRemoting({
         table,
         process: 'server',
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         heap: { allocate: size=>{
             const at = next;
             next += (size + 7) & ~7;

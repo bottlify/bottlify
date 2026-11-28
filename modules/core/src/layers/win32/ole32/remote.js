@@ -52,8 +52,7 @@ import {
     createInterfaceCatalog, layoutOf, marshalReply, marshalRequest, unmarshalReply,
     unmarshalRequest, unsupportedAt,
 } from '../oleaut32/marshal.js';
-import { pointerIo, wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 /**
@@ -527,8 +526,7 @@ export function createClassTable(hooks = {}){
  * @typedef {Object} RemotingHost
  * @property {ReturnType<typeof createClassTable>} table
  * @property {unknown} process   Whatever names this process to the table's hooks.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its interface pointers, vtable
  *     slots, out-parameters and structures are quadwords.
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
@@ -582,15 +580,8 @@ export function createClassTable(hooks = {}){
  */
 export function createRemoting(host){
     const report = (/** @type {string} */ detail)=>host.divergence?.('COM', detail);
+    const { guest } = host;
 
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), Uint8Array.of(
-        value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
 
     /**
      * The process's width: every interface pointer, vtable slot, out-pointer
@@ -601,15 +592,11 @@ export function createRemoting(host){
     const POINTER = width.pointer;
     const MESSAGE = MESSAGES[POINTER];
     const catalog = createInterfaceCatalog({ ...host.catalog, pointerSize: POINTER });
-    const { read: readPointer, write: writePointer } = pointerIo({
-        readMemory: (address, length)=>host.readMemory(wholeAddress(address), length),
-        writeMemory: (address, bytes)=>host.writeMemory(wholeAddress(address), bytes),
-    }, POINTER);
     /** An argument to a guest call: a pointer past 4 GiB goes whole. @param {number | bigint} value */
     const guestValue = value=>(typeof value === 'number' && value >= 2 ** 32 ? BigInt(value)
         : value);
     /** @param {number} pointer @param {number} slot */
-    const methodAt = (pointer, slot)=>readPointer(readPointer(pointer) + slot * POINTER);
+    const methodAt = (pointer, slot)=>guest.ptr(guest.ptr(pointer) + slot * POINTER);
 
     /**
      * A method of a guest object, called on the thread whose host call is
@@ -640,11 +627,11 @@ export function createRemoting(host){
         {
             return { hr: E_OUTOFMEMORY, pointer: 0 };
         }
-        writePointer(block, 0);
-        host.writeMemory(block + POINTER, /** @type {Uint8Array} */ (parseGuid(iid)));
+        guest.setPtr(block, 0);
+        guest.setGuid(block + POINTER, iid);
         const hr = (await callSlot(pointer, SLOT_QUERY_INTERFACE, [block + POINTER, block],
             thread)) | 0;
-        const found = readPointer(block);
+        const found = guest.ptr(block);
         host.heap.free(block);
         return { hr, pointer: hr < 0 ? 0 : found };
     };
@@ -913,13 +900,8 @@ export function createRemoting(host){
         {
             return null;
         }
-        const length = Math.min(readU32(bstr - 4), 1 << 20);
-        const bytes = host.readMemory(bstr, length);
-        let text = '';
-        for (let at = 0; at + 1 < bytes.length; at += 2)
-        {
-            text += String.fromCharCode(bytes[at] | (bytes[at + 1] << 8));
-        }
+        const length = Math.min(guest.u32(bstr - 4), 1 << 20);
+        const text = guest.text(bstr, true, length & ~1, true);
         host.bstr.free(bstr);
         return text;
     };
@@ -946,21 +928,21 @@ export function createRemoting(host){
             await callSlot(pointer, SLOT_RELEASE, [], thread);
             return null;
         }
-        host.writeMemory(block, new Uint8Array(GUID_BYTES + POINTER));
+        guest.setBytes(block, new Uint8Array(GUID_BYTES + POINTER));
         await callSlot(pointer, SLOT_ERROR_GET_GUID, [block], thread);
-        const guid = formatGuid(host.readMemory(block, GUID_BYTES).slice());
+        const guid = formatGuid(guest.snapshot(block, GUID_BYTES));
         /** @param {number} slot */
         const text = async slot=>{
-            writePointer(block + GUID_BYTES, 0);
+            guest.setPtr(block + GUID_BYTES, 0);
             const hr = (await callSlot(pointer, slot, [block + GUID_BYTES], thread)) | 0;
-            return hr < 0 ? null : takeBstr(readPointer(block + GUID_BYTES));
+            return hr < 0 ? null : takeBstr(guest.ptr(block + GUID_BYTES));
         };
         const source = await text(SLOT_ERROR_GET_SOURCE);
         const description = await text(SLOT_ERROR_GET_DESCRIPTION);
         const helpFile = await text(SLOT_ERROR_GET_HELP_FILE);
-        writeU32(block + GUID_BYTES, 0);
+        guest.set32(block + GUID_BYTES, 0);
         await callSlot(pointer, SLOT_ERROR_GET_HELP_CONTEXT, [block + GUID_BYTES], thread);
-        const helpContext = readU32(block + GUID_BYTES);
+        const helpContext = guest.u32(block + GUID_BYTES);
         host.heap.free(block);
         await callSlot(pointer, SLOT_RELEASE, [], thread);
         return { guid, source, description, helpFile, helpContext };
@@ -988,22 +970,21 @@ export function createRemoting(host){
         {
             return;
         }
-        writePointer(block, 0);
-        if ((host.errors.create(block) | 0) < 0 || readPointer(block) === 0)
+        guest.setPtr(block, 0);
+        if ((host.errors.create(block) | 0) < 0 || guest.ptr(block) === 0)
         {
             host.heap.free(block);
             return;
         }
-        const creator = readPointer(block);
-        host.writeMemory(block + POINTER, /** @type {Uint8Array} */ (parseGuid(values.guid)));
+        const creator = guest.ptr(block);
+        guest.setGuid(block + POINTER, values.guid);
         await callSlot(creator, SLOT_ERROR_SET_GUID, [block + POINTER], thread);
         let at = block + POINTER + GUID_BYTES;
         for (const [index, value] of strings.entries())
         {
-            const bytes = utf16z(value);
-            host.writeMemory(at, bytes);
+            const written = guest.writeWide(at, value);
             await callSlot(creator, SLOT_ERROR_SET_SOURCE + index, [at], thread);
-            at += bytes.length;
+            at += (written + 1) * 2;
         }
         await callSlot(creator, SLOT_ERROR_SET_HELP_CONTEXT, [values.helpContext >>> 0], thread);
         const asked = await queryGuest(creator, IID_IERRORINFO, thread);
@@ -1122,8 +1103,8 @@ export function createRemoting(host){
      */
     const sideOn = thread=>({
         pointerSize: POINTER,
-        readMemory: host.readMemory,
-        writeMemory: host.writeMemory,
+        readMemory: guest.snapshot,
+        writeMemory: guest.setBytes,
         allocate: bytes=>host.heap.allocate(bytes),
         free: address=>{
             host.heap.free(address);
@@ -1371,13 +1352,13 @@ export function createRemoting(host){
             return false;
         }
         proxyAt.set(outer, proxy);
-        writePointer(block, 0);
-        writePointer(block + POINTER, 0);
-        host.writeMemory(block + 2 * POINTER, /** @type {Uint8Array} */ (parseGuid(iid)));
+        guest.setPtr(block, 0);
+        guest.setPtr(block + POINTER, 0);
+        guest.setGuid(block + 2 * POINTER, iid);
         const hr = (await callSlot(factory, SLOT_CREATE_PROXY,
             [outer, block + 2 * POINTER, block, block + POINTER], thread)) | 0;
-        const buffer = readPointer(block);
-        const pointer = readPointer(block + POINTER);
+        const buffer = guest.ptr(block);
+        const pointer = guest.ptr(block + POINTER);
         host.heap.free(block);
         if (hr < 0 || buffer === 0 || pointer === 0)
         {
@@ -1430,14 +1411,14 @@ export function createRemoting(host){
             addresses: [1, 2],
             /** HRESULT GetBuffer(RPCOLEMESSAGE *pMessage, REFIID riid) */
             invoke: (/** @type {any} */ _channel, /** @type {number[]} */ [message])=>{
-                const buffer = host.heap.allocate(Math.max(readU32(message + MESSAGE.BUFFER_LENGTH),
-                    8));
+                const buffer = host.heap.allocate(
+                    Math.max(guest.u32(message + MESSAGE.BUFFER_LENGTH), 8));
                 if (buffer === 0)
                 {
                     return E_OUTOFMEMORY;
                 }
-                writePointer(message + MESSAGE.BUFFER, buffer);
-                writeU32(message + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
+                guest.setPtr(message + MESSAGE.BUFFER, buffer);
+                guest.set32(message + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
                 return S_OK;
             },
         },
@@ -1457,11 +1438,11 @@ export function createRemoting(host){
             addresses: [1],
             /** HRESULT FreeBuffer(RPCOLEMESSAGE *pMessage) */
             invoke: (/** @type {any} */ _channel, /** @type {number[]} */ [message])=>{
-                const buffer = readPointer(message + MESSAGE.BUFFER);
+                const buffer = guest.ptr(message + MESSAGE.BUFFER);
                 if (buffer !== 0)
                 {
                     host.heap.free(buffer);
-                    writePointer(message + MESSAGE.BUFFER, 0);
+                    guest.setPtr(message + MESSAGE.BUFFER, 0);
                 }
                 return S_OK;
             },
@@ -1474,11 +1455,11 @@ export function createRemoting(host){
             invoke: (/** @type {any} */ _channel, /** @type {number[]} */ [context, pointer])=>{
                 if (wholeAddress(context) !== 0)
                 {
-                    writeU32(context, MSHCTX_LOCAL);
+                    guest.set32(context, MSHCTX_LOCAL);
                 }
                 if (wholeAddress(pointer) !== 0)
                 {
-                    writePointer(pointer, 0);
+                    guest.setPtr(pointer, 0);
                 }
                 return S_OK;
             },
@@ -1534,10 +1515,10 @@ export function createRemoting(host){
         {
             return RPC_E_DISCONNECTED;
         }
-        const request = readPointer(message + MESSAGE.BUFFER);
-        const bytes = host.readMemory(request, readU32(message + MESSAGE.BUFFER_LENGTH)).slice();
+        const request = guest.ptr(message + MESSAGE.BUFFER);
+        const bytes = guest.snapshot(request, guest.u32(message + MESSAGE.BUFFER_LENGTH));
         const reply = await outgoing(thread, proxy.endpoint, { kind: 'ndr', object: proxy.object,
-            iid, method: readU32(message + MESSAGE.METHOD), bytes });
+            iid, method: guest.u32(message + MESSAGE.METHOD), bytes });
         if (reply.disconnected)
         {
             return RPC_E_DISCONNECTED;
@@ -1553,14 +1534,14 @@ export function createRemoting(host){
         {
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(buffer, answer);
+        guest.setBytes(buffer, answer);
         host.heap.free(request);
-        writePointer(message + MESSAGE.BUFFER, buffer);
-        writeU32(message + MESSAGE.BUFFER_LENGTH, answer.length);
-        writeU32(message + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
+        guest.setPtr(message + MESSAGE.BUFFER, buffer);
+        guest.set32(message + MESSAGE.BUFFER_LENGTH, answer.length);
+        guest.set32(message + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
         if (status !== 0)
         {
-            writeU32(status, 0);
+            guest.set32(status, 0);
         }
         return S_OK;
     };
@@ -1586,11 +1567,11 @@ export function createRemoting(host){
         {
             return 0;
         }
-        writePointer(block, 0);
-        host.writeMemory(block + POINTER, /** @type {Uint8Array} */ (parseGuid(iid)));
+        guest.setPtr(block, 0);
+        guest.setGuid(block + POINTER, iid);
         const hr = (await callSlot(factory, SLOT_CREATE_STUB,
             [block + POINTER, entry.unknown, block], thread)) | 0;
-        const stub = readPointer(block);
+        const stub = guest.ptr(block);
         host.heap.free(block);
         if (hr < 0 || stub === 0)
         {
@@ -1623,18 +1604,18 @@ export function createRemoting(host){
         {
             return { hr: E_OUTOFMEMORY };
         }
-        host.writeMemory(rpc, new Uint8Array(MESSAGE.SIZE));
-        host.writeMemory(request, bytes);
-        writeU32(rpc + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
-        writePointer(rpc + MESSAGE.BUFFER, request);
-        writeU32(rpc + MESSAGE.BUFFER_LENGTH, bytes.length);
-        writeU32(rpc + MESSAGE.METHOD, message.method);
+        guest.setBytes(rpc, new Uint8Array(MESSAGE.SIZE));
+        guest.setBytes(request, bytes);
+        guest.set32(rpc + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
+        guest.setPtr(rpc + MESSAGE.BUFFER, request);
+        guest.set32(rpc + MESSAGE.BUFFER_LENGTH, bytes.length);
+        guest.set32(rpc + MESSAGE.METHOD, message.method);
         const hr = (await callGuarded(stub, SLOT_INVOKE, [rpc, stubChannel.pointer], thread)) | 0;
         // The request stays until the stub is done: what it unmarshaled in
         // place is read from there while the method runs.
-        const replied = readPointer(rpc + MESSAGE.BUFFER);
+        const replied = guest.ptr(rpc + MESSAGE.BUFFER);
         const reply = replied !== request && replied !== 0
-            ? host.readMemory(replied, readU32(rpc + MESSAGE.BUFFER_LENGTH)).slice()
+            ? guest.snapshot(replied, guest.u32(rpc + MESSAGE.BUFFER_LENGTH))
             : new Uint8Array(0);
         if (replied !== request && replied !== 0)
         {
@@ -1743,8 +1724,8 @@ export function createRemoting(host){
         {
             return E_POINTER;
         }
-        writePointer(out, 0);
-        const iid = formatGuid(host.readMemory(riid, 16));
+        guest.setPtr(out, 0);
+        const iid = guest.guid(riid);
         if (!proxy.records.has(iid) && !proxy.midl.has(iid))
         {
             const reply = await outgoing(thread, proxy.endpoint,
@@ -1765,7 +1746,7 @@ export function createRemoting(host){
         }
         proxyAt.set(pointer, proxy);
         proxy.local++;
-        writePointer(out, pointer);
+        guest.setPtr(out, pointer);
         return S_OK;
     };
 
@@ -1938,12 +1919,11 @@ export function createRemoting(host){
                     return { hr: factory.hr };
                 }
                 const block = host.heap.allocate(POINTER + GUID_BYTES);
-                writePointer(block, 0);
-                host.writeMemory(block + POINTER,
-                    /** @type {Uint8Array} */ (parseGuid(message.iid)));
+                guest.setPtr(block, 0);
+                guest.setGuid(block + POINTER, message.iid);
                 const hr = (await callGuarded(factory.pointer, SLOT_CREATE_INSTANCE,
                     [0, block + POINTER, block], thread)) | 0;
-                const made = readPointer(block);
+                const made = guest.ptr(block);
                 host.heap.free(block);
                 await callSlot(factory.pointer, SLOT_RELEASE, [], thread);
                 if (hr < 0 || made === 0)
@@ -2209,7 +2189,7 @@ export function createRemoting(host){
             {
                 return E_NOINTERFACE;
             }
-            writePointer(out, pointer);
+            guest.setPtr(out, pointer);
             return S_OK;
         },
 

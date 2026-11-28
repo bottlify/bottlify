@@ -788,10 +788,7 @@
    "accessor writeU32": 1
   },
   "win32/ole32/functions.js": {
-   "accessor readU32": 1,
-   "accessor writePointer": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 6
+   "copy readMemory().slice()": 1
   },
   "win32/ole32/mmdevapi.js": {
    "accessor writeU32": 1,
@@ -834,11 +831,6 @@
    "accessor put32": 1,
    "accessor readU16": 1,
    "accessor readU32": 1,
-   "copy readMemory().slice()": 3
-  },
-  "win32/ole32/remote.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
    "copy readMemory().slice()": 3
   },
   "win32/ole32/storage.js": {

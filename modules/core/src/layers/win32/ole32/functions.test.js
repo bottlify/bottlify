@@ -218,6 +218,8 @@ function fakeHost(){
 function setup({ interfaces = [IID_TEST], taskAllocator = true, pointerSize = 4 } = {}){
     const host = fakeHost();
     /** @type {any} */ (host).pointerSize = pointerSize;
+    // The guest's memory at the process's width, as win32 hands it.
+    host.guest = guestOver(host.bytes, pointerSize);
     if (taskAllocator)
     {
         host.taskAllocator = createTaskAllocator({
