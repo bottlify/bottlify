@@ -586,6 +586,15 @@
    "tests": []
   },
   {
+   "path": "tools/checks/check-required-calls.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "No layer calls a method of a layer it requires as if it might be missing",
+   "command": "node tools/checks/check-required-calls.mjs",
+   "tests": []
+  },
+  {
    "path": "tools/checks/check-emit-options.mjs",
    "category": "checks",
    "kind": "check",
