@@ -17,7 +17,6 @@
 import { TB_ADDBITMAP, TB_ADDBUTTONSA, TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE,
     TOOLBAR_CLASS } from './toolbar.js';
 import { createRefusals } from '../common/refusal.js';
-import { encodeAnsi } from '../kernel32/locale.js';
 import { after } from '../user32/controls.js';
 import { wholeAddress } from '../common/pointers.js';
 
@@ -54,8 +53,7 @@ const MAX_MAP = 0x100;
 
 /**
  * @typedef {Object} HelperHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [user32]
  * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [gdi32]
  * @property {(bytes: number) => number} [allocate]
@@ -65,13 +63,11 @@ const MAX_MAP = 0x100;
  *           pace; the wall clock when absent.
  */
 
-/** @param {Uint8Array} bytes @param {number} at */
-const i32 = (bytes, at)=>bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24;
-
 /**
  * @param {HelperHost} host
  */
 export function createHelperFunctions(host){
+    const { guest } = host;
     const refuse = createRefusals(host);
 
     /**
@@ -142,9 +138,10 @@ export function createHelperFunctions(host){
                         'no window manager to make a toolbar with');
                     return 0;
                 }
-                const name = encodeAnsi(`${TOOLBAR_CLASS}\0`);
-                return withBlock(name.length + 8, block=>{
-                    host.writeMemory(block, name);
+                // The class's name, and a TBADDBITMAP after it.
+                const name = TOOLBAR_CLASS.length + 1;
+                return withBlock(name + 8, block=>{
+                    guest.writeAnsi(block, TOOLBAR_CLASS);
                     const made = api('user32', 'CreateWindowExA', [0, block, 0,
                         (style | WS_CHILD) >>> 0, 0, 0, 100, 30, parent, id, 0, 0]);
                     return after(made, (/** @type {number} */ hwnd)=>{
@@ -155,10 +152,7 @@ export function createHelperFunctions(host){
                         /** @param {number} message @param {number} wParam @param {number} lParam */
                         const send = (message, wParam, lParam)=>()=>api('user32', 'SendMessageA',
                             [hwnd, message, wParam, lParam]);
-                        const table = new Uint8Array(8);
-                        new DataView(table.buffer).setUint32(0, wholeAddress(instance), true);
-                        new DataView(table.buffer).setUint32(4, bitmapId >>> 0, true);
-                        host.writeMemory(block + name.length, table);
+                        guest.set32s(block + name, [instance, bitmapId]);
                         const steps = [send(TB_BUTTONSTRUCTSIZE, structSize >>> 0, 0)];
                         // Each pair is used when neither side is zero, -1 a
                         // side left as it is; the buttons' pair sizes the
@@ -175,7 +169,7 @@ export function createHelperFunctions(host){
                         }
                         if ((bitmaps | 0) > 0)
                         {
-                            steps.push(send(TB_ADDBITMAP, bitmaps | 0, block + name.length));
+                            steps.push(send(TB_ADDBITMAP, bitmaps | 0, block + name));
                         }
                         if ((count | 0) > 0 && wholeAddress(buttons) !== 0)
                         {
@@ -211,8 +205,8 @@ export function createHelperFunctions(host){
                 /** @type {[number, number][]} */
                 const pairs = wholeAddress(map) !== 0 && (entries | 0) > 0
                     ? Array.from({ length: Math.min(entries | 0, MAX_MAP) }, (_, at)=>{
-                        const pair = host.readMemory(wholeAddress(map) + at * 8, 8);
-                        return [i32(pair, 0) & 0xffffff, i32(pair, 4) & 0xffffff];
+                        return [guest.u32(map + at * 8) & 0xffffff,
+                            guest.u32(map + at * 8 + 4) & 0xffffff];
                     })
                     : DEFAULT_MAP.map(([from, index])=>[from,
                         (api('user32', 'GetSysColor', [index]) ?? from) & 0xffffff]);
@@ -227,9 +221,10 @@ export function createHelperFunctions(host){
                     {
                         return bitmap;
                     }
-                    const header = host.readMemory(info, 24);
-                    const depth = header[18] | header[19] << 8;
-                    const size = i32(header, 12) * Math.abs(i32(header, 8));
+                    const depth = guest.u16(info + 18);
+                    const rowBytes = guest.i32(info + 12);
+                    const across = guest.i32(info + 4);
+                    const size = rowBytes * Math.abs(guest.i32(info + 8));
                     if (depth !== 32 && depth !== 24)
                     {
                         host.divergence?.('CreateMappedBitmap',
@@ -238,10 +233,8 @@ export function createHelperFunctions(host){
                     }
                     return withBlock(size, bits=>{
                         api('gdi32', 'GetBitmapBits', [bitmap, size, bits]);
-                        const pixels = host.readMemory(bits, size).slice();
+                        const pixels = guest.snapshot(bits, size);
                         const step = depth >>> 3;
-                        const rowBytes = i32(header, 12);
-                        const across = i32(header, 4);
                         for (let row = 0; row + rowBytes <= pixels.length; row += rowBytes)
                         {
                             for (let at = row; at < row + across * step; at += step)
@@ -256,7 +249,7 @@ export function createHelperFunctions(host){
                                 }
                             }
                         }
-                        host.writeMemory(bits, pixels);
+                        guest.setBytes(bits, pixels);
                         api('gdi32', 'SetBitmapBits', [bitmap, size, bits]);
                         return bitmap;
                     }, bitmap);
@@ -296,16 +289,14 @@ export function createHelperFunctions(host){
                 const send = (message, wParam, lParam)=>api('user32', 'SendMessageA',
                     [list, message, wParam, lParam]);
                 const answer = withBlock(32, block=>{
-                    host.writeMemory(block, Uint8Array.from([...new Uint8Array(new Int32Array(
-                        [x | 0, y | 0]).buffer)]));
+                    guest.set32s(block, [x, y]);
                     if (!api('user32', 'ScreenToClient', [list, block])
                         || !api('user32', 'GetClientRect', [list, block + 8]))
                     {
                         return -1;
                     }
-                    const read = host.readMemory(block, 24);
-                    const [px, py] = [i32(read, 0), i32(read, 4)];
-                    const [left, top, right, bottom] = [8, 12, 16, 20].map(at=>i32(read, at));
+                    const [px, py, left, top, right, bottom] = [0, 4, 8, 12, 16, 20]
+                        .map(at=>guest.i32(block + at));
                     const first = (send(LB_GETTOPINDEX, 0, 0) ?? 0) | 0;
                     const count = (send(LB_GETCOUNT, 0, 0) ?? 0) | 0;
                     if (px < left || px >= right || py < top || py >= bottom)
@@ -329,13 +320,13 @@ export function createHelperFunctions(host){
                         {
                             return -1;
                         }
-                        const item = host.readMemory(block + 8, 16);
-                        const [itemTop, itemBottom] = [i32(item, 4), i32(item, 12)];
+                        const [itemLeft, itemTop, itemRight, itemBottom] = [8, 12, 16, 20]
+                            .map(at=>guest.i32(block + at));
                         if (itemTop > bottom)
                         {
                             return -1;
                         }
-                        if (px >= i32(item, 0) && px < i32(item, 8) && py >= itemTop
+                        if (px >= itemLeft && px < itemRight && py >= itemTop
                             && py < itemBottom)
                         {
                             return index;

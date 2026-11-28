@@ -44,7 +44,11 @@ const OUT = 0x400;
 /** ILHEAD as Wine's tests declare it, packed to two bytes. */
 const ILHEAD_SIZE = 28;
 
-function machine(){
+/**
+ * @param {4 | 8} [pointerSize]  the width the library and the stream's
+ *     vtable are laid out at
+ */
+function machine(pointerSize = 4){
     const bytes = new Uint8Array(0x200000);
     const view = new DataView(bytes.buffer);
     let next = 0x10000;
@@ -57,12 +61,9 @@ function machine(){
     /** @type {number[]} */
     const released = [];
     let handle = 4;
-    const readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>
-        bytes.slice(address, address + length);
-    const writeMemory = (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
-        bytes.set(data, address);
+    const guest = guestOver(bytes);
     const gdi = createGdiFunctions({
-        guest: guestOver(bytes),
+        guest,
         handles: { open: ()=>(handle += 4), close: ()=>undefined },
         surfaces: { allocate, free: ()=>undefined },
         graphics: {
@@ -80,9 +81,10 @@ function machine(){
      */
     /** @type {{ data: Uint8Array, at: number, writes: number, failWrite: boolean }} */
     const stream = { data: new Uint8Array(0), at: 0, writes: 0, failWrite: false };
-    view.setUint32(STREAM, VTABLE, true);
-    view.setUint32(VTABLE + 3 * 4, READ_ENTRY, true);
-    view.setUint32(VTABLE + 4 * 4, WRITE_ENTRY, true);
+    const wide = guestOver(bytes, pointerSize);
+    wide.setPtr(STREAM, VTABLE);
+    wide.setPtr(VTABLE + 3 * pointerSize, READ_ENTRY);
+    wide.setPtr(VTABLE + 4 * pointerSize, WRITE_ENTRY);
     /** @type {unknown[]} */
     const threads = [];
     /** @param {number} entry @param {number[]} args @param {unknown} thread */
@@ -119,12 +121,12 @@ function machine(){
         return Promise.resolve(0);
     };
     const lists = createImageLists({
-        readMemory, writeMemory,
+        guest,
         gdi32: name=>gdi32[name],
         bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
     });
     const comctl = createComctlFunctions({
-        readMemory, writeMemory, imageLists: lists,
+        guest: wide, imageLists: lists,
         allocate,
         release: address=>released.push(address),
         call: (entry, args, thread)=>call(entry, /** @type {number[]} */ (args), thread),
@@ -273,6 +275,13 @@ test('ImageList_Write writes the header and the bitmaps Windows writes', async()
     assert.equal(m.stream.writes, 2, 'the header, then the image');
     assert.ok(m.threads.every(thread=>thread === 'caller'), 'on the caller\'s thread');
     assert.ok(m.released.length > 0, 'the guest memory it lent is given back');
+});
+
+test('a 64-bit stream\'s methods are found in its vtable of pointers', async()=>{
+    const m = machine(8);
+    const list = m.fns.ImageList_Create.handler([4, 4, ILC_COLOR24, 1, 1]);
+    assert.equal(await m.write(list), 1);
+    assert.equal(m.stream.writes, 2, 'the header, then the image, through IStream::Write');
 });
 
 test('the room a list has grows, shrinks and is written as Windows keeps it', async()=>{
@@ -483,8 +492,7 @@ test('a host with no guest calls cannot use a stream, and says so', async()=>{
     const said = [];
     const memory = new Uint8Array(0x100);
     const fns = /** @type {any} */ (createComctlFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, data)=>memory.set(data, address),
+        guest: guestOver(memory),
         divergence: api=>said.push(api),
     }));
     const list = fns.ImageList_Create.handler([2, 1, ILC_COLOR32, 0, 1]);

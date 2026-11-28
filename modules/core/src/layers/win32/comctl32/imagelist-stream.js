@@ -63,10 +63,6 @@ const ILC_MASK = 0x0001;
 const SLOT_STREAM_READ = 3;
 const SLOT_STREAM_WRITE = 4;
 
-/** @param {Uint8Array} bytes @param {number} [at] */
-const u32 = (bytes, at = 0)=>(bytes[at] | bytes[at + 1] << 8
-    | bytes[at + 2] << 16 | bytes[at + 3] << 24) >>> 0;
-
 /** @param {Uint8Array} bytes */
 const viewOf = bytes=>new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
@@ -116,6 +112,7 @@ const bitmapFile = dib=>{
  * @param {ReturnType<typeof import('./imagelist.js').createImageLists>} lists
  */
 function createImageListStreams(host, lists){
+    const { guest } = host;
     /**
      * Whether everything a stream is used through is here: guest memory to
      * hold its bytes, and a way to call its methods.
@@ -123,7 +120,7 @@ function createImageListStreams(host, lists){
      * @param {string} api
      */
     const ready = api=>{
-        if (host.call && host.allocate && host.release && host.readMemory)
+        if (host.call && host.allocate && host.release)
         {
             return true;
         }
@@ -138,8 +135,7 @@ function createImageListStreams(host, lists){
      * @param {unknown} thread
      */
     const callMethod = async(stream, slot, args, thread)=>{
-        const read = /** @type {NonNullable<typeof host.readMemory>} */ (host.readMemory);
-        const entry = u32(read(u32(read(stream, 4)) + slot * 4, 4));
+        const entry = guest.ptr(guest.ptr(stream) + slot * guest.pointerSize);
         const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
         return (await call(entry, [stream, ...args], thread)) | 0;
     };
@@ -173,7 +169,7 @@ function createImageListStreams(host, lists){
      * @param {number} stream @param {Uint8Array} bytes @param {unknown} thread
      */
     const writeStream = async(stream, bytes, thread)=>(await lend(bytes.length, async block=>{
-        host.writeMemory(block, bytes);
+        guest.setBytes(block, bytes);
         return (await callMethod(stream, SLOT_STREAM_WRITE, [block, bytes.length, 0],
             thread)) >= 0;
     })) === true;
@@ -186,13 +182,11 @@ function createImageListStreams(host, lists){
      * @returns {Promise<Uint8Array | null>}
      */
     const readStream = (stream, length, thread)=>lend(length + 4, async block=>{
-        const read = /** @type {NonNullable<typeof host.readMemory>} */ (host.readMemory);
-        host.writeMemory(block + length, new Uint8Array(4));
+        guest.fill(block + length, 0, 4);
         const hr = await callMethod(stream, SLOT_STREAM_READ, [block, length, block + length],
             thread);
-        return hr < 0 || u32(read(block + length, 4)) !== length
-            ? null
-            : read(block, length).slice();
+        return hr < 0 || guest.u32(block + length) !== length ? null
+            : guest.snapshot(block, length);
     });
 
     /**
@@ -339,16 +333,16 @@ function createImageListStreams(host, lists){
                     return 0;
                 }
                 const view = viewOf(head);
-                const word = (/** @type {number} */ at)=>view.getUint16(at, true);
+                const headWord = (/** @type {number} */ at)=>view.getUint16(at, true);
                 const fields = {
-                    count: word(ILHEAD.cCurImage), max: word(ILHEAD.cMaxImage),
-                    grow: word(ILHEAD.cGrow), cx: word(ILHEAD.cx), cy: word(ILHEAD.cy),
-                    background: view.getUint32(ILHEAD.bkcolor, true), flags: word(ILHEAD.flags),
+                    count: headWord(ILHEAD.cCurImage), max: headWord(ILHEAD.cMaxImage),
+                    grow: headWord(ILHEAD.cGrow), cx: headWord(ILHEAD.cx), cy: headWord(ILHEAD.cy),
+                    background: view.getUint32(ILHEAD.bkcolor, true), flags: headWord(ILHEAD.flags),
                     overlays: [0, 1, 2, 3].map(index=>view.getInt16(ILHEAD.ovls + index * 2,
                         true)),
                 };
-                if (word(ILHEAD.usMagic) !== IMAGELIST_MAGIC
-                    || word(ILHEAD.usVersion) !== IMAGELIST_VERSION
+                if (headWord(ILHEAD.usMagic) !== IMAGELIST_MAGIC
+                    || headWord(ILHEAD.usVersion) !== IMAGELIST_VERSION
                     || fields.cx === 0 || fields.cy === 0)
                 {
                     return 0;

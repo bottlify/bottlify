@@ -42,7 +42,6 @@ import {
 import { notifyWindow } from './notify.js';
 import { renderDate } from '../kernel32/datetime-format.js';
 import { DAYS, MONTHS } from '../kernel32/locale-data.js';
-import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const MONTHCAL_CLASS = 'SysMonthCal32';
@@ -413,7 +412,8 @@ export const localNow = sources=>{
  *     thread?: unknown) => number | Promise<number>}
  */
 export function createMonthCalProcedure(host, tk, sources = {}){
-    const pointer = host.pointerSize ?? 4;
+    const { guest } = host;
+    const pointer = guest.pointerSize;
     /** NMHDR's size: a window, an id as wide as a pointer, the code. */
     const HEADER = pointer === 8 ? 24 : 12;
 
@@ -478,35 +478,23 @@ export function createMonthCalProcedure(host, tk, sources = {}){
 
     /** @param {number} address @returns {Time} */
     const readTime = address=>{
-        const view = new DataView(host.readMemory(wholeAddress(address), 16).buffer);
-        const field = (/** @type {number} */ at)=>view.getUint16(at * 2, true);
+        const field = (/** @type {number} */ at)=>guest.u16(address + at * 2);
         return { year: field(0), month: field(1), dow: field(2), day: field(3), hour: field(4),
             minute: field(5), second: field(6), ms: field(7) };
     };
 
     /** @param {number} address @param {Time} time */
     const writeTime = (address, time)=>{
-        const bytes = new Uint8Array(16);
-        const view = new DataView(bytes.buffer);
         [time.year, time.month, time.dow, time.day, time.hour, time.minute, time.second, time.ms]
-            .forEach((value, at)=>view.setUint16(at * 2, value & 0xffff, true));
-        host.writeMemory(wholeAddress(address), bytes);
+            .forEach((value, at)=>guest.set16(address + at * 2, value));
     };
 
     /**
      * @param {number} address
      * @param {{ left: number, top: number, right: number, bottom: number }} rect
      */
-    const writeRect = (address, rect)=>host.writeMemory(wholeAddress(address), new Uint8Array(
-        new Int32Array([rect.left, rect.top, rect.right, rect.bottom]).buffer));
-
-    /** @param {number} address */
-    const readI32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
-        .getInt32(0, true);
-
-    /** @param {number} address @param {number} value */
-    const writeI32 = (address, value)=>host.writeMemory(wholeAddress(address),
-        new Uint8Array(new Int32Array([value]).buffer));
+    const writeRect = (address, rect)=>guest.set32s(address,
+        [rect.left, rect.top, rect.right, rect.bottom]);
 
     /**
      * The sizes everything is laid out in, measured in the control's font:
@@ -673,10 +661,10 @@ export function createMonthCalProcedure(host, tk, sources = {}){
         {
             return 0;
         }
-        host.writeMemory(block, new Uint8Array(size));
-        writeI32(block, record.hwnd);
-        writeI32(block + pointer, record.id);
-        writeI32(block + 2 * pointer, code);
+        guest.fill(block, 0, size);
+        guest.set32(block, record.hwnd);
+        guest.set32(block + pointer, record.id);
+        guest.set32(block + 2 * pointer, code);
         fill(block);
         return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
             read?.(block);
@@ -724,17 +712,17 @@ export function createMonthCalProcedure(host, tk, sources = {}){
         const array = states + pointer;
         return notify(record, MCN_GETDAYSTATE, array + count * 4, block=>{
             writeTime(block + HEADER, start);
-            writeI32(block + HEADER + 16, count);
-            writeI32(states + block, block + array);
+            guest.set32(block + HEADER + 16, count);
+            guest.set32(states + block, block + array);
         }, thread, block=>{
-            const given = readI32(block + states) >>> 0;
+            const given = guest.i32(block + states) >>> 0;
             if (given === 0)
             {
                 return;
             }
             for (let at = 0; at < count; at++)
             {
-                held.dayStates.set(held.first - 1 + at, readI32(given + at * 4) >>> 0);
+                held.dayStates.set(held.first - 1 + at, guest.i32(given + at * 4) >>> 0);
             }
         });
     };
@@ -1192,14 +1180,14 @@ export function createMonthCalProcedure(host, tk, sources = {}){
         {
             return -1;
         }
-        const size = readI32(address) >>> 0;
+        const size = guest.i32(address) >>> 0;
         if (size < MCHITTESTINFO_V1_SIZE)
         {
             return -1;
         }
-        const point = { x: readI32(address + 4), y: readI32(address + 8) };
+        const point = { x: guest.i32(address + 4), y: guest.i32(address + 8) };
         const found = hitTest(record, point);
-        writeI32(address + 12, found.hit);
+        guest.set32(address + 12, found.hit);
         if (found.date)
         {
             writeTime(address + 16, found.date);
@@ -1218,9 +1206,9 @@ export function createMonthCalProcedure(host, tk, sources = {}){
                 {
                     writeRect(address + 32, found.rect);
                 }
-                writeI32(address + 48, found.calendar ?? 0);
-                writeI32(address + 52, found.row ?? -1);
-                writeI32(address + 56, found.column ?? -1);
+                guest.set32(address + 48, found.calendar ?? 0);
+                guest.set32(address + 52, found.row ?? -1);
+                guest.set32(address + 56, found.column ?? -1);
             }
         }
         return found.hit;
@@ -1343,9 +1331,9 @@ export function createMonthCalProcedure(host, tk, sources = {}){
                 // fixed when it is made (Wine's test_maxselday, test_daystate).
                 if ((message.wParam | 0) === GWL_STYLE && lParam !== 0)
                 {
-                    const old = readI32(lParam) >>> 0;
-                    const wanted = readI32(lParam + 4) >>> 0;
-                    writeI32(lParam + 4, (wanted & ~FIXED_STYLES) | (old & FIXED_STYLES));
+                    const old = guest.i32(lParam) >>> 0;
+                    const wanted = guest.i32(lParam + 4) >>> 0;
+                    guest.set32(lParam + 4, (wanted & ~FIXED_STYLES) | (old & FIXED_STYLES));
                 }
                 return 0;
             case WM_STYLECHANGED:
@@ -1512,7 +1500,7 @@ export function createMonthCalProcedure(host, tk, sources = {}){
                 }
                 for (let at = 0; at < count; at++)
                 {
-                    held.dayStates.set(held.first - 1 + at, readI32(lParam + at * 4) >>> 0);
+                    held.dayStates.set(held.first - 1 + at, guest.i32(lParam + at * 4) >>> 0);
                 }
                 host.invalidate(record);
                 return 1;
@@ -1629,7 +1617,7 @@ export function createMonthCalProcedure(host, tk, sources = {}){
                 {
                     return 0;
                 }
-                const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>readI32(lParam + at));
+                const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>guest.i32(lParam + at));
                 const sizes = metrics(record);
                 const frame = frameOf(record);
                 const gap = held.border;

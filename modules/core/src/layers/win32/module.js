@@ -3569,7 +3569,7 @@ export function createWin32Module(){
             // comctl32's image lists, drawn with gdi32's own calls: its exports,
             // and what its tab control draws from.
             const imageLists = createImageLists({
-                readMemory, writeMemory, divergence: config?.divergence,
+                guest, divergence: config?.divergence,
                 // A list is the IImageList its handle points at.
                 vtables: comVtables,
                 gdi32: name=>libraries['GDI32.dll']?.[name],
@@ -3895,7 +3895,7 @@ export function createWin32Module(){
             // The common controls, one implementation and the two libraries it is:
             // system32's 5.82 and Common Controls 6 (`commonControlsFaces`).
             const commonControls = commonControlsFaces({
-                readMemory, writeMemory, pointerSize, divergence: config?.divergence, imageLists,
+                guest, divergence: config?.divergence, imageLists,
                 // What _TrackMouseEvent is documented to call where the
                 // system has it; looked up when called, as user32 is built
                 // beside it.
@@ -5465,7 +5465,7 @@ export function createWin32Module(){
 
                 // The rich edit classes are always registered; these are the
                 // libraries a program loads before it makes one.
-                ...lazily(createRichedLibraries({ writeMemory })),
+                ...lazily(createRichedLibraries({ guest })),
 
                 // The old iostream library: its objects live in the program's
                 // memory and its methods run over the C runtime's heap, locks

@@ -291,6 +291,7 @@ const VK_CONTROL = 0x11;
  * @param {(hdc: number, mode: number) => number} [setBkMode]  gdi32's.
  */
 export function createListViewProcedure(host, tk, setBkMode){
+    const { guest } = host;
     let toldEdit = false;
     /** @param {string} what */
     const notHere = what=>{
@@ -299,17 +300,6 @@ export function createListViewProcedure(host, tk, setBkMode){
             toldEdit = true;
             host.divergence?.(LISTVIEW_CLASS, `${what} is not here yet`);
         }
-    };
-    /** @param {number} at */
-    const read32 = at=>{
-        const b = host.readMemory(wholeAddress(at), 4);
-        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
-    };
-    /** @param {number} at @param {number} value */
-    const write32 = (at, value)=>{
-        const v = value >>> 0;
-        host.writeMemory(wholeAddress(at),
-            Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
     };
 
     /** @param {any} record */
@@ -382,10 +372,10 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             return 0;
         }
-        host.writeMemory(block, new Uint8Array(size));
-        write32(block, record.hwnd);
-        write32(block + 4, record.id);
-        write32(block + 8, code);
+        guest.fill(block, 0, size);
+        guest.set32(block, record.hwnd);
+        guest.set32(block + 4, record.id);
+        guest.set32(block + 8, code);
         fill(block);
         return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
             const result = read ? read(block, answer) : answer;
@@ -404,12 +394,12 @@ export function createListViewProcedure(host, tk, setBkMode){
      */
     const tellItem = (record, code, index, what, thread)=>notify(record, code, NMLISTVIEW.SIZE,
         block=>{
-            write32(block + NMLISTVIEW.iItem, index);
-            write32(block + NMLISTVIEW.iSubItem, what.subItem ?? 0);
-            write32(block + NMLISTVIEW.uNewState, what.newState ?? 0);
-            write32(block + NMLISTVIEW.uOldState, what.oldState ?? 0);
-            write32(block + NMLISTVIEW.uChanged, what.changed ?? 0);
-            write32(block + NMLISTVIEW.lParam, what.lParam ?? 0);
+            guest.set32(block + NMLISTVIEW.iItem, index);
+            guest.set32(block + NMLISTVIEW.iSubItem, what.subItem ?? 0);
+            guest.set32(block + NMLISTVIEW.uNewState, what.newState ?? 0);
+            guest.set32(block + NMLISTVIEW.uOldState, what.oldState ?? 0);
+            guest.set32(block + NMLISTVIEW.uChanged, what.changed ?? 0);
+            guest.set32(block + NMLISTVIEW.lParam, what.lParam ?? 0);
         }, thread);
 
     /**
@@ -435,29 +425,29 @@ export function createListViewProcedure(host, tk, setBkMode){
         const room = given?.buffer ? given.room : MAX_TEXT;
         if (own !== 0)
         {
-            host.writeMemory(own, new Uint8Array(2));
+            guest.fill(own, 0, 2);
         }
         const item = ownerData(record) ? null : held.items[index];
         const answer = notify(record, wide ? LVN_GETDISPINFOW : LVN_GETDISPINFOA, DISPINFO_SIZE,
             block=>{
                 const at = block + DISPINFO_ITEM;
-                write32(at + LVITEM.mask, mask);
-                write32(at + LVITEM.iItem, index);
-                write32(at + LVITEM.iSubItem, subItem);
-                write32(at + LVITEM.stateMask, stateMask);
-                write32(at + LVITEM.pszText, buffer);
-                write32(at + LVITEM.cchTextMax, buffer !== 0 ? room : 0);
-                write32(at + LVITEM.lParam, item?.lParam ?? 0);
+                guest.set32(at + LVITEM.mask, mask);
+                guest.set32(at + LVITEM.iItem, index);
+                guest.set32(at + LVITEM.iSubItem, subItem);
+                guest.set32(at + LVITEM.stateMask, stateMask);
+                guest.set32(at + LVITEM.pszText, buffer);
+                guest.set32(at + LVITEM.cchTextMax, buffer !== 0 ? room : 0);
+                guest.set32(at + LVITEM.lParam, item?.lParam ?? 0);
             }, thread, block=>{
                 const at = block + DISPINFO_ITEM;
-                const pointer = read32(at + LVITEM.pszText);
+                const pointer = guest.u32(at + LVITEM.pszText);
                 return {
                     text: mask & LVIF_TEXT && pointer !== 0 && pointer !== LPSTR_TEXTCALLBACK
                         ? readText(host, pointer, wide) : '',
-                    image: read32(at + LVITEM.iImage) | 0,
-                    state: read32(at + LVITEM.state) & stateMask,
-                    indent: read32(at + LVITEM.iIndent) | 0,
-                    keep: (read32(at + LVITEM.mask) & LVIF_DI_SETITEM) !== 0,
+                    image: guest.u32(at + LVITEM.iImage) | 0,
+                    state: guest.u32(at + LVITEM.state) & stateMask,
+                    indent: guest.u32(at + LVITEM.iIndent) | 0,
+                    keep: (guest.u32(at + LVITEM.mask) & LVIF_DI_SETITEM) !== 0,
                 };
             });
         return after(answer, got=>{
@@ -492,30 +482,30 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             return 0;
         }
-        host.writeMemory(block, new Uint8Array(HDITEM.SIZE));
+        guest.fill(block, 0, HDITEM.SIZE);
         let hdMask = 0;
         if (mask & LVCF_WIDTH)
         {
             hdMask |= 0x0001;
-            write32(block + HDITEM.cxy, column.width ?? 0);
+            guest.set32(block + HDITEM.cxy, column.width ?? 0);
         }
         if (mask & LVCF_TEXT)
         {
             hdMask |= 0x0002;
             writeText(host, block + HDITEM.SIZE, text, true, text.length + 1);
-            write32(block + HDITEM.pszText, block + HDITEM.SIZE);
+            guest.set32(block + HDITEM.pszText, block + HDITEM.SIZE);
         }
         if (mask & LVCF_FMT)
         {
             hdMask |= 0x0004;
-            write32(block + HDITEM.fmt, (column.fmt ?? 0) & LVCFMT_JUSTIFYMASK | 0x4000);
+            guest.set32(block + HDITEM.fmt, (column.fmt ?? 0) & LVCFMT_JUSTIFYMASK | 0x4000);
         }
         if (mask & LVCF_ORDER)
         {
             hdMask |= 0x0080;
-            write32(block + HDITEM.iOrder, column.order ?? 0);
+            guest.set32(block + HDITEM.iOrder, column.order ?? 0);
         }
-        write32(block + HDITEM.mask, hdMask);
+        guest.set32(block + HDITEM.mask, hdMask);
         const wide = message === HDM.INSERTITEMA ? HDM.INSERTITEMW
             : message === HDM.SETITEMA ? HDM.SETITEMW : message;
         return after(host.send(held.header, wide, index, block, thread), answer=>{
@@ -543,7 +533,7 @@ export function createListViewProcedure(host, tk, setBkMode){
             return held.columns.map((/** @type {Column} */ _, /** @type {number} */ i)=>i);
         }
         return after(host.send(held.header, HDM.GETORDERARRAY, columns, block, thread), ()=>{
-            const order = Array.from({ length: columns }, (_, i)=>read32(block + i * 4) | 0);
+            const order = Array.from({ length: columns }, (_, i)=>guest.u32(block + i * 4) | 0);
             host.release?.(block);
             return order;
         });
@@ -764,7 +754,7 @@ export function createListViewProcedure(host, tk, setBkMode){
      * @param {number} info @param {boolean} wide
      */
     const textIn = (info, wide)=>{
-        const pointer = read32(info + LVITEM.pszText);
+        const pointer = guest.u32(info + LVITEM.pszText);
         return pointer === LPSTR_TEXTCALLBACK ? null
             : pointer === 0 ? '' : readText(host, pointer, wide);
     };
@@ -906,9 +896,9 @@ export function createListViewProcedure(host, tk, setBkMode){
             held.selected.add(index);
         }
         await notify(record, LVN_ODSTATECHANGED, ODSTATECHANGE.SIZE, block=>{
-            write32(block + ODSTATECHANGE.iFrom, low);
-            write32(block + ODSTATECHANGE.iTo, high);
-            write32(block + ODSTATECHANGE.uNewState, LVIS_SELECTED);
+            guest.set32(block + ODSTATECHANGE.iFrom, low);
+            guest.set32(block + ODSTATECHANGE.iTo, high);
+            guest.set32(block + ODSTATECHANGE.uNewState, LVIS_SELECTED);
         }, thread);
         host.invalidate(record);
     };
@@ -933,9 +923,9 @@ export function createListViewProcedure(host, tk, setBkMode){
      */
     const setItem = async(record, info, wide, thread)=>{
         const held = state(record);
-        const index = read32(info + LVITEM.iItem) | 0;
-        const subItem = read32(info + LVITEM.iSubItem) | 0;
-        const mask = read32(info + LVITEM.mask);
+        const index = guest.u32(info + LVITEM.iItem) | 0;
+        const subItem = guest.u32(info + LVITEM.iSubItem) | 0;
+        const mask = guest.u32(info + LVITEM.mask);
         if (index < 0 || index >= count(record) || subItem < 0)
         {
             return 0;
@@ -945,8 +935,8 @@ export function createListViewProcedure(host, tk, setBkMode){
             // An owner-data list keeps nothing but its selection and focus.
             if (mask & LVIF_STATE && subItem === 0)
             {
-                await setState(record, index, read32(info + LVITEM.state),
-                    read32(info + LVITEM.stateMask), thread);
+                await setState(record, index, guest.u32(info + LVITEM.state),
+                    guest.u32(info + LVITEM.stateMask), thread);
             }
             return 1;
         }
@@ -956,16 +946,17 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             changed |= LVIF_TEXT;
         }
-        if (mask & LVIF_IMAGE && (item.images[subItem] ?? 0) !== (read32(info + LVITEM.iImage) | 0))
+        if (mask & LVIF_IMAGE
+            && (item.images[subItem] ?? 0) !== (guest.u32(info + LVITEM.iImage) | 0))
         {
             changed |= LVIF_IMAGE;
         }
-        if (mask & LVIF_PARAM && subItem === 0 && item.lParam !== read32(info + LVITEM.lParam))
+        if (mask & LVIF_PARAM && subItem === 0 && item.lParam !== guest.u32(info + LVITEM.lParam))
         {
             changed |= LVIF_PARAM;
         }
         if (mask & LVIF_INDENT && subItem === 0
-            && item.indent !== (read32(info + LVITEM.iIndent) | 0))
+            && item.indent !== (guest.u32(info + LVITEM.iIndent) | 0))
         {
             changed |= LVIF_INDENT;
         }
@@ -984,15 +975,15 @@ export function createListViewProcedure(host, tk, setBkMode){
             }
             if (changed & LVIF_IMAGE)
             {
-                item.images[subItem] = read32(info + LVITEM.iImage) | 0;
+                item.images[subItem] = guest.u32(info + LVITEM.iImage) | 0;
             }
             if (changed & LVIF_PARAM)
             {
-                item.lParam = read32(info + LVITEM.lParam);
+                item.lParam = guest.u32(info + LVITEM.lParam);
             }
             if (changed & LVIF_INDENT)
             {
-                item.indent = read32(info + LVITEM.iIndent) | 0;
+                item.indent = guest.u32(info + LVITEM.iIndent) | 0;
             }
             await tellItem(record, LVN_ITEMCHANGED, index, { subItem, changed,
                 lParam: item.lParam, oldState: item.state, newState: item.state }, thread);
@@ -1000,8 +991,8 @@ export function createListViewProcedure(host, tk, setBkMode){
         }
         if (mask & LVIF_STATE && subItem === 0)
         {
-            const done = await setState(record, index, read32(info + LVITEM.state),
-                read32(info + LVITEM.stateMask), thread);
+            const done = await setState(record, index, guest.u32(info + LVITEM.state),
+                guest.u32(info + LVITEM.stateMask), thread);
             return done ? 1 : 0;
         }
         return 1;
@@ -1015,9 +1006,9 @@ export function createListViewProcedure(host, tk, setBkMode){
      */
     const getItem = async(record, info, wide, thread)=>{
         const held = state(record);
-        const index = read32(info + LVITEM.iItem) | 0;
-        const subItem = read32(info + LVITEM.iSubItem) | 0;
-        const mask = read32(info + LVITEM.mask);
+        const index = guest.u32(info + LVITEM.iItem) | 0;
+        const subItem = guest.u32(info + LVITEM.iSubItem) | 0;
+        const mask = guest.u32(info + LVITEM.mask);
         if (index < 0 || index >= count(record) || subItem < 0)
         {
             return 0;
@@ -1026,7 +1017,7 @@ export function createListViewProcedure(host, tk, setBkMode){
         const textCallback = mask & LVIF_TEXT && (item === null || item.texts[subItem] === null);
         const imageCallback = mask & LVIF_IMAGE
             && (item === null || (item.images[subItem] ?? 0) === I_IMAGECALLBACK);
-        const stateMask = read32(info + LVITEM.stateMask);
+        const stateMask = guest.u32(info + LVITEM.stateMask);
         const stateCallback = mask & LVIF_STATE && subItem === 0
             ? (item === null ? stateMask & ~(LVIS_FOCUSED | LVIS_SELECTED)
                 : stateMask & held.callbackMask) : 0;
@@ -1035,8 +1026,8 @@ export function createListViewProcedure(host, tk, setBkMode){
             | (stateCallback ? LVIF_STATE : 0) | (indentCallback ? LVIF_INDENT : 0);
         const asked = askMask !== 0
             ? await askDisplay(record, index, subItem, askMask, stateCallback, thread,
-                textCallback ? { buffer: read32(info + LVITEM.pszText),
-                    room: read32(info + LVITEM.cchTextMax) | 0 } : undefined) : null;
+                textCallback ? { buffer: guest.u32(info + LVITEM.pszText),
+                    room: guest.u32(info + LVITEM.cchTextMax) | 0 } : undefined) : null;
         if (asked?.keep && item !== null)
         {
             if (textCallback)
@@ -1051,27 +1042,27 @@ export function createListViewProcedure(host, tk, setBkMode){
         if (mask & LVIF_TEXT)
         {
             const text = textCallback ? asked?.text ?? '' : item?.texts[subItem] ?? '';
-            writeText(host, read32(info + LVITEM.pszText), text, wide,
-                read32(info + LVITEM.cchTextMax) | 0);
+            writeText(host, guest.u32(info + LVITEM.pszText), text, wide,
+                guest.u32(info + LVITEM.cchTextMax) | 0);
         }
         if (mask & LVIF_IMAGE)
         {
-            write32(info + LVITEM.iImage, imageCallback ? asked?.image ?? 0
+            guest.set32(info + LVITEM.iImage, imageCallback ? asked?.image ?? 0
                 : item?.images[subItem] ?? 0);
         }
         if (mask & LVIF_PARAM && subItem === 0)
         {
-            write32(info + LVITEM.lParam, item?.lParam ?? 0);
+            guest.set32(info + LVITEM.lParam, item?.lParam ?? 0);
         }
         if (mask & LVIF_INDENT && subItem === 0)
         {
-            write32(info + LVITEM.iIndent, indentCallback ? asked?.indent ?? 0
+            guest.set32(info + LVITEM.iIndent, indentCallback ? asked?.indent ?? 0
                 : item?.indent ?? 0);
         }
         if (mask & LVIF_STATE)
         {
             const own = subItem === 0 ? stateOf(record, index) & ~stateCallback : 0;
-            write32(info + LVITEM.state, (own | (asked?.state ?? 0)) & stateMask);
+            guest.set32(info + LVITEM.state, (own | (asked?.state ?? 0)) & stateMask);
         }
         return 1;
     };
@@ -1085,12 +1076,12 @@ export function createListViewProcedure(host, tk, setBkMode){
      */
     const insertItem = async(record, info, wide, thread)=>{
         const held = state(record);
-        if (ownerData(record) || info >>> 0 === 0 || (read32(info + LVITEM.iSubItem) | 0) !== 0)
+        if (ownerData(record) || info >>> 0 === 0 || (guest.u32(info + LVITEM.iSubItem) | 0) !== 0)
         {
             return -1;
         }
-        const mask = read32(info + LVITEM.mask);
-        let index = read32(info + LVITEM.iItem) | 0;
+        const mask = guest.u32(info + LVITEM.mask);
+        let index = guest.u32(info + LVITEM.iItem) | 0;
         if (index < 0)
         {
             return -1;
@@ -1102,18 +1093,18 @@ export function createListViewProcedure(host, tk, setBkMode){
         }
         if (mask & LVIF_IMAGE)
         {
-            item.images[0] = read32(info + LVITEM.iImage) | 0;
+            item.images[0] = guest.u32(info + LVITEM.iImage) | 0;
         }
         if (mask & LVIF_PARAM)
         {
-            item.lParam = read32(info + LVITEM.lParam);
+            item.lParam = guest.u32(info + LVITEM.lParam);
         }
         if (mask & LVIF_INDENT)
         {
-            item.indent = read32(info + LVITEM.iIndent) | 0;
+            item.indent = guest.u32(info + LVITEM.iIndent) | 0;
         }
         const wanted = mask & LVIF_STATE
-            ? read32(info + LVITEM.state) & read32(info + LVITEM.stateMask) : 0;
+            ? guest.u32(info + LVITEM.state) & guest.u32(info + LVITEM.stateMask) : 0;
         index = Math.min(index, held.items.length);
         const sorting = record.style & (LVS_SORTASCENDING | LVS_SORTDESCENDING);
         if (sorting && item.texts[0] !== null)
@@ -1249,19 +1240,19 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             return -1;
         }
-        const flags = read32(info + FINDINFO.flags);
+        const flags = guest.u32(info + FINDINFO.flags);
         if (ownerData(record))
         {
             const answer = await notify(record, held.unicode ? LVN_ODFINDITEMW : LVN_ODFINDITEMA,
                 FINDITEM_SIZE, block=>{
-                    write32(block + FINDITEM_START, start + 1);
-                    host.writeMemory(block + FINDITEM_INFO, host.readMemory(info, 24));
+                    guest.set32(block + FINDITEM_START, start + 1);
+                    guest.copy(block + FINDITEM_INFO, info, 24);
                 }, thread);
             return answer | 0;
         }
-        const lParam = read32(info + FINDINFO.lParam);
+        const lParam = guest.u32(info + FINDINFO.lParam);
         const wanted = flags & (LVFI_STRING | LVFI_PARTIAL | LVFI_SUBSTRING)
-            ? readText(host, read32(info + FINDINFO.psz), wide).toLowerCase() : null;
+            ? readText(host, guest.u32(info + FINDINFO.psz), wide).toLowerCase() : null;
         const first = start < -1 || start >= total ? 0 : start + 1;
         const order = Array.from({ length: total }, (_, i)=>(first + i) % total)
             .filter(index=>flags & LVFI_WRAP || index >= first);
@@ -1305,8 +1296,8 @@ export function createListViewProcedure(host, tk, setBkMode){
         const items = held.items;
         const before = new Map(items.map((item, index)=>[item, index]));
         /** @param {ListItem} item */
-        const word = item=>(byIndex ? /** @type {number} */ (before.get(item)) : item.lParam);
-        held.items = await stableSort(items, (a, b)=>call(compare, [word(a), word(b), lParam],
+        const keyOf = item=>(byIndex ? /** @type {number} */ (before.get(item)) : item.lParam);
+        held.items = await stableSort(items, (a, b)=>call(compare, [keyOf(a), keyOf(b), lParam],
             thread));
         host.invalidate(record);
         return 1;
@@ -1324,17 +1315,17 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             return -1;
         }
-        const mask = read32(info + LVCOLUMN.mask);
+        const mask = guest.u32(info + LVCOLUMN.mask);
         const at = Math.min(index, held.columns.length);
         /** @type {Column} */
         const column = {
-            fmt: mask & LVCF_FMT ? read32(info + LVCOLUMN.fmt) : 0,
-            width: mask & LVCF_WIDTH ? read32(info + LVCOLUMN.cx) | 0 : DEFAULT_COLUMN_WIDTH,
-            text: mask & LVCF_TEXT && read32(info + LVCOLUMN.pszText) !== 0
-                ? readText(host, read32(info + LVCOLUMN.pszText), wide) : '',
-            subItem: mask & LVCF_SUBITEM ? read32(info + LVCOLUMN.iSubItem) | 0 : at,
-            image: mask & LVCF_IMAGE ? read32(info + LVCOLUMN.iImage) | 0 : 0,
-            minWidth: mask & LVCF_MINWIDTH ? read32(info + LVCOLUMN.cxMin) | 0 : 0,
+            fmt: mask & LVCF_FMT ? guest.u32(info + LVCOLUMN.fmt) : 0,
+            width: mask & LVCF_WIDTH ? guest.u32(info + LVCOLUMN.cx) | 0 : DEFAULT_COLUMN_WIDTH,
+            text: mask & LVCF_TEXT && guest.u32(info + LVCOLUMN.pszText) !== 0
+                ? readText(host, guest.u32(info + LVCOLUMN.pszText), wide) : '',
+            subItem: mask & LVCF_SUBITEM ? guest.u32(info + LVCOLUMN.iSubItem) | 0 : at,
+            image: mask & LVCF_IMAGE ? guest.u32(info + LVCOLUMN.iImage) | 0 : 0,
+            minWidth: mask & LVCF_MINWIDTH ? guest.u32(info + LVCOLUMN.cxMin) | 0 : 0,
         };
         // The first column is always left aligned, whatever it asks.
         if (at === 0)
@@ -1344,7 +1335,7 @@ export function createListViewProcedure(host, tk, setBkMode){
         held.columns.splice(at, 0, column);
         await ensureHeader(record, thread);
         await headerItem(record, HDM.INSERTITEMW, at, LVCF_WIDTH | LVCF_TEXT | LVCF_FMT
-            | (mask & LVCF_ORDER), { ...column, order: read32(info + LVCOLUMN.iOrder) | 0 },
+            | (mask & LVCF_ORDER), { ...column, order: guest.u32(info + LVCOLUMN.iOrder) | 0 },
         thread);
         host.invalidate(record);
         return at;
@@ -1361,36 +1352,36 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             return 0;
         }
-        const mask = read32(info + LVCOLUMN.mask);
+        const mask = guest.u32(info + LVCOLUMN.mask);
         if (mask & LVCF_FMT)
         {
-            write32(info + LVCOLUMN.fmt, column.fmt);
+            guest.set32(info + LVCOLUMN.fmt, column.fmt);
         }
         if (mask & LVCF_WIDTH)
         {
-            write32(info + LVCOLUMN.cx, column.width);
+            guest.set32(info + LVCOLUMN.cx, column.width);
         }
         if (mask & LVCF_TEXT)
         {
-            writeText(host, read32(info + LVCOLUMN.pszText), column.text, wide,
-                read32(info + LVCOLUMN.cchTextMax) | 0);
+            writeText(host, guest.u32(info + LVCOLUMN.pszText), column.text, wide,
+                guest.u32(info + LVCOLUMN.cchTextMax) | 0);
         }
         if (mask & LVCF_SUBITEM)
         {
-            write32(info + LVCOLUMN.iSubItem, column.subItem);
+            guest.set32(info + LVCOLUMN.iSubItem, column.subItem);
         }
         if (mask & LVCF_IMAGE)
         {
-            write32(info + LVCOLUMN.iImage, column.image);
+            guest.set32(info + LVCOLUMN.iImage, column.image);
         }
         if (mask & LVCF_ORDER)
         {
             const order = await columnOrder(record, thread);
-            write32(info + LVCOLUMN.iOrder, order.indexOf(index));
+            guest.set32(info + LVCOLUMN.iOrder, order.indexOf(index));
         }
         if (mask & LVCF_MINWIDTH)
         {
-            write32(info + LVCOLUMN.cxMin, column.minWidth);
+            guest.set32(info + LVCOLUMN.cxMin, column.minWidth);
         }
         return 1;
     };
@@ -1406,35 +1397,35 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             return 0;
         }
-        const mask = read32(info + LVCOLUMN.mask);
+        const mask = guest.u32(info + LVCOLUMN.mask);
         if (mask & LVCF_FMT)
         {
-            column.fmt = index === 0 ? read32(info + LVCOLUMN.fmt) & ~LVCFMT_JUSTIFYMASK
-                : read32(info + LVCOLUMN.fmt);
+            column.fmt = index === 0 ? guest.u32(info + LVCOLUMN.fmt) & ~LVCFMT_JUSTIFYMASK
+                : guest.u32(info + LVCOLUMN.fmt);
         }
         if (mask & LVCF_WIDTH)
         {
-            column.width = read32(info + LVCOLUMN.cx) | 0;
+            column.width = guest.u32(info + LVCOLUMN.cx) | 0;
         }
         if (mask & LVCF_TEXT)
         {
-            const pointer = read32(info + LVCOLUMN.pszText);
+            const pointer = guest.u32(info + LVCOLUMN.pszText);
             column.text = pointer === 0 ? '' : readText(host, pointer, wide);
         }
         if (mask & LVCF_SUBITEM)
         {
-            column.subItem = read32(info + LVCOLUMN.iSubItem) | 0;
+            column.subItem = guest.u32(info + LVCOLUMN.iSubItem) | 0;
         }
         if (mask & LVCF_IMAGE)
         {
-            column.image = read32(info + LVCOLUMN.iImage) | 0;
+            column.image = guest.u32(info + LVCOLUMN.iImage) | 0;
         }
         if (mask & LVCF_MINWIDTH)
         {
-            column.minWidth = read32(info + LVCOLUMN.cxMin) | 0;
+            column.minWidth = guest.u32(info + LVCOLUMN.cxMin) | 0;
         }
         await headerItem(record, HDM.SETITEMW, index, mask & (LVCF_WIDTH | LVCF_TEXT | LVCF_FMT
-            | LVCF_ORDER), { ...column, order: read32(info + LVCOLUMN.iOrder) | 0 }, thread);
+            | LVCF_ORDER), { ...column, order: guest.u32(info + LVCOLUMN.iOrder) | 0 }, thread);
         host.invalidate(record);
         return 1;
     };
@@ -1512,16 +1503,16 @@ export function createListViewProcedure(host, tk, setBkMode){
     const customDraw = (record, stage, hdc, box, what, thread)=>{
         const held = state(record);
         return notify(record, NM_CUSTOMDRAW, CUSTOMDRAW.SIZE, block=>{
-            write32(block + CUSTOMDRAW.dwDrawStage, stage);
-            write32(block + CUSTOMDRAW.hdc, hdc);
+            guest.set32(block + CUSTOMDRAW.dwDrawStage, stage);
+            guest.set32(block + CUSTOMDRAW.hdc, hdc);
             [box.left, box.top, box.right, box.bottom]
-                .forEach((value, i)=>write32(block + CUSTOMDRAW.rc + i * 4, value));
-            write32(block + CUSTOMDRAW.dwItemSpec, what.index ?? 0);
-            write32(block + CUSTOMDRAW.uItemState, what.itemState ?? 0);
-            write32(block + CUSTOMDRAW.lItemlParam, what.lParam ?? 0);
-            write32(block + CUSTOMDRAW.clrText, held.textColor);
-            write32(block + CUSTOMDRAW.clrTextBk, held.textBackground);
-            write32(block + CUSTOMDRAW.iSubItem, what.subItem ?? 0);
+                .forEach((value, i)=>guest.set32(block + CUSTOMDRAW.rc + i * 4, value));
+            guest.set32(block + CUSTOMDRAW.dwItemSpec, what.index ?? 0);
+            guest.set32(block + CUSTOMDRAW.uItemState, what.itemState ?? 0);
+            guest.set32(block + CUSTOMDRAW.lItemlParam, what.lParam ?? 0);
+            guest.set32(block + CUSTOMDRAW.clrText, held.textColor);
+            guest.set32(block + CUSTOMDRAW.clrTextBk, held.textBackground);
+            guest.set32(block + CUSTOMDRAW.iSubItem, what.subItem ?? 0);
         }, thread);
     };
 
@@ -1715,12 +1706,12 @@ export function createListViewProcedure(host, tk, setBkMode){
                 }
                 return NFR_UNICODE;
             case WM_NOTIFY: {
-                if (lParam >>> 0 === 0 || read32(lParam) !== held.header)
+                if (lParam >>> 0 === 0 || guest.u32(lParam) !== held.header)
                 {
                     return 0;
                 }
-                const code = read32(lParam + 8) | 0;
-                const column = read32(lParam + NMHEADER_ITEM) | 0;
+                const code = guest.u32(lParam + 8) | 0;
+                const column = guest.u32(lParam + NMHEADER_ITEM) | 0;
                 if ((code === HDN_ITEMCHANGEDA || code === HDN_ITEMCHANGEDW)
                     && held.columns[column] && held.header !== 0)
                 {
@@ -1730,11 +1721,11 @@ export function createListViewProcedure(host, tk, setBkMode){
                     {
                         return 0;
                     }
-                    host.writeMemory(block, new Uint8Array(HDITEM.SIZE));
-                    write32(block + HDITEM.mask, 0x0001);
+                    guest.fill(block, 0, HDITEM.SIZE);
+                    guest.set32(block + HDITEM.mask, 0x0001);
                     return after(host.send(held.header, HDM.GETITEMW, column, block, thread),
                         ()=>{
-                            held.columns[column].width = read32(block + HDITEM.cxy) | 0;
+                            held.columns[column].width = guest.u32(block + HDITEM.cxy) | 0;
                             host.release?.(block);
                             host.invalidate(record);
                             return 0;
@@ -1877,8 +1868,8 @@ export function createListViewProcedure(host, tk, setBkMode){
                     return 0;
                 }
                 const index = wParam | 0;
-                const value = read32(lParam + LVITEM.state);
-                const mask = read32(lParam + LVITEM.stateMask);
+                const value = guest.u32(lParam + LVITEM.state);
+                const mask = guest.u32(lParam + LVITEM.stateMask);
                 if (index === -1)
                 {
                     // Deselecting all when none is selected does nothing; a
@@ -1959,10 +1950,10 @@ export function createListViewProcedure(host, tk, setBkMode){
                 {
                     return 0;
                 }
-                write32(lParam + LVITEM.mask, LVIF_TEXT);
-                write32(lParam + LVITEM.iItem, index);
+                guest.set32(lParam + LVITEM.mask, LVIF_TEXT);
+                guest.set32(lParam + LVITEM.iItem, index);
                 return getItem(record, lParam, wide, thread).then(()=>{
-                    const buffer = read32(lParam + LVITEM.pszText);
+                    const buffer = guest.u32(lParam + LVITEM.pszText);
                     return buffer === 0 ? 0 : readText(host, buffer, wide).length;
                 });
             }
@@ -1977,8 +1968,8 @@ export function createListViewProcedure(host, tk, setBkMode){
                 {
                     return 0;
                 }
-                write32(lParam + LVITEM.mask, LVIF_TEXT);
-                write32(lParam + LVITEM.iItem, index);
+                guest.set32(lParam + LVITEM.mask, LVIF_TEXT);
+                guest.set32(lParam + LVITEM.iItem, index);
                 return setItem(record, lParam, wide, thread);
             }
             case LVM.GETNEXTITEM:
@@ -2017,12 +2008,12 @@ export function createListViewProcedure(host, tk, setBkMode){
                 {
                     return 0;
                 }
-                const portion = message.message === LVM.GETSUBITEMRECT ? read32(lParam + 8)
-                    : read32(lParam);
+                const portion = message.message === LVM.GETSUBITEMRECT ? guest.u32(lParam + 8)
+                    : guest.u32(lParam);
                 let box = itemRect(record, index, portion);
                 if (message.message === LVM.GETSUBITEMRECT)
                 {
-                    const subItem = read32(lParam + 4) | 0;
+                    const subItem = guest.u32(lParam + 4) | 0;
                     if (view(record) !== LVS_REPORT || subItem < 0
                         || subItem >= Math.max(1, held.columns.length))
                     {
@@ -2039,7 +2030,7 @@ export function createListViewProcedure(host, tk, setBkMode){
                     }
                 }
                 [box.left, box.top, box.right, box.bottom]
-                    .forEach((value, i)=>write32(lParam + i * 4, value));
+                    .forEach((value, i)=>guest.set32(lParam + i * 4, value));
                 return 1;
             }
             case LVM.GETITEMPOSITION: {
@@ -2049,8 +2040,8 @@ export function createListViewProcedure(host, tk, setBkMode){
                     return 0;
                 }
                 const box = bounds(record, index);
-                write32(lParam, box.left);
-                write32(lParam + 4, box.top);
+                guest.set32(lParam, box.left);
+                guest.set32(lParam + 4, box.top);
                 return 1;
             }
             case LVM.SETITEMPOSITION:
@@ -2062,7 +2053,7 @@ export function createListViewProcedure(host, tk, setBkMode){
                     return 0;
                 }
                 const point = message.message === LVM.SETITEMPOSITION ? pointOf(lParam)
-                    : { x: read32(lParam) | 0, y: read32(lParam + 4) | 0 };
+                    : { x: guest.u32(lParam) | 0, y: guest.u32(lParam + 4) | 0 };
                 held.items[index].position = { x: point.x + held.scroll.x,
                     y: point.y + held.scroll.y };
                 host.invalidate(record);
@@ -2074,16 +2065,16 @@ export function createListViewProcedure(host, tk, setBkMode){
                 {
                     return -1;
                 }
-                const x = read32(lParam + HITTEST.x) | 0;
-                const y = read32(lParam + HITTEST.y) | 0;
+                const x = guest.u32(lParam + HITTEST.x) | 0;
+                const y = guest.u32(lParam + HITTEST.y) | 0;
                 const sub = message.message === LVM.SUBITEMHITTEST;
                 const hit = sub && view(record) === LVS_REPORT ? subItemHitTest(record, x, y)
                     : { subItem: 0, ...hitTest(record, x, y) };
-                write32(lParam + HITTEST.flags, hit.flags);
-                write32(lParam + HITTEST.iItem, hit.index);
+                guest.set32(lParam + HITTEST.flags, hit.flags);
+                guest.set32(lParam + HITTEST.iItem, hit.index);
                 if (sub)
                 {
-                    write32(lParam + HITTEST.iSubItem, hit.subItem);
+                    guest.set32(lParam + HITTEST.iSubItem, hit.subItem);
                 }
                 return hit.index;
             }
@@ -2272,8 +2263,8 @@ export function createListViewProcedure(host, tk, setBkMode){
                 {
                     return 0;
                 }
-                write32(lParam, held.scroll.x);
-                write32(lParam + 4, held.scroll.y);
+                guest.set32(lParam, held.scroll.x);
+                guest.set32(lParam + 4, held.scroll.y);
                 return 1;
             }
             case LVM.GETVIEWRECT: {
@@ -2289,7 +2280,7 @@ export function createListViewProcedure(host, tk, setBkMode){
                     right = Math.max(right, box.right);
                     bottom = Math.max(bottom, box.bottom);
                 }
-                [0, 0, right, bottom].forEach((value, i)=>write32(lParam + i * 4, value));
+                [0, 0, right, bottom].forEach((value, i)=>guest.set32(lParam + i * 4, value));
                 return 1;
             }
             case LVM.GETITEMSPACING: {

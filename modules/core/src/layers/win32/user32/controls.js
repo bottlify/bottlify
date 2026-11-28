@@ -657,9 +657,6 @@ export const imagePlace = (record, rect, shape)=>{
  *
  * @typedef {Object} ControlHost
  * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {Drawing | null} draw
  * @property {(handle: number) => import('./cursors.js').CursorPicture | null} [picture]
  *           The picture an icon or cursor handle stands for, null for one this
@@ -746,7 +743,6 @@ export const imagePlace = (record, rect, shape)=>{
  *           The thread's caret, which an edit takes while it has the focus.
  *           Absent, an edit draws its own bar where typing goes.
  * @property {import('../kernel32/files.js').FileSystem} [files]
- * @property {4 | 8} [pointerSize]  8 in a 64-bit process: a handle's width in a structure.
  * @property {(code: number) => void} [setLastError]
  * @property {(himl: number) => ({ cx: number, cy: number } | null)} [imageListSize]
  *           An image list's image size (comctl32's), for a version 6 button's
@@ -2953,7 +2949,6 @@ export function createControlProcedures(host){
         }
     };
 
-
     /**
      * How far inside its client area an edit lays its text out: a pixel for
      * WS_EX_CLIENTEDGE, a thin border and one for WS_BORDER, which Windows
@@ -4037,7 +4032,7 @@ export function createControlProcedures(host){
      * @returns {number | Promise<number>}
      */
     const measureItem = (combo, item, rows, thread)=>{
-        const size = (host.pointerSize ?? 4) === 8 ? 32 : 24;
+        const size = guest.pointerSize === 8 ? 32 : 24;
         const at = combo.parent && host.allocate ? host.allocate(size) : 0;
         if (at === 0)
         {
@@ -4517,7 +4512,7 @@ export function createControlProcedures(host){
                 // one no taller than the field, a dialog laid out again,
                 // leaves that as it was (Wine's combo test, test_changesize).
                 const pos = message.lParam >>> 0;
-                const pointer = host.pointerSize ?? 4;
+                const pointer = guest.pointerSize;
                 if (!simple && pos !== 0
                     && (guest.u32(wholeAddress(pos + 2 * pointer + 16)) & SWP_NOSIZE) === 0)
                 {
@@ -5007,7 +5002,6 @@ export function createControlProcedures(host){
                 return common(record, message, thread);
         }
     };
-
 
     // --- The dialog class ---------------------------------------------------
 

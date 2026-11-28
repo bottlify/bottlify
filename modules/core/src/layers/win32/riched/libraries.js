@@ -24,7 +24,7 @@ const E_NOTIMPL = 0x80004001;
 
 /**
  * @typedef {Object} RichedHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  */
 
 /** @param {RichedHost} host */
@@ -47,7 +47,7 @@ export function createRichedLibraries(host){
                     {
                         return E_INVALIDARG;
                     }
-                    host.writeMemory(wholeAddress(out), new Uint8Array(4));
+                    host.guest.setPtr(out, 0);
                     return E_NOTIMPL;
                 },
             },

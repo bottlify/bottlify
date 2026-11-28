@@ -15,6 +15,7 @@
  * @param {ReturnType<typeof import('./imagelist.js').createImageLists>} lists
  */
 export function createImageListIcons(host, lists){
+    const { guest } = host;
     return {
         /**
          * HICON ImageList_GetIcon(HIMAGELIST himl, int i, UINT flags)
@@ -49,8 +50,8 @@ export function createImageListIcons(host, lists){
                 }
                 try
                 {
-                    host.writeMemory(block, planes.and);
-                    host.writeMemory(block + planes.and.length, planes.xor);
+                    guest.setBytes(block, planes.and);
+                    guest.setBytes(block + planes.and.length, planes.xor);
                     return /** @type {number} */ (create.handler([0, planes.cx, planes.cy, 1, 32,
                         block, block + planes.and.length])) >>> 0;
                 }

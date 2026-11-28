@@ -200,24 +200,13 @@ const itemLayout = pointer=>(pointer === 8
  *     thread?: unknown) => number | Promise<number>}
  */
 export function createComboBoxExProcedure(host, tk, images, subclassing){
-    const pointer = host.pointerSize ?? 4;
+    const { guest } = host;
+    const pointer = guest.pointerSize;
     const HEADER = pointer === 8 ? 24 : 12;
     const ITEM = itemLayout(pointer);
-
-    /** @param {number} address */
-    const i32 = address=>new DataView(host.readMemory(wholeAddress(address),
-        4).buffer).getInt32(0, true);
-    /** @param {number} address @param {number} value */
-    const setI32 = (address, value)=>host.writeMemory(wholeAddress(address),
-        new Uint8Array(new Int32Array([value | 0]).buffer));
-    /** A pointer-wide field: its low half what counts, the high half its sign's. */
-    const setPointer = (/** @type {number} */ address, /** @type {number} */ value)=>{
-        setI32(address, value);
-        if (pointer === 8)
-        {
-            setI32(address + 4, (value | 0) < 0 ? -1 : 0);
-        }
-    };
+    /** A pointer-wide signed field (an index, a handle): its sign carried into the high half. */
+    const setIntPtr = (/** @type {number} */ address, /** @type {number} */ value)=>(pointer === 8
+        ? guest.set64(address, value | 0) : guest.set32(address, value));
 
     /** @param {number} address @param {boolean} wide */
     const readText = (address, wide)=>readString(host, address, wide, 0x10000);
@@ -273,10 +262,10 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         {
             return 0;
         }
-        host.writeMemory(block, new Uint8Array(size));
-        setPointer(block, record.hwnd);
-        setPointer(block + pointer, record.id);
-        setI32(block + 2 * pointer, code);
+        guest.fill(block, 0, size);
+        setIntPtr(block, record.hwnd);
+        setIntPtr(block + pointer, record.id);
+        guest.set32(block + 2 * pointer, code);
         fill(block);
         return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
             read?.(block);
@@ -292,14 +281,14 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
      * @param {number} text  Where the text is, or zero.
      */
     const fillItem = (at, mask, index, item, text)=>{
-        setI32(at + ITEM.mask, mask);
-        setPointer(at + ITEM.iItem, index);
-        setPointer(at + ITEM.pszText, text);
-        setI32(at + ITEM.iImage, item.image ?? 0);
-        setI32(at + ITEM.iSelectedImage, item.selectedImage ?? 0);
-        setI32(at + ITEM.iOverlay, item.overlay ?? 0);
-        setI32(at + ITEM.iIndent, item.indent === CALLBACK ? 0 : item.indent ?? 0);
-        setPointer(at + ITEM.lParam, item.lParam);
+        guest.set32(at + ITEM.mask, mask);
+        setIntPtr(at + ITEM.iItem, index);
+        setIntPtr(at + ITEM.pszText, text);
+        guest.set32(at + ITEM.iImage, item.image ?? 0);
+        guest.set32(at + ITEM.iSelectedImage, item.selectedImage ?? 0);
+        guest.set32(at + ITEM.iOverlay, item.overlay ?? 0);
+        guest.set32(at + ITEM.iIndent, item.indent === CALLBACK ? 0 : item.indent ?? 0);
+        setIntPtr(at + ITEM.lParam, item.lParam);
     };
 
     /**
@@ -319,31 +308,31 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
      * @param {number} address @param {Item} item @param {boolean} wide
      */
     const store = (address, item, wide)=>{
-        const mask = i32(address + ITEM.mask);
+        const mask = guest.i32(address + ITEM.mask);
         if ((mask & CBEIF_TEXT) !== 0)
         {
-            const text = i32(address + ITEM.pszText);
+            const text = guest.i32(address + ITEM.pszText);
             item.text = text === CALLBACK ? CALLBACK : text === 0 ? null : readText(text, wide);
         }
         if ((mask & CBEIF_IMAGE) !== 0)
         {
-            item.image = i32(address + ITEM.iImage);
+            item.image = guest.i32(address + ITEM.iImage);
         }
         if ((mask & CBEIF_SELECTEDIMAGE) !== 0)
         {
-            item.selectedImage = i32(address + ITEM.iSelectedImage);
+            item.selectedImage = guest.i32(address + ITEM.iSelectedImage);
         }
         if ((mask & CBEIF_OVERLAY) !== 0)
         {
-            item.overlay = i32(address + ITEM.iOverlay);
+            item.overlay = guest.i32(address + ITEM.iOverlay);
         }
         if ((mask & CBEIF_INDENT) !== 0)
         {
-            item.indent = i32(address + ITEM.iIndent);
+            item.indent = guest.i32(address + ITEM.iIndent);
         }
         if ((mask & CBEIF_LPARAM) !== 0)
         {
-            item.lParam = i32(address + ITEM.lParam);
+            item.lParam = guest.i32(address + ITEM.lParam);
         }
         return mask;
     };
@@ -361,7 +350,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
             host.divergence?.('ComboBoxEx32', 'no memory for an item\'s text: the list shows none');
             return use(0);
         }
-        host.writeMemory(at, Uint8Array.from([...bytes, 0]));
+        guest.setBytes(at, Uint8Array.from([...bytes, 0]));
         return after(use(at), answer=>{
             host.release?.(at);
             return answer;
@@ -379,7 +368,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         {
             return CB_ERR;
         }
-        const asked = i32(address + ITEM.iItem);
+        const asked = guest.i32(address + ITEM.iItem);
         const index = asked === -1 ? held.items.length : asked;
         if (index < 0 || index > held.items.length)
         {
@@ -426,7 +415,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
             return shownText(held.editItem);
         }
         return after(host.send(held.edit, WM_GETTEXT, CBEMAXSTRLEN, at, thread), ()=>{
-            const text = host.readCString(at, CBEMAXSTRLEN);
+            const text = guest.cstr(at, CBEMAXSTRLEN);
             host.release?.(at);
             return text;
         });
@@ -444,13 +433,13 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         {
             return 0;
         }
-        const index = i32(address + ITEM.iItem);
+        const index = guest.i32(address + ITEM.iItem);
         const item = index === -1 ? held.editItem : held.items[index];
         if (!item)
         {
             return 0;
         }
-        const mask = i32(address + ITEM.mask);
+        const mask = guest.i32(address + ITEM.mask);
         const fields = /** @type {[number, keyof Item][]} */ ([[CBEIF_TEXT, 'text'],
             [CBEIF_IMAGE, 'image'], [CBEIF_SELECTEDIMAGE, 'selectedImage'],
             [CBEIF_OVERLAY, 'overlay'], [CBEIF_INDENT, 'indent']]);
@@ -467,35 +456,37 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
                 if ((mask & CBEIF_TEXT) !== 0 && typeof answer.text === 'string'
                     && answer.text !== '')
                 {
-                    writeText(i32(address + ITEM.pszText) >>> 0, i32(address + ITEM.cchTextMax),
+                    writeText(guest.i32(address + ITEM.pszText),
+                        guest.i32(address + ITEM.cchTextMax),
                         answer.text, wide);
                 }
-                else if ((mask & CBEIF_TEXT) !== 0 && i32(address + ITEM.pszText) !== 0)
+                else if ((mask & CBEIF_TEXT) !== 0 && guest.i32(address + ITEM.pszText) !== 0)
                 {
                     // No text is an empty string where the caller gave room
                     // for one (Wine's test_comboex_CB_GETLBTEXT).
-                    writeText(i32(address + ITEM.pszText) >>> 0, i32(address + ITEM.cchTextMax),
+                    writeText(guest.i32(address + ITEM.pszText),
+                        guest.i32(address + ITEM.cchTextMax),
                         '', wide);
                 }
                 if ((mask & CBEIF_IMAGE) !== 0)
                 {
-                    setI32(address + ITEM.iImage, answer.image ?? 0);
+                    guest.set32(address + ITEM.iImage, answer.image ?? 0);
                 }
                 if ((mask & CBEIF_SELECTEDIMAGE) !== 0)
                 {
-                    setI32(address + ITEM.iSelectedImage, answer.selectedImage ?? 0);
+                    guest.set32(address + ITEM.iSelectedImage, answer.selectedImage ?? 0);
                 }
                 if ((mask & CBEIF_OVERLAY) !== 0)
                 {
-                    setI32(address + ITEM.iOverlay, answer.overlay ?? 0);
+                    guest.set32(address + ITEM.iOverlay, answer.overlay ?? 0);
                 }
                 if ((mask & CBEIF_INDENT) !== 0)
                 {
-                    setI32(address + ITEM.iIndent, answer.indent ?? 0);
+                    guest.set32(address + ITEM.iIndent, answer.indent ?? 0);
                 }
                 if ((mask & CBEIF_LPARAM) !== 0)
                 {
-                    setPointer(address + ITEM.lParam, answer.lParam);
+                    setIntPtr(address + ITEM.lParam, answer.lParam);
                 }
                 return 1;
             }));
@@ -517,32 +508,32 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         return notify(record, wide ? CBEN_GETDISPINFOW : CBEN_GETDISPINFOA, size, block=>{
             fillItem(block + HEADER, asked, index, item, (asked & CBEIF_TEXT) !== 0
                 ? block + buffer : 0);
-            setI32(block + HEADER + ITEM.cchTextMax, 0);
+            guest.set32(block + HEADER + ITEM.cchTextMax, 0);
         }, thread, block=>{
             const at = block + HEADER;
-            const back = i32(at + ITEM.mask);
+            const back = guest.i32(at + ITEM.mask);
             /** @type {Item} */
             const given = { ...item };
             if ((asked & CBEIF_TEXT) !== 0)
             {
-                const text = i32(at + ITEM.pszText);
+                const text = guest.i32(at + ITEM.pszText);
                 given.text = text === 0 || text === CALLBACK ? null : readText(text, wide);
             }
             if ((asked & CBEIF_IMAGE) !== 0)
             {
-                given.image = i32(at + ITEM.iImage);
+                given.image = guest.i32(at + ITEM.iImage);
             }
             if ((asked & CBEIF_SELECTEDIMAGE) !== 0)
             {
-                given.selectedImage = i32(at + ITEM.iSelectedImage);
+                given.selectedImage = guest.i32(at + ITEM.iSelectedImage);
             }
             if ((asked & CBEIF_OVERLAY) !== 0)
             {
-                given.overlay = i32(at + ITEM.iOverlay);
+                given.overlay = guest.i32(at + ITEM.iOverlay);
             }
             if ((asked & CBEIF_INDENT) !== 0)
             {
-                given.indent = i32(at + ITEM.iIndent);
+                given.indent = guest.i32(at + ITEM.iIndent);
             }
             Object.assign(answer, given);
             if ((back & CBEIF_DI_SETITEM) !== 0)
@@ -564,7 +555,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         {
             return 0;
         }
-        const index = i32(address + ITEM.iItem);
+        const index = guest.i32(address + ITEM.iItem);
         const item = index === -1 ? held.editItem : held.items[index];
         if (!item)
         {
@@ -620,10 +611,10 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
             const changed = held.changed;
             held.changed = false;
             return notify(record, wide ? CBEN_ENDEDITW : CBEN_ENDEDITA, size, block=>{
-                setI32(block + HEADER, changed ? 1 : 0);
-                setI32(block + HEADER + 4, selection);
+                guest.set32(block + HEADER, changed ? 1 : 0);
+                guest.set32(block + HEADER + 4, selection);
                 writeText(block + HEADER + 8, CBEMAXSTRLEN, text, wide);
-                setI32(block + size - 4, why);
+                guest.set32(block + size - 4, why);
             }, thread);
         }));
     };
@@ -803,12 +794,11 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
     const drawItem = (record, address)=>{
         const held = state(record);
         const draw = host.draw;
-        const view = new DataView(host.readMemory(wholeAddress(address), 48).buffer);
-        const index = view.getInt32(8, true);
-        const itemState = view.getUint32(16, true);
-        const hdc = view.getUint32(24, true);
-        const rect = { left: view.getInt32(28, true), top: view.getInt32(32, true),
-            right: view.getInt32(36, true), bottom: view.getInt32(40, true) };
+        const index = guest.i32(address + 8);
+        const itemState = guest.u32(address + 16);
+        const hdc = guest.u32(address + 24);
+        const rect = { left: guest.i32(address + 28), top: guest.i32(address + 32),
+            right: guest.i32(address + 36), bottom: guest.i32(address + 40) };
         const item = held.items[index];
         if (!draw || !item)
         {
@@ -845,7 +835,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         const size = held.imageList !== 0 ? images?.size(held.imageList) : null;
         if (size)
         {
-            setI32(address + 16, Math.max(i32(address + 16), size.cy + 2));
+            guest.set32(address + 16, Math.max(guest.i32(address + 16), size.cy + 2));
         }
         return 1;
     };
@@ -907,9 +897,9 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
             case WM_WINDOWPOSCHANGING: {
                 // As tall as the field, whatever it is given.
                 const at = lParam + 2 * pointer;
-                if (lParam !== 0 && held.height > 0 && (i32(at + 16) & SWP_NOSIZE) === 0)
+                if (lParam !== 0 && held.height > 0 && (guest.i32(at + 16) & SWP_NOSIZE) === 0)
                 {
-                    setI32(at + 12, held.height);
+                    guest.set32(at + 12, held.height);
                 }
                 return 0;
             }

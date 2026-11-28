@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createImageLists } from './imagelist.js';
 import { CLSID_IMAGELIST, IID_IIMAGELIST, IID_IIMAGELIST2 } from './imagelist-com.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * Image lists published as COM objects, as Wine's imagelist test sees them
@@ -43,8 +44,7 @@ function machine(){
     const published = new Map();
     let next = 0x8000;
     const lists = createImageLists({
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
         vtables: { publish: object=>{
             for (const [pointer, held] of published)
             {

@@ -148,23 +148,13 @@ const IMAGELISTDRAWPARAMS = Object.freeze({
     yBitmap: 36, rgbBk: 40, rgbFg: 44, fStyle: 48, dwRop: 52, V3_SIZE: 56,
 });
 
-/** A POINT: two signed longs. @param {number} x @param {number} y */
-const point32 = (x, y)=>new Uint8Array([
-    x & 0xff, x >> 8 & 0xff, x >> 16 & 0xff, x >> 24 & 0xff,
-    y & 0xff, y >> 8 & 0xff, y >> 16 & 0xff, y >> 24 & 0xff,
-]);
-
-/** @param {number[]} values @returns {Uint8Array} them as little-endian DWORDs */
-const dwords = values=>new Uint8Array(new Uint32Array(values.map(value=>value >>> 0)).buffer);
-
 /**
  * @typedef {Object} ImageListHost
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  *           Where a list is published as the IImageList its handle is
  *           (`imagelist-com.js`). Absent, a handle is a number of the list's own
  *           and no COM call reaches it.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bitmap: number) => { width: number, height: number } | null} [bitmapSize]
  *           How large a bitmap handle is, for counting the images in a strip.
  *           Absent in a build without gdi32 behind it, and then a strip counts
@@ -222,6 +212,7 @@ const dwords = values=>new Uint8Array(new Uint32Array(values.map(value=>value >>
  * @param {ImageListHost} host
  */
 export function createImageLists(host){
+    const { guest } = host;
     /**
      * @typedef {Object} ImageList
      * @property {number} cx
@@ -260,14 +251,11 @@ export function createImageLists(host){
     const listOf = handle=>lists.get(handle >>> 0) ?? null;
 
     /** The lists as COM objects, where there is a bridge to publish them on. */
-    const objects = host.vtables && host.readMemory ? createImageListObjects({
+    const objects = host.vtables ? createImageListObjects({
         publish: (object, id)=>/** @type {NonNullable<ImageListHost['vtables']>} */ (host.vtables)
             .publish(object, id),
         flat: (name, args)=>/** @type {any} */ (functions)[name].handler(args),
-        putU32: (at, value)=>host.writeMemory(at, Uint8Array.of(value & 255, value >>> 8 & 255,
-            value >>> 16 & 255, value >>> 24 & 255)),
-        readGuid: at=>/** @type {NonNullable<ImageListHost['readMemory']>} */ (host.readMemory)(
-            at, 16).slice(),
+        guest,
         divergence: host.divergence,
         initialize: (handle, cx, cy, flags, initial, grow)=>{
             const list = listOf(handle);
@@ -412,7 +400,7 @@ export function createImageLists(host){
         }
         try
         {
-            host.writeMemory(at, new Uint8Array(info.buffer));
+            guest.setBytes(at, new Uint8Array(info.buffer));
             return gdi('CreateDIBSection', 0, at, DIB_RGB_COLORS, 0, 0, 0);
         }
         finally
@@ -446,7 +434,7 @@ export function createImageLists(host){
             const quads = new DataView(new ArrayBuffer(set * 4));
             colors.slice(0, set).forEach((rgb, index)=>quads.setUint32(index * 4,
                 rgb & 0xffffff, true));
-            host.writeMemory(at, new Uint8Array(quads.buffer));
+            guest.setBytes(at, new Uint8Array(quads.buffer));
             withDCs([list.image], dc=>gdi('SetDIBColorTable', dc, start, set, at));
             host.release?.(at);
         }
@@ -462,20 +450,18 @@ export function createImageLists(host){
      */
     const colorsOf = bitmap=>{
         const at = host.allocate?.(256 * 4) ?? 0;
-        if (at === 0 || !host.readMemory)
+        if (at === 0)
         {
             return null;
         }
         try
         {
-            const read = /** @type {(address: number, length: number) => Uint8Array} */ (
-                host.readMemory);
             const count = withDCs([bitmap], dc=>gdi('GetDIBColorTable', dc, 0, 256, at));
             if (count <= 0)
             {
                 return null;
             }
-            const bytes = read(at, count * 4);
+            const bytes = guest.view(at, count * 4);
             return Array.from({ length: count }, (_, index)=>bytes[index * 4]
                 | bytes[index * 4 + 1] << 8 | bytes[index * 4 + 2] << 16);
         }
@@ -609,9 +595,8 @@ export function createImageLists(host){
      * @param {ImageList} list @param {number} bitmap @param {number} from
      */
     const hasAlpha = (list, bitmap, from)=>{
-        const read = host.readMemory;
         const info = host.allocate?.(24) ?? 0;
-        if (!read || info === 0)
+        if (info === 0)
         {
             return false;
         }
@@ -632,21 +617,20 @@ export function createImageLists(host){
             {
                 return false;
             }
-            const header = new DataView(read(info, 24).slice().buffer);
-            if (header.getUint16(18, true) !== 32)
+            if (guest.u16(info + 18) !== 32)
             {
                 return false;
             }
-            const stride = header.getInt32(12, true);
-            const rows = Math.min(Math.abs(header.getInt32(8, true)), list.cy);
-            const width = Math.min(list.cx, header.getInt32(4, true) - from);
-            const pointer = header.getUint32(20, true);
+            const stride = guest.i32(info + 12);
+            const rows = Math.min(Math.abs(guest.i32(info + 8)), list.cy);
+            const width = Math.min(list.cx, guest.i32(info + 4) - from);
+            const pointer = guest.u32(info + 20);
             if (pointer !== 0 && width > 0)
             {
                 // A DIB section's bits are in memory: its rows read in place.
                 for (let row = 0; row < rows; row++)
                 {
-                    const line = read(pointer + row * stride + from * 4, width * 4);
+                    const line = guest.view(pointer + row * stride + from * 4, width * 4);
                     if (anyAlpha(line, 0, line.length))
                     {
                         return true;
@@ -665,7 +649,7 @@ export function createImageLists(host){
                 list.cy, source, from, 0, SRCCOPY));
             gdi('GetBitmapBits', copy, size, at);
             gdi('DeleteObject', copy);
-            const found = anyAlpha(read(at, size), 0, size);
+            const found = anyAlpha(guest.view(at, size), 0, size);
             host.release?.(at);
             return found;
         }
@@ -1184,8 +1168,8 @@ export function createImageLists(host){
                 {
                     return 0;
                 }
-                host.writeMemory(wholeAddress(cx), dwords([list.cx]));
-                host.writeMemory(wholeAddress(cy), dwords([list.cy]));
+                guest.set32(cx, list.cx);
+                guest.set32(cy, list.cy);
                 return 1;
             },
         },
@@ -1371,11 +1355,11 @@ export function createImageLists(host){
                 }
                 if (wholeAddress(point) !== 0)
                 {
-                    host.writeMemory(wholeAddress(point), point32(drag.x, drag.y));
+                    guest.set32s(point, [drag.x, drag.y]);
                 }
                 if (wholeAddress(hotspot) !== 0)
                 {
-                    host.writeMemory(wholeAddress(hotspot), point32(drag.dx, drag.dy));
+                    guest.set32s(hotspot, [drag.dx, drag.dy]);
                 }
                 return drag.owned || drag.list;
             },
@@ -1412,14 +1396,12 @@ export function createImageLists(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([params])=>{
-                if (wholeAddress(params) === 0 || !host.readMemory)
+                if (wholeAddress(params) === 0)
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(wholeAddress(params), IMAGELISTDRAWPARAMS.V3_SIZE);
-                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                 /** @param {number} at */
-                const field = at=>view.getInt32(at, true);
+                const field = at=>guest.i32(params + at);
                 if ((field(IMAGELISTDRAWPARAMS.cbSize) >>> 0) < IMAGELISTDRAWPARAMS.V3_SIZE)
                 {
                     return 0;
@@ -1612,13 +1594,13 @@ export function createImageLists(host){
             /** @param {number[]} args */
             handler: ([handle, start, entries, quads])=>{
                 const list = listOf(handle);
-                if (!list || depthOf(list) > 8 || (quads >>> 0) === 0 || !host.readMemory)
+                if (!list || depthOf(list) > 8 || (quads >>> 0) === 0)
                 {
                     return 0;
                 }
                 const size = 1 << depthOf(list);
                 const wanted = Math.max(0, Math.min(entries >>> 0, size - (start >>> 0)));
-                const bytes = host.readMemory(wholeAddress(quads), wanted * 4);
+                const bytes = guest.snapshot(quads, wanted * 4);
                 list.colorsSet = true;
                 return setColors(list, start >>> 0, Array.from({ length: wanted },
                     (_, index)=>bytes[index * 4] | bytes[index * 4 + 1] << 8
@@ -1643,8 +1625,8 @@ export function createImageLists(host){
                     return 0;
                 }
                 const left = (index | 0) * list.cx;
-                host.writeMemory(wholeAddress(info), dwords([list.image, list.mask, 0, 0,
-                    left, 0, left + list.cx, list.cy]));
+                guest.set32s(info, [list.image, list.mask, 0, 0,
+                    left, 0, left + list.cx, list.cy]);
                 return 1;
             },
         },
@@ -1720,9 +1702,8 @@ export function createImageLists(host){
         const stride = ((width * depth + 31) >>> 5) * 4;
         const infoSize = BITMAPINFOHEADER_SIZE + (depth <= 8 ? (1 << depth) * 4 : 0);
         const total = infoSize + stride * height;
-        const read = host.readMemory;
-        const block = read ? scratch.allocate(total) : 0;
-        if (!read || block === 0)
+        const block = scratch.allocate(total);
+        if (block === 0)
         {
             return null;
         }
@@ -1737,7 +1718,7 @@ export function createImageLists(host){
             header.setUint16(14, depth, true);
             header.setUint32(16, BI_RGB, true);
             header.setUint32(20, stride * height, true);
-            host.writeMemory(block, laid);
+            guest.setBytes(block, laid);
             if (host.gdi32 && source !== 0)
             {
                 const grid = gdi('CreateBitmap', width, height, 1, depth === 1 ? 1 : 32, 0);
@@ -1754,8 +1735,8 @@ export function createImageLists(host){
                 gdi('DeleteDC', dc);
                 gdi('DeleteObject', grid);
             }
-            const bytes = read(block, total);
-            return { info: bytes.slice(0, infoSize), bits: bytes.slice(infoSize) };
+            return { info: guest.snapshot(block, infoSize),
+                bits: guest.snapshot(block + infoSize, total - infoSize) };
         }
         finally
         {
@@ -1785,8 +1766,8 @@ export function createImageLists(host){
         {
             return false;
         }
-        host.writeMemory(block, dib.info);
-        host.writeMemory(block + dib.info.length, dib.bits);
+        guest.setBytes(block, dib.info);
+        guest.setBytes(block + dib.info.length, dib.bits);
         const grid = gdi('CreateBitmap', width, height, 1, target === list.mask ? 1 : 32, 0);
         const dc = gdi('CreateCompatibleDC', 0);
         gdi('SetDIBits', dc, grid, 0, height, block + dib.info.length, block, DIB_RGB_COLORS);
@@ -1829,8 +1810,7 @@ export function createImageLists(host){
          */
         iconPlanes: (handle, index, scratch)=>{
             const list = listOf(handle);
-            const read = host.readMemory;
-            if (!list || !host.gdi32 || !read || list.image === 0 || (index | 0) < 0
+            if (!list || !host.gdi32 || list.image === 0 || (index | 0) < 0
                 || (index | 0) >= list.count)
             {
                 return null;
@@ -1852,7 +1832,7 @@ export function createImageLists(host){
                         from, (index | 0) * cx, 0, SRCCOPY));
                     gdi('GetBitmapBits', bitmap, size, at);
                     gdi('DeleteObject', bitmap);
-                    return read(at, size).slice();
+                    return guest.snapshot(at, size);
                 };
                 return {
                     cx, cy,

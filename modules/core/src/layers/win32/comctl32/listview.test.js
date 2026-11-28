@@ -10,6 +10,7 @@ import { decodeAnsi } from '../kernel32/locale.js';
 import { LVCF_TEXT, LVCF_WIDTH, LVCOLUMN, LVIF_PARAM, LVIF_STATE, LVIF_TEXT, LVIS_FOCUSED,
     LVIS_SELECTED, LVITEM, LVM, LVS_OWNERDATA, LVS_REPORT, LVS_SINGLESEL,
     createListViewProcedure } from './listview.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const ITEM = 0x10100;
 const TEXT = 0x10200;
@@ -37,11 +38,7 @@ function listview(style, answer = ()=>0, setBkMode = undefined){
     /** @type {number[][]} */
     const heard = [];
     const procedure = createListViewProcedure(/** @type {any} */ ({
-        readMemory: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, at),
-        readCString: (/** @type {number} */ at)=>
-            decodeAnsi(bytes.subarray(at, bytes.indexOf(0, at))),
+        guest: guestOver(bytes),
         allocate: (/** @type {number} */ n)=>{
             const at = heap;
             heap += n;

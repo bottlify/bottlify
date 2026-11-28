@@ -7,10 +7,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DATA_ORDINALS, createDataStructureFunctions } from './dpa.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * A guest of plain memory, a heap that remembers each block's size, and
  * callbacks that are JavaScript functions at made-up addresses.
+ *
+ * @param {4 | 8} [pointerSize]
  */
 function machine(pointerSize = 4){
     const memory = new Uint8Array(0x40000);
@@ -42,11 +45,9 @@ function machine(pointerSize = 4){
     /** @type {Map<number, (...args: number[]) => number>} */
     const callbacks = new Map();
     const f = createDataStructureFunctions({
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory, pointerSize),
         kernel32: name=>kernel32[name],
         call: (entry, args)=>/** @type {any} */ (callbacks.get(entry))(...args),
-        ...pointerSize === 8 ? { pointerSize: /** @type {8} */ (8) } : {},
     });
     const run = (/** @type {string} */ name, /** @type {number[]} */ args)=>
         /** @type {any} */ (f)[name].handler(args);

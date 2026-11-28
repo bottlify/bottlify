@@ -11,6 +11,7 @@ import { createHelperFunctions } from './helpers.js';
 import { TB_ADDBITMAP, TB_ADDBUTTONSA, TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE }
     from './toolbar.js';
 import { DATA_ORDINALS } from './dpa.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * Guest memory, a bump allocator, and user32 and gdi32 stand-ins that record
@@ -35,10 +36,7 @@ function machine(user32, gdi32){
         return table[name](args);
     } } : undefined);
     const host = {
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.slice(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, at),
+        guest: guestOver(bytes),
         allocate: (/** @type {number} */ size)=>{
             const at = next;
             next += (size + 15) & ~15;

@@ -34,7 +34,6 @@ import {
     COLOR_BTNTEXT, after,
 } from '../user32/controls.js';
 import { notifyWindow } from './notify.js';
-import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const TRACKBAR_CLASS = 'msctls_trackbar32';
@@ -515,7 +514,7 @@ export function createTrackbarProcedure(host, tk){
                     held.ticArray = { address, capacity };
                 }
                 held.tics.forEach((/** @type {number} */ pos, /** @type {number} */ at)=>
-                    host.guest.set32(wholeAddress(held.ticArray.address + at * 4), pos));
+                    host.guest.set32(held.ticArray.address + at * 4, pos));
                 return held.ticArray.address;
             }
             case TBM_CLEARTICS:
@@ -567,10 +566,10 @@ export function createTrackbarProcedure(host, tk){
                 {
                     const { channel, thumb } = layout(record);
                     const rect = message.message === TBM_GETTHUMBRECT ? thumb : channel;
-                    host.guest.set32(wholeAddress(out), rect.left);
-                    host.guest.set32(wholeAddress(out + 4), rect.top);
-                    host.guest.set32(wholeAddress(out + 8), rect.right);
-                    host.guest.set32(wholeAddress(out + 12), rect.bottom);
+                    host.guest.set32(out, rect.left);
+                    host.guest.set32(out + 4, rect.top);
+                    host.guest.set32(out + 8, rect.right);
+                    host.guest.set32(out + 12, rect.bottom);
                 }
                 return 0;
             }

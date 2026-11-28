@@ -19,7 +19,6 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { wholeAddress } from '../common/pointers.js';
 
 /** The classes, as riched32 (1.0), riched20 (2.0 and 3.0) and msftedit (4.1) name them. */
 export const RICHEDIT_CLASSES = ['RichEdit', 'RichEdit20A', 'RichEdit20W', 'RICHEDIT50W'];
@@ -284,12 +283,7 @@ export function rtfToText(bytes){
 export function createRichEditControls(host, toolkit){
     const edit = toolkit.editProc;
     const { stateOf, writeU32 } = toolkit;
-
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
+    const { guest } = host;
 
     /** @param {any} value @param {(answer: any) => any} then */
     const after = (value, then)=>(typeof value?.then === 'function'
@@ -304,8 +298,8 @@ export function createRichEditControls(host, toolkit){
      * @returns {Uint8Array | null | Promise<Uint8Array | null>}  Null when it failed.
      */
     const readStream = (stream, thread)=>{
-        const callback = readU32(stream + EDITSTREAM_CALLBACK);
-        const cookie = readU32(stream);
+        const callback = guest.u32(stream + EDITSTREAM_CALLBACK);
+        const cookie = guest.u32(stream);
         const buffer = host.allocate?.(STREAM_CHUNK + 4) ?? 0;
         if (callback === 0 || buffer === 0 || !host.call)
         {
@@ -325,7 +319,7 @@ export function createRichEditControls(host, toolkit){
             writeU32(count, 0);
             const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
             return after(call(callback, [cookie, buffer, STREAM_CHUNK, count], thread), error=>{
-                const got = Math.min(readU32(count), STREAM_CHUNK);
+                const got = Math.min(guest.u32(count), STREAM_CHUNK);
                 if ((error >>> 0) !== 0)
                 {
                     writeU32(stream + EDITSTREAM_ERROR, error >>> 0);
@@ -342,7 +336,7 @@ export function createRichEditControls(host, toolkit){
                     }
                     return done(all);
                 }
-                chunks.push(host.readMemory(buffer, got).slice());
+                chunks.push(guest.snapshot(buffer, got));
                 total += got;
                 return step();
             });
@@ -384,24 +378,12 @@ export function createRichEditControls(host, toolkit){
      * @param {number} address @param {number} codePage
      */
     const textAt = (address, codePage)=>{
-        const unit = codePage === CP_UNICODE ? 2 : 1;
-        /** @type {number[]} */
-        const bytes = [];
-        for (let at = address; bytes.length < MAX_SET_TEXT; at += unit)
-        {
-            const piece = host.readMemory(at, unit);
-            if (piece.every(byte=>byte === 0))
-            {
-                break;
-            }
-            bytes.push(...piece);
-        }
-        const raw = Uint8Array.from(bytes);
-        const text = unit === 2
-            ? String.fromCharCode(...new Uint16Array(raw.buffer)) : decodeAnsi(raw);
+        const wide = codePage === CP_UNICODE;
+        const text = guest.text(address, wide, MAX_SET_TEXT);
         // RTF is ASCII, its other characters escaped; the parser reads bytes.
         return text.startsWith('{\\rtf')
-            ? rtfToText(unit === 2 ? encodeAnsi(text) : raw) : text;
+            ? rtfToText(wide ? encodeAnsi(text) : guest.stringBytes(address, false, MAX_SET_TEXT))
+            : text;
     };
 
     /**
@@ -446,8 +428,8 @@ export function createRichEditControls(host, toolkit){
                 // SETTEXTEX { DWORD flags; UINT codepage } -- an installer
                 // hands its licence this way, RTF or plain; unanswered, the
                 // box stayed empty.
-                const flags = readU32(wholeAddress(wParam));
-                const codePage = readU32(wholeAddress(wParam) + 4);
+                const flags = guest.u32(wParam);
+                const codePage = guest.u32(wParam + 4);
                 const text = (lParam >>> 0) === 0 ? '' : textAt(lParam >>> 0, codePage);
                 place(record, text, (flags & ST_SELECTION) !== 0);
                 return 1;
@@ -464,15 +446,15 @@ export function createRichEditControls(host, toolkit){
                 return 0;
             case EM_EXSETSEL:
                 return after(edit(record, { ...message, message: EM_SETSEL,
-                    wParam: readU32(lParam), lParam: readU32(lParam + 4) }, thread),
+                    wParam: guest.u32(lParam), lParam: guest.u32(lParam + 4) }, thread),
                 ()=>Math.max(state.selStart ?? 0, state.selEnd ?? 0));
             case EM_EXLINEFROMCHAR:
                 return edit(record, { ...message, message: EM_LINEFROMCHAR, wParam: lParam,
                     lParam: 0 }, thread);
             case EM_GETTEXTRANGE: {
-                const from = readU32(lParam) | 0;
-                const to = readU32(lParam + 4) | 0;
-                const target = readU32(lParam + 8);
+                const from = guest.u32(lParam) | 0;
+                const to = guest.u32(lParam + 4) | 0;
+                const target = guest.u32(lParam + 8);
                 const slice = record.title.slice(Math.max(0, from), to < 0 ? undefined : to);
                 if (target !== 0)
                 {

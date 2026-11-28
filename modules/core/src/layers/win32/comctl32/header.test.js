@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { HDF_STRING, HDI_FORMAT, HDI_LPARAM, HDI_ORDER, HDI_TEXT, HDI_WIDTH,
     HDITEM, HDM, createHeaderProcedure } from './header.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const ITEM = 0x10100;
 const TEXT = 0x10200;
@@ -28,11 +29,7 @@ function header(answer = 0){
     /** @type {[number, number][]} the accessibility events raised, and their child */
     const events = [];
     const procedure = createHeaderProcedure(/** @type {any} */ ({
-        readMemory: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, at),
-        readCString: (/** @type {number} */ at)=>
-            decodeAnsi(bytes.subarray(at, bytes.indexOf(0, at))),
+        guest: guestOver(bytes),
         allocate: (/** @type {number} */ n)=>{
             const at = heap;
             heap += n;

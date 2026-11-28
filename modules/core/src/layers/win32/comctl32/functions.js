@@ -22,9 +22,8 @@ import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} ComctlHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the arrays (DPA, DSA) take its layout.
+ * @property {import('../common/guest.js').Guest} guest
+ *           The guest's memory at the process's width: the arrays (DPA, DSA) take its layout.
  * @property {(bitmap: number) => { width: number, height: number } | null} [bitmapSize]
  *           How large a bitmap handle is, for counting the images in a strip.
  *           Absent in a build without gdi32 behind it, and then a strip counts
@@ -62,10 +61,6 @@ import { wholeAddress } from '../common/pointers.js';
  *     first?: import('../user32/dialogs.js').ModalHook }) => number | Promise<number>} [modal]
  *           The rest of what a property sheet needs; see propsheet.js.
  */
-
-/** @param {Uint8Array} bytes @param {number} at */
-const u32 = (bytes, at)=>(bytes[at] | bytes[at + 1] << 8
-    | bytes[at + 2] << 16 | bytes[at + 3] << 24) >>> 0;
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -153,6 +148,7 @@ export function commonControlsFaces(host){
  * @param {ComctlHost} host
  */
 export function createComctlFunctions(host){
+    const { guest } = host;
     const sheets = createPropertySheetFunctions(host);
     const images = createImageListFunctions(host);
     return {
@@ -180,7 +176,7 @@ export function createComctlFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([controls])=>{
-                const size = u32(host.readMemory(wholeAddress(controls), 4), 0);
+                const size = guest.u32(controls);
                 return size === 8 ? 1 : 0;
             },
         },
@@ -203,7 +199,7 @@ export function createComctlFunctions(host){
                 {
                     return host.trackMouseEvent(wholeAddress(track));
                 }
-                const size = u32(host.readMemory(wholeAddress(track), 4), 0);
+                const size = guest.u32(track);
                 return size === 16 ? 1 : 0;
             },
         },
@@ -227,8 +223,7 @@ export function createComctlFunctions(host){
                 {
                     return 0;
                 }
-                host.writeMemory(name, new Uint8Array([...UPDOWN_CLASS].map(c=>c.charCodeAt(0))
-                    .concat(0)));
+                guest.writeAnsi(name, UPDOWN_CLASS);
                 /** @param {unknown} value @param {(answer: any) => any} then */
                 const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then
                     === 'function' ? /** @type {Promise<unknown>} */ (value).then(then)
@@ -278,6 +273,7 @@ export function createComctlFunctions(host){
  * @param {{ major: number, minor: number, build: number, qfe: number }} version
  */
 function dllGetVersion(host, version){
+    const { guest } = host;
     return {
         argBytes: 4,
         /** @param {number[]} args */
@@ -286,24 +282,20 @@ function dllGetVersion(host, version){
             {
                 return E_INVALIDARG;
             }
-            const size = u32(host.readMemory(wholeAddress(info), 4), 0);
+            const size = guest.u32(info);
             if (size !== DLLVERSIONINFO_SIZE && size !== DLLVERSIONINFO2_SIZE)
             {
                 return E_INVALIDARG;
             }
-            const fields = new DataView(new ArrayBuffer(size - 4));
-            fields.setUint32(0, version.major, true);
-            fields.setUint32(4, version.minor, true);
-            fields.setUint32(8, version.build, true);
-            fields.setUint32(12, DLLVER_PLATFORM_NT, true);
+            guest.set32s(info + 4, [version.major, version.minor, version.build,
+                DLLVER_PLATFORM_NT]);
             if (size === DLLVERSIONINFO2_SIZE)
             {
-                // dwFlags stays zero; ullVersion is major.minor.build.qfe,
+                // dwFlags is zero; ullVersion is major.minor.build.qfe,
                 // a word each, the major in the top word.
-                fields.setUint32(20, (version.build << 16 | version.qfe) >>> 0, true);
-                fields.setUint32(24, (version.major << 16 | version.minor) >>> 0, true);
+                guest.set32s(info + 20, [0, version.build << 16 | version.qfe,
+                    version.major << 16 | version.minor]);
             }
-            host.writeMemory(wholeAddress(info) + 4, new Uint8Array(fields.buffer));
             return S_OK;
         },
     };
@@ -323,6 +315,7 @@ function dllGetVersion(host, version){
  * @param {Set<string>} classes  the library's own, lower case
  */
 function registerClassName(host, classes){
+    const { guest } = host;
     return {
         argBytes: 4,
         /** @param {number[]} args */
@@ -331,18 +324,7 @@ function registerClassName(host, classes){
             {
                 return 0;
             }
-            const units = [];
-            for (let at = wholeAddress(name); units.length < 256; at += 2)
-            {
-                const unit = host.readMemory(at, 2);
-                const code = unit[0] | unit[1] << 8;
-                if (code === 0)
-                {
-                    break;
-                }
-                units.push(code);
-            }
-            const text = String.fromCharCode(...units);
+            const text = guest.wstr(name, 512);
             if (!classes.has(text.toLowerCase()) || !host.allocate || !host.user32)
             {
                 return 0;

@@ -376,8 +376,7 @@ function setup({ modal = false, guest = false } = {}){
         handler: (args: number[]) => any }>} */ (/** @type {unknown} */ (fns));
 
     const functions = createComctlFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
+        guest: memory.guest,
         user32: name=>table[name],
         allocate,
         release: ()=>{},

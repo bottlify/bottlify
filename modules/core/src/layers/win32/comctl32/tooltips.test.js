@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { createTooltipProcedure } from './tooltips.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const WM_USER = 0x0400;
 const TTM_ADDTOOLA = WM_USER + 4;
@@ -40,11 +41,7 @@ function tooltip(){
     /** @type {number[]} */
     const asked = [];
     const procedure = createTooltipProcedure(/** @type {any} */ ({
-        readMemory: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, at),
-        readCString: (/** @type {number} */ at)=>
-            decodeAnsi(bytes.subarray(at, bytes.indexOf(0, at))),
+        guest: guestOver(bytes),
         allocate: (/** @type {number} */ n)=>{
             const at = heap;
             heap += n;

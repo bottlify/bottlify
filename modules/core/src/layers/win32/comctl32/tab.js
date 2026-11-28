@@ -29,14 +29,12 @@ import {
     COLOR_GRAYTEXT,
     after, pointOf,
 } from '../user32/controls.js';
-import { encodeAnsi } from '../kernel32/locale.js';
 import {
     EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_FOCUS, EVENT_OBJECT_SELECTION,
     raiseEvent,
 } from './winevents.js';
 import { notifyWindow } from './notify.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 /** The class name a program creates the control by. */
 export const TAB_CLASS = 'SysTabControl32';
@@ -205,6 +203,7 @@ const PANE_INSET = 4;
  *     => number | Promise<number>}
  */
 export function createTabProcedure(host, tk, images){
+    const { guest } = host;
     /** @param {any} record @returns {TabState} */
     const state = record=>{
         const held = tk.stateOf(record);
@@ -227,28 +226,6 @@ export function createTabProcedure(host, tk, images){
     /** @param {any} record */
     const buttons = record=>(record.style & TCS_BUTTONS) !== 0;
 
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-
-    /** @param {number} address @param {number} limit */
-    const readWide = (address, limit)=>{
-        const bytes = host.readMemory(wholeAddress(address), limit * 2);
-        let text = '';
-        for (let at = 0; at + 1 < bytes.length; at += 2)
-        {
-            const unit = bytes[at] | bytes[at + 1] << 8;
-            if (unit === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(unit);
-        }
-        return text;
-    };
-
     /**
      * Copies text into a buffer of `room` characters, clipped and
      * terminated, in the program's spelling: UTF-16, or the ANSI page.
@@ -260,13 +237,7 @@ export function createTabProcedure(host, tk, images){
         {
             return;
         }
-        const clipped = text.slice(0, room - 1);
-        if (!wide)
-        {
-            host.writeMemory(wholeAddress(address), encodeAnsi(`${clipped}\0`));
-            return;
-        }
-        host.writeMemory(wholeAddress(address), utf16z(clipped));
+        guest.setText(address, text, wide, room);
     };
 
     /**
@@ -277,25 +248,25 @@ export function createTabProcedure(host, tk, images){
      * @param {boolean} states  Whether dwState is read, which an insert does not.
      */
     const readItem = (record, item, address, wide, states)=>{
-        const mask = readU32(address + TCITEM.mask);
+        const mask = guest.u32(address + TCITEM.mask);
         if ((mask & TCIF_TEXT) !== 0)
         {
-            const text = readU32(address + TCITEM.pszText);
-            item.text = text === 0 ? '' : wide ? readWide(text, 1024)
-                : host.readCString(text, 1024);
+            const text = guest.u32(address + TCITEM.pszText);
+            item.text = text === 0 ? '' : wide ? guest.wstr(text, 2048)
+                : guest.cstr(text, 1024);
         }
         if ((mask & TCIF_IMAGE) !== 0)
         {
-            item.image = readU32(address + TCITEM.iImage) | 0;
+            item.image = guest.u32(address + TCITEM.iImage) | 0;
         }
         if ((mask & TCIF_PARAM) !== 0)
         {
-            item.param = host.readMemory(address + TCITEM.lParam, state(record).extra);
+            item.param = guest.snapshot(address + TCITEM.lParam, state(record).extra);
         }
         if (states && (mask & TCIF_STATE) !== 0)
         {
-            const stateMask = readU32(address + TCITEM.dwStateMask);
-            item.state = (item.state & ~stateMask | readU32(address + TCITEM.dwState)
+            const stateMask = guest.u32(address + TCITEM.dwStateMask);
+            item.state = (item.state & ~stateMask | guest.u32(address + TCITEM.dwState)
                 & stateMask) >>> 0;
         }
     };
@@ -308,25 +279,25 @@ export function createTabProcedure(host, tk, images){
      * @param {boolean} wide
      */
     const writeItem = (record, item, address, wide)=>{
-        const mask = readU32(address + TCITEM.mask);
+        const mask = guest.u32(address + TCITEM.mask);
         if ((mask & TCIF_TEXT) !== 0 && item)
         {
-            writeText(readU32(address + TCITEM.pszText), item.text,
-                readU32(address + TCITEM.cchTextMax) | 0, wide);
+            writeText(guest.u32(address + TCITEM.pszText), item.text,
+                guest.u32(address + TCITEM.cchTextMax) | 0, wide);
         }
         if ((mask & TCIF_IMAGE) !== 0)
         {
-            host.guest.set32(wholeAddress(address + TCITEM.iImage), item ? item.image : 0);
+            host.guest.set32(address + TCITEM.iImage, item ? item.image : 0);
         }
         if ((mask & TCIF_PARAM) !== 0)
         {
-            host.writeMemory(address + TCITEM.lParam,
+            guest.setBytes(address + TCITEM.lParam,
                 item ? item.param : new Uint8Array(state(record).extra));
         }
         if ((mask & TCIF_STATE) !== 0)
         {
-            host.guest.set32(wholeAddress(address + TCITEM.dwState),
-                item ? item.state & readU32(address + TCITEM.dwStateMask) : 0);
+            host.guest.set32(address + TCITEM.dwState,
+                item ? item.state & guest.u32(address + TCITEM.dwStateMask) : 0);
         }
     };
 
@@ -450,7 +421,7 @@ export function createTabProcedure(host, tk, images){
         view.setUint32(0, record.hwnd >>> 0, true);
         view.setUint32(4, record.id >>> 0, true);
         view.setInt32(8, code, true);
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
         const sent = host.send(target, WM_NOTIFY, record.id & 0xffff, address, thread);
         return after(sent, answer=>{
             host.release?.(address);
@@ -651,7 +622,7 @@ export function createTabProcedure(host, tk, images){
         const data = extra.length > 4 ? host.allocate(extra.length) : 0;
         if (data !== 0)
         {
-            host.writeMemory(data, extra);
+            guest.setBytes(data, extra);
         }
         const word = new Uint8Array(4);
         word.set(extra.subarray(0, 4));
@@ -672,7 +643,7 @@ export function createTabProcedure(host, tk, images){
             record.hwnd, hdc, ...item,
             data !== 0 ? data : new DataView(word.buffer).getUint32(0, true)]
             .forEach((value, field)=>view.setUint32(field * 4, value >>> 0, true));
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         return after(host.send(target, WM_DRAWITEM, record.id, at, thread), ()=>{
             items?.leaveItem?.(hdc, saved);
             host.release?.(at);
@@ -839,7 +810,7 @@ export function createTabProcedure(host, tk, images){
                     return 0;
                 }
                 [rect.left, rect.top, rect.right, rect.bottom].forEach((value, index)=>
-                    host.guest.set32(wholeAddress(message.lParam) + index * 4, value));
+                    host.guest.set32(message.lParam + index * 4, value));
                 return 1;
             }
             case TCM_HITTEST: {
@@ -848,9 +819,9 @@ export function createTabProcedure(host, tk, images){
                 {
                     return -1 >>> 0;
                 }
-                const index = itemAt(record, readU32(at + TCHITTESTINFO.x) | 0,
-                    readU32(at + TCHITTESTINFO.y) | 0);
-                host.guest.set32(wholeAddress(at + TCHITTESTINFO.flags),
+                const index = itemAt(record, guest.u32(at + TCHITTESTINFO.x) | 0,
+                    guest.u32(at + TCHITTESTINFO.y) | 0);
+                host.guest.set32(at + TCHITTESTINFO.flags,
                     index >= 0 ? TCHT_ONITEM : TCHT_NOWHERE);
                 return index >>> 0;
             }
@@ -865,11 +836,11 @@ export function createTabProcedure(host, tk, images){
                 }
                 const top = ROW_TOP + rowHeight(record) + PANE_INSET;
                 const [left, upper, right, bottom] = [0, 4, 8, 12].map(offset=>
-                    readU32(at + offset) | 0);
+                    guest.u32(at + offset) | 0);
                 const sign = message.wParam !== 0 ? -1 : 1;
                 [left + sign * PANE_INSET, upper + sign * top, right - sign * PANE_INSET,
                     bottom - sign * PANE_INSET].forEach((value, index)=>
-                    host.guest.set32(wholeAddress(at + index * 4), value));
+                    host.guest.set32(at + index * 4, value));
                 return 0;
             }
             case TCM_SETITEMEXTRA:
