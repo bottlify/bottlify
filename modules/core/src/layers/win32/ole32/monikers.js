@@ -30,7 +30,6 @@
 import { canonicalGuid, formatGuid, GUID_NULL, GUID_SIZE, guidBytes } from '../../../system/guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16, utf16z } from '../common/utf16.js';
 import { foldName, sameName, upcaseUnit } from '../../../system/text.js';
@@ -166,8 +165,7 @@ const FILE_MONIKER_WIDE_TAG = 3;
  *
  * @typedef {Object} MonikerEnv
  * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose MULTI_QI is wider
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
  *           Scratch: out-parameters, and the strings and GUIDs lent to a call
  *           for its duration. An address of 0 means nothing fits.
@@ -428,29 +426,15 @@ export function createMonikerFunctions(env){
     /** MULTI_QI: the IID asked for, the interface answered, each a pointer wide, and its HRESULT. */
     const MULTI_QI = env.pointerSize === 8 ? { IID: 0, ITF: 8, HR: 16, SIZE_OF: 24 }
         : { IID: 0, ITF: 4, HR: 8, SIZE_OF: 12 };
-    /** @param {number} address */
-    const readU32 = address=>readU32Of(env.readMemory(wholeAddress(address), 4), 0);
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>env.writeMemory(wholeAddress(address), u32(value));
-    /** @param {number} address @param {bigint} value */
-    const writeU64 = (address, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
-        env.writeMemory(wholeAddress(address), bytes);
-    };
-    /** @param {number} address */
-    const readGuidAt = address=>formatGuid(env.readMemory(wholeAddress(address),
-        GUID_SIZE).slice());
+    const { guest } = env;
 
     /**
-     * An OLESTR a program hands in, read a window at a time so a short one at
-     * the end of its block is not read past.
+     * An OLESTR a program hands in, null for a NULL pointer.
      *
      * @param {number} address
-     * @returns {string | null} null for a NULL pointer
+     * @returns {string | null}
      */
-    const readWide = address=>((address >>> 0) === 0 ? null
-        : charactersOf(readToTerminator(env, address, 2, MAX_STRING).bytes, 2));
+    const readWide = address=>((address >>> 0) === 0 ? null : guest.wstr(address, MAX_STRING * 2));
 
     /** @param {string} api @param {string} detail */
     const diverge = (api, detail)=>env.divergence?.(api, detail);
@@ -492,7 +476,7 @@ export function createMonikerFunctions(env){
         {
             return failed;
         }
-        env.writeMemory(block, bytes);
+        guest.setBytes(block, bytes);
         try
         {
             return await use(block);
@@ -512,7 +496,7 @@ export function createMonikerFunctions(env){
      */
     const outCall = make=>lend(new Uint8Array(4), async slot=>{
         const hr = await make(slot);
-        return { hr: hr | 0, value: readU32(slot) };
+        return { hr: hr | 0, value: guest.u32(slot) };
     }, { hr: E_OUTOFMEMORY, value: 0 });
 
     /**
@@ -541,14 +525,14 @@ export function createMonikerFunctions(env){
      * @param {string} text @param {number} out
      */
     const answerString = (text, out)=>{
-        const bytes = utf16z(text);
-        const block = env.taskAlloc(bytes.length) >>> 0;
+        const block = env.taskAlloc((text.length + 1) * 2) >>> 0;
         if (block === 0)
         {
             return E_OUTOFMEMORY;
         }
-        env.writeMemory(block, bytes);
-        writeU32(out, block);
+        guest.writeWide(block, text);
+        // An LPOLESTR*: a pointer of the process's width.
+        guest.setPtr(out, block);
         return S_OK;
     };
 
@@ -574,8 +558,8 @@ export function createMonikerFunctions(env){
      */
     const readStream = (stream, length, thread)=>lend(new Uint8Array(length + 4), async block=>{
         const hr = await call(stream, SLOT.STREAM_READ, [block, length, block + length], thread);
-        const read = Math.min(readU32(block + length), length);
-        return { hr, bytes: env.readMemory(block, read).slice() };
+        const read = Math.min(guest.u32(block + length), length);
+        return { hr, bytes: guest.snapshot(block, read) };
     }, { hr: E_OUTOFMEMORY, bytes: new Uint8Array(0) });
 
     /**
@@ -688,7 +672,7 @@ export function createMonikerFunctions(env){
             {
                 return defaults;
             }
-            const bytes = env.readMemory(block, BIND_OPTS.SIZE_OF_V2).slice();
+            const bytes = guest.snapshot(block, BIND_OPTS.SIZE_OF_V2);
             const size = readU32Of(bytes, BIND_OPTS.CB_STRUCT);
             return {
                 mode: readU32Of(bytes, BIND_OPTS.MODE),
@@ -924,7 +908,7 @@ export function createMonikerFunctions(env){
      */
     const answerMoniker = async(state, out, thread)=>{
         const pointer = await makeMoniker(state, thread);
-        writeU32(out, pointer);
+        guest.set32(out, pointer);
         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
     };
 
@@ -1248,7 +1232,7 @@ export function createMonikerFunctions(env){
             const made = await lend(new Uint8Array(4), async slot=>{
                 const created = await env.createInstance(clsid, 0, CLSCTX_SERVER,
                     IID_IPERSISTFILE, slot, thread);
-                return { hr: created | 0, value: readU32(slot) };
+                return { hr: created | 0, value: guest.u32(slot) };
             }, { hr: E_OUTOFMEMORY, value: 0 });
             if (made.hr < 0 || made.value === 0)
             {
@@ -1572,6 +1556,7 @@ export function createMonikerFunctions(env){
         }
         const sized = await outCall(slot=>call(data.value, SLOT.GET_COMPARISON_DATA,
             [0, 0, slot], thread));
+        /** @type {{ hr: number, bytes: Uint8Array }} */
         let answer = { hr: sized.hr, bytes: new Uint8Array(0) };
         if (sized.hr >= 0 || sized.hr === E_OUTOFMEMORY)
         {
@@ -1579,8 +1564,8 @@ export function createMonikerFunctions(env){
             answer = await lend(new Uint8Array(length + 4), async block=>{
                 const hr = await call(data.value, SLOT.GET_COMPARISON_DATA,
                     [block, length, block + length], thread);
-                const size = Math.min(readU32(block + length), length);
-                return { hr, bytes: env.readMemory(block, size).slice() };
+                const size = Math.min(guest.u32(block + length), length);
+                return { hr, bytes: guest.snapshot(block, size) };
             }, { hr: E_OUTOFMEMORY, bytes: new Uint8Array(0) });
         }
         await release(data.value, thread);
@@ -1595,7 +1580,7 @@ export function createMonikerFunctions(env){
     const saveToStream = async(object, stream, thread)=>{
         const classed = await lend(new Uint8Array(GUID_SIZE), async block=>{
             const hr = await call(object, SLOT.GET_CLASS_ID, [block], thread);
-            return { hr, bytes: env.readMemory(block, GUID_SIZE).slice() };
+            return { hr, bytes: guest.snapshot(block, GUID_SIZE) };
         }, { hr: E_OUTOFMEMORY, bytes: new Uint8Array(0) });
         if (classed.hr < 0)
         {
@@ -1636,7 +1621,7 @@ export function createMonikerFunctions(env){
             made = await lend(new Uint8Array(4), async slot=>{
                 const hr = await env.createInstance(clsid, 0, CLSCTX_INPROC_SERVER, IID_IMONIKER,
                     slot, thread);
-                return { hr: hr | 0, value: readU32(slot) };
+                return { hr: hr | 0, value: guest.u32(slot) };
             }, { hr: E_OUTOFMEMORY, value: 0 });
         }
         if (made.hr < 0 || made.value === 0)
@@ -1971,7 +1956,7 @@ export function createMonikerFunctions(env){
                 {
                     const answer = await lend(new Uint8Array(8), async block=>{
                         const hr = await call(part, SLOT.GET_SIZE_MAX, [block], thread);
-                        return { hr, size: readU32(block) };
+                        return { hr, size: guest.u32(block) };
                     }, { hr: E_OUTOFMEMORY, size: 0 });
                     if (answer.hr < 0)
                     {
@@ -1981,10 +1966,10 @@ export function createMonikerFunctions(env){
                 }
                 break;
             default:
-                writeU64(out, 0n);
+                guest.set64(out, 0n);
                 return E_NOTIMPL;
         }
-        writeU64(out, BigInt(size));
+        guest.set64(out, BigInt(size));
         return S_OK;
     };
 
@@ -1998,7 +1983,7 @@ export function createMonikerFunctions(env){
         {
             return E_POINTER;
         }
-        const iid = iidAt === 0 ? IID_IUNKNOWN : readGuidAt(iidAt);
+        const iid = iidAt === 0 ? IID_IUNKNOWN : guest.guid(iidAt);
         switch (state.kind)
         {
             case 'item': {
@@ -2006,7 +1991,7 @@ export function createMonikerFunctions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const container = await itemContainer(context, left, thread, false);
                 if (container.hr < 0)
                 {
@@ -2019,7 +2004,7 @@ export function createMonikerFunctions(env){
                 return hr;
             }
             case 'file': {
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const object = await fileObject(state, context, left, thread);
                 if (object.hr < 0 || object.value === 0)
                 {
@@ -2028,7 +2013,7 @@ export function createMonikerFunctions(env){
                 const hr = await call(object.value, SLOT.QUERY_INTERFACE, [iidAt, out], thread);
                 if (hr >= 0 && context !== 0)
                 {
-                    await call(context, SLOT.REGISTER_OBJECT_BOUND, [readU32(out)], thread);
+                    await call(context, SLOT.REGISTER_OBJECT_BOUND, [guest.u32(out)], thread);
                 }
                 await release(object.value, thread);
                 return hr;
@@ -2042,7 +2027,7 @@ export function createMonikerFunctions(env){
                 }
                 return call(state.target, SLOT.QUERY_INTERFACE, [iidAt, out], thread);
             case 'composite': {
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (state.parts.length === 0)
                 {
                     return E_UNEXPECTED;
@@ -2085,7 +2070,7 @@ export function createMonikerFunctions(env){
         switch (state.kind)
         {
             case 'item': {
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (left === 0)
                 {
                     return E_INVALIDARG;
@@ -2111,7 +2096,7 @@ export function createMonikerFunctions(env){
                     diverge('IMoniker::BindToStorage', 'a file moniker with a moniker to its left');
                     return E_NOTIMPL;
                 }
-                const iid = readGuidAt(iidAt);
+                const iid = guest.guid(iidAt);
                 if (iid === IID_ISTORAGE)
                 {
                     return env.openStorage(state.path, options.mode, out, thread);
@@ -2122,7 +2107,7 @@ export function createMonikerFunctions(env){
             case 'pointer':
                 return bindToObject(state, [context, left, iidAt, out], thread);
             case 'composite': {
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (state.parts.length === 0)
                 {
                     return E_UNEXPECTED;
@@ -2177,7 +2162,7 @@ export function createMonikerFunctions(env){
                 const answer = await lend(concat(u32(leftOf), new Uint8Array(4)), async block=>{
                     const hr = await call(part, SLOT.REDUCE, [context, howFar,
                         leftOf === 0 ? 0 : block, block + 4], thread);
-                    return { hr, value: readU32(block + 4), left: readU32(block) };
+                    return { hr, value: guest.u32(block + 4), left: guest.u32(block) };
                 }, { hr: E_OUTOFMEMORY, value: 0, left: leftOf });
                 // A component that replaced what is to its left has let go of
                 // the one it was given.
@@ -2199,13 +2184,13 @@ export function createMonikerFunctions(env){
                     await releaseAll([built.value, part], thread);
                     built = next;
                 }
-                writeU32(out, built.value);
+                guest.set32(out, built.value);
                 return built.hr;
             }
             await releaseAll(reduced, thread);
         }
         await addRef(state.self, thread);
-        writeU32(out, state.self);
+        guest.set32(out, state.self);
         return MK_S_REDUCED_TO_SELF;
     };
 
@@ -2223,10 +2208,10 @@ export function createMonikerFunctions(env){
         {
             return state.kind === 'file' ? E_INVALIDARG : E_POINTER;
         }
-        writeU32(out, 0);
+        guest.set32(out, 0);
         /** @param {{ hr: number, value: number }} made */
         const answer = made=>{
-            writeU32(out, made.value);
+            guest.set32(out, made.value);
             return made.hr;
         };
         const generic = async()=>(onlyIfNotGeneric !== 0 ? MK_E_NEEDGENERIC
@@ -2245,7 +2230,7 @@ export function createMonikerFunctions(env){
                 return S_OK;
             }
             const rest = await makeAnti(other.count - 1, thread);
-            writeU32(out, rest);
+            guest.set32(out, rest);
             return rest === 0 ? E_OUTOFMEMORY : S_OK;
         }
         if (state.kind === 'file')
@@ -2275,14 +2260,14 @@ export function createMonikerFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             return E_NOTIMPL;
         }
         if (out === 0)
         {
             return E_INVALIDARG;
         }
-        writeU32(out, 0);
+        guest.set32(out, 0);
         if (state.kind !== 'composite')
         {
             return S_OK;
@@ -2302,7 +2287,7 @@ export function createMonikerFunctions(env){
             await releaseAll(items, thread);
             return E_OUTOFMEMORY;
         }
-        writeU32(out, pointer);
+        guest.set32(out, pointer);
         return S_OK;
     };
 
@@ -2398,7 +2383,7 @@ export function createMonikerFunctions(env){
                 }
             }
         }
-        writeU32(out, value);
+        guest.set32(out, value);
         return S_OK;
     };
 
@@ -2521,7 +2506,7 @@ export function createMonikerFunctions(env){
                 {
                     return MK_E_NOOBJECT;
                 }
-                writeU64(out, info.lastWrite);
+                guest.set64(out, info.lastWrite);
                 return S_OK;
             }
             case 'item': {
@@ -2598,7 +2583,7 @@ export function createMonikerFunctions(env){
         {
             return state.kind === 'composite' ? E_INVALIDARG : E_POINTER;
         }
-        writeU32(out, 0);
+        guest.set32(out, 0);
         if (state.kind === 'anti')
         {
             return MK_E_NOINVERSE;
@@ -2606,7 +2591,7 @@ export function createMonikerFunctions(env){
         if (state.kind !== 'composite')
         {
             const anti = await makeAnti(1, thread);
-            writeU32(out, anti);
+            guest.set32(out, anti);
             return anti === 0 ? E_OUTOFMEMORY : S_OK;
         }
         if (state.parts.length === 0)
@@ -2614,7 +2599,7 @@ export function createMonikerFunctions(env){
             return E_UNEXPECTED;
         }
         const result = await inverseOf(state.parts, thread);
-        writeU32(out, result.value);
+        guest.set32(out, result.value);
         return result.hr;
     };
 
@@ -2627,12 +2612,12 @@ export function createMonikerFunctions(env){
         /** @param {number} moniker @param {number} hr */
         const answer = async(moniker, hr)=>{
             await addRef(moniker, thread);
-            writeU32(out, moniker);
+            guest.set32(out, moniker);
             return hr;
         };
         /** @param {{ hr: number, value: number }} made */
         const answerMade = made=>{
-            writeU32(out, made.value);
+            guest.set32(out, made.value);
             return made.hr;
         };
         if (state.kind === 'file' && out === 0)
@@ -2643,11 +2628,11 @@ export function createMonikerFunctions(env){
         {
             if (out !== 0)
             {
-                writeU32(out, 0);
+                guest.set32(out, 0);
             }
             return E_INVALIDARG;
         }
-        writeU32(out, 0);
+        guest.set32(out, 0);
         const theirs = await ours(other, thread);
         switch (state.kind)
         {
@@ -2745,7 +2730,7 @@ export function createMonikerFunctions(env){
                     return MK_E_NOPREFIX;
                 }
                 const value = await fromParts(prefix, thread);
-                writeU32(out, value);
+                guest.set32(out, value);
                 if (value === 0)
                 {
                     return E_OUTOFMEMORY;
@@ -2771,21 +2756,21 @@ export function createMonikerFunctions(env){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 return MK_E_NOTBINDABLE;
             case 'pointer':
                 if (out === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 return other === 0 ? E_INVALIDARG : E_NOTIMPL;
             case 'item':
                 if (out === 0 || other === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 return MK_E_NOTBINDABLE;
             case 'anti':
                 if (out === 0 || other === 0)
@@ -2793,7 +2778,7 @@ export function createMonikerFunctions(env){
                     return E_INVALIDARG;
                 }
                 await addRef(other, thread);
-                writeU32(out, other);
+                guest.set32(out, other);
                 return MK_S_HIM;
             case 'file': {
                 if (out === 0)
@@ -2804,7 +2789,7 @@ export function createMonikerFunctions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const path = await filePathOf(other, thread);
                 const a = pathPieces(state.path);
                 const b = path === null ? [] : pathPieces(path);
@@ -2816,7 +2801,7 @@ export function createMonikerFunctions(env){
                 if (path === null || same === 0)
                 {
                     await addRef(other, thread);
-                    writeU32(out, other);
+                    guest.set32(out, other);
                     return MK_S_HIM;
                 }
                 const up = a.slice(same).filter(piece=>piece !== '\\').map(()=>'..\\').join('');
@@ -2828,13 +2813,13 @@ export function createMonikerFunctions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (other === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const result = await relativePath(state.self, other, thread, true);
-                writeU32(out, result.value);
+                guest.set32(out, result.value);
                 return result.hr;
             }
         }
@@ -2852,7 +2837,7 @@ export function createMonikerFunctions(env){
             {
                 if (out !== 0)
                 {
-                    writeU32(out, 0);
+                    guest.set32(out, 0);
                 }
                 return E_INVALIDARG;
             }
@@ -2973,7 +2958,7 @@ export function createMonikerFunctions(env){
             case 'class':
                 return parseWith(await parserOf(iid=>lend(new Uint8Array(4), async slot=>{
                     const hr = await bindClass(state.clsid, context, left, iid, slot, thread);
-                    return { hr: hr | 0, value: readU32(slot) };
+                    return { hr: hr | 0, value: guest.u32(slot) };
                 }, { hr: E_OUTOFMEMORY, value: 0 }), thread), parseArgs, thread);
             case 'pointer':
                 if (left !== 0)
@@ -2993,7 +2978,7 @@ export function createMonikerFunctions(env){
                 const options = await bindOptions(context, thread);
                 const fromClass = hr < 0 ? { hr, value: 0 } : await lend(new Uint8Array(4),
                     async slot=>({ hr: (await env.getClassObject(clsid, options.classContext,
-                        IID_IPARSEDISPLAYNAME, slot, thread)) | 0, value: readU32(slot) }),
+                        IID_IPARSEDISPLAYNAME, slot, thread)) | 0, value: guest.u32(slot) }),
                     { hr: E_OUTOFMEMORY, value: 0 });
                 const parser = fromClass.hr >= 0 ? fromClass
                     : await bindTo(state.self, context, left, IID_IPARSEDISPLAYNAME, thread);
@@ -3042,7 +3027,7 @@ export function createMonikerFunctions(env){
                 const piece = await comparisonOf(part, thread);
                 if (piece.hr < 0)
                 {
-                    writeU32(sizeOut, 0);
+                    guest.set32(sizeOut, 0);
                     return piece.hr;
                 }
                 pieces.push(piece.bytes);
@@ -3053,12 +3038,12 @@ export function createMonikerFunctions(env){
         {
             return E_NOTIMPL;
         }
-        writeU32(sizeOut, data.length);
+        guest.set32(sizeOut, data.length);
         if (max < data.length || buffer === 0)
         {
             return E_OUTOFMEMORY;
         }
-        env.writeMemory(buffer, data);
+        guest.setBytes(buffer, data);
         return S_OK;
     };
 
@@ -3085,7 +3070,7 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            env.writeMemory(out, guidBytes(classOf(state)));
+            guest.setBytes(out, guidBytes(classOf(state)));
             return S_OK;
         }),
         // Windows' monikers never change once made, so none is ever dirty.
@@ -3112,7 +3097,7 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            writeU32(out, state.objref ? MKSYS.OBJREFMONIKER : MKSYS_OF[state.kind]);
+            guest.set32(out, state.objref ? MKSYS.OBJREFMONIKER : MKSYS_OF[state.kind]);
             return S_OK;
         }),
     ];
@@ -3151,7 +3136,7 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            env.writeMemory(out, guidBytes(classOf(state)));
+            guest.setBytes(out, guidBytes(classOf(state)));
             return S_OK;
         }),
         monikerMethod('GetMarshalSizeMax', 28, async(state, args, thread)=>{
@@ -3173,7 +3158,7 @@ export function createMonikerFunctions(env){
                 hr = await lend(new Uint8Array(4), async slot=>{
                     const answer = (await marshaling.sizeMax(slot, IID_IMONIKER, half, context,
                         destination, flags)) | 0;
-                    total += readU32(slot) + OBJREF_CUSTOM_HEADER;
+                    total += guest.u32(slot) + OBJREF_CUSTOM_HEADER;
                     return answer;
                 }, E_OUTOFMEMORY);
                 if (hr < 0)
@@ -3187,7 +3172,7 @@ export function createMonikerFunctions(env){
             }
             if (hr >= 0)
             {
-                writeU32(out, total);
+                guest.set32(out, total);
             }
             return hr;
         }),
@@ -3224,15 +3209,15 @@ export function createMonikerFunctions(env){
                     hr = (await marshaling.unmarshal(stream, IID_IMONIKER, slot + 4)) | 0;
                     if (hr < 0)
                     {
-                        await release(readU32(slot), thread);
+                        await release(guest.u32(slot), thread);
                     }
                 }
                 if (hr < 0)
                 {
                     return hr;
                 }
-                const left = readU32(slot);
-                const right = readU32(slot + 4);
+                const left = guest.u32(slot);
+                const right = guest.u32(slot + 4);
                 const parts = [...await componentsOf(left, thread),
                     ...await componentsOf(right, thread)];
                 for (const part of parts)
@@ -3261,7 +3246,7 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            env.writeMemory(out, guidBytes(classOf(state)));
+            guest.setBytes(out, guidBytes(classOf(state)));
             return S_OK;
         }),
         monikerMethod('GetMarshalSizeMax', 28, (state, [, , , , , out], thread)=>{
@@ -3273,7 +3258,7 @@ export function createMonikerFunctions(env){
                 const hr = (await sizeMax(state, slot, thread)) | 0;
                 if (hr >= 0)
                 {
-                    writeU32(out, readU32(slot));
+                    guest.set32(out, guest.u32(slot));
                 }
                 return hr;
             }, E_OUTOFMEMORY);
@@ -3300,7 +3285,7 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            env.writeMemory(out, guidBytes(classOf(state)));
+            guest.setBytes(out, guidBytes(classOf(state)));
             return S_OK;
         }),
         monikerMethod('GetMarshalSizeMax', 28, (state, [, , context, destination, flags, out])=>
@@ -3321,7 +3306,7 @@ export function createMonikerFunctions(env){
                     return hr;
                 }
                 const previous = state.target;
-                state.target = readU32(slot);
+                state.target = guest.u32(slot);
                 if (previous !== 0)
                 {
                     await release(previous, env.callerThread());
@@ -3347,18 +3332,18 @@ export function createMonikerFunctions(env){
                         return E_INVALIDARG;
                     }
                     const thread = env.callerThread();
-                    writeU32(array, 0);
+                    guest.set32(array, 0);
                     let given = 0;
                     while (given < (count >>> 0) && state.position < state.items.length)
                     {
                         const item = state.items[state.position++];
                         await addRef(item, thread);
-                        writeU32(wholeAddress(array) + given * 4, item);
+                        guest.set32(array + given * 4, item);
                         given++;
                     }
                     if ((fetched >>> 0) !== 0)
                     {
-                        writeU32(fetched, given);
+                        guest.set32(fetched, given);
                     }
                     return given === (count >>> 0) ? S_OK : S_FALSE;
                 } },
@@ -3384,7 +3369,7 @@ export function createMonikerFunctions(env){
                     {
                         return E_INVALIDARG;
                     }
-                    writeU32(out, 0);
+                    guest.set32(out, 0);
                     return E_NOTIMPL;
                 } },
             ] }],
@@ -3464,14 +3449,14 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            const size = readU32(options);
+            const size = guest.u32(options);
             if (size > BIND_OPTS.SIZE_OF)
             {
                 return E_INVALIDARG;
             }
             if (size > BIND_OPTS.FLAGS)
             {
-                object.state.options.set(env.readMemory(wholeAddress(options) + BIND_OPTS.FLAGS,
+                object.state.options.set(guest.snapshot(options + BIND_OPTS.FLAGS,
                     size - BIND_OPTS.FLAGS), BIND_OPTS.FLAGS);
             }
             return S_OK;
@@ -3481,13 +3466,13 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            const size = Math.min(readU32(options), BIND_OPTS.SIZE_OF);
+            const size = Math.min(guest.u32(options), BIND_OPTS.SIZE_OF);
             if (size > BIND_OPTS.FLAGS)
             {
-                env.writeMemory(wholeAddress(options) + BIND_OPTS.FLAGS,
+                guest.setBytes(options + BIND_OPTS.FLAGS,
                     object.state.options.subarray(BIND_OPTS.FLAGS, size));
             }
-            writeU32(options, size);
+            guest.set32(options, size);
             return S_OK;
         } },
         { name: 'GetRunningObjectTable', argBytes: 8, invoke: (_object, [out])=>{
@@ -3523,7 +3508,7 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             /** @type {BindContextState} */
             const state = object.state;
             const index = paramIndex(state, readWide(keyAt));
@@ -3533,7 +3518,7 @@ export function createMonikerFunctions(env){
             }
             const found = state.params[index].object;
             await addRef(found, env.callerThread());
-            writeU32(out, found);
+            guest.set32(out, found);
             return S_OK;
         } },
         // Not implemented on Windows either, where the conformance tests
@@ -3541,7 +3526,7 @@ export function createMonikerFunctions(env){
         { name: 'EnumObjectParam', argBytes: 8, invoke: (_object, [out])=>{
             if ((out >>> 0) !== 0)
             {
-                writeU32(out, 0);
+                guest.set32(out, 0);
             }
             return E_NOTIMPL;
         } },
@@ -3665,11 +3650,11 @@ export function createMonikerFunctions(env){
         }
         const parser = await parserOf(iid=>lend(new Uint8Array(4), async slot=>{
             const hr = await bindClass(clsid, context, 0, iid, slot, thread);
-            return { hr: hr | 0, value: readU32(slot) };
+            return { hr: hr | 0, value: guest.u32(slot) };
         }, { hr: E_OUTOFMEMORY, value: 0 }), thread);
         return lend(new Uint8Array(8), async block=>{
             const hr = await parseWith(parser, [context, nameAt, block, block + 4], thread);
-            return { hr, value: readU32(block + 4), eaten: readU32(block) };
+            return { hr, value: guest.u32(block + 4), eaten: guest.u32(block) };
         }, { hr: E_OUTOFMEMORY, value: 0, eaten: 0 });
     };
 
@@ -3727,8 +3712,8 @@ export function createMonikerFunctions(env){
         {
             return E_INVALIDARG;
         }
-        writeU32(eatenAt, 0);
-        writeU32(out, 0);
+        guest.set32(eatenAt, 0);
+        guest.set32(out, 0);
         /** @type {{ hr: number, value: number, eaten: number }} */
         let first = { hr: MK_E_SYNTAX, value: 0, eaten: 0 };
         if (text.slice(0, 6).toLowerCase() === 'clsid:')
@@ -3764,7 +3749,7 @@ export function createMonikerFunctions(env){
             const step = await lend(new Uint8Array(8), async block=>{
                 const hr = await call(moniker, SLOT.PARSE_DISPLAY_NAME,
                     [context, 0, nameAt + eaten * 2, block, block + 4], thread);
-                return { hr, value: readU32(block + 4), eaten: readU32(block) };
+                return { hr, value: guest.u32(block + 4), eaten: guest.u32(block) };
             }, { hr: E_OUTOFMEMORY, value: 0, eaten: 0 });
             if (step.hr < 0 || step.eaten === 0 || step.value === 0)
             {
@@ -3780,8 +3765,8 @@ export function createMonikerFunctions(env){
             moniker = joined.value;
             eaten += Math.min(step.eaten, text.length - eaten);
         }
-        writeU32(eatenAt, eaten);
-        writeU32(out, moniker);
+        guest.set32(eatenAt, eaten);
+        guest.set32(out, moniker);
         return S_OK;
     };
 
@@ -3803,7 +3788,7 @@ export function createMonikerFunctions(env){
         // is touched, as Windows does.
         for (let index = 0; index < count; index++)
         {
-            if (readU32(resultAt(index) + MULTI_QI.ITF) !== 0)
+            if (guest.u32(resultAt(index) + MULTI_QI.ITF) !== 0)
             {
                 return E_INVALIDARG;
             }
@@ -3812,8 +3797,8 @@ export function createMonikerFunctions(env){
         const failAll = hr=>{
             for (let index = 0; index < count; index++)
             {
-                writeU32(resultAt(index) + MULTI_QI.ITF, 0);
-                writeU32(resultAt(index) + MULTI_QI.HR, hr);
+                guest.set32(resultAt(index) + MULTI_QI.ITF, 0);
+                guest.set32(resultAt(index) + MULTI_QI.HR, hr);
             }
             return hr;
         };
@@ -3823,7 +3808,7 @@ export function createMonikerFunctions(env){
             diverge('CoGetInstanceFromFile', 'a server was named, and the object is made here');
         }
         const path = readWide(nameAt) ?? '';
-        let clsid = clsidAt === 0 ? null : readGuidAt(clsidAt);
+        let clsid = clsidAt === 0 ? null : guest.guid(clsidAt);
         if (clsid === null)
         {
             const found = await classOfFile(path);
@@ -3836,7 +3821,7 @@ export function createMonikerFunctions(env){
         const made = await lend(new Uint8Array(4), async slot=>{
             const hr = await env.createInstance(/** @type {string} */ (clsid), outer, classContext,
                 IID_IUNKNOWN, slot, thread);
-            return { hr: hr | 0, value: readU32(slot) };
+            return { hr: hr | 0, value: guest.u32(slot) };
         }, { hr: E_OUTOFMEMORY, value: 0 });
         if (made.hr !== S_OK || made.value === 0)
         {
@@ -3858,10 +3843,10 @@ export function createMonikerFunctions(env){
         let answered = 0;
         for (let index = 0; index < count; index++)
         {
-            const iidAt = readU32(resultAt(index) + MULTI_QI.IID);
+            const iidAt = guest.u32(resultAt(index) + MULTI_QI.IID);
             const hr = await call(made.value, SLOT.QUERY_INTERFACE, [iidAt,
                 resultAt(index) + MULTI_QI.ITF], thread);
-            writeU32(resultAt(index) + MULTI_QI.HR, hr);
+            guest.set32(resultAt(index) + MULTI_QI.HR, hr);
             if (hr >= 0)
             {
                 answered++;
@@ -3892,13 +3877,13 @@ export function createMonikerFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             if (reserved !== 0)
             {
                 return E_INVALIDARG;
             }
             const context = await makeBindContext();
-            writeU32(out, context);
+            guest.set32(out, context);
             return context === 0 ? E_OUTOFMEMORY : S_OK;
         }),
 
@@ -3923,7 +3908,7 @@ export function createMonikerFunctions(env){
             {
                 return MK_E_SYNTAX;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             return answerMoniker(newState('file', { path: normalisePath(path) }), out, thread);
         }),
 
@@ -3933,12 +3918,12 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             if (clsidAt === 0)
             {
                 return E_INVALIDARG;
             }
-            return answerMoniker(newState('class', { clsid: readGuidAt(clsidAt) }), out, thread);
+            return answerMoniker(newState('class', { clsid: guest.guid(clsidAt) }), out, thread);
         }),
 
         /** HRESULT CreatePointerMoniker(LPUNKNOWN punk, LPMONIKER *ppmk) */
@@ -3947,7 +3932,7 @@ export function createMonikerFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             if (unknown !== 0)
             {
                 await addRef(unknown, thread);
@@ -3965,7 +3950,7 @@ export function createMonikerFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             if (unknown !== 0)
             {
                 await addRef(unknown, thread);
@@ -3992,9 +3977,9 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             const made = await compose(left, right, thread);
-            writeU32(out, made.value);
+            guest.set32(out, made.value);
             return made.hr;
         }),
 
@@ -4011,7 +3996,7 @@ export function createMonikerFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             if (options !== 0)
             {
                 return E_INVALIDARG;
@@ -4035,9 +4020,9 @@ export function createMonikerFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             const prefix = await commonPrefix(mine, theirs, thread);
-            writeU32(out, prefix.value);
+            guest.set32(out, prefix.value);
             return prefix.hr;
         }),
 
@@ -4050,13 +4035,13 @@ export function createMonikerFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             if (from === 0 || to === 0)
             {
                 return E_INVALIDARG;
             }
             const relative = await relativePath(from, to, thread, false);
-            writeU32(out, relative.value);
+            guest.set32(out, relative.value);
             return relative.hr;
         }),
 
@@ -4070,7 +4055,7 @@ export function createMonikerFunctions(env){
             const { hr, clsid } = await classOfFile(path);
             if (hr >= 0)
             {
-                env.writeMemory(out, guidBytes(clsid));
+                guest.setBytes(out, guidBytes(clsid));
             }
             return hr;
         }),

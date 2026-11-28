@@ -2757,8 +2757,7 @@ export function createOleFunctions(host){
      */
     const monikerEnv = {
         pointerSize: width.size,
-        readMemory: host.readMemory,
-        writeMemory: host.writeMemory,
+        guest,
         heap: host.heap,
         taskAlloc: bytes=>host.heap.allocate(bytes >>> 0),
         taskFree: address=>((address >>> 0) === 0 ? 0 : host.heap.free(address >>> 0)),

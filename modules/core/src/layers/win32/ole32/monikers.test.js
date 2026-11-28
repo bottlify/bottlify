@@ -9,6 +9,7 @@
 // records it.
 
 import { test } from 'node:test';
+import { guestOver } from '../common/guest.fixture.js';
 import assert from 'node:assert/strict';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComRegistry } from './objects.js';
@@ -146,7 +147,8 @@ function fakeHeap(base){
  * @property {string[]} calls
  */
 
-function setup(){
+/** @param {{ pointerSize?: 4 | 8 }} [options] */
+function setup({ pointerSize = 4 } = {}){
     const bytes = new Uint8Array(0x200000);
     const view = new DataView(bytes.buffer);
     const heap = fakeHeap(0x10000);
@@ -430,10 +432,10 @@ function setup(){
     const storageOpens = [];
 
     const env = {
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
+        // The guest's memory, which ends where the test's bytes end: a read past
+        // them is a fault, as the memory layer's past its last region.
+        guest: guestOver(bytes, pointerSize),
+        pointerSize,
         heap,
         /** @param {number} size */
         taskAlloc: size=>heap.allocate(size),
@@ -773,12 +775,6 @@ test('a name ending just short of the end of its memory is read without reading 
         // that runs into it, as the memory layer refuses one past a region's end.
         const t = setup();
         const end = t.bytes.length;
-        const read = t.env.readMemory;
-        t.env.readMemory = (address, length)=>{
-            assert.ok(address >= end || address + length <= end, `read of ${length} bytes`
-                + ` at 0x${address.toString(16)} runs past the end of memory`);
-            return read(address, length);
-        };
         const path = 'C:\\data\\a.txt';
         const at = end - 8 - (path.length + 1) * 2;
         [...path, '\0'].forEach((c, index)=>
@@ -786,6 +782,22 @@ test('a name ending just short of the end of its memory is read without reading 
         const moniker = await t.made('CreateFileMoniker', at);
         assert.equal(await t.display(moniker), path);
     });
+
+test('a 64-bit moniker\'s display name is handed out at its pointer\'s whole width', async()=>{
+    // GetDisplayName's LPOLESTR* is a pointer of the process's width: a high half
+    // left as the caller had it is another address.
+    const t = setup({ pointerSize: 8 });
+    const path = 'C:\\data\\a.txt';
+    const at = t.heap.allocate((path.length + 1) * 2);
+    [...path, '\0'].forEach((c, index)=>t.view.setUint16(at + index * 2, c.charCodeAt(0), true));
+    const moniker = await t.made('CreateFileMoniker', at);
+    const context = await t.made('CreateBindCtx', 0);
+    const slot = t.out();
+    t.view.setUint32(slot + 4, 0xffffffff, true);
+    assert.equal(await t.m(moniker, 'GetDisplayName', context, 0, slot), 0);
+    assert.notEqual(t.view.getUint32(slot, true), 0);
+    assert.equal(t.view.getUint32(slot + 4, true), 0, 'all eight bytes written');
+});
 
 test('the exports take the stack Windows gives them', ()=>{
     const t = setup();

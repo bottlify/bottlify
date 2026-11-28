@@ -795,12 +795,8 @@
    "copy readMemory().slice()": 1
   },
   "win32/ole32/monikers.js": {
-   "accessor readU32": 1,
    "accessor u16": 1,
    "accessor u32": 1,
-   "accessor writeU32": 1,
-   "accessor writeU64": 1,
-   "copy readMemory().slice()": 5,
    "string readWide": 1
   },
   "win32/ole32/ole2.js": {
