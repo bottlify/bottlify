@@ -10,6 +10,7 @@ import { testPageFile } from './process/page-file.fixture.js';
 import { discReader, freeLetter, mountDiscs } from './discs.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { buildIso } from './layers/filesystem/internal/iso/build.js';
+import { logHost } from './layers/log/testing.fixture.js';
 
 const IMAGE = buildIso({ label: 'DEMO', files: {
     'SETUP.EXE': 'MZ', 'Data/a.cab': 'cab', 'Data/big.cab': new Uint8Array(1 << 20),
@@ -75,7 +76,7 @@ test('bytes and a synchronous reader are taken as they are', async()=>{
 });
 
 test('mounted discs are CD-ROM drives, and a letter asked for must be free', async()=>{
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     /** @type {any[]} */
     const emitted = [];
     const events = { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>

@@ -14,6 +14,7 @@ import { createVolume } from '../kernel32/vfs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { buildImage, buildResources } from '../../loader/internal/resources.test.js';
 import { freshSpace } from '../../cache/testing.fixture.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const RT_ICON = 3;
 const RT_GROUP_ICON = 14;
@@ -133,7 +134,7 @@ function iconFile(images){
  * @param {Record<string, any>} [extra]  More of the host, laid over the rest.
  */
 async function shellOver(files, extra = {}){
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const volume = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     for (const directory of ['C:\\WINDOWS', 'C:\\WINDOWS\\system32', 'C:\\work'])
     {
@@ -261,7 +262,7 @@ test('a bare name is found in the system directory, as the shell\'s own librarie
 });
 
 test('a file whose bytes are still arriving is answered when they have', async()=>{
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const base = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     const late = { ...base,
         /** @param {any} node @param {number} offset @param {number} length */

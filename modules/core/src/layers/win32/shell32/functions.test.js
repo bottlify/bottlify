@@ -12,6 +12,7 @@ import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { freshSpace } from '../../cache/testing.fixture.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 /** @param {number} [allocator]  The IMalloc pointer ole32 would hand out, if any. */
 function machine(allocator){
@@ -601,7 +602,7 @@ test('a notification icon is kept by its window and id until it is deleted', ()=
  *     past it: memory refuses a read across it.
  */
 async function machineWithVolume(extra = {}, allocationEnd = 0){
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const volume = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     volume.mkdir('C:\\work');
     volume.setCurrentDirectory('C:\\work');

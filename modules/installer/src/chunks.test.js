@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { atPath, blocksOf, chunkedFile, sha256Blocks, sizeOf } from './chunks.js';
 import { packBundle } from './pack.js';
 import { filesystemModule } from '../../core/src/layers/filesystem/module.js';
+import { logHost } from '../../core/src/layers/log/testing.fixture.js';
 
 const PIECE = 1 << 20;
 
@@ -84,7 +85,7 @@ test('a file a volume exports is read in its own pieces, as the bytes it holds',
     // a reader here takes the file's pieces from it and nothing of the same
     // name means anything else - a save that read a writer's function as
     // pieces could not collect an installation at all.
-    const volume = await filesystemModule.create({ drives: { C: {} } });
+    const volume = await filesystemModule.create({ drives: { C: {} } }, await logHost());
     volume.createDirectory('C:\\Setup');
     const handle = volume.open('C:\\Setup\\data.cab',
         { write: true, disposition: volume.Disposition.CREATE_NEW });

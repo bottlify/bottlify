@@ -22,6 +22,7 @@ import {
     FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
 } from './changes.js';
 import { freshSpace } from '../../cache/testing.fixture.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 
@@ -62,7 +63,7 @@ function fakeKernel(){
 }
 
 async function setup(){
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const volume = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     volume.mkdir('C:\\Saves');
     volume.mkdir('C:\\Saves\\Old');

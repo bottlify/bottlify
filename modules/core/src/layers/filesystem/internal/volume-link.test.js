@@ -11,6 +11,7 @@ import { Worker } from 'node:worker_threads';
 import { createFilesystemModule } from '../module.js';
 import { createLinkMemory, openLink } from '@bottlify/cellar';
 import { remoteVolume, volumeHandlers } from './volume-link.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const here = (/** @type {string} */ path)=>new URL(path, import.meta.url).href;
 
@@ -23,7 +24,7 @@ test('a process in another thread stands on the run\'s volume: it reads and writ
         writables: new Map(),
         watchers: new Set() };
     const layer = createFilesystemModule();
-    const here_ = await layer.create({ volume: run });
+    const here_ = await layer.create({ volume: run }, await logHost());
     here_.createDirectory('C:\\Save');
     const kept = here_.open('C:\\Save\\a.txt', { write: true, shareRead: false,
         disposition: here_.Disposition.CREATE_NEW });
@@ -36,13 +37,13 @@ test('a process in another thread stands on the run\'s volume: it reads and writ
         const worker = new Worker(`
             const { workerData, parentPort } = require('node:worker_threads');
             (async()=>{
-                const [{ openLink }, { createFilesystemModule }, { remoteVolume }] =
+                const [{ openLink }, { createFilesystemModule }, { remoteVolume }, { logHost }] =
                     await Promise.all([import(workerData.link), import(workerData.module),
-                        import(workerData.remote)]);
+                        import(workerData.remote), import(workerData.log)]);
                 const link = openLink(workerData.end, {});
                 const fs = await createFilesystemModule().create({
                     volume: remoteVolume((method, args)=>
-                        link.ask('volume', method, args)) });
+                        link.ask('volume', method, args)) }, await logHost());
                 const code = run=>{ try { run(); return null; } catch (e) { return e.code; } };
                 const size = fs.stat('C:\\\\Save\\\\a.txt').size;
                 const refused = code(()=>fs.open('C:\\\\Save\\\\A.TXT', { read: true }));
@@ -55,7 +56,8 @@ test('a process in another thread stands on the run\'s volume: it reads and writ
                 parentPort.postMessage({ size, refused, missing, names });
             })().catch(e=>parentPort.postMessage({ error: String(e && e.stack || e) }));`,
         { eval: true, workerData: { end: b, link: import.meta.resolve('@bottlify/cellar'),
-            module: here('../module.js'), remote: here('./volume-link.js') } });
+            module: here('../module.js'), remote: here('./volume-link.js'),
+            log: here('../../log/testing.fixture.js') } });
         worker.once('message', message=>{
             worker.terminate();
             if (message.error)
@@ -90,7 +92,7 @@ test('a process on the run\'s volume from afar reports its drives as the run\'s,
         return method === 'drives' ? [{ letter: 'C', readOnly: false, volume: null }] : null;
     });
     const layer = createFilesystemModule();
-    await layer.create({ volume });
+    await layer.create({ volume }, await logHost());
     asked.length = 0;
     const { metrics } = layer.diagnostics();
     assert.deepEqual(metrics?.volumes['C:'], { across: true });
@@ -104,7 +106,7 @@ test('what a process reads of a drive from afar it keeps until the drive changes
         writables: new Map(),
         watchers: new Set(), revisions: new Int32Array(new SharedArrayBuffer(26 * 4)) };
     const here_ = await createFilesystemModule().create({ pageFile: await testPageFile(),
-        volume: run });
+        volume: run }, await logHost());
     const file = here_.open('C:\\data.bin', { write: true,
         disposition: here_.Disposition.CREATE_NEW });
     here_.write(file, new Uint8Array(3000).fill(1));
@@ -116,7 +118,7 @@ test('what a process reads of a drive from afar it keeps until the drive changes
         volume: remoteVolume((method, args)=>{
             asked.push(method === 'call' ? args[1] : method);
             return /** @type {any} */ (handlers)[method](...args);
-        }, { revisions: run.revisions }) });
+        }, { revisions: run.revisions }) }, await logHost());
     const read = ()=>{
         const opened = there.open('C:\\data.bin', { read: true, shareWrite: true });
         const got = [];
@@ -149,11 +151,11 @@ test('a process on the run\'s volume from afar links a file as one standing on i
         writables: new Map(),
         watchers: new Set() };
     const layer = createFilesystemModule();
-    const local = await layer.create({ volume: run });
+    const local = await layer.create({ volume: run }, await logHost());
     const handlers = volumeHandlers(run);
     const farLayer = createFilesystemModule();
     const far = await farLayer.create({ volume: remoteVolume((method, args)=>
-        /** @type {any} */ (handlers.volume)[method](...args)) });
+        /** @type {any} */ (handlers.volume)[method](...args)) }, await logHost());
     const made = far.open('C:\\a.txt', { write: true, disposition: far.Disposition.CREATE_NEW });
     far.write(made, bytes('one'));
     far.close(made);
@@ -173,11 +175,11 @@ test('a process on the run\'s volume from afar makes a junction the run\'s volum
         writables: new Map(),
         watchers: new Set() };
     const layer = createFilesystemModule();
-    const local = await layer.create({ volume: run });
+    const local = await layer.create({ volume: run }, await logHost());
     const handlers = volumeHandlers(run);
     const farLayer = createFilesystemModule();
     const far = await farLayer.create({ volume: remoteVolume((method, args)=>
-        /** @type {any} */ (handlers.volume)[method](...args)) });
+        /** @type {any} */ (handlers.volume)[method](...args)) }, await logHost());
     far.createDirectory('C:\\Store');
     const made = far.open('C:\\Store\\a.dll',
         { write: true, disposition: far.Disposition.CREATE_NEW });

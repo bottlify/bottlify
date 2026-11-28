@@ -19,6 +19,7 @@ import { createHive } from '../advapi32/registry.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { freshSpace } from '../../cache/testing.fixture.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const MSIDBOPEN_READONLY = 0;
 const MSIDBOPEN_CREATE = 3;
@@ -29,7 +30,7 @@ const VT_LPSTR = 30;
 async function setup(){
     const memory = new Uint8Array(0x100000);
     let next = 0x80000;
-    const files = /** @type {any} */ (createVolume(await filesystemModule.create({ pageFile: await testPageFile() }), null, { kept: freshSpace('reads') }));
+    const files = /** @type {any} */ (createVolume(await filesystemModule.create({ pageFile: await testPageFile() }, await logHost()), null, { kept: freshSpace('reads') }));
     files.mkdir('C:\\work');
     const fns = /** @type {any} */ (createMsiFunctions(/** @type {any} */ ({
         readMemory: (/** @type {number} */ at, /** @type {number} */ n)=>memory.subarray(at, at + n),

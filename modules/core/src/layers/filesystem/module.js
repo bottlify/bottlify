@@ -140,12 +140,11 @@ export function createFilesystemModule(){
 
         /**
          * @param {any} config
-         * @param {any} [host]  the module host, whose log is told what an export left out
+         * @param {any} host  the module host, whose log is told what an export left out
          * @returns {Promise<any>}
          */
         async create(config, host){
-            /** The run's log, where it was given one. @type {any} */
-            const log = host?.requireApi?.('log') ?? null;
+            const log = host.requireApi('log');
             /** Names `export` could not read, each said once. @type {Set<string>} */
             const unreadable = new Set();
             /**
@@ -167,7 +166,7 @@ export function createFilesystemModule(){
                     if (!unreadable.has(path))
                     {
                         unreadable.add(path);
-                        log?.warn?.('filesystem', `"${path}" is listed and has nothing to`
+                        log.warn('filesystem', `"${path}" is listed and has nothing to`
                             + ' read: left out of what was exported');
                     }
                     return null;

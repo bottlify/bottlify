@@ -21,6 +21,7 @@ import { createVolume } from './vfs.js';
 import { createFileFunctions } from './files.js';
 import { createNamedObjects } from './named-objects.js';
 import { freshSpace } from '../../cache/testing.fixture.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const GENERIC_WRITE = 0x40000000;
@@ -34,7 +35,7 @@ const NAME = 0x1000;
 const NAME2 = 0x2000;
 
 async function setup(){
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const volume = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     const bytes = new Uint8Array(0x4000);
     /** @type {Map<number, any>} */

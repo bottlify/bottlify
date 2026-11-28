@@ -57,6 +57,7 @@ import { Access, RegionKind, createRegionMap } from './layers/memory/internal/re
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { findResource, RT_STRING } from './layers/loader/internal/resources.js';
 import { buildImage, buildResources } from './layers/loader/internal/resources.test.js';
+import { logHost } from './layers/log/testing.fixture.js';
 
 /** Fast enough that a test does not pay for the backoff it is checking. */
 const QUICK = { attempts: 4, baseDelayMs: 1, maxDelayMs: 4 };
@@ -641,7 +642,7 @@ test('a library missing beside the program is read from system32', async()=>{
     const d3dx = new Uint8Array([1, 2, 3, 4]);
     const filesystem = await filesystemModule.create({ pageFile: await testPageFile(),
         drives: { C: { source: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }) } },
-    });
+    }, await logHost());
     const read = shippedLibraryReader(filesystem, null, IMAGE);
 
     assert.deepEqual([.../** @type {Uint8Array} */ (await read('d3dx9_26.dll'))],
@@ -656,7 +657,7 @@ test('a file beside the program still wins over system32', async()=>{
         drives: { C: { source: createMemoryStore({
             'WINDOWS\\system32\\d3dx9_26.dll': system, 'App\\d3dx9_26.dll': beside,
         }) } },
-    });
+    }, await logHost());
     const read = shippedLibraryReader(filesystem, null, IMAGE);
     assert.deepEqual([.../** @type {Uint8Array} */ (await read('d3dx9_26.dll'))], [9]);
 });
@@ -682,7 +683,8 @@ test('an import the engine answers is its own over a file in system32, not over 
             isKnownDll: (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll',
             readLibrary: shippedLibraryReader(await filesystemModule.create({
                 pageFile: await testPageFile(),
-                drives: { C: { source: createMemoryStore(files) } } }), null, IMAGE, ours),
+                drives: { C: { source: createMemoryStore(files) } } },
+            await logHost()), null, IMAGE, ours),
         });
 
         const covered = await plan({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx });
@@ -726,7 +728,7 @@ async function mapBeside(files, executable, space){
     const filesystem = await filesystemModule.create({ pageFile: await testPageFile(),
         drives: { C: { source: createMemoryStore(Object.fromEntries(
             Object.entries(files).map(([name, bytes])=>[`App\\${name}`, bytes]))) } },
-    });
+    }, await logHost());
     /** @type {{ name: string, region: string, base: number, size: number }[]} */
     const placed = [];
     /** @type {any[]} */

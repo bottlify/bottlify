@@ -15,6 +15,7 @@ import { createVolume } from '../kernel32/vfs.js';
 import { createHive } from '../advapi32/registry.js';
 import { createRegistryService } from '../advapi32/registry-service.js';
 import { freshSpace } from '../../cache/testing.fixture.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const ACCOUNT = { steamId: '76561197960287930', accountName: 'someone', apps: [400, 620],
     appId: 620 };
@@ -384,7 +385,7 @@ test('a cloud file a session has not read yet is fetched before it is answered',
     // A saved session is read lazily: the first read of its file misses, and a
     // read that could not wait for the fetch stopped the game at its first
     // cloud file on every start after the one that wrote it.
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const folder = 'C:\\Program Files (x86)\\Steam\\userdata\\1\\620\\remote';
     steamFilesOf(fs, createVolume(fs, null, { kept: freshSpace('reads') }))
         .write(`${folder}\\modindex`, Uint8Array.of(7, 8, 9));
@@ -407,7 +408,7 @@ test('a cloud file a session has not read yet is fetched before it is answered',
 });
 
 test('the guest\'s files hold a cloud file in folders made for it, and list it below', async()=>{
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const files = steamFilesOf(fs, createVolume(fs, null, { kept: freshSpace('reads') }));
     const folder = 'C:\\Program Files (x86)\\Steam\\userdata\\1\\620\\remote';
     assert.deepEqual(files.list(folder), [], 'no folder, nothing');
