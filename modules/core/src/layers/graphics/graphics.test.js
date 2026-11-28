@@ -118,8 +118,8 @@ test('the backend is built once, on first use', async()=>{
     await graphicsModule.dispose();
 });
 
-test('a Direct3D 8 or 9 root drawn here with no device keeps its texels under names of the '
-    + 'run\'s cache', async()=>{
+test('a Direct3D 8 or 9 root drawn here with no device holds no names for texels: it has no '
+    + 'renderer to keep any', async()=>{
     const host = await hostWith(fakeMemory());
     const cache = host.requireApi('cache');
     /** @type {string[]} */
@@ -132,8 +132,8 @@ test('a Direct3D 8 or 9 root drawn here with no device keeps its texels under na
     const api = await graphicsModule.create({ allocate: ()=>0x1000 }, host);
     api.create('d3d8');
     api.create('d3d9');
-    assert.deepEqual(owned.filter(name=>name === 'texels'), ['texels', 'texels'],
-        'one owner a root, as a root with a device has');
+    assert.deepEqual(owned.filter(name=>name === 'texels'), [],
+        'no owner for a root drawn on the processor');
     await graphicsModule.dispose();
 });
 

@@ -699,7 +699,9 @@ export function createGraphicsModule(){
              */
             const direct3d = (name, factory, services)=>(remote
                 ? remote.root(name, factory, services, cache)
-                : factory({ ...services, texelCache: ownTexels(), scratches,
+                // A root drawn on the processor has no renderer: it keeps no
+                // texels, so it holds no names for them.
+                : factory({ ...services, texelCache: device ? ownTexels() : null, scratches,
                     holds }));
             /**
              * Direct3D 10's root, drawn here or in the graphics worker.
