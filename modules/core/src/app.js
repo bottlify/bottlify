@@ -4313,6 +4313,9 @@ export async function createApp(options){
                 || besides.size > 0
                 || [...standing].some(other=>other !== self) }))
             .catch(e=>{
+                // Given back before the holder goes: a holder released is
+                // the next claim's at once, and a give after it is refused.
+                releaseCredit(memoryCredit, holder);
                 if (given === undefined)
                 {
                     machineMemory.release(holder);

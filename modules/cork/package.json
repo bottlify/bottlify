@@ -42,7 +42,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@bottlify/cellar": "github:bottlify/cellar#2bf7c7ad68bfa0f2bc44944299fd095f9a08cf69"
+    "@bottlify/cellar": "github:bottlify/cellar#1fefe83e2210a3f00dbc32400c6f26e160ef16b6"
   },
   "scripts": {
     "test": "node --test --test-timeout=1200000 \"src/**/*.test.js\"",

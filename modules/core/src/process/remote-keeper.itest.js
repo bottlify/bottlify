@@ -140,7 +140,9 @@ const PROCESS = `
 
 /** What a run's cache holds once the ops ran: its figures, as far as the ops decide them, and every body. @param {any} run */
 const standing = run=>{
-    const { budget, records, hot, cold, segments, segmentBytes, placedBytes, roundingBytes, spaces,
+    // Not the records: a name dropped gives its record back at the keeper's
+    // next sweep, which runs on its clock, not at an op.
+    const { budget, hot, cold, segments, segmentBytes, placedBytes, roundingBytes, spaces,
         owners, ownerTails, ownersOut } = run.figures();
     /** @type {Record<string, number | null>} */
     const bodies = {};
@@ -150,7 +152,7 @@ const standing = run=>{
             (/** @type {number} */ total, /** @type {number} */ byte, /** @type {number} */ i)=>
                 (total + byte * (i + 1)) % 0x7fffffff, 0)) ?? null;
     }
-    return { figures: { budget, records, hot, cold, segments, segmentBytes, placedBytes,
+    return { figures: { budget, hot, cold, segments, segmentBytes, placedBytes,
         roundingBytes, spaces, owners, ownerTails, ownersOut }, bodies };
 };
 
