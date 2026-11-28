@@ -13,6 +13,7 @@ import { createVolume } from '../kernel32/vfs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { freshSpace } from '../../cache/testing.fixture.js';
 import { logHost } from '../../log/testing.fixture.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /** @param {number} [allocator]  The IMalloc pointer ole32 would hand out, if any. */
 function machine(allocator){
@@ -20,8 +21,7 @@ function machine(allocator){
     /** @type {string[]} */
     const diverged = [];
     const host = {
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>
-            memory.set(b, a),
+        guest: guestOver(memory),
         taskAllocator: allocator === undefined ? undefined : { pointer: ()=>allocator },
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
@@ -45,8 +45,7 @@ test('DllGetVersion answers the shell of Windows XP SP3 in either structure', ()
     // has; the first field says which structure it passed.
     const memory = new Uint8Array(0x100).fill(0xaa);
     const shell = /** @type {any} */ (createShellFunctions({
-        readMemory: (/** @type {number} */ a, /** @type {number} */ l)=>memory.slice(a, a + l),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        guest: guestOver(memory),
     }));
     const view = new DataView(memory.buffer);
     const E_INVALIDARG = 0x80070057 | 0;
@@ -76,20 +75,8 @@ test('DllGetVersion answers the shell of Windows XP SP3 in either structure', ()
 function machineWithFolders(strings = false){
     const memory = new Uint8Array(0x1000).fill(0xaa);
     let free = 0x800;
-    /** @param {number} at @param {number} unit */
-    const textAt = (at, unit)=>{
-        let text = '';
-        for (let code = memory[at] | (unit === 2 ? memory[at + 1] << 8 : 0); code !== 0;
-            at += unit, code = memory[at] | (unit === 2 ? memory[at + 1] << 8 : 0))
-        {
-            text += String.fromCharCode(code);
-        }
-        return text;
-    };
     const host = {
         ...strings ? {
-            readCString: (/** @type {number} */ a)=>textAt(a, 1),
-            readWideString: (/** @type {number} */ a)=>textAt(a, 2),
             free: ()=>{},
             // The task allocator, as ole32 answers for it.
             library: (/** @type {string} */ name)=>(name === 'ole32.dll' ? {
@@ -100,8 +87,7 @@ function machineWithFolders(strings = false){
                 } },
             } : undefined),
         } : {},
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        guest: guestOver(memory),
         allocate: (/** @type {number} */ bytes)=>{
             const at = free;
             free += bytes;
@@ -439,16 +425,7 @@ function machineWithPaths(cwd, extra){
         memory[at + text.length] = 0;
     };
     const host = {
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
-        readCString: (/** @type {number} */ address, /** @type {number} */ max)=>{
-            let end = address;
-            while (end < memory.length && end - address < max && memory[end] !== 0)
-            {
-                end++;
-            }
-            return decodeAnsi(memory.subarray(address, end));
-        },
+        guest: guestOver(memory),
         resolve: (/** @type {string} */ path)=>{
             return /^[A-Za-z]:[\\/]/.test(path) ? path : `${cwd}\\${path}`;
         },
@@ -568,8 +545,7 @@ test('a notification icon is kept by its window and id until it is deleted', ()=
     const view = new DataView(memory.buffer);
     /** @type {number[]} */
     const errors = [];
-    const fns = createShellFunctions({ writeMemory: (at, bytes)=>memory.set(bytes, at),
-        readMemory: (at, length)=>memory.slice(at, at + length),
+    const fns = createShellFunctions({ guest: guestOver(memory),
         setLastError: code=>errors.push(code) });
     const [NIM_ADD, NIM_MODIFY, NIM_DELETE] = [0, 1, 2];
     /** @param {number} size @param {number} id */
@@ -616,23 +592,8 @@ async function machineWithVolume(extra = {}, allocationEnd = 0){
     const view = new DataView(memory.buffer);
     let next = 0x1000;
     const shell = /** @type {any} */ (createShellFunctions({
-        readMemory: (address, length)=>{
-            assert.ok(address >= allocationEnd || address + length <= allocationEnd,
-                `read of ${length} bytes at`
-                + ` 0x${address.toString(16)} runs past the end of an allocation`);
-            return memory.slice(address, address + length);
-        },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
-        // As the memory layer reads an ANSI string: in Windows-1252, which is
-        // what the Encoding standard calls latin1.
-        readCString: (address, limit)=>{
-            let end = address;
-            while (end < address + limit && memory[end] !== 0)
-            {
-                end++;
-            }
-            return decodeAnsi(memory.subarray(address, end));
-        },
+        // A read across the end of an allocation faults, as one across a region's end does.
+        guest: guestOver(memory, 4, [allocationEnd]),
         resolve: path=>fs.resolve(path).path,
         volume: { ...volume, drives: ()=>['C'] },
         ...extra,
@@ -757,8 +718,7 @@ test('a folder path in the upper half of the ANSI page goes back in that page', 
     const memory = new Uint8Array(0x1000).fill(0xaa);
     let free = 0x800;
     const shell = /** @type {any} */ (createShellFunctions({
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        guest: guestOver(memory),
         allocate: (/** @type {number} */ bytes)=>{
             const at = free;
             free += bytes;
@@ -871,8 +831,7 @@ test('SHGetFileInfoW refuses as its ANSI twin does, and leaves the wider record 
     const SHGFI_SMALLICON = 0x1;
     const memory = new Uint8Array(0x400).fill(0xaa);
     const shell = /** @type {any} */ (createShellFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
     }));
     putWide(memory, 'C:\\App', 0x10);
     assert.equal(shell.SHGetFileInfoW.handler([0x10, 0, 0x40, 692,
@@ -1052,7 +1011,7 @@ test('DragAcceptFiles sets and clears the window\'s WS_EX_ACCEPTFILES', ()=>{
     let style = 0x100;
     /** @type {number[][]} */
     const set = [];
-    const shell = /** @type {any} */ (createShellFunctions({ writeMemory: ()=>{},
+    const shell = /** @type {any} */ (createShellFunctions({ guest: guestOver(new Uint8Array(0x100)),
         library: name=>(name === 'USER32.dll' ? {
             GetWindowLongA: { handler: ([window, index])=>(window === 0x40 && index === -20
                 ? style : 0) },

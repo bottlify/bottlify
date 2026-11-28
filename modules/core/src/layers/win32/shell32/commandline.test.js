@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { splitCommandLine } from './commandline.js';
 import { createShellFunctions } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 test('arguments are split at white space, and a quoted part keeps its own', ()=>{
     // The documentation's own table of how a command line is read.
@@ -86,15 +87,14 @@ test('the program is read by its own rule, in which a backslash is a path\'s', (
  *
  * @param {Record<string, any>} [extra]  More of the host, laid over the rest.
  */
-function machine(extra = {}){
+function machine({ pointerSize = 4, ...extra } = {}){
     const memory = new Uint8Array(0x2000).fill(0xaa);
     const view = new DataView(memory.buffer);
     let free = 0x1000;
     /** @type {number[]} */
     const errors = [];
     const shell = /** @type {any} */ (createShellFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory, /** @type {4 | 8} */ (pointerSize)),
         allocate: bytes=>{
             const at = free;
             free += bytes + 15 & ~15;

@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {
     argify, createAssociations, pathOfFileUrl, splitParameters,
 } from './associations.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 test('the shell splits parameters at spaces alone, halving runs of quotes', ()=>{
     // Wine's test_argify, as its comments set the rules out.
@@ -114,8 +115,7 @@ function classes(keys){
         RegCloseKey: { handler: ()=>0 },
     };
     return createAssociations({
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
         allocate: bytes=>{
             const at = heap;
             heap += bytes + 16;

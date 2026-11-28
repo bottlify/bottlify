@@ -78,10 +78,10 @@ const PE32_PLUS = 0x20b;
 const NONE = Object.freeze({ count: 0, picture: null, unread: null });
 
 /** @param {Uint8Array} bytes @param {number} at */
-const u16 = (bytes, at)=>(at + 2 <= bytes.length ? bytes[at] | bytes[at + 1] << 8 : 0);
+const u16Of = (bytes, at)=>(at + 2 <= bytes.length ? bytes[at] | bytes[at + 1] << 8 : 0);
 
 /** @param {Uint8Array} bytes @param {number} at */
-const u32 = (bytes, at)=>(at + 4 <= bytes.length
+const u32Of = (bytes, at)=>(at + 4 <= bytes.length
     ? (bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24) >>> 0 : 0);
 
 /**
@@ -110,7 +110,7 @@ const pictureOf = bits=>{
  * @returns {Generator<Uint8Array | Promise<Uint8Array>, FileIcons, Uint8Array>}
  */
 function* iconFileSteps(read, head, index, side){
-    const entries = Math.min(u16(head, 4), MAX_ICON_ENTRIES);
+    const entries = Math.min(u16Of(head, 4), MAX_ICON_ENTRIES);
     const directory = ICONDIR_HEADER + entries * ICONDIR_ENTRY > head.length
         ? yield read(0, ICONDIR_HEADER + entries * ICONDIR_ENTRY) : head;
     const count = Math.min(entries,
@@ -137,7 +137,7 @@ function* iconFileSteps(read, head, index, side){
     }
     const chosen = /** @type {number} */ (groupImageId(group, false, side)) - 1;
     const at = ICONDIR_HEADER + chosen * ICONDIR_ENTRY;
-    const bits = yield read(u32(directory, at + 12), u32(directory, at + 8));
+    const bits = yield read(u32Of(directory, at + 12), u32Of(directory, at + 8));
     return { count: 1, picture: pictureOf(bits), unread: null, id: null };
 }
 
@@ -156,23 +156,23 @@ function* iconFileSteps(read, head, index, side){
  */
 function* imageSteps(read, head, size, index, side){
     let headers = head;
-    const peOffset = u32(headers, 0x3c);
+    const peOffset = u32Of(headers, 0x3c);
     if (peOffset + 24 > headers.length && headers.length < size)
     {
         headers = yield read(0, peOffset + HEAD_BYTES);
     }
-    if (u32(headers, peOffset) !== PE_SIGNATURE)
+    if (u32Of(headers, peOffset) !== PE_SIGNATURE)
     {
         // A DOS program has no resources; a 16-bit Windows one keeps its
         // icons in a resource table of another form, not read here.
-        return u16(headers, peOffset) === NE_SIGNATURE
+        return u16Of(headers, peOffset) === NE_SIGNATURE
             ? { ...NONE, unread: 'a 16-bit image' } : NONE;
     }
-    if (u16(headers, peOffset + 24) === PE32_PLUS)
+    if (u16Of(headers, peOffset + 24) === PE32_PLUS)
     {
         return { ...NONE, unread: 'a 64-bit image' };
     }
-    const end = peOffset + 24 + u16(headers, peOffset + 20) + u16(headers, peOffset + 6) * 40;
+    const end = peOffset + 24 + u16Of(headers, peOffset + 20) + u16Of(headers, peOffset + 6) * 40;
     if (end > headers.length && headers.length < size)
     {
         headers = yield read(0, end);
@@ -227,11 +227,11 @@ function* imageSteps(read, head, size, index, side){
  */
 function* fileSteps(read, size, index, side){
     const head = yield read(0, HEAD_BYTES);
-    if (u16(head, 0) === 0 && u16(head, 2) === 1)
+    if (u16Of(head, 0) === 0 && u16Of(head, 2) === 1)
     {
         return yield* iconFileSteps(read, head, index, side);
     }
-    if (u16(head, 0) === 0x5a4d)
+    if (u16Of(head, 0) === 0x5a4d)
     {
         return yield* imageSteps(read, head, size, index, side);
     }
@@ -347,7 +347,7 @@ export function programIcon(bytes){
         }
         const at = rvaToFileOffset(image, group.rva);
         const entries = bytes.subarray(at, at + group.size);
-        const count = Math.min(u16(entries, 4),
+        const count = Math.min(u16Of(entries, 4),
             Math.floor((entries.length - ICONDIR_HEADER) / GROUP_ENTRY));
         let best = null;
         for (let index = 0; index < count; index++)
@@ -355,10 +355,10 @@ export function programIcon(bytes){
             const entry = ICONDIR_HEADER + index * GROUP_ENTRY;
             // A BYTE of width, where 0 means 256.
             const width = entries[entry] || 256;
-            const depth = u16(entries, entry + 6);
+            const depth = u16Of(entries, entry + 6);
             if (!best || width > best.width || (width === best.width && depth > best.depth))
             {
-                best = { width, depth, id: u16(entries, entry + 12) };
+                best = { width, depth, id: u16Of(entries, entry + 12) };
             }
         }
         const icon = best && findResource(bytes, image, RT_ICON, best.id);

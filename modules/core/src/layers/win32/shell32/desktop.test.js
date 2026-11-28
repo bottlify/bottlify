@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShellFunctions } from './functions.js';
 import { aboutBox } from './desktop.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const E_FAIL = 0x80004005 | 0;
 
@@ -17,8 +18,7 @@ function machine(){
     /** @type {string[]} */
     const diverged = [];
     const shell = /** @type {any} */ (createShellFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
     }));
     return { memory, view, diverged, shell };
@@ -30,8 +30,7 @@ test('application bars are kept along the edges, a later one clear of the earlie
     const memory = new Uint8Array(0x400);
     const view = new DataView(memory.buffer);
     const shell = /** @type {any} */ (createShellFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         library: name=>(name === 'USER32.dll' ? { PostMessageA: { handler: args=>{
             posted.push(args);
             return 1;
@@ -129,9 +128,7 @@ test('the about box is user32\'s modal box, its words as ShellAbout lays them ou
         return text;
     };
     const shell = /** @type {any} */ (createShellFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
-        readWideString: address=>wideAt(address),
+        guest: guestOver(memory),
         allocate: bytes=>{
             const at = next;
             next += bytes + 8;

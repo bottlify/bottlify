@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDropFunctions, dropPaths } from './drop.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * A drop block at 0x1000 as a program posts one, behind a kernel32 whose
@@ -49,8 +50,7 @@ function drop(paths, { wide = false, outside = false } = {}){
         } },
     };
     const fns = createDropFunctions({
-        readMemory: (address, length)=>memory.subarray(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         library: name=>(name === 'KERNEL32.dll' ? kernel32 : undefined),
     }, decodeAnsi, text=>encodeAnsi(text));
     return { fns, memory, view, freed };

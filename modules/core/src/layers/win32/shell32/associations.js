@@ -187,8 +187,7 @@ const REG_EXPAND_SZ = 2;
 
 /**
  * @typedef {Object} AssociationHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => void} [free]
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
@@ -202,13 +201,12 @@ const REG_EXPAND_SZ = 2;
  * @param {AssociationHost} host
  */
 export function createAssociations(host){
+    const { guest } = host;
     /** @param {string} name @param {number[]} args */
     const call = (name, args)=>{
         const answer = host.library('ADVAPI32.dll')?.[name]?.handler(args);
         return typeof answer === 'number' ? answer >>> 0 : -1;
     };
-    /** @param {Uint8Array} bytes */
-    const u32 = bytes=>new DataView(bytes.slice().buffer).getUint32(0, true);
     /** @param {string} text */
     const ansi = text=>Uint8Array.from(`${text}\0`, c=>c.charCodeAt(0) & 0xff);
     /** @param {Uint8Array} bytes */
@@ -234,13 +232,13 @@ export function createAssociations(host){
         }
         try
         {
-            host.writeMemory(scratch + 0x400, name);
+            guest.setBytes(scratch + 0x400, name);
             if (call('RegOpenKeyExA', [HKEY_CLASSES_ROOT, scratch + 0x400, 0, KEY_READ, scratch])
                 !== ERROR_SUCCESS)
             {
                 return null;
             }
-            const key = u32(host.readMemory(scratch, 4));
+            const key = guest.u32(scratch);
             try
             {
                 return body(key, scratch);
@@ -263,18 +261,18 @@ export function createAssociations(host){
      * @returns {{ value: string, expand: boolean } | null}
      */
     const defaultOf = path=>withKey(path, (key, scratch)=>{
-        host.writeMemory(scratch + 8, Uint8Array.of(0, 4, 0, 0));
+        guest.setBytes(scratch + 8, Uint8Array.of(0, 4, 0, 0));
         if (call('RegQueryValueExA', [key, 0, 0, scratch + 4, scratch + 0x200, scratch + 8])
             !== ERROR_SUCCESS)
         {
             return null;
         }
-        const type = u32(host.readMemory(scratch + 4, 4));
+        const type = guest.u32(scratch + 4);
         if (type !== REG_SZ && type !== REG_EXPAND_SZ)
         {
             return null;
         }
-        return { value: text(host.readMemory(scratch + 0x200, 0x200)),
+        return { value: text(guest.snapshot(scratch + 0x200, 0x200)),
             expand: type === REG_EXPAND_SZ };
     });
 
@@ -284,14 +282,14 @@ export function createAssociations(host){
      * @param {string} path @param {string} value
      */
     const hasValue = (path, value)=>withKey(path, (key, scratch)=>{
-        host.writeMemory(scratch + 0x300, ansi(value));
+        guest.setBytes(scratch + 0x300, ansi(value));
         return call('RegQueryValueExA', [key, scratch + 0x300, 0, 0, 0, 0]) === ERROR_SUCCESS;
     }) ?? false;
 
     /** @param {string} path @returns {string | null} its first subkey */
     const firstSubkey = path=>withKey(path, (key, scratch)=>(call('RegEnumKeyA',
         [key, 0, scratch + 0x200, 0x100]) === ERROR_SUCCESS
-        ? text(host.readMemory(scratch + 0x200, 0x100)) : null));
+        ? text(guest.snapshot(scratch + 0x200, 0x100)) : null));
 
     /**
      * The command a verb of a class runs, and the verb found: the one asked

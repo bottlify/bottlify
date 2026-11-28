@@ -2971,10 +2971,7 @@ export function createWin32Module(){
             // back strings from the same task heap CoTaskMemAlloc does.
             /** @type {Parameters<typeof registerShellLinkClasses>[1]} */
             const shortcutHost = {
-                readMemory,
-                writeMemory,
-                readCString,
-                readWideString,
+                guest,
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
                 files: volume,
@@ -4936,8 +4933,7 @@ export function createWin32Module(){
                 'COMCTL32.dll': ()=>commonControls.system,
 
                 'SHELL32.dll': ()=>createShellFunctions({
-                    pointerSize,
-                    writeMemory, readMemory, readCString, readWideString,
+                    guest,
                     /** @param {number} address */
                     free: address=>heap.free(address),
                     // Read when called: the table is still being built here.

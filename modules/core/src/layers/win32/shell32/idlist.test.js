@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { IDLIST_ORDINALS, createIdListFunctions } from './idlist.js';
 import { SHELL32_ORDINALS } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /** Guest memory with a heap, and lists put in it item by item. */
 function machine(){
@@ -16,8 +17,7 @@ function machine(){
     /** @type {number[]} */
     const freed = [];
     const fns = createIdListFunctions({
-        readMemory: (at, length)=>memory.subarray(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
         allocate: bytes=>{
             const at = heap;
             heap += bytes + 8;

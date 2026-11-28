@@ -8,7 +8,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
 import { createOleFunctions } from '../ole32/functions.js';
-import { guestOver } from '../common/guest.fixture.js';
 import { parseGuid } from '../../../system/guid.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
@@ -17,6 +16,7 @@ import {
 } from './shelllink.js';
 import { decodeShellLink, encodeShellLink, SW_SHOWMAXIMIZED } from '../common/shell-link.js';
 import { listBytes } from './namespace.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -100,10 +100,7 @@ function setup(){
 
     const heap = fakeHeap();
     const shellHost = {
-        readMemory,
-        writeMemory,
-        readCString,
-        readWideString,
+        guest: guestOver(bytes),
         /** @param {number} size */
         allocate: size=>heap.allocate(size),
         files: {

@@ -11,6 +11,7 @@ import {
     IID_IPERSIST_FILE, IID_IURL_A, IID_IURL_W, URL_E_INVALID_SYNTAX, createInternetShortcut,
     urlOfShortcut,
 } from './internet-shortcut.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -37,10 +38,7 @@ function setup(){
         return text;
     };
     const host = {
-        readMemory: (/** @type {number} */ at, /** @type {number} */ n)=>memory.subarray(at, at + n),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, at),
-        readCString, readWideString,
+        guest: guestOver(memory),
         allocate: (/** @type {number} */ size)=>{
             const at = next;
             next += size + 8;

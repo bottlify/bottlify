@@ -246,11 +246,6 @@
   "win32/comdlg32/functions.js": {
    "accessor u32": 1
   },
-  "win32/comdlg32/itemdialog.js": {
-   "accessor read32": 1,
-   "accessor write32": 1,
-   "string wide": 1
-  },
   "win32/common/compound-writer.js": {
    "accessor putWords": 1
   },
@@ -625,49 +620,6 @@
    "accessor readU32": 1,
    "accessor writeU32": 1,
    "copy readMemory().slice()": 6
-  },
-  "win32/shell32/associations.js": {
-   "accessor u32": 1
-  },
-  "win32/shell32/desktop.js": {
-   "accessor dword": 1,
-   "accessor readInt": 1,
-   "string wide": 1
-  },
-  "win32/shell32/extras.js": {
-   "accessor dword": 1,
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 4,
-   "string wide": 1
-  },
-  "win32/shell32/functions.js": {
-   "accessor dword": 1,
-   "accessor u32": 1
-  },
-  "win32/shell32/icons.js": {
-   "accessor u16": 1,
-   "accessor u32": 1
-  },
-  "win32/shell32/idlist.js": {
-   "copy readMemory().slice()": 2
-  },
-  "win32/shell32/internet-shortcut.js": {
-   "accessor dword": 1
-  },
-  "win32/shell32/namespace.js": {
-   "accessor dword": 1,
-   "string readWide": 1
-  },
-  "win32/shell32/shellitem.js": {
-   "accessor dword": 1,
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 2
-  },
-  "win32/shell32/shelllink.js": {
-   "accessor dword": 1,
-   "copy readMemory().slice()": 2
   },
   "win32/steamclient/functions.js": {
    "accessor dword": 1,

@@ -15,7 +15,6 @@
 
 import { createAdapter } from '../oleaut32/objects.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { parseGuid, readGuid } from '../../../system/guid.js';
 import { itemsOf, listBytes, parentOf } from './namespace.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
@@ -51,18 +50,12 @@ const SIGDN_URL = 0x80068000;
 /** What the desktop is called, as a browser shows it. */
 const DESKTOP_NAME = 'Desktop';
 
-/** @param {number} value */
-const dword = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff,
-    value >>> 24 & 0xff);
-
 /** The longest list read out of guest memory: past it a list is no list. */
 const MAX_LIST = 0x10000;
 
 /**
  * @typedef {Object} ShellItemHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} allocate  The heap ILFree frees.
  * @property {(address: number) => void} [free]
  * @property {(object: import('../oleaut32/objects.js').ComAdapter, iid: string) => number} publish
@@ -87,17 +80,14 @@ const MAX_LIST = 0x10000;
  * @param {ShellItemHost} host @param {ShellItemNamespace} namespace
  */
 export function createShellItems(host, namespace){
-    /** @param {number} at */
-    const readU32 = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
-        .getUint32(0, true);
-    /** @param {number} at @param {number} value */
-    const writeU32 = (at, value)=>{
+    const { guest } = host;
+    /** A DWORD answered through an out-parameter the caller may leave NULL. @param {number} at @param {number} value */
+    const answerOut = (at, value)=>{
         if ((at >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(at), dword(value));
+            guest.set32(at, value);
         }
     };
-    const memory = { readMemory: host.readMemory, writeMemory: host.writeMemory };
 
     /**
      * A list's bytes as guest memory has them, its terminator included, or
@@ -108,7 +98,7 @@ export function createShellItems(host, namespace){
      */
     const listAt = at=>{
         let length = 0;
-        for (let cb = readU32(at) & 0xffff; cb !== 0; cb = readU32(at + length) & 0xffff)
+        for (let cb = guest.u32(at) & 0xffff; cb !== 0; cb = guest.u32(at + length) & 0xffff)
         {
             length += cb;
             if (length > MAX_LIST)
@@ -116,7 +106,7 @@ export function createShellItems(host, namespace){
                 return null;
             }
         }
-        return host.readMemory(wholeAddress(at), length + 2).slice();
+        return guest.snapshot(at, length + 2);
     };
 
     /** @param {Uint8Array} first @param {Uint8Array} second  Two lists as one. */
@@ -139,7 +129,7 @@ export function createShellItems(host, namespace){
         const at = wholeAddress(host.allocate(bytes.length));
         if (at)
         {
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
         }
         return at;
     };
@@ -166,7 +156,7 @@ export function createShellItems(host, namespace){
     };
 
     /** @param {Uint8Array} list  Its last item's text; undefined for the desktop. */
-    const textOf = list=>withList(list, at=>itemsOf(memory, at).at(-1), undefined);
+    const textOf = list=>withList(list, at=>itemsOf(guest, at).at(-1), undefined);
 
     /** @param {string} text */
     const taskString = async text=>{
@@ -175,7 +165,7 @@ export function createShellItems(host, namespace){
         const at = alloc ? /** @type {number} */ (await alloc.handler([bytes.length])) >>> 0 : 0;
         if (at)
         {
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
         }
         return at;
     };
@@ -200,7 +190,7 @@ export function createShellItems(host, namespace){
      * @param {Uint8Array} list @param {string | null} iid @param {number} out
      */
     const handOut = (list, iid, out)=>{
-        writeU32(out, 0);
+        answerOut(out, 0);
         if (iid === null || !INTERFACES[iid])
         {
             return E_NOINTERFACE;
@@ -212,12 +202,12 @@ export function createShellItems(host, namespace){
             return E_OUTOFMEMORY;
         }
         handedOut.set(pointer, object);
-        writeU32(out, pointer);
+        answerOut(out, pointer);
         return S_OK;
     };
 
     /** @param {number} riid */
-    const iidAt = riid=>((riid >>> 0) === 0 ? null : readGuid(host, riid >>> 0));
+    const iidAt = riid=>((riid >>> 0) === 0 ? null : guest.guid(riid));
 
     /**
      * The name a SIGDN asks for: for parsing, the item's path (or, in its
@@ -259,7 +249,7 @@ export function createShellItems(host, namespace){
      * @returns {Uint8Array | null}
      */
     const parentList = list=>{
-        const texts = withList(list, at=>itemsOf(memory, at), /** @type {string[]} */ ([]));
+        const texts = withList(list, at=>itemsOf(guest, at), /** @type {string[]} */ ([]));
         if (texts.length === 0)
         {
             return null;
@@ -295,7 +285,7 @@ export function createShellItems(host, namespace){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                answerOut(out, 0);
                 if (iidAt(bhid) !== BHID_SFOBJECT)
                 {
                     return MK_E_NOOBJECT;
@@ -307,7 +297,7 @@ export function createShellItems(host, namespace){
         { name: 'GetParent', argBytes: 8,
             /** @param {any} object @param {number[]} args */
             invoke: (object, [out])=>{
-                writeU32(out, 0);
+                answerOut(out, 0);
                 const parent = parentList(object.state.list);
                 return parent === null ? E_FAIL : handOut(parent, IID_ISHELLITEM, out);
             } },
@@ -319,14 +309,14 @@ export function createShellItems(host, namespace){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                answerOut(out, 0);
                 const name = nameOf(object.state.list, sigdn >>> 0);
                 if (name === null)
                 {
                     return E_INVALIDARG;
                 }
                 const at = await taskString(name);
-                writeU32(out, at);
+                answerOut(out, at);
                 return at ? S_OK : E_OUTOFMEMORY;
             } },
         /**
@@ -342,11 +332,11 @@ export function createShellItems(host, namespace){
                 const item = text === undefined ? null : namespace.describe(text);
                 if (text !== undefined && !item)
                 {
-                    writeU32(out, 0);
+                    answerOut(out, 0);
                     return E_FAIL;
                 }
                 const attributes = ((item?.attributes ?? 0) & mask) >>> 0;
-                writeU32(out, attributes);
+                answerOut(out, attributes);
                 return attributes === (mask >>> 0) ? S_OK : S_FALSE;
             } },
         /**
@@ -366,7 +356,7 @@ export function createShellItems(host, namespace){
                 const rank = (/** @type {Uint8Array} */ list)=>(textOf(list) ?? '').toLowerCase();
                 const [a, b] = [rank(object.state.list), rank(theirs.list)];
                 const order = a < b ? -1 : a > b ? 1 : 0;
-                writeU32(out, order);
+                answerOut(out, order);
                 return order === 0 ? S_OK : S_FALSE;
             } },
     ];
@@ -382,7 +372,7 @@ export function createShellItems(host, namespace){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(CLSID_SHELLITEM)));
+                guest.setGuid(out, CLSID_SHELLITEM);
                 return S_OK;
             } },
         /** HRESULT SetIDList(PCIDLIST_ABSOLUTE pidl): the item becomes the list's. */
@@ -406,7 +396,7 @@ export function createShellItems(host, namespace){
                     return E_INVALIDARG;
                 }
                 const at = placed(object.state.list);
-                writeU32(out, at);
+                answerOut(out, at);
                 return at ? S_OK : E_OUTOFMEMORY;
             } },
     ];
@@ -423,7 +413,7 @@ export function createShellItems(host, namespace){
         { name: 'GetImage', argBytes: 20, quadwords: [1],
             /** @param {any} object @param {number[]} args */
             invoke: (object, [, , , out])=>{
-                writeU32(out, 0);
+                answerOut(out, 0);
                 return E_NOTIMPL;
             } },
     ];
@@ -469,7 +459,7 @@ export function createShellItems(host, namespace){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                answerOut(out, 0);
                 const own = wholeAddress(child) === 0 ? null : listAt(child);
                 if (own === null)
                 {
@@ -500,7 +490,7 @@ export function createShellItems(host, namespace){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pidl, riid, out])=>{
-                writeU32(out, 0);
+                answerOut(out, 0);
                 const list = wholeAddress(pidl) === 0 ? null : listAt(pidl);
                 return list === null || wholeAddress(out) === 0 ? E_INVALIDARG
                     : handOut(list, iidAt(riid), out);
@@ -518,9 +508,9 @@ export function createShellItems(host, namespace){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, , riid, out])=>{
-                writeU32(out, 0);
+                answerOut(out, 0);
                 const text = wholeAddress(name) === 0 ? null
-                    : host.readWideString?.(wholeAddress(name), 0x8000) ?? null;
+                    : guest.wstr(name, 0x8000) ?? null;
                 if (text === null || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
@@ -541,10 +531,10 @@ export function createShellItems(host, namespace){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([parent, name, , riid, out])=>{
-                writeU32(out, 0);
+                answerOut(out, 0);
                 const above = itemAt(parent);
                 const text = wholeAddress(name) === 0 ? null
-                    : host.readWideString?.(wholeAddress(name), 0x8000) ?? null;
+                    : guest.wstr(name, 0x8000) ?? null;
                 if (!above || text === null || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
@@ -570,7 +560,7 @@ export function createShellItems(host, namespace){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                answerOut(out, 0);
                 if (wholeAddress(object) === 0)
                 {
                     return E_NOINTERFACE;
@@ -584,7 +574,7 @@ export function createShellItems(host, namespace){
                     return E_NOINTERFACE;
                 }
                 const at = placed(list);
-                writeU32(out, at);
+                answerOut(out, at);
                 return at ? S_OK : E_OUTOFMEMORY;
             },
         },
@@ -598,7 +588,7 @@ export function createShellItems(host, namespace){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                answerOut(out, 0);
                 const item = itemAt(object);
                 const folder = item ? undefined : namespace.folderAt(object);
                 const list = item ? item.list

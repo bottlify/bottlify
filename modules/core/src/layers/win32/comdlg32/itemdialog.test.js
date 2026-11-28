@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CLSID_FILE_OPEN_DIALOG, CLSID_FILE_SAVE_DIALOG, OPEN_OPTIONS, SAVE_OPTIONS,
@@ -15,7 +16,7 @@ const SPECS = 0x3000;
 const HEAP = 0x8000;
 
 /** Both dialogs registered over plain memory; `make` gives one's methods by name. */
-function dialogs(){
+function dialogs(width = /** @type {4 | 8} */ (4)){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     let heap = HEAP;
@@ -25,16 +26,7 @@ function dialogs(){
         registerClass: (/** @type {string} */ clsid, /** @type {() => any} */ factory)=>
             classes.set(clsid, factory),
     }), {
-        readMemory: (at, n)=>bytes.slice(at, at + n),
-        writeMemory: (at, data)=>bytes.set(data, at),
-        readWideString: at=>{
-            let text = '';
-            for (let p = at; view.getUint16(p, true) !== 0; p += 2)
-            {
-                text += String.fromCharCode(view.getUint16(p, true));
-            }
-            return text;
-        },
+        guest: guestOver(bytes, width),
         allocate: n=>{
             const at = heap;
             heap += n;
@@ -134,3 +126,20 @@ test('a save dialog starts with its own options and answers the save dialog\'s i
     assert.ok(definition.interfaces.some((/** @type {any} */ i)=>
         i.id === '{42F85136-DB7E-439C-85F1-E4075D135FC8}'), 'and IFileDialog');
 });
+
+test('in a 64-bit process COMDLG_FILTERSPEC is two pointers of eight, and a name comes out whole',
+    ()=>{
+        const d = dialogs(8);
+        const { methods, definition } = d.make(CLSID_FILE_OPEN_DIALOG);
+        d.view.setBigUint64(SPECS, BigInt(d.wide(TEXT, 'Saves')), true);
+        d.view.setBigUint64(SPECS + 8, BigInt(d.wide(TEXT + 0x100, '*.sav')), true);
+        d.view.setBigUint64(SPECS + 16, BigInt(d.wide(TEXT + 0x200, 'All')), true);
+        d.view.setBigUint64(SPECS + 24, BigInt(d.wide(TEXT + 0x300, '*.*')), true);
+        assert.equal(methods.SetFileTypes(2, SPECS), 0);
+        assert.deepEqual(definition.state.types, [{ name: 'Saves', spec: '*.sav' },
+            { name: 'All', spec: '*.*' }]);
+        methods.SetFileName(d.wide(TEXT + 0x400, 'save1.dat'));
+        d.view.setBigUint64(OUT, 0xffff_ffff_ffff_ffffn, true);
+        assert.equal(methods.GetFileName(OUT), 0);
+        assert.equal(d.readWide(Number(d.view.getBigUint64(OUT, true))), 'save1.dat');
+    });
