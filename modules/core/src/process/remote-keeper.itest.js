@@ -38,8 +38,10 @@ function sequenceOf(seed, count){
     };
     const ops = ['put', 'put', 'put', 'read', 'read', 'look', 'drop', 'reserve', 'own', 'ownPut',
         'ownPut', 'ownPut', 'release'];
+    // Lengths up to the largest body the run's one segment shares, a quarter
+    // of it: a few such only copies outgrow it, however densely they lie.
     return Array.from({ length: count }, ()=>[ops[Math.floor(next() * ops.length)],
-        `m/${Math.floor(next() * NAMES)}`, 1 + Math.floor(next() * 2_000_000),
+        `m/${Math.floor(next() * NAMES)}`, 1 + Math.floor(next() * (4 << 20)),
         Math.floor(next() * 256)]);
 }
 
