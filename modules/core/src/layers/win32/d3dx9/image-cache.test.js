@@ -22,7 +22,8 @@ import { FMT, layoutOf } from './pixels.js';
 import { deviceRig } from './device.fixture.js';
 import { writeDds } from './save-texture.js';
 import { openRunCache } from '../../../process/run-cache.js';
-import { cacheSpace, noCache } from '../../cache/module.js';
+import { cacheSpace } from '../../cache/module.js';
+import { testCache } from '../../cache/testing.fixture.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -147,9 +148,9 @@ async function run(seed, cached, { mutate = false } = {}){
     const r = deviceRig();
     const runCache = cached ? await openRunCache({ budget: 16 << 20 }) : null;
     const counts = { found: 0, kept: 0 };
-    // Without the run's cache, a space that keeps nothing: every create decodes.
+    // A cache with no room: every create decodes.
     /** @type {import('../../cache/module.js').CacheSpace} */
-    let images = noCache.space('d3dx-images');
+    let images = (await testCache({ budget: 0 })).space('d3dx-images');
     if (runCache)
     {
         const space = cacheSpace(runCache.reader, 'd3dx-images');

@@ -9,7 +9,8 @@
  * the cache has no room or there is none (`plainScratches`, `plainHold`, gone
  * from the cache layer and not to come back), a
  * site's own branch for a run without a cache (`cache === null`, `space ===
- * null`, `noCache`), or a store that keeps nothing in the cache's place
+ * null`, `noCache`), a default room that refuses every room because there
+ * is no cache (`noScratches`), or a store that keeps nothing in the cache's place
  * (`KEEP_NOTHING`). The run always has a cache, and what it has no room for
  * is the cache's to answer (refused, a loss, made again): a site that keeps
  * its own copy is a heap outside the run's one budget. Nor does a layer stand
@@ -31,7 +32,7 @@ import { relative } from 'node:path';
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SOURCES = ['modules/core/src'];
 const SKIP = [/\.(test|itest|fixture)\.js$/, /\.x(86|64)\.js$/, /^modules\/core\/src\/layers\/cache\//];
-const SAID = /\b(?:plainScratches|plainHold|KEEP_NOTHING|noCache|isStub|createStub(?:Api|Module))\b|\b(?:cache|space) === null\b/g;
+const SAID = /\b(?:plainScratches|plainHold|KEEP_NOTHING|noCache|noScratches|isStub|createStub(?:Api|Module))\b|\b(?:cache|space) === null\b/g;
 
 /**
  * The sites left, each with why it stays and what removes it.
@@ -45,6 +46,12 @@ const BASELINE = {
     // heap's address space, which a 32-bit process has none of.
     'modules/core/src/layers/win32/shell32/desktop.js': 1,
     'modules/core/src/layers/win32/kernel32/heap.js': 1,
+    // A default room for a caller that hands none: every room refused. Each
+    // goes when its site takes the process's scratches as required.
+    'modules/core/src/layers/graphics/opengl/context.js': 2,
+    'modules/core/src/layers/graphics/webgpu/internal/bindings.js': 2,
+    'modules/core/src/layers/graphics/webgpu/internal/presenter.js': 2,
+    'modules/core/src/layers/graphics/ddraw/blit.js': 2,
 };
 
 /** @param {string} dir @returns {string[]} */

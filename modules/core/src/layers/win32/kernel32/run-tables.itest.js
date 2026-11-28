@@ -19,7 +19,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { testCache } from '../../cache/testing.fixture.js';
-import { noCache } from '../../cache/module.js';
 import { runTables } from '../common/run-tables.js';
 import { codePages } from './codepages.js';
 import { createLocaleFunctions } from './locale.js';
@@ -126,7 +125,7 @@ test('the locale functions answer the same with the run\'s tables and with table
         // Room for the single-byte pages and not the 128 KiB tables: those are
         // made again at each read.
         const cramped = await testCache({ budget: 64 << 10, segmentBytes: 64 << 10 });
-        const own = machine(runTables(noCache.space('tables')));
+        const own = machine(runTables((await testCache({ budget: 0 })).space('tables')));
         const roomyTables = runTables(roomy.space('tables', { idle: 'stay' }));
         const crampedTables = runTables(cramped.space('tables', { idle: 'stay' }));
         const arms = { kept: machine(roomyTables), cramped: machine(crampedTables) };

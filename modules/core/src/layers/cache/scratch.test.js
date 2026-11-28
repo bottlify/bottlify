@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import { bytesPerCall } from '../../../../../tools/fixtures/allocation.mjs';
 
-import { createCacheModule, noCache } from './module.js';
+import { cacheSpace, createCacheModule } from './module.js';
 import { grainsOf } from '@bottlify/cellar';
 
 import { NoRoom, createScratches } from './scratch.js';
@@ -107,7 +107,7 @@ test('a scratch reused across calls makes nothing a call', async()=>{
     assert.equal(scratches.figures().grows, 1, 'the counter of grows stays put');
 });
 
-test('the cache layer hands out scratches and reports them; without a reader it refuses them',
+test('the cache layer hands out scratches and reports them; without a reader it is not built',
     async()=>{
         const cache = await testCache();
         const module = createCacheModule();
@@ -123,12 +123,12 @@ test('the cache layer hands out scratches and reports them; without a reader it 
         cache.idle(1);
         assert.equal(cache.keeper.under('scratch/').bodies, 0);
 
+        // A process always has a cache: nothing stands in for a missing one.
         const alone = createCacheModule();
-        const none = await alone.create(null);
-        assert.equal(none, noCache);
-        assert.throws(()=>none.scratch('blit').bytes(100), NoRoom);
-        assert.throws(()=>noCache.hold('tool', 10), NoRoom);
-        assert.match(String(alone.diagnostics().metrics.scratch), /no cache/);
+        await assert.rejects(alone.create(null), /built without a reader/);
+        await assert.rejects(alone.create({}), /built without a reader/);
+        assert.equal(alone.diagnostics().status, 'created');
+        assert.throws(()=>cacheSpace(/** @type {any} */ (null), 'tool'), /has no reader/);
     });
 
 test('a hold is memory of its own length for an object\'s life: held in a block of the cache, '

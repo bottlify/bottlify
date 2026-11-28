@@ -194,5 +194,10 @@ export function createScratches(hold){
     };
 }
 
-/** The scratches of a holder with no cache under it (`noCache`'s): every room refused. */
+/**
+ * The scratches of a holder with no cache under it: every room refused. Left
+ * only for the graphics sites that still take it as a default room
+ * (`opengl/context.js`, `webgpu/internal/bindings.js`, `presenter.js`,
+ * `ddraw/blit.js`); it goes with them.
+ */
 export const noScratches = createScratches(null);

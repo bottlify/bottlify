@@ -23,7 +23,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { win32Module } from './module.js';
-import { noCache } from '../cache/module.js';
+import { roomy } from '../cache/testing.fixture.js';
 import { memoryLayerAnswers } from './memory.fixture.js';
 import { kernelLayerAnswers } from './kernel.fixture.js';
 
@@ -108,8 +108,7 @@ function stubHost(){
             redirect: ()=>{},
             volume: ()=>null,
         },
-        // No run's cache: every read is a miss.
-        cache: noCache,
+        cache: roomy.api,
     };
     return /** @type {any} */ ({
         /** @param {string} name */
