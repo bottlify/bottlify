@@ -763,6 +763,16 @@ test('StringFromCLSID hands out the string in task memory', ()=>{
     assert.equal(fns.StringFromIID.handler([CLSID_ARG, 0]) >>> 0, 0x80070057, 'E_INVALIDARG');
 });
 
+test('a 64-bit StringFromCLSID writes the string\'s pointer whole, its high half cleared', ()=>{
+    // An LPOLESTR* is a pointer of the process's width: a high half left as the
+    // caller had it makes the pointer it reads another.
+    const { host, fns } = setup({ pointerSize: 8 });
+    host.fill(PPV, 2);
+    assert.equal(fns.StringFromCLSID.handler([CLSID_ARG, PPV]), 0, 'S_OK');
+    assert.notEqual(host.u32(PPV), 0);
+    assert.equal(host.u32(PPV + 4), 0, 'all eight bytes written');
+});
+
 test('ProgIDFromCLSID reads the class key, and an unregistered class has none', ()=>{
     const { host, fns } = setup();
     host.fill(PPV, 1);
@@ -1150,6 +1160,21 @@ test('a class object the program registers is what CoCreateInstance asks, outer 
     assert.equal(await fns.CoRevokeClassObject.handler([cookie]), 0x800401fb, 'CO_E_OBJNOTREG');
     assert.equal(fns.CoCreateInstance.handler([GUEST_CLSID_ARG, 0, 1, IID_ARG, PPV]),
         REGDB_E_CLASSNOTREG);
+});
+
+test('a 64-bit guest object is called at its method\'s whole address, past 4 GiB too', async()=>{
+    // A vtable slot of a 64-bit process is a quadword: an entry read as its low
+    // dword is another address.
+    const { fns, host, view } = withGuestCalls({ pointerSize: 8 });
+    view.setUint32(GUEST_VTABLE + 1 * 8 + 4, 1, true);
+    /** @type {number[]} */
+    const entries = [];
+    /** @type {any} */ (host).call = async(/** @type {number} */ entry)=>{
+        entries.push(entry);
+        return 0;
+    };
+    await fns.CoRegisterClassObject.handler([GUEST_CLSID_ARG, GUEST_OBJECT, 1, 0, 0x1400]);
+    assert.deepEqual(entries, [METHOD_BASE + 0x10 + 2 ** 32], 'AddRef at its slot\'s eight bytes');
 });
 
 test('CoCreateInstanceEx makes the object once and asks it for every interface in the array',
