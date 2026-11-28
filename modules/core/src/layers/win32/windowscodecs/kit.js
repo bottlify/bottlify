@@ -37,6 +37,7 @@ export const E_INVALIDARG = 0x80070057 | 0;
  *     vtables
  * @property {(pointer: number) => any} objectAt  the object behind a pointer this engine published
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => void }} heap
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString

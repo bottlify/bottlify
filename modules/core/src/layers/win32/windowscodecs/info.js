@@ -354,7 +354,7 @@ export function createInfos(kit, host, makers){
          * @param {number} types @param {number} out
          */
         enumerate: (types, out)=>publishEnumerator({
-            writeMemory: host.writeMemory,
+            guest: host.guest,
             makeObject: (clsid, definition)=>createComObject(clsid, definition),
             publish: (object, iid)=>host.vtables.publish(object, iid),
             callerThread: host.currentThread,

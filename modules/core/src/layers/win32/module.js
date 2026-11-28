@@ -3025,7 +3025,7 @@ export function createWin32Module(){
             const windowscodecsHost = ()=>{
                 /** @type {import('./windowscodecs/kit.js').CodecsHost} */
                 const codecsHost = {
-                    registry: com, vtables: comVtables, heap, readMemory, writeMemory,
+                    registry: com, vtables: comVtables, heap, guest, readMemory, writeMemory,
                     readWideString, pointerSize,
                     objectAt: pointer=>bridge.interfaceObject(pointer),
                     callGuest: call=>bridge.callGuest(call),
