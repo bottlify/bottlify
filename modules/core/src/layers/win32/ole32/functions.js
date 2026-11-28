@@ -411,11 +411,10 @@ const MAX_PROGID = 255;
  * kept its pointer still owns its data.
  *
  * @param {OleHeap} heap
- * @param {{ readMemory: (address: number, length: number) => Uint8Array,
- *           writeMemory: (address: number, bytes: Uint8Array) => void }} memory
+ * @param {import('../common/guest.js').Guest} guest
  * @param {number} pointer @param {number} size
  */
-function reallocate(heap, memory, pointer, size){
+function reallocate(heap, guest, pointer, size){
     const address = wholeAddress(pointer);
     const wanted = size >>> 0;
     if (address === 0)
@@ -441,7 +440,7 @@ function reallocate(heap, memory, pointer, size){
     {
         return 0;
     }
-    memory.writeMemory(moved, memory.readMemory(address, Math.min(block.size, wanted)).slice());
+    guest.copy(moved, address, Math.min(block.size, wanted));
     heap.free(address);
     return moved;
 }
@@ -474,11 +473,9 @@ const MEMCTX_TASK = 1;
  * @param {import('./objects.js').ComRegistry} deps.registry
  * @param {{ publish: (object: import('./objects.js').ComObject, interfaceId: string) => number }}
  *        deps.vtables
- * @param {(address: number, length: number) => Uint8Array} deps.readMemory
- * @param {(address: number, bytes: Uint8Array) => void} deps.writeMemory
+ * @param {import('../common/guest.js').Guest} deps.guest
  */
-export function createTaskAllocator({ heap, registry, vtables, readMemory, writeMemory }){
-    const memory = { readMemory, writeMemory };
+export function createTaskAllocator({ heap, registry, vtables, guest }){
     registry.registerClass(CLSID_TASK_ALLOCATOR, ()=>({
         interfaces: [{
             id: IID_IMALLOC,
@@ -486,7 +483,7 @@ export function createTaskAllocator({ heap, registry, vtables, readMemory, write
                 { name: 'Alloc', argBytes: 8,
                     invoke: (object, [bytes])=>heap.allocate(bytes >>> 0) },
                 { name: 'Realloc', argBytes: 12,
-                    invoke: (object, [pointer, size])=>reallocate(heap, memory, pointer, size) },
+                    invoke: (object, [pointer, size])=>reallocate(heap, guest, pointer, size) },
                 { name: 'Free', argBytes: 8, invoke: (object, [pointer])=>{
                     if ((pointer >>> 0) !== 0)
                     {
@@ -4275,7 +4272,7 @@ export function createOleFunctions(host){
             argBytes: 8,
             sizes: [1],
             /** @param {number[]} args */
-            handler: ([pointer, size])=>reallocate(host.heap, host, pointer, size),
+            handler: ([pointer, size])=>reallocate(host.heap, guest, pointer, size),
         },
 
         /** int StringFromGUID2(REFGUID rguid, LPOLESTR lpsz, int cchMax) */

@@ -2962,7 +2962,7 @@ export function createWin32Module(){
                 unpublish: (object, interfaceId)=>bridge.unpublishInterface(object, interfaceId),
             };
             const taskAllocator = createTaskAllocator({
-                heap, registry: com, vtables: comVtables, readMemory, writeMemory,
+                heap, registry: com, vtables: comVtables, guest,
             });
 
             // shell32's COM class, registered beside the shell's own table because

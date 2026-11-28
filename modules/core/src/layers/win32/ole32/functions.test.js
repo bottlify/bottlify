@@ -223,8 +223,7 @@ function setup({ interfaces = [IID_TEST], taskAllocator = true, pointerSize = 4 
     if (taskAllocator)
     {
         host.taskAllocator = createTaskAllocator({
-            heap: host.heap, registry: host.registry, vtables: host.vtables,
-            readMemory: host.readMemory, writeMemory: host.writeMemory,
+            heap: host.heap, registry: host.registry, vtables: host.vtables, guest: host.guest,
         });
     }
     /** @type {{ created: any[], destroyed: number }} */
@@ -570,8 +569,7 @@ test('a failed CoTaskMemRealloc leaves the original block alone', ()=>{
 test('the task allocator is one object over the task heap, and a Release never destroys it', ()=>{
     const { host, fns } = setup();
     const allocator = createTaskAllocator({
-        heap: host.heap, registry: host.registry, vtables: host.vtables,
-        readMemory: host.readMemory, writeMemory: host.writeMemory,
+        heap: host.heap, registry: host.registry, vtables: host.vtables, guest: host.guest,
     });
     const pointer = allocator.pointer();
     assert.notEqual(pointer, 0);

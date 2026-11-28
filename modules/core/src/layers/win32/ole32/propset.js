@@ -290,20 +290,20 @@ function encodeValue(property, codepage){
     else if (vt === VT.LPWSTR)
     {
         const text = utf16z(value);
-        data = join([u32(text.length / 2), text]);
+        data = join([le32(text.length / 2), text]);
     }
     else if (STRING_TYPES.has(vt))
     {
         const text = encodeText(value, codepage);
-        data = join([u32(text.length), text]);
+        data = join([le32(text.length), text]);
     }
     else if (vt === VT.BLOB)
     {
-        data = join([u32(value.length), value]);
+        data = join([le32(value.length), value]);
     }
     else if (vt === VT.CF)
     {
-        data = join([u32(value.data.length + 4), u32(value.format), value.data]);
+        data = join([le32(value.data.length + 4), le32(value.format), value.data]);
     }
     else
     {
@@ -316,7 +316,7 @@ function encodeValue(property, codepage){
 }
 
 /** @param {number} value */
-const u32 = value=>{
+const le32 = value=>{
     const bytes = new Uint8Array(4);
     new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
     return bytes;
@@ -439,12 +439,12 @@ function encodeSection(section){
  */
 const encodeDictionary = section=>{
     /** @type {Uint8Array[]} */
-    const parts = [u32(section.names.size)];
+    const parts = [le32(section.names.size)];
     for (const [id, name] of section.names)
     {
         const text = encodeText(name, section.codepage);
         const characters = section.codepage === CP_UNICODE ? text.length / 2 : text.length;
-        const entry = join([u32(id), u32(characters), text]);
+        const entry = join([le32(id), le32(characters), text]);
         parts.push(section.codepage === CP_UNICODE
             ? join([entry, new Uint8Array(pad4(entry.length) - entry.length)]) : entry);
     }
@@ -815,7 +815,7 @@ export function createPropertySetFunctions(env){
         }
         if (fixed !== undefined)
         {
-            return decodeValue(new DataView(join([u32(vt), bytes.subarray(8, 16)]).buffer), 0,
+            return decodeValue(new DataView(join([le32(vt), bytes.subarray(8, 16)]).buffer), 0,
                 CP_UNICODE);
         }
         switch (vt)
@@ -896,7 +896,8 @@ export function createPropertySetFunctions(env){
         else if (vt === VT.CF)
         {
             const data = value.data.length > 0 ? taskCopy(value.data) : 0;
-            const clip = taskCopy(join([u32(value.data.length + 4), u32(value.format), u32(data)]));
+            const clip = taskCopy(join([le32(value.data.length + 4), le32(value.format),
+                le32(data)]));
             made = point(clip) && (value.data.length === 0 || data !== 0);
         }
         guest.setBytes(at, record);
@@ -1136,7 +1137,7 @@ export function createPropertySetFunctions(env){
                     {
                         return false;
                     }
-                    guest.setBytes(at, join([u32(name), u32(item.id), u32(item.vt)]));
+                    guest.setBytes(at, join([le32(name), le32(item.id), le32(item.vt)]));
                     return true;
                 },
             }, out >>> 0);
@@ -1174,7 +1175,7 @@ export function createPropertySetFunctions(env){
             guest.setBytes(out, join([
                 /** @type {Uint8Array} */ (parseGuid(state.section.fmtid)),
                 /** @type {Uint8Array} */ (parseGuid(state.clsid)),
-                u32(state.flags), state.times, u32(state.set.osVersion)]));
+                le32(state.flags), state.times, le32(state.set.osVersion)]));
             return S_OK;
         } },
     ];

@@ -314,14 +314,14 @@ const concat = (...chunks)=>{
 };
 
 /** @param {number} value */
-const u32 = value=>{
+const le32 = value=>{
     const bytes = new Uint8Array(4);
     new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
     return bytes;
 };
 
 /** @param {number} value */
-const u16 = value=>new Uint8Array([value & 0xff, (value >>> 8) & 0xff]);
+const le16 = value=>new Uint8Array([value & 0xff, (value >>> 8) & 0xff]);
 
 /** @param {Uint8Array} bytes @param {number} at */
 const readU32Of = (bytes, at)=>(bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
@@ -410,7 +410,7 @@ const comparisonDataOf = state=>{
         case 'class':
             return concat(clsid, guidBytes(state.clsid));
         case 'anti':
-            return concat(clsid, u32(state.count));
+            return concat(clsid, le32(state.count));
         default:
             return null;
     }
@@ -434,7 +434,7 @@ export function createMonikerFunctions(env){
      * @param {number} address
      * @returns {string | null}
      */
-    const readWide = address=>((address >>> 0) === 0 ? null : guest.wstr(address, MAX_STRING * 2));
+    const oleString = address=>((address >>> 0) === 0 ? null : guest.wstr(address, MAX_STRING * 2));
 
     /** @param {string} api @param {string} detail */
     const diverge = (api, detail)=>env.divergence?.(api, detail);
@@ -542,7 +542,7 @@ export function createMonikerFunctions(env){
      * @param {number} block
      */
     const takeString = block=>{
-        const text = readWide(block) ?? '';
+        const text = oleString(block) ?? '';
         if (block !== 0)
         {
             env.taskFree(block);
@@ -665,7 +665,7 @@ export function createMonikerFunctions(env){
             return defaults;
         }
         const options = new Uint8Array(BIND_OPTS.SIZE_OF_V2);
-        options.set(u32(BIND_OPTS.SIZE_OF_V2), BIND_OPTS.CB_STRUCT);
+        options.set(le32(BIND_OPTS.SIZE_OF_V2), BIND_OPTS.CB_STRUCT);
         return lend(options, async block=>{
             const hr = await call(context, SLOT.GET_BIND_OPTIONS, [block], thread);
             if (hr < 0)
@@ -1690,7 +1690,7 @@ export function createMonikerFunctions(env){
     /** @param {string} text */
     const itemRecord = text=>{
         const ansi = concat(encodeAnsi(text), new Uint8Array(1));
-        return concat(u32(ansi.length), ansi);
+        return concat(le32(ansi.length), ansi);
     };
 
     /**
@@ -1705,16 +1705,16 @@ export function createMonikerFunctions(env){
     const fileRecord = path=>{
         const ansi = encodeAnsi(path);
         const lossy = decodeAnsi(ansi) !== path;
-        const head = concat(u16(0), u32(ansi.length + 1), ansi, new Uint8Array(1),
-            u16(FILE_MONIKER_UNKNOWN), u16(FILE_MONIKER_MARKER), new Uint8Array(20));
+        const head = concat(le16(0), le32(ansi.length + 1), ansi, new Uint8Array(1),
+            le16(FILE_MONIKER_UNKNOWN), le16(FILE_MONIKER_MARKER), new Uint8Array(20));
         const wide = lossy || path.endsWith('\\')
             || Array.from(path).some(c=>c.charCodeAt(0) > 0xff);
         if (!wide)
         {
-            return concat(head, u32(0));
+            return concat(head, le32(0));
         }
         const units = utf16(path);
-        return concat(head, u32(units.length + 6), u32(units.length), u16(FILE_MONIKER_WIDE_TAG),
+        return concat(head, le32(units.length + 6), le32(units.length), le16(FILE_MONIKER_WIDE_TAG),
             units);
     };
 
@@ -1884,22 +1884,22 @@ export function createMonikerFunctions(env){
         {
             case 'item':
                 return writeStream(stream, concat(
-                    state.delimiter === null ? u32(0) : itemRecord(state.delimiter),
+                    state.delimiter === null ? le32(0) : itemRecord(state.delimiter),
                     itemRecord(state.name)), thread);
             case 'file':
                 return stream === 0 ? E_POINTER : writeStream(stream, fileRecord(state.path),
                     thread);
             case 'class':
-                return writeStream(stream, concat(guidBytes(state.clsid), u32(state.extra.length),
+                return writeStream(stream, concat(guidBytes(state.clsid), le32(state.extra.length),
                     state.extra), thread);
             case 'anti':
-                return writeStream(stream, u32(state.count), thread);
+                return writeStream(stream, le32(state.count), thread);
             case 'composite': {
                 if (state.parts.length === 0)
                 {
                     return E_UNEXPECTED;
                 }
-                const written = await writeStream(stream, u32(state.parts.length), thread);
+                const written = await writeStream(stream, le32(state.parts.length), thread);
                 if (written < 0)
                 {
                     return written;
@@ -2159,7 +2159,7 @@ export function createMonikerFunctions(env){
                     await addRef(piece, thread);
                 }
                 const leftOf = await fromParts(prefix, thread);
-                const answer = await lend(concat(u32(leftOf), new Uint8Array(4)), async block=>{
+                const answer = await lend(concat(le32(leftOf), new Uint8Array(4)), async block=>{
                     const hr = await call(part, SLOT.REDUCE, [context, howFar,
                         leftOf === 0 ? 0 : block, block + 4], thread);
                     return { hr, value: guest.u32(block + 4), left: guest.u32(block) };
@@ -3490,7 +3490,7 @@ export function createMonikerFunctions(env){
             /** @type {BindContextState} */
             const state = object.state;
             const thread = env.callerThread();
-            const key = readWide(keyAt);
+            const key = oleString(keyAt);
             await addRef(unknown >>> 0, thread);
             const index = paramIndex(state, key);
             if (index >= 0)
@@ -3511,7 +3511,7 @@ export function createMonikerFunctions(env){
             guest.set32(out, 0);
             /** @type {BindContextState} */
             const state = object.state;
-            const index = paramIndex(state, readWide(keyAt));
+            const index = paramIndex(state, oleString(keyAt));
             if (index < 0)
             {
                 return E_FAIL;
@@ -3533,7 +3533,7 @@ export function createMonikerFunctions(env){
         { name: 'RevokeObjectParam', argBytes: 8, invoke: async(object, [keyAt])=>{
             /** @type {BindContextState} */
             const state = object.state;
-            const index = paramIndex(state, readWide(keyAt));
+            const index = paramIndex(state, oleString(keyAt));
             if (index < 0)
             {
                 return E_FAIL;
@@ -3707,7 +3707,7 @@ export function createMonikerFunctions(env){
      * @param {number} out @param {unknown} thread
      */
     const parseName = async(context, nameAt, eatenAt, out, thread)=>{
-        const text = readWide(nameAt);
+        const text = oleString(nameAt);
         if (context === 0 || text === null || text.length === 0 || eatenAt === 0 || out === 0)
         {
             return E_INVALIDARG;
@@ -3807,7 +3807,7 @@ export function createMonikerFunctions(env){
         {
             diverge('CoGetInstanceFromFile', 'a server was named, and the object is made here');
         }
-        const path = readWide(nameAt) ?? '';
+        const path = oleString(nameAt) ?? '';
         let clsid = clsidAt === 0 ? null : guest.guid(clsidAt);
         if (clsid === null)
         {
@@ -3893,8 +3893,8 @@ export function createMonikerFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            return answerMoniker(newState('item', { delimiter: readWide(delimiter),
-                name: readWide(item) ?? '' }), out, thread);
+            return answerMoniker(newState('item', { delimiter: oleString(delimiter),
+                name: oleString(item) ?? '' }), out, thread);
         }),
 
         /** HRESULT CreateFileMoniker(LPCOLESTR lpszPathName, LPMONIKER *ppmk) */
@@ -3903,7 +3903,7 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            const path = readWide(pathAt);
+            const path = oleString(pathAt);
             if (path === null)
             {
                 return MK_E_SYNTAX;
@@ -4047,7 +4047,7 @@ export function createMonikerFunctions(env){
 
         /** HRESULT GetClassFile(LPCOLESTR szFilename, CLSID *pclsid) */
         GetClassFile: entry(8, async([pathAt, out])=>{
-            const path = readWide(pathAt);
+            const path = oleString(pathAt);
             if (path === null || out === 0)
             {
                 return E_INVALIDARG;

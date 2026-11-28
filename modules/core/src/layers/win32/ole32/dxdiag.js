@@ -57,9 +57,9 @@ const MAX_NAME = 256;
  */
 
 /** @param {number} value @returns {DxDiagProperty} */
-const u32 = value=>({ vt: VT_UI4, value });
+const variantU4 = value=>({ vt: VT_UI4, value });
 /** @param {number} value @returns {DxDiagProperty} */
-const i32 = value=>({ vt: VT_I4, value });
+const variantI4 = value=>({ vt: VT_I4, value });
 /** @param {string} value @returns {DxDiagProperty} */
 const text = value=>({ vt: VT_BSTR, value });
 /** @param {boolean} value @returns {DxDiagProperty} */
@@ -108,19 +108,19 @@ function displayDevice(screen){
         szChipType: text('WebGPU'),
         szDACType: text('Internal'),
         szRevision: text(''),
-        dwWidth: u32(screen.width),
-        dwHeight: u32(screen.height),
-        dwBpp: u32(screen.bitsPerPixel),
-        dwRefreshRate: u32(60),
+        dwWidth: variantU4(screen.width),
+        dwHeight: variantU4(screen.height),
+        dwBpp: variantU4(screen.bitsPerPixel),
+        dwRefreshRate: variantU4(60),
         szMonitorName: text('Default Monitor'),
         szMonitorMaxRes: text(`${screen.width},${screen.height}`),
         szDriverName: text('webgpu'),
         // Direct3D's DriverVersion, as DxDiag spells one.
         szDriverVersion: text('1.00.0000.0000'),
         szDriverAttributes: text('Final Retail'),
-        lDriverSize: i32(0),
+        lDriverSize: variantI4(0),
         szMiniVdd: text('n/a'),
-        lMiniVddSize: i32(0),
+        lMiniVddSize: variantI4(0),
         szVdd: text('n/a'),
         bCanRenderWindow: bool(true),
         bDriverBeta: bool(false),
@@ -129,13 +129,13 @@ function displayDevice(screen){
         bDriverSignedValid: bool(true),
         szDeviceIdentifier: text('{0D6C1B7A-9F3E-1140-8A2B-5C6D7E8F90A1}'),
         szDriverSignDate: text('n/a'),
-        dwDDIVersion: u32(9),
-        iAdapter: u32(0),
+        dwDDIVersion: variantU4(9),
+        iAdapter: variantU4(0),
         szVendorId: text('0x0000'),
         szDeviceId: text('0x0000'),
         szSubSysId: text('0x00000000'),
         szRevisionId: text('0x0000'),
-        dwWHQLLevel: u32(1),
+        dwWHQLLevel: variantU4(1),
         bNoHardware: bool(false),
         bDDAccelerationEnabled: bool(true),
         b3DAccelerationExists: bool(true),
@@ -164,12 +164,12 @@ export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9], physi
     const [major, minor, release, build] = directx.version.split('.');
     /** @type {Record<string, DxDiagProperty>} */
     const systemInfo = {
-        dwOSMajorVersion: u32(windows.major),
-        dwOSMinorVersion: u32(windows.minor),
-        dwOSBuildNumber: u32(windows.build),
-        dwOSPlatformID: u32(windows.platformId),
-        dwDirectXVersionMajor: u32(directx.major),
-        dwDirectXVersionMinor: u32(directx.minor),
+        dwOSMajorVersion: variantU4(windows.major),
+        dwOSMinorVersion: variantU4(windows.minor),
+        dwOSBuildNumber: variantU4(windows.build),
+        dwOSPlatformID: variantU4(windows.platformId),
+        dwDirectXVersionMajor: variantU4(directx.major),
+        dwDirectXVersionMinor: variantU4(directx.minor),
         szDirectXVersionLetter: text(directx.letter),
         szDirectXVersionEnglish: text(`${major}.${minor}.${release.padStart(4, '0')}.${build}`),
         bDebug: bool(false),
@@ -189,7 +189,7 @@ export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9], physi
             'bIsDPlayDebugRuntime', 'bIsDSoundDebugRuntime'].map(name=>[name, bool(false)])),
         ...Object.fromEntries(['nD3DDebugLevel', 'nDDrawDebugLevel', 'nDIDebugLevel',
             'nDMusicDebugLevel', 'nDPlayDebugLevel', 'nDSoundDebugLevel', 'nDShowDebugLevel']
-            .map(name=>[name, i32(0)])),
+            .map(name=>[name, variantI4(0)])),
     };
     /** @type {(properties: Record<string, DxDiagProperty>) => DxDiagNode} */
     const node = properties=>({ properties: new Map(Object.entries(properties)),

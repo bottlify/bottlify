@@ -186,7 +186,7 @@ export function encodeCompObj(record){
     /** @type {number[]} */
     const bytes = [];
     /** @param {number} value */
-    const word = value=>{
+    const pushDword = value=>{
         bytes.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff,
             (value >>> 24) & 0xff);
     };
@@ -194,21 +194,21 @@ export function encodeCompObj(record){
     const ansi = text=>{
         if (text === null)
         {
-            word(0);
+            pushDword(0);
             return;
         }
         const encoded = encodeAnsi(text);
-        word(encoded.length + 1);
+        pushDword(encoded.length + 1);
         bytes.push(...encoded, 0);
     };
     /** @param {string | null} text */
     const wide = text=>{
         if (text === null)
         {
-            word(0);
+            pushDword(0);
             return;
         }
-        word(text.length + 1);
+        pushDword(text.length + 1);
         for (const unit of `${text}\0`)
         {
             bytes.push(unit.charCodeAt(0) & 0xff, unit.charCodeAt(0) >>> 8);
@@ -218,26 +218,26 @@ export function encodeCompObj(record){
     const format = named=>{
         if (record.format === null)
         {
-            word(0);
+            pushDword(0);
         }
         else if ('id' in record.format)
         {
-            word(0xffffffff);
-            word(record.format.id);
+            pushDword(0xffffffff);
+            pushDword(record.format.id);
         }
         else
         {
             named(record.format.name);
         }
     };
-    word(COMPOBJ_RESERVED);
-    word(COMPOBJ_VERSION);
-    word(0xffffffff);
+    pushDword(COMPOBJ_RESERVED);
+    pushDword(COMPOBJ_VERSION);
+    pushDword(0xffffffff);
     bytes.push(...record.clsid);
     ansi(record.userType);
     format(ansi);
     ansi(record.progId);
-    word(COMPOBJ_UNICODE_MARKER);
+    pushDword(COMPOBJ_UNICODE_MARKER);
     wide(record.userType);
     format(wide);
     wide(record.progId);
@@ -259,7 +259,7 @@ export function decodeCompObj(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
     let at = COMPOBJ_HEADER;
     let broken = false;
-    const word = ()=>{
+    const nextDword = ()=>{
         if (at + 4 > bytes.length)
         {
             broken = true;
@@ -269,8 +269,8 @@ export function decodeCompObj(bytes){
         return view.getUint32(at - 4, true);
     };
     /** @param {number} unit @returns {string | null} */
-    const string = unit=>{
-        const length = word();
+    const nextText = unit=>{
+        const length = nextDword();
         if (length === 0 || broken)
         {
             return null;
@@ -297,34 +297,34 @@ export function decodeCompObj(bytes){
     };
     /** @param {number} unit @returns {CompObjFormat} */
     const format = unit=>{
-        const marker = word();
+        const marker = nextDword();
         if (marker === 0 || broken)
         {
             return null;
         }
         if (marker === 0xffffffff || marker === 0xfffffffe)
         {
-            return { id: word() & 0xffff };
+            return { id: nextDword() & 0xffff };
         }
         at -= 4;
-        const name = string(unit);
+        const name = nextText(unit);
         return name === null ? null : { name };
     };
     const record = {
         clsid: bytes.slice(12, 12 + GUID_SIZE),
-        userType: string(1),
+        userType: nextText(1),
         format: format(1),
-        progId: string(1),
+        progId: nextText(1),
     };
     if (broken)
     {
         return null;
     }
-    if (word() === COMPOBJ_UNICODE_MARKER && !broken)
+    if (nextDword() === COMPOBJ_UNICODE_MARKER && !broken)
     {
-        const userType = string(2);
+        const userType = nextText(2);
         const wideFormat = format(2);
-        const progId = string(2);
+        const progId = nextText(2);
         if (!broken)
         {
             return { clsid: record.clsid, userType, format: wideFormat, progId };

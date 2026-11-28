@@ -761,8 +761,6 @@
    "copy readMemory().slice()": 3
   },
   "win32/ole32/dxdiag.js": {
-   "accessor i32": 1,
-   "accessor u32": 1,
    "accessor writeU32": 1,
    "copy readMemory().slice()": 1,
    "string writeWide": 1
@@ -771,24 +769,9 @@
    "accessor writeFloat": 1,
    "accessor writeU32": 1
   },
-  "win32/ole32/functions.js": {
-   "copy readMemory().slice()": 1
-  },
   "win32/ole32/mmdevapi.js": {
    "accessor writeU32": 1,
    "copy readMemory().slice()": 1
-  },
-  "win32/ole32/monikers.js": {
-   "accessor u16": 1,
-   "accessor u32": 1,
-   "string readWide": 1
-  },
-  "win32/ole32/ole2.js": {
-   "accessor word": 1,
-   "string string": 1
-  },
-  "win32/ole32/propset.js": {
-   "accessor u32": 1
   },
   "win32/ole32/propvariant.js": {
    "accessor get32": 1,
