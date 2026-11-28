@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createImageFunctions } from './image.js';
 
 const BASE = 0x1000;
@@ -36,27 +37,15 @@ function fakeImage(){
     view.setUint32(section + 12, 0x1000, true);
     view.setUint32(section + 16, 0x200, true);
     view.setUint32(section + 20, 0x400, true);
-    return {
-        view,
-        /** @param {number} address @param {number} length */
-        readMemory(address, length){
-            if (address + length > bytes.length)
-            {
-                throw new Error(`unmapped ${address}`);
-            }
-            return bytes.slice(address, address + length);
-        },
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-    };
+    // Past the buffer is not there: a read of it faults.
+    return { view, guest: guestOver(bytes) };
 }
 
 test('LdrProcessRelocationBlock moves a dword, a word\'s high and low halves; the next block', ()=>{
     const memory = new Uint8Array(0x100);
     const view = new DataView(memory.buffer);
     const fns = createImageFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, data)=>memory.set(data, address),
+        guest: guestOver(memory),
     });
     view.setUint32(0x10, 0x50005, true);
     view.setUint16(0x20, 0x505, true);

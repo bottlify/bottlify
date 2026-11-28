@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createMemoryFunctions } from './memory.js';
 import { RELEASE_PART } from '../kernel32/heap.js';
 import { VIRTUAL_MEMORY } from '../kernel32/process-memory.js';
@@ -41,8 +42,7 @@ function setup(answers = {}, lastError = 0, more = {}){
         },
     });
     const fns = createMemoryFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         allocate: ()=>0x1800,
         kernel32: {
             VirtualAllocEx: recorder('VirtualAllocEx', 0x10000),

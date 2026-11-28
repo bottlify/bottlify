@@ -421,8 +421,7 @@ function portAt(text, from){
 
 /**
  * @typedef {Object} IpStringHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  */
 
 /**
@@ -431,11 +430,7 @@ function portAt(text, from){
  * @param {IpStringHost} host
  */
 export function createIpStringFunctions(host){
-    /** @param {number} at */
-    const dword = at=>new DataView(host.readMemory(at, 4).buffer).getUint32(0, true);
-    /** @param {number} at @param {number} value */
-    const putDword = (at, value)=>host.writeMemory(at, Uint8Array.of(value & 0xff,
-        value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24));
+    const { guest } = host;
     /** @param {number} port  network order */
     const hostPort = port=>(port & 0xff) << 8 | port >> 8 & 0xff;
 
@@ -455,11 +450,11 @@ export function createIpStringFunctions(host){
                     bytes[index] = character.charCodeAt(0);
                 }
             });
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
         },
         /** @param {number} at  read to its terminator, at most 128 characters */
         read: at=>{
-            const raw = host.readMemory(at, 128 * (wide ? 2 : 1));
+            const raw = guest.view(at, 128 * (wide ? 2 : 1));
             let text = '';
             for (let index = 0; index < 128; index++)
             {
@@ -490,7 +485,7 @@ export function createIpStringFunctions(host){
             {
                 return wholeAddress(wholeAddress(buffer) - width(wide).unit);
             }
-            const text = format(host.readMemory(wholeAddress(address), size));
+            const text = format(guest.view(wholeAddress(address), size));
             width(wide).write(wholeAddress(buffer), text);
             return wholeAddress(buffer) + text.length * width(wide).unit;
         },
@@ -517,8 +512,8 @@ export function createIpStringFunctions(host){
             }
             const written = text(args);
             const needed = written.length + 1;
-            const room = dword(length);
-            putDword(length, needed);
+            const room = guest.u32(length);
+            guest.set32(length, needed);
             if (buffer === 0 || room < needed)
             {
                 return STATUS_INVALID_PARAMETER;
@@ -544,12 +539,13 @@ export function createIpStringFunctions(host){
             }
             const text = width(wide).read(wholeAddress(string));
             const read = parseIpv4(text, (strict & 0xff) !== 0);
-            putDword(wholeAddress(terminator), wholeAddress(string) + read.end * width(wide).unit);
+            guest.set32(wholeAddress(terminator),
+                wholeAddress(string) + read.end * width(wide).unit);
             if ('error' in read)
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            host.writeMemory(wholeAddress(address), read.bytes);
+            guest.setBytes(wholeAddress(address), read.bytes);
             return STATUS_SUCCESS;
         },
     });
@@ -564,13 +560,13 @@ export function createIpStringFunctions(host){
                 return STATUS_ACCESS_VIOLATION;
             }
             const text = width(wide).read(wholeAddress(string));
-            const read = parseIpv6(text, host.readMemory(wholeAddress(address), 16));
+            const read = parseIpv6(text, guest.snapshot(wholeAddress(address), 16));
             if (read.end !== null)
             {
-                putDword(wholeAddress(terminator),
+                guest.set32(wholeAddress(terminator),
                     wholeAddress(string) + read.end * width(wide).unit);
             }
-            host.writeMemory(wholeAddress(address), read.bytes);
+            guest.setBytes(wholeAddress(address), read.bytes);
             return read.error ? STATUS_INVALID_PARAMETER : STATUS_SUCCESS;
         },
     });
@@ -597,13 +593,13 @@ export function createIpStringFunctions(host){
             }
             // The address is written before the port is read: a bad port
             // leaves it there, and the port untouched.
-            host.writeMemory(wholeAddress(address), read.bytes);
+            guest.setBytes(wholeAddress(address), read.bytes);
             const number = read.end === text.length ? 0 : portAt(text, read.end);
             if (number === null)
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            host.writeMemory(wholeAddress(port), Uint8Array.of(number >> 8, number & 0xff));
+            guest.set16(wholeAddress(port), hostPort(number));
             return STATUS_SUCCESS;
         },
     });
@@ -622,8 +618,8 @@ export function createIpStringFunctions(host){
             const bracketed = text.startsWith('[');
             const inner = bracketed ? text.slice(1) : text;
             // The address is stored as it is read, whatever comes after it.
-            const read = parseIpv6(inner, host.readMemory(wholeAddress(address), 16));
-            host.writeMemory(wholeAddress(address), read.bytes);
+            const read = parseIpv6(inner, guest.snapshot(wholeAddress(address), 16));
+            guest.setBytes(wholeAddress(address), read.bytes);
             if (read.error || read.prefixed || read.end === null)
             {
                 return STATUS_INVALID_PARAMETER;
@@ -659,21 +655,21 @@ export function createIpStringFunctions(host){
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            putDword(wholeAddress(scope), scopeId >>> 0);
-            host.writeMemory(wholeAddress(port), Uint8Array.of(number >> 8, number & 0xff));
+            guest.set32(wholeAddress(scope), scopeId >>> 0);
+            guest.set16(wholeAddress(port), hostPort(number));
             return STATUS_SUCCESS;
         },
     });
 
     /** @param {number[]} args  address, port */
     const text4 = args=>{
-        const address = ipv4ToString(host.readMemory(args[0] >>> 0, 4));
+        const address = ipv4ToString(guest.view(args[0] >>> 0, 4));
         const port = hostPort(args[1]);
         return port === 0 ? address : `${address}:${port}`;
     };
     /** @param {number[]} args  address, scope, port */
     const text6 = args=>{
-        const address = ipv6ToString(host.readMemory(args[0] >>> 0, 16));
+        const address = ipv6ToString(guest.view(args[0] >>> 0, 16));
         const scoped = args[1] === 0 ? address : `${address}%${args[1] >>> 0}`;
         const port = hostPort(args[2]);
         return port === 0 ? scoped : `[${scoped}]:${port}`;

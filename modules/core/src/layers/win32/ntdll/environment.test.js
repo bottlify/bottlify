@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createEnvironmentFunctions } from './environment.js';
 import { STATUS } from './status.js';
 
@@ -64,8 +65,7 @@ function machine(){
         } },
     };
     const table = createEnvironmentFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         kernel32, allocate, free: ()=>true,
     });
     /** A UNICODE_STRING at `at` over text at `buffer`, with room. */

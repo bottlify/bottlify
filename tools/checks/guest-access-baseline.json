@@ -911,72 +911,13 @@
   "win32/netapi32/workstation.js": {
    "accessor writeU32": 1
   },
-  "win32/ntdll/atoms.js": {
-   "accessor readU32": 1,
-   "accessor u16": 1,
-   "accessor u32": 1
-  },
-  "win32/ntdll/debug-buffer.js": {
-   "accessor writeU32": 1
-  },
-  "win32/ntdll/debug.js": {
-   "accessor dword": 1,
-   "accessor writeU32": 1
-  },
-  "win32/ntdll/environment.js": {
-   "accessor setU32": 1,
-   "accessor u32": 1
-  },
-  "win32/ntdll/functions.js": {
-   "accessor readU32": 1,
-   "accessor word": 1,
-   "accessor writeU32": 1
-  },
-  "win32/ntdll/image.js": {
-   "accessor u16": 1,
-   "accessor u32": 1
-  },
   "win32/ntdll/integer.js": {
    "string wide": 1
-  },
-  "win32/ntdll/ip-strings.js": {
-   "accessor dword": 1,
-   "accessor putDword": 1
-  },
-  "win32/ntdll/lznt1.js": {
-   "accessor putDword": 1
-  },
-  "win32/ntdll/memory.js": {
-   "accessor read32": 1,
-   "accessor write32": 1
-  },
-  "win32/ntdll/pool.js": {
-   "accessor write32": 1
-  },
-  "win32/ntdll/process.js": {
-   "accessor readU16": 1,
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
-  "win32/ntdll/query.js": {
-   "accessor readU32": 1
-  },
-  "win32/ntdll/security.js": {
-   "accessor dword": 1,
-   "accessor putDword": 1,
-   "accessor word": 1
-  },
-  "win32/ntdll/string-ops.js": {
-   "accessor readU32": 1,
-   "accessor u32": 1
   },
   "win32/ntdll/strings.js": {
    "string ansiAt": 1,
    "string wideAt": 1,
    "string writeWide": 1
-  },
-  "win32/ntdll/time.js": {
-   "accessor writeU32": 1
   },
   "win32/odbc32/functions.js": {
    "accessor writeI16": 1,

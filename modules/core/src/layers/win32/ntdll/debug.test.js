@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createDebugFunctions } from './debug.js';
 
 const STATUS_SUCCESS = 0;
@@ -35,8 +36,7 @@ function setup({ teb = TEB } = {}){
         return text;
     };
     const fns = /** @type {Record<string, any>} */ (createDebugFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         readCString,
         kernel32: {
             RaiseException: { handler: (/** @type {number[]} */ args)=>{

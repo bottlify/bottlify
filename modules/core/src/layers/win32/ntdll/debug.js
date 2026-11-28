@@ -86,8 +86,7 @@ const VARIADIC_SLOTS = 32;
 
 /**
  * @typedef {Object} DebugHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {Record<string, { handler: Function } | undefined>} kernel32
  *           RaiseException, OutputDebugStringA.
@@ -100,25 +99,16 @@ const VARIADIC_SLOTS = 32;
  *           DbgUiRemoteBreakin calls.
  */
 
-/** @param {number} value */
-const dword = value=>{
-    const bytes = new Uint8Array(4);
-    new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-    return bytes;
-};
-
 /**
  * @param {DebugHost} host
  */
 export function createDebugFunctions(host){
+    const { guest } = host;
     const refuse = createRefusals({ divergence: host.divergence });
     const why = 'no debugger can attach to this process';
 
     /** The debug object a thread keeps with no thread block to keep it in. */
     let detached = 0;
-
-    /** @param {number} pointer @param {number} value */
-    const writeU32 = (pointer, value)=>host.writeMemory(wholeAddress(pointer), dword(value));
 
     /**
      * The argument slots a va_list points at, as many as DbgPrint reads.
@@ -131,9 +121,8 @@ export function createDebugFunctions(host){
         {
             return [];
         }
-        const view = new DataView(host.readMemory(wholeAddress(list),
-            VARIADIC_SLOTS * 4).buffer);
-        return Array.from({ length: VARIADIC_SLOTS }, (_, at)=>view.getUint32(at * 4, true));
+        return Array.from({ length: VARIADIC_SLOTS }, (_, at)=>guest.u32(wholeAddress(list)
+            + at * 4));
     };
 
     /** @type {Record<string, any>} */
@@ -176,7 +165,7 @@ export function createDebugFunctions(host){
                     return STATUS.SUCCESS;
                 }
                 print.handler([buffer, DBG_PRINT_LIMIT, ...args]);
-                host.writeMemory(buffer + DBG_PRINT_LIMIT, new Uint8Array(1));
+                guest.set8(buffer + DBG_PRINT_LIMIT, 0);
                 say.handler([buffer]);
                 host.free(buffer);
                 return STATUS.SUCCESS;
@@ -229,10 +218,10 @@ export function createDebugFunctions(host){
                 }
                 const head = Uint8Array.from([...lead].map(ch=>ch.charCodeAt(0) & 0xff))
                     .subarray(0, DBG_PRINT_LIMIT);
-                host.writeMemory(buffer, head);
+                guest.setBytes(buffer, head);
                 print.handler([buffer + head.length, DBG_PRINT_LIMIT - head.length, format,
                     ...slots(list)]);
-                host.writeMemory(buffer + DBG_PRINT_LIMIT, new Uint8Array(1));
+                guest.set8(buffer + DBG_PRINT_LIMIT, 0);
                 say.handler([buffer]);
                 host.free(buffer);
                 return STATUS.SUCCESS;
@@ -255,7 +244,7 @@ export function createDebugFunctions(host){
                 }
                 if (wholeAddress(response) !== 0 && (most >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(response), new Uint8Array(1));
+                    guest.set8(wholeAddress(response), 0);
                 }
                 return 0;
             },
@@ -276,8 +265,7 @@ export function createDebugFunctions(host){
                 {
                     return detached;
                 }
-                const bytes = host.readMemory(teb + TEB.DEBUG_OBJECT, 4);
-                return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+                return guest.u32(teb + TEB.DEBUG_OBJECT);
             },
         },
 
@@ -292,7 +280,7 @@ export function createDebugFunctions(host){
                 }
                 else
                 {
-                    writeU32(teb + TEB.DEBUG_OBJECT, handle);
+                    guest.set32(teb + TEB.DEBUG_OBJECT, handle);
                 }
                 return 0;
             },

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createSystemFunctions } from './system.js';
 import { createQueryFunctions } from '../ntdll/query.js';
 import { TEB } from './teb.js';
@@ -25,7 +26,7 @@ test('a thread\'s error mode is its own, in its block, read alike by kernel32 an
     const kernel32 = createSystemFunctions(/** @type {any} */ ({ ...memory,
         setLastError: (/** @type {number} */ code)=>errors.push(code), currentThread: ()=>thread,
         resolveHandle: ()=>null, systemTimeMs: ()=>0 }));
-    const ntdll = createQueryFunctions(/** @type {any} */ ({ ...memory, teb: ()=>0x1000,
+    const ntdll = createQueryFunctions(/** @type {any} */ ({ guest: guestOver(bytes), teb: ()=>0x1000,
         arena: { base: 0, size: 0 } }));
     const view = new DataView(bytes.buffer);
 

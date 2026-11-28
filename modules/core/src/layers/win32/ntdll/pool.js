@@ -48,16 +48,10 @@ const STATUS_TOO_MANY_THREADS = 0xc0000129;
 
 /**
  * @param {{ kernel32: Record<string, { handler: Function }>, deletions: PoolDeletions,
- *     writeMemory: (address: number, bytes: Uint8Array) => void }} host
+ *     guest: import('../common/guest.js').Guest }} host
  * @returns {Record<string, { argBytes: number, handler: Function }>}
  */
-export function createPoolFunctions({ kernel32, deletions, writeMemory }){
-    /** @param {number} at @param {number} value */
-    const write32 = (at, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        writeMemory(wholeAddress(at), bytes);
-    };
+export function createPoolFunctions({ kernel32, deletions, guest }){
     /** A Win32 error the API refused with, as its status. @param {number} error */
     const statusOf = error=>(error === 0 ? STATUS.SUCCESS
         : error === ERROR_NOT_ENOUGH_MEMORY ? STATUS.NO_MEMORY : STATUS.INVALID_PARAMETER);
@@ -84,7 +78,7 @@ export function createPoolFunctions({ kernel32, deletions, writeMemory }){
         {
             return statusOf(made.error);
         }
-        write32(out, made);
+        guest.set32(wholeAddress(out), made);
         return STATUS.SUCCESS;
     });
     /** @param {number} instance @param {string} name @param {number[]} args */
@@ -98,7 +92,7 @@ export function createPoolFunctions({ kernel32, deletions, writeMemory }){
             {
                 return STATUS.NO_MEMORY;
             }
-            write32(out, pool);
+            guest.set32(wholeAddress(out), pool);
             return STATUS.SUCCESS;
         }),
         /** VOID TpReleasePool(TP_POOL *) */
@@ -122,7 +116,7 @@ export function createPoolFunctions({ kernel32, deletions, writeMemory }){
             {
                 return STATUS.NO_MEMORY;
             }
-            write32(out, group);
+            guest.set32(wholeAddress(out), group);
             return STATUS.SUCCESS;
         }),
         /** VOID TpReleaseCleanupGroup(TP_CLEANUP_GROUP *) */
@@ -179,7 +173,7 @@ export function createPoolFunctions({ kernel32, deletions, writeMemory }){
             {
                 return statusOf(made.error);
             }
-            write32(out, made);
+            guest.set32(wholeAddress(out), made);
             return STATUS.SUCCESS;
         }),
         /** VOID TpStartAsyncIoOperation(TP_IO *) */
@@ -274,9 +268,7 @@ export function createPoolFunctions({ kernel32, deletions, writeMemory }){
                 {
                     return STATUS.NO_MEMORY;
                 }
-                const bytes = new Uint8Array(4);
-                new DataView(bytes.buffer).setUint32(0, queue, true);
-                writeMemory(wholeAddress(out), bytes);
+                guest.set32(wholeAddress(out), queue);
                 return STATUS.SUCCESS;
             },
         },

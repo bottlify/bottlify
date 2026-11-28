@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { compress, createCompressionFunctions, decompress } from './lznt1.js';
 
 const text = (/** @type {string} */ value)=>Uint8Array.from([...value].map(ch=>ch.charCodeAt(0)));
@@ -47,8 +48,7 @@ test('the Rtl calls: formats, room, fragments', ()=>{
     const memory = new Uint8Array(0x10000);
     const view = new DataView(memory.buffer);
     const fns = createCompressionFunctions({
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
     });
     const IN = 0x1000;
     const PACKED = 0x4000;

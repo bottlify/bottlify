@@ -57,8 +57,7 @@ const DYNAMIC_ZONE_SIZE = 432;
 
 /**
  * @typedef {Object} TimeHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {Record<string, { handler: Function }>} kernel32
  * @property {(bytes: number) => number} allocate  From the process heap.
  * @property {(address: number) => boolean} free
@@ -69,22 +68,7 @@ const DYNAMIC_ZONE_SIZE = 432;
  * @returns {{ table: Record<string, { argBytes: number, handler: Function }>,
  *     systemClasses: Record<number, import('./query.js').SystemClass> }}
  */
-export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocate, free }){
-    /** @param {number} address */
-    const readTime = address=>new DataView(readMemory(address, 8).buffer.slice(0))
-        .getBigInt64(0, true);
-    /** @param {number} address @param {bigint} value */
-    const writeTime = (address, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigInt64(0, BigInt.asIntN(64, value), true);
-        writeMemory(address, bytes);
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        writeMemory(address, bytes);
-    };
+export function createTimeFunctions({ guest, kernel32, allocate, free }){
     /** The zone's bias in minutes (UTC = local + bias), kernel32's report. */
     const bias = ()=>{
         if (!kernel32.GetTimeZoneInformation)
@@ -98,7 +82,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             return 0;
         }
         kernel32.GetTimeZoneInformation.handler([scratch]);
-        const value = new DataView(readMemory(scratch, 4).buffer.slice(0)).getInt32(0, true);
+        const value = guest.i32(scratch);
         free(scratch);
         return value;
     };
@@ -114,7 +98,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
         try
         {
             kernel32[name].handler([scratch]);
-            return readMemory(scratch, size);
+            return guest.snapshot(scratch, size);
         }
         finally
         {
@@ -122,7 +106,18 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
         }
     };
     /** The system time now, kernel32's clock. */
-    const now = ()=>new DataView(filled('GetSystemTimeAsFileTime', 8).buffer).getBigInt64(0, true);
+    const now = ()=>{
+        const scratch = allocate(8);
+        try
+        {
+            kernel32.GetSystemTimeAsFileTime.handler([scratch]);
+            return guest.i64(scratch);
+        }
+        finally
+        {
+            free(scratch);
+        }
+    };
 
     /** @type {Record<string, { argBytes: number, handler: Function }>} */
     const table = {
@@ -136,7 +131,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([time, fields])=>{
-                const value = BigInt.asUintN(64, readTime(wholeAddress(time)));
+                const value = guest.u64(wholeAddress(time));
                 let days = Number(value / DAY);
                 const rest = Number(value % DAY / 10_000n);
                 const weekday = (days + 1) % 7;
@@ -156,11 +151,15 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                     days -= daysIn(year, month);
                     month++;
                 }
-                const out = new DataView(new ArrayBuffer(16));
-                [year, month, days + 1, Math.floor(rest / 3_600_000),
-                    Math.floor(rest / 60_000) % 60, Math.floor(rest / 1000) % 60, rest % 1000,
-                    weekday].forEach((field, index)=>out.setInt16(index * 2, field, true));
-                writeMemory(wholeAddress(fields), new Uint8Array(out.buffer));
+                const at = wholeAddress(fields);
+                guest.set16(at, year);
+                guest.set16(at + 2, month);
+                guest.set16(at + 4, days + 1);
+                guest.set16(at + 6, Math.floor(rest / 3_600_000));
+                guest.set16(at + 8, Math.floor(rest / 60_000) % 60);
+                guest.set16(at + 10, Math.floor(rest / 1000) % 60);
+                guest.set16(at + 12, rest % 1000);
+                guest.set16(at + 14, weekday);
                 return 0;
             },
         },
@@ -175,9 +174,9 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([fields, time])=>{
-                const view = new DataView(readMemory(wholeAddress(fields), 16).buffer.slice(0));
+                const at = wholeAddress(fields);
                 const [year, month, day, hour, minute, second, millisecond] = [0, 1, 2, 3, 4, 5, 6]
-                    .map(index=>view.getInt16(index * 2, true));
+                    .map(index=>guest.i16(at + index * 2));
                 if (year < 1601 || month < 1 || month > 12 || day < 1 || day > daysIn(year, month)
                     || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0
                     || second > 59 || millisecond < 0 || millisecond > 999)
@@ -190,7 +189,8 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                     days += daysIn(year, m);
                 }
                 const milliseconds = ((hour * 60 + minute) * 60 + second) * 1000 + millisecond;
-                writeTime(wholeAddress(time), BigInt(days) * DAY + BigInt(milliseconds) * 10_000n);
+                guest.set64(wholeAddress(time),
+                    BigInt(days) * DAY + BigInt(milliseconds) * 10_000n);
                 return 1;
             },
         },
@@ -209,8 +209,8 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([system, local])=>{
-                writeTime(wholeAddress(local),
-                    readTime(wholeAddress(system)) - BigInt(bias()) * 60n * SECOND);
+                guest.set64(wholeAddress(local),
+                    guest.i64(wholeAddress(system)) - BigInt(bias()) * 60n * SECOND);
                 return STATUS.SUCCESS;
             },
         },
@@ -219,8 +219,8 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([local, system])=>{
-                writeTime(wholeAddress(system),
-                    readTime(wholeAddress(local)) + BigInt(bias()) * 60n * SECOND);
+                guest.set64(wholeAddress(system),
+                    guest.i64(wholeAddress(local)) + BigInt(bias()) * 60n * SECOND);
                 return STATUS.SUCCESS;
             },
         },
@@ -240,9 +240,9 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                writeU32(wholeAddress(minimum), COARSEST);
-                writeU32(wholeAddress(maximum), FINEST);
-                writeU32(wholeAddress(current), resolution);
+                guest.set32(wholeAddress(minimum), COARSEST);
+                guest.set32(wholeAddress(maximum), FINEST);
+                guest.set32(wholeAddress(current), resolution);
                 return STATUS.SUCCESS;
             },
         },
@@ -279,7 +279,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                 {
                     status = STATUS_TIMER_RESOLUTION_NOT_SET;
                 }
-                writeU32(wholeAddress(current), resolution);
+                guest.set32(wholeAddress(current), resolution);
                 return status;
             },
         },
@@ -433,12 +433,12 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [time, seconds])=>{
-                const value = readTime(wholeAddress(time)) - epoch;
+                const value = guest.i64(wholeAddress(time)) - epoch;
                 if (value < 0n || value / SECOND > 0xffffffffn)
                 {
                     return 0;
                 }
-                writeU32(wholeAddress(seconds), Number(value / SECOND));
+                guest.set32(wholeAddress(seconds), Number(value / SECOND));
                 return 1;
             },
         };
@@ -450,7 +450,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [seconds, time])=>{
-                writeTime(wholeAddress(time), epoch + BigInt(seconds >>> 0) * SECOND);
+                guest.set64(wholeAddress(time), epoch + BigInt(seconds >>> 0) * SECOND);
                 return 0;
             },
         };

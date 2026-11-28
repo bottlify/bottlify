@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createSecurityFunctions } from './security.js';
 
 const TEB = 0x1000;
@@ -31,8 +32,7 @@ function setup(){
     };
     const table = createSecurityFunctions({
         advapi32,
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         teb: ()=>TEB,
     });
     return { table, advapi32, view, calls };

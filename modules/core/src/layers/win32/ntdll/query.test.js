@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createQueryFunctions, systemProcessInformation } from './query.js';
 import { STATUS } from './status.js';
 import { LDR_DATA, LDR_ENTRY, PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
@@ -43,10 +44,7 @@ function fakeHost({ blocks = true, arenaSize = 64 * 1024 * 1024 } = {}){
         processors: testProcessors(),
         bytes,
         view,
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         teb: ()=>(blocks ? TEB_AT : 0),
         arena: { base: 0x400000, size: arenaSize },
     };
@@ -121,8 +119,7 @@ test('RtlGetVersion answers each Windows the process block was built for', ()=>{
         const { teb } = blocks.createThreadBlock({ id: 1, stackBase: 0x3000, stackLimit: 0x2000 });
         const fns = createQueryFunctions({
             processors: testProcessors(),
-            readMemory: (address, length)=>bytes.slice(address, address + length),
-            writeMemory: (address, data)=>bytes.set(data, address),
+            guest: guestOver(bytes),
             teb: ()=>teb,
             arena: { base: 0x400000, size: 0x100000 },
             version,
@@ -427,8 +424,7 @@ test('RtlVerifyVersionInfo compares against the version the process block holds'
     const { teb } = blocks.createThreadBlock({ id: 1, stackBase: 0x3000, stackLimit: 0x2000 });
     const fns = createQueryFunctions({
         processors: testProcessors(),
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         teb: ()=>teb,
         arena: { base: 0x400000, size: 0x100000 },
         version,
