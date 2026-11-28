@@ -22,14 +22,13 @@
  * are written against a backing rather than against the tree.
  */
 
-import { GUID_NULL, GUID_SIZE, formatGuid, readGuid, writeGuid } from '../../../system/guid.js';
+import { GUID_NULL, GUID_SIZE, formatGuid } from '../../../system/guid.js';
 import {
     MAX_NAME_LENGTH, createEntry, createRoot, isCompoundFile, nameKey,
     parseCompoundFile, serializeCompoundFile,
 } from './cfb.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
-import { utf16z } from '../common/utf16.js';
 
 /** The block CreateStreamOnHGlobal makes for itself: GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_SHARE. */
 const GMEM_MOVEABLE = 0x0002;
@@ -166,12 +165,7 @@ const MAX_PATH = 260;
 
 /**
  * @typedef {Object} StorageHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, value: number, length: number) => void} fillMemory
- *     Sets a range to one byte value in place, with no host buffer holding
- *     the pattern: the lengths are the program's, and a clear of a megabyte
- *     through writeMemory costs an allocation and two extra passes.
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => boolean,
  *              block: (address: number) => { size: number } | null,
  *              resize: (address: number, bytes: number) => boolean }} heap
@@ -279,51 +273,21 @@ const readable = mode=>(mode & STGM_ACCESS_MASK) !== STGM_WRITE;
  */
 export function createStorageFunctions(host){
     const STATSTG = statstgLayout(host.pointerSize);
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(address, WORD);
-        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(WORD);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
-    };
-    /** @param {number} address @param {bigint} value */
-    const writeU64 = (address, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
-        host.writeMemory(address, bytes);
-    };
-    /** @param {number} address */
-    const readU64 = address=>new DataView(host.readMemory(address, 8).slice().buffer)
-        .getBigUint64(0, true);
+    const { guest } = host;
+    /** A vtable slot: a pointer of the process's width. */
+    const slotBytes = host.pointerSize === 8 ? 8 : WORD;
+    /** The entry of `pointer`'s method in `slot`. @param {number} pointer @param {number} slot */
+    const methodAt = (pointer, slot)=>guest.ptr(guest.ptr(pointer) + slot * slotBytes);
 
     /**
-     * An OLESTR, read no further than a name of its kind can reach.
+     * An OLESTR, read no further than a name of its kind can reach: null for
+     * a NULL pointer.
      *
      * @param {number} address @param {number} maxUnits
-     * @returns {string | null} null for a NULL pointer
+     * @returns {string | null}
      */
-    const readWide = (address, maxUnits)=>{
-        if (address === 0)
-        {
-            return null;
-        }
-        const bytes = host.readMemory(address, (maxUnits + 1) * 2);
-        let text = '';
-        for (let index = 0; index + 1 < bytes.length; index += 2)
-        {
-            const unit = bytes[index] | (bytes[index + 1] << 8);
-            if (unit === 0)
-            {
-                return text;
-            }
-            text += String.fromCharCode(unit);
-        }
-        return text;
-    };
+    const oleName = (address, maxUnits)=>(address === 0 ? null
+        : guest.wstr(address, (maxUnits + 1) * 2));
 
     /**
      * A string in task memory, terminated, for STATSTG.pwcsName; 0 when
@@ -337,7 +301,7 @@ export function createStorageFunctions(host){
         {
             return 0;
         }
-        host.writeMemory(block, utf16z(text));
+        guest.writeWide(block, text);
         return block;
     };
 
@@ -391,7 +355,7 @@ export function createStorageFunctions(host){
         };
         if (out !== 0)
         {
-            writeU32(out, pointer);
+            guest.set32(out, pointer);
         }
         return S_OK;
     };
@@ -475,7 +439,7 @@ export function createStorageFunctions(host){
      * @param {number} flags
      */
     const writeStat = (at, about, flags)=>{
-        host.writeMemory(at, new Uint8Array(STATSTG.SIZE_OF));
+        guest.setBytes(at, new Uint8Array(STATSTG.SIZE_OF));
         if ((flags & STATFLAG_NONAME) === 0 && about.name !== null)
         {
             const name = allocateWide(about.name);
@@ -483,17 +447,17 @@ export function createStorageFunctions(host){
             {
                 return STG_E_INSUFFICIENTMEMORY;
             }
-            writeU32(at + STATSTG.NAME, name);
+            guest.set32(at + STATSTG.NAME, name);
         }
-        writeU32(at + STATSTG.TYPE, about.type);
-        writeU64(at + STATSTG.SIZE, BigInt(about.size));
-        writeU64(at + STATSTG.MTIME, about.entry?.modified ?? 0n);
-        writeU64(at + STATSTG.CTIME, about.entry?.created ?? 0n);
-        writeU32(at + STATSTG.MODE, about.mode);
+        guest.set32(at + STATSTG.TYPE, about.type);
+        guest.set64(at + STATSTG.SIZE, BigInt(about.size));
+        guest.set64(at + STATSTG.MTIME, about.entry?.modified ?? 0n);
+        guest.set64(at + STATSTG.CTIME, about.entry?.created ?? 0n);
+        guest.set32(at + STATSTG.MODE, about.mode);
         if (about.type === STGTY_STORAGE && about.entry)
         {
-            writeGuid(host, at + STATSTG.CLSID, about.entry.clsid);
-            writeU32(at + STATSTG.STATE_BITS, about.entry.stateBits);
+            guest.setGuid(at + STATSTG.CLSID, about.entry.clsid);
+            guest.set32(at + STATSTG.STATE_BITS, about.entry.stateBits);
         }
         return S_OK;
     };
@@ -506,7 +470,7 @@ export function createStorageFunctions(host){
      * @returns {string | null}
      */
     const elementName = address=>{
-        const name = readWide(address, MAX_NAME_LENGTH + 1);
+        const name = oleName(address, MAX_NAME_LENGTH + 1);
         if (name === null || name.length === 0 || name.length > MAX_NAME_LENGTH
             || /[\\/:!]/.test(name))
         {
@@ -582,7 +546,7 @@ export function createStorageFunctions(host){
         }
         if (out !== 0)
         {
-            writeU64(out, BigInt(state.position));
+            guest.set64(out, BigInt(state.position));
         }
         return failed ? STG_E_SEEKERROR : S_OK;
     };
@@ -599,7 +563,7 @@ export function createStorageFunctions(host){
             const state = object.state;
             if ((pcbRead >>> 0) !== 0)
             {
-                writeU32(wholeAddress(pcbRead), 0);
+                guest.set32(pcbRead, 0);
             }
             if (!readable(state.mode))
             {
@@ -614,12 +578,12 @@ export function createStorageFunctions(host){
             const bytes = state.backing.read(state.position, Math.min(wanted, available));
             if (bytes.length > 0)
             {
-                host.writeMemory(wholeAddress(pv), bytes);
+                guest.setBytes(pv, bytes);
             }
             state.position += bytes.length;
             if ((pcbRead >>> 0) !== 0)
             {
-                writeU32(wholeAddress(pcbRead), bytes.length);
+                guest.set32(pcbRead, bytes.length);
             }
             // S_OK even when short: a docfile stream reports the count and
             // leaves "was that the end" to the caller, and programs written
@@ -631,7 +595,7 @@ export function createStorageFunctions(host){
             const state = object.state;
             if ((pcbWritten >>> 0) !== 0)
             {
-                writeU32(wholeAddress(pcbWritten), 0);
+                guest.set32(pcbWritten, 0);
             }
             if (!writable(state.mode))
             {
@@ -643,14 +607,14 @@ export function createStorageFunctions(host){
                 return STG_E_INVALIDPOINTER;
             }
             if (count > 0 && !state.backing.write(state.position,
-                host.readMemory(wholeAddress(pv), count)))
+                guest.snapshot(pv, count)))
             {
                 return E_OUTOFMEMORY;
             }
             state.position += count;
             if ((pcbWritten >>> 0) !== 0)
             {
-                writeU32(wholeAddress(pcbWritten), count);
+                guest.set32(pcbWritten, count);
             }
             return S_OK;
         } },
@@ -685,7 +649,7 @@ export function createStorageFunctions(host){
             state.position = target;
             if ((out >>> 0) !== 0)
             {
-                writeU64(wholeAddress(out), BigInt(target));
+                guest.set64(out, BigInt(target));
             }
             return S_OK;
         } },
@@ -713,7 +677,7 @@ export function createStorageFunctions(host){
                 {
                     if (slot !== 0)
                     {
-                        writeU64(slot, 0n);
+                        guest.set64(slot, 0n);
                     }
                 }
                 if (target === 0)
@@ -730,11 +694,11 @@ export function createStorageFunctions(host){
                 const report = written=>{
                     if ((pcbRead >>> 0) !== 0)
                     {
-                        writeU64(wholeAddress(pcbRead), BigInt(bytes.length));
+                        guest.set64(pcbRead, BigInt(bytes.length));
                     }
                     if ((pcbWritten >>> 0) !== 0)
                     {
-                        writeU64(wholeAddress(pcbWritten), BigInt(written));
+                        guest.set64(pcbWritten, BigInt(written));
                     }
                     return S_OK;
                 };
@@ -833,12 +797,12 @@ export function createStorageFunctions(host){
         {
             return 0;
         }
-        host.writeMemory(block, bytes);
-        writeU32(block + bytes.length, 0);
-        const entry = readU32(readU32(pointer) + SLOT_STREAM_WRITE * WORD);
+        guest.setBytes(block, bytes);
+        guest.set32(block + bytes.length, 0);
+        const entry = methodAt(pointer, SLOT_STREAM_WRITE);
         return host.call(entry, [pointer, block, bytes.length, block + bytes.length], thread)
             .then(hr=>{
-                const written = (hr | 0) < 0 ? 0 : readU32(block + bytes.length);
+                const written = (hr | 0) < 0 ? 0 : guest.u32(block + bytes.length);
                 host.heap.free(block);
                 return written;
             });
@@ -870,11 +834,11 @@ export function createStorageFunctions(host){
         {
             return new Uint8Array(0);
         }
-        writeU32(block + length, 0);
-        const entry = readU32(readU32(pointer) + SLOT_STREAM_READ * WORD);
+        guest.set32(block + length, 0);
+        const entry = methodAt(pointer, SLOT_STREAM_READ);
         return host.call(entry, [pointer, block, length, block + length]).then(hr=>{
-            const read = (hr | 0) < 0 ? 0 : Math.min(length, readU32(block + length));
-            const bytes = host.readMemory(block, read).slice();
+            const read = (hr | 0) < 0 ? 0 : Math.min(length, guest.u32(block + length));
+            const bytes = guest.snapshot(block, read);
             host.heap.free(block);
             return bytes;
         });
@@ -910,7 +874,7 @@ export function createStorageFunctions(host){
             {
                 return STG_E_INVALIDPOINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             // The two reserved words.
             if (r1 !== 0 || r2 !== 0)
             {
@@ -955,7 +919,7 @@ export function createStorageFunctions(host){
             {
                 return STG_E_INVALIDPOINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             const name = elementName(pwcsName >>> 0);
             if (name === null)
             {
@@ -984,7 +948,7 @@ export function createStorageFunctions(host){
             {
                 return STG_E_INVALIDPOINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             // A simple-mode docfile holds streams alone.
             if (state.document.simple)
             {
@@ -1023,7 +987,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (state.document.simple)
                 {
                     return STG_E_INVALIDFUNCTION;
@@ -1135,7 +1099,7 @@ export function createStorageFunctions(host){
             {
                 return STG_E_INVALIDPOINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             return publishEnumerator([...state.entry.children.values()], out);
         } },
         { name: 'DestroyElement', argBytes: 8, invoke: (object, [pwcsName])=>{
@@ -1203,11 +1167,11 @@ export function createStorageFunctions(host){
                 }
                 if ((pctime >>> 0) !== 0)
                 {
-                    entry.created = readU64(wholeAddress(pctime));
+                    entry.created = guest.u64(pctime);
                 }
                 if ((pmtime >>> 0) !== 0)
                 {
-                    entry.modified = readU64(wholeAddress(pmtime));
+                    entry.modified = guest.u64(pmtime);
                 }
                 return S_OK;
             } },
@@ -1222,7 +1186,7 @@ export function createStorageFunctions(host){
             {
                 return STG_E_ACCESSDENIED;
             }
-            state.entry.clsid = readGuid(host, clsid >>> 0);
+            state.entry.clsid = guest.guid(clsid >>> 0);
             return S_OK;
         } },
         { name: 'SetStateBits', argBytes: 12, invoke: (object, [bits, mask])=>{
@@ -1314,7 +1278,7 @@ export function createStorageFunctions(host){
                 const wanted = wholeAddress(celt);
                 if ((pceltFetched >>> 0) !== 0)
                 {
-                    writeU32(wholeAddress(pceltFetched), 0);
+                    guest.set32(pceltFetched, 0);
                 }
                 if ((rgelt >>> 0) === 0 || (wanted > 1 && (pceltFetched >>> 0) === 0))
                 {
@@ -1337,7 +1301,7 @@ export function createStorageFunctions(host){
                 }
                 if ((pceltFetched >>> 0) !== 0)
                 {
-                    writeU32(wholeAddress(pceltFetched), fetched);
+                    guest.set32(pceltFetched, fetched);
                 }
                 return fetched === wanted ? S_OK : S_FALSE;
             } },
@@ -1358,7 +1322,7 @@ export function createStorageFunctions(host){
                 const hr = publishEnumerator(state.items, ppenum >>> 0);
                 if (hr === S_OK)
                 {
-                    stateAt(readU32(wholeAddress(ppenum)), CLSID_ENUM).index = state.index;
+                    stateAt(guest.u32(ppenum), CLSID_ENUM).index = state.index;
                 }
                 return hr;
             } },
@@ -1524,7 +1488,7 @@ export function createStorageFunctions(host){
             {
                 return false;
             }
-            host.writeMemory(moved, host.readMemory(handle, size).slice());
+            guest.setBytes(moved, guest.snapshot(handle, size));
             host.heap.free(handle);
             handle = moved;
             return true;
@@ -1546,7 +1510,7 @@ export function createStorageFunctions(host){
             // Nothing is read or written for no bytes: a moveable handle's
             // block is NULL while it is empty.
             read: (offset, length)=>(length === 0 ? new Uint8Array(0)
-                : host.readMemory(at() + offset, length).slice()),
+                : guest.snapshot(at() + offset, length)),
             write: (offset, bytes)=>{
                 if (!alive() || !grow(offset + bytes.length))
                 {
@@ -1554,11 +1518,11 @@ export function createStorageFunctions(host){
                 }
                 if (offset > size)
                 {
-                    host.fillMemory(at() + size, 0, offset - size);
+                    guest.fill(at() + size, 0, offset - size);
                 }
                 if (bytes.length !== 0)
                 {
-                    host.writeMemory(at() + offset, bytes);
+                    guest.setBytes(at() + offset, bytes);
                 }
                 size = Math.max(size, offset + bytes.length);
                 return true;
@@ -1570,7 +1534,7 @@ export function createStorageFunctions(host){
                 }
                 if (wanted > size)
                 {
-                    host.fillMemory(at() + size, 0, wanted - size);
+                    guest.fill(at() + size, 0, wanted - size);
                 }
                 size = wanted;
                 return true;
@@ -1613,11 +1577,11 @@ export function createStorageFunctions(host){
                     : backing.read(offset, Math.min(cb >>> 0, backing.size() - offset));
                 if (bytes.length > 0)
                 {
-                    host.writeMemory(wholeAddress(pv), bytes);
+                    guest.setBytes(pv, bytes);
                 }
                 if ((pcbRead >>> 0) !== 0)
                 {
-                    writeU32(wholeAddress(pcbRead), bytes.length);
+                    guest.set32(pcbRead, bytes.length);
                 }
                 return S_OK;
             } },
@@ -1631,14 +1595,14 @@ export function createStorageFunctions(host){
                 }
                 const count = wholeAddress(cb);
                 if ((high >>> 0) !== 0
-                || (count > 0 && !backing.write(low >>> 0, host.readMemory(wholeAddress(pv),
+                || (count > 0 && !backing.write(low >>> 0, guest.snapshot(pv,
                     count))))
                 {
                     return STG_E_MEDIUMFULL;
                 }
                 if ((pcbWritten >>> 0) !== 0)
                 {
-                    writeU32(wholeAddress(pcbWritten), count);
+                    guest.set32(pcbWritten, count);
                 }
                 return S_OK;
             } },
@@ -1696,11 +1660,10 @@ export function createStorageFunctions(host){
      * @param {number} pointer @param {number} slot @param {(number | bigint)[]} args
      * @param {unknown} thread
      */
-    const callGuest = async(pointer, slot, args, thread)=>(await /** @type {NonNullable<StorageHost['call']>} */ (
-        host.call)(readU32(readU32(pointer) + slot * slotBytes), [pointer, ...args], thread)) | 0;
-    // A 64-bit program's table holds a quadword a slot, and its ULARGE_INTEGER
-    // arguments are one slot each.
-    const slotBytes = host.pointerSize === 8 ? 8 : WORD;
+    const callGuest = async(pointer, slot, args, thread)=>(await
+    /** @type {NonNullable<StorageHost['call']>} */ (host.call)(
+        methodAt(pointer, slot), [pointer, ...args], thread)) | 0;
+    // A 64-bit program's ULARGE_INTEGER arguments are one slot each.
     const quad = pointerWidth(slotBytes).quadword;
 
     /**
@@ -1721,7 +1684,7 @@ export function createStorageFunctions(host){
         {
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(block, new Uint8Array(STATSTG.SIZE_OF + WORD));
+        guest.setBytes(block, new Uint8Array(STATSTG.SIZE_OF + WORD));
         try
         {
             const stated = await callGuest(pointer, SLOT_LOCKBYTES.STAT, [block, STATFLAG_NONAME],
@@ -1730,8 +1693,8 @@ export function createStorageFunctions(host){
             {
                 return stated;
             }
-            const size = create ? 0 : Math.min(readU32(block + STATSTG.SIZE), MAX_GUEST_DOCFILE);
-            const locks = readU32(block + STATSTG.LOCKS);
+            const size = create ? 0 : Math.min(guest.u32(block + STATSTG.SIZE), MAX_GUEST_DOCFILE);
+            const locks = guest.u32(block + STATSTG.LOCKS);
             if ((locks & (LOCK_WRITE | LOCK_EXCLUSIVE | LOCK_ONLYONCE)) !== 0)
             {
                 const locked = await callGuest(pointer, SLOT_LOCKBYTES.LOCK_REGION,
@@ -1742,6 +1705,7 @@ export function createStorageFunctions(host){
                     return locked;
                 }
             }
+            /** @type {Uint8Array} */
             let contents = new Uint8Array(0);
             if (size > 0)
             {
@@ -1750,11 +1714,11 @@ export function createStorageFunctions(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                writeU32(buffer + size, 0);
+                guest.set32(buffer + size, 0);
                 const read = await callGuest(pointer, SLOT_LOCKBYTES.READ_AT,
                     [...quad(0), buffer, size, buffer + size], thread);
                 contents = read < 0 ? contents
-                    : host.readMemory(buffer, readU32(buffer + size)).slice();
+                    : guest.snapshot(buffer, guest.u32(buffer + size));
                 host.heap.free(buffer);
             }
             const root = create ? createRoot() : parseCompoundFile(contents);
@@ -1837,10 +1801,10 @@ export function createStorageFunctions(host){
         {
             if (check)
             {
-                writeU32(buffer + SIGNATURE_BYTES, 0);
+                guest.set32(buffer + SIGNATURE_BYTES, 0);
                 await callGuest(pointer, SLOT_LOCKBYTES.READ_AT,
                     [...quad(0), buffer, SIGNATURE_BYTES, buffer + SIGNATURE_BYTES], thread);
-                if (!isCompoundFile(host.readMemory(buffer, SIGNATURE_BYTES).slice()))
+                if (!isCompoundFile(guest.snapshot(buffer, SIGNATURE_BYTES)))
                 {
                     return STG_E_INVALIDHEADER;
                 }
@@ -1851,8 +1815,8 @@ export function createStorageFunctions(host){
             {
                 return sized;
             }
-            host.writeMemory(buffer, bytes);
-            writeU32(buffer + bytes.length, 0);
+            guest.setBytes(buffer, bytes);
+            guest.set32(buffer + bytes.length, 0);
             const hr = await callGuest(pointer, SLOT_LOCKBYTES.WRITE_AT,
                 [...quad(0), buffer, bytes.length, buffer + bytes.length], thread);
             return hr < 0 ? hr : S_OK;
@@ -1865,11 +1829,6 @@ export function createStorageFunctions(host){
 
     let temporaries = 0;
 
-    /**
-     * @param {number} pointer  An interface the guest holds.
-     * @param {number} slot     Its vtable index.
-     */
-    const methodAt = (pointer, slot)=>readU32(readU32(pointer) + slot * WORD);
 
     /**
      * @param {string} api @param {number} out
@@ -1878,7 +1837,7 @@ export function createStorageFunctions(host){
     const refuse = (api, out)=>{
         if (out !== 0)
         {
-            writeU32(out, 0);
+            guest.set32(out, 0);
         }
         diverge(api, 'a docfile over an ILockBytes a program implemented is not done');
         return STG_E_INVALIDFUNCTION;
@@ -1902,7 +1861,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (reserved !== 0)
                 {
                     return STG_E_INVALIDPARAMETER;
@@ -1917,7 +1876,7 @@ export function createStorageFunctions(host){
                 {
                     return refused;
                 }
-                let path = readWide(wholeAddress(pwcsName), MAX_PATH);
+                let path = oleName(wholeAddress(pwcsName), MAX_PATH);
                 if (path === null)
                 {
                     path = `${TEMP_DIRECTORY}\\~DF${(++temporaries).toString(16)
@@ -1967,7 +1926,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const mode = wholeAddress(grfMode);
                 if ((mode & STGM_CREATE) !== 0)
                 {
@@ -1978,7 +1937,7 @@ export function createStorageFunctions(host){
                 {
                     return refused;
                 }
-                const path = readWide(wholeAddress(pwcsName), MAX_PATH);
+                const path = oleName(wholeAddress(pwcsName), MAX_PATH);
                 if (path === null)
                 {
                     return STG_E_INVALIDNAME;
@@ -2014,7 +1973,7 @@ export function createStorageFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pwcsName])=>{
-                const path = readWide(wholeAddress(pwcsName), MAX_PATH);
+                const path = oleName(wholeAddress(pwcsName), MAX_PATH);
                 if (path === null)
                 {
                     return STG_E_INVALIDNAME;
@@ -2053,7 +2012,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(wholeAddress(out), 0);
+                guest.set32(out, 0);
                 const refused = checkCreateMode('StgCreateDocfileOnILockBytes', grfMode >>> 0);
                 if (refused !== S_OK)
                 {
@@ -2077,7 +2036,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(wholeAddress(out), 0);
+                guest.set32(out, 0);
                 const refused = checkDocfileMode('StgOpenStorageOnILockBytes', grfMode >>> 0);
                 if (refused !== S_OK)
                 {
@@ -2127,7 +2086,7 @@ export function createStorageFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const backing = memoryBacking(wholeAddress(hGlobal),
                     (fDeleteOnRelease >>> 0) !== 0);
                 if (typeof backing === 'number')
@@ -2153,7 +2112,7 @@ export function createStorageFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(wholeAddress(phglobal), lockBytes?.handle?.() ?? 0);
+                guest.set32(phglobal, lockBytes?.handle?.() ?? 0);
                 return lockBytes ? S_OK : E_INVALIDARG;
             },
         },
@@ -2176,7 +2135,7 @@ export function createStorageFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 return publishMemoryStream(wholeAddress(hGlobal), (fDeleteOnRelease >>> 0) !== 0,
                     out);
             },
@@ -2196,10 +2155,10 @@ export function createStorageFunctions(host){
                 const state = stateAt(wholeAddress(pstm), CLSID_STREAM);
                 if (!state?.backing.handle)
                 {
-                    writeU32(out, 0);
+                    guest.set32(out, 0);
                     return E_INVALIDARG;
                 }
-                writeU32(out, state.backing.handle());
+                guest.set32(out, state.backing.handle());
                 return S_OK;
             },
         },
@@ -2220,7 +2179,7 @@ export function createStorageFunctions(host){
                     return E_INVALIDARG;
                 }
                 const written = writeToStream(wholeAddress(pStm),
-                    host.readMemory(wholeAddress(rclsid),
+                    guest.snapshot(rclsid,
                         GUID_SIZE));
                 /** @param {number} count */
                 const check = count=>(count === GUID_SIZE ? S_OK : STG_E_ACCESSDENIED);
@@ -2242,7 +2201,7 @@ export function createStorageFunctions(host){
                     {
                         return STG_E_READFAULT;
                     }
-                    host.writeMemory(wholeAddress(pclsid), read);
+                    guest.setBytes(pclsid, read);
                     return S_OK;
                 };
                 return bytes instanceof Promise ? bytes.then(store) : store(bytes);
@@ -2269,7 +2228,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_ACCESSDENIED;
                 }
-                state.entry.clsid = readGuid(host, wholeAddress(rclsid));
+                state.entry.clsid = guest.guid(rclsid);
                 return S_OK;
             },
         },
@@ -2283,7 +2242,7 @@ export function createStorageFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeGuid(host, wholeAddress(pclsid), state.entry.clsid);
+                guest.setGuid(pclsid, state.entry.clsid);
                 return S_OK;
             },
         },
@@ -2322,7 +2281,7 @@ export function createStorageFunctions(host){
                         host.heap.free(slot);
                         return hr | 0;
                     }
-                    const written = writeToStream(stream, host.readMemory(slot, GUID_SIZE), thread);
+                    const written = writeToStream(stream, guest.snapshot(slot, GUID_SIZE), thread);
                     host.heap.free(slot);
                     return Promise.resolve(written).then(count=>(count === GUID_SIZE
                         ? call(methodAt(object, SLOT_SAVE), [object, stream, 1], thread)
@@ -2348,7 +2307,7 @@ export function createStorageFunctions(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (wholeAddress(pStm) === 0 || (iidInterface >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -2401,18 +2360,18 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(wholeAddress(out), 0);
+                guest.set32(out, 0);
                 if ((stgfmt >>> 0) !== STGFMT_STORAGE && (stgfmt >>> 0) !== STGFMT_DOCFILE)
                 {
                     diverge('StgCreateStorageEx', `format ${stgfmt >>> 0} is not made; `
                         + 'only a compound file is');
                     return STG_E_INVALIDPARAMETER;
                 }
-                if ((riid >>> 0) === 0 || readGuid(host, wholeAddress(riid)) !== IID_ISTORAGE)
+                if ((riid >>> 0) === 0 || guest.guid(riid) !== IID_ISTORAGE)
                 {
                     return E_NOINTERFACE;
                 }
-                if (wholeAddress(options) !== 0 && readU32(wholeAddress(options) + 4) > 512)
+                if (wholeAddress(options) !== 0 && guest.u32(options + 4) > 512)
                 {
                     diverge('StgCreateStorageEx', 'a larger sector is asked for and 512 is used');
                 }
@@ -2439,7 +2398,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(wholeAddress(out), 0);
+                guest.set32(out, 0);
                 const format = wholeAddress(stgfmt);
                 if (format !== STGFMT_STORAGE && format !== STGFMT_DOCFILE
                     && format !== STGFMT_ANY)
@@ -2448,7 +2407,7 @@ export function createStorageFunctions(host){
                         + 'only a compound file is');
                     return STG_E_INVALIDPARAMETER;
                 }
-                if ((riid >>> 0) === 0 || readGuid(host, wholeAddress(riid)) !== IID_ISTORAGE)
+                if ((riid >>> 0) === 0 || guest.guid(riid) !== IID_ISTORAGE)
                 {
                     return E_NOINTERFACE;
                 }

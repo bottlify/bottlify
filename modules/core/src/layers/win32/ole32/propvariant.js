@@ -24,7 +24,7 @@
  * clear refuses it with STG_E_INVALIDPARAMETER and zeroes the record anyway.
  */
 
-import { readToTerminator } from '../common/scan-windows.js';
+import { WHOLE } from '../common/guest.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
@@ -130,8 +130,7 @@ const holdable = vt=>{
 
 /**
  * @typedef {Object} PropVariantHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
  *           Task memory, which what a PROPVARIANT owns is made of.
  * @property {{ copy: (bstr: number) => number, free: (bstr: number) => unknown }} [bstr]
@@ -171,34 +170,22 @@ const after = (value, then)=>(typeof value?.then === 'function' ? value.then(the
  * @param {PropVariantHost} host
  */
 export function createPropVariantFunctions(host){
-    /** @param {number} address */
-    const readU16 = address=>{
-        const bytes = host.readMemory(address, 2);
-        return bytes[0] | bytes[1] << 8;
-    };
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
+    const { guest } = host;
     /** @param {Uint8Array} bytes @param {number} at @param {number} value */
-    const put32 = (bytes, at, value)=>new DataView(bytes.buffer, bytes.byteOffset)
+    const setField = (bytes, at, value)=>new DataView(bytes.buffer, bytes.byteOffset)
         .setUint32(at, value >>> 0, true);
     /** @param {Uint8Array} bytes @param {number} at */
-    const get32 = (bytes, at)=>new DataView(bytes.buffer, bytes.byteOffset).getUint32(at, true);
+    const fieldOf = (bytes, at)=>new DataView(bytes.buffer, bytes.byteOffset).getUint32(at, true);
 
     /**
      * The length of a terminated string in bytes, its terminator included,
-     * or as much as memory holds of one that runs off its end; read a window
-     * at a time, so one at the end of what the program allocated is not read
-     * past.
+     * read to it: one that runs off memory's end is the access violation it
+     * is on Windows.
      *
      * @param {number} address @param {number} unit  1 or 2
      */
-    const terminatedBytes = (address, unit)=>{
-        const { bytes, terminated } = readToTerminator(host, address, unit);
-        return bytes.length + (terminated ? unit : 0);
-    };
+    const terminatedBytes = (address, unit)=>guest.stringBytes(address, unit === 2, WHOLE).length
+        + unit;
 
     /**
      * Everything a copy made, so that one that fails part of the way gives it
@@ -221,7 +208,7 @@ export function createPropVariantFunctions(host){
         if (block !== 0)
         {
             made.blocks.push(block);
-            host.writeMemory(block, host.readMemory(source, length).slice());
+            guest.copy(block, source, length);
         }
         return block;
     };
@@ -234,14 +221,14 @@ export function createPropVariantFunctions(host){
      * @returns {Uint8Array | number}
      */
     const copyOf = (source, made, owed)=>{
-        const vt = readU16(source);
+        const vt = guest.u16(source);
         if (!holdable(vt))
         {
             return DISP_E_BADVARTYPE;
         }
-        const record = host.readMemory(source, PROPVARIANT_SIZE).slice();
+        const record = guest.snapshot(source, PROPVARIANT_SIZE);
         const type = vt & VT_TYPEMASK;
-        const pointer = get32(record, VALUE);
+        const pointer = fieldOf(record, VALUE);
         const form = vt & ~VT_TYPEMASK;
         if (form === VT_BYREF)
         {
@@ -250,7 +237,7 @@ export function createPropVariantFunctions(host){
         if (form === VT_ARRAY)
         {
             // A SAFEARRAY pointer is all the value holds.
-            put32(record, VALUE + 4, 0);
+            setField(record, VALUE + 4, 0);
             if (pointer === 0)
             {
                 return record;
@@ -265,7 +252,7 @@ export function createPropVariantFunctions(host){
                 return E_OUTOFMEMORY;
             }
             const answer = host.safeArray.copy(pointer, slot);
-            const array = readU32(slot);
+            const array = guest.u32(slot);
             host.heap.free(slot);
             // A copy of interfaces is answered once their references are
             // taken, calls into the program: the copy is made and named
@@ -279,17 +266,17 @@ export function createPropVariantFunctions(host){
                 return answer;
             }
             made.arrays.push(array);
-            put32(record, VALUE, array);
+            setField(record, VALUE, array);
             return record;
         }
         if (form === VT_VECTOR)
         {
             const count = pointer;
-            const elements = get32(record, VALUE + 4);
+            const elements = fieldOf(record, VALUE + 4);
             const size = /** @type {number} */ (VECTOR_ELEMENT.get(type));
             if (count === 0 || elements === 0)
             {
-                put32(record, VALUE + 4, 0);
+                setField(record, VALUE + 4, 0);
                 return record;
             }
             const copied = duplicate(elements, count * size, made);
@@ -297,19 +284,19 @@ export function createPropVariantFunctions(host){
             {
                 return E_OUTOFMEMORY;
             }
-            put32(record, VALUE + 4, copied);
+            setField(record, VALUE + 4, copied);
             for (let index = 0; index < count; index++)
             {
                 const at = copied + index * size;
                 const answer = type === VT_VARIANT ? copyOf(elements + index * size, made, owed)
-                    : copyOwned(type, readU32(at), at, made);
+                    : copyOwned(type, guest.u32(at), at, made);
                 if (typeof answer === 'number' && answer !== S_OK)
                 {
                     return answer;
                 }
                 if (typeof answer !== 'number')
                 {
-                    host.writeMemory(at, answer);
+                    guest.setBytes(at, answer);
                 }
             }
             return record;
@@ -318,7 +305,7 @@ export function createPropVariantFunctions(host){
         {
             // A record is its data and the IRecordInfo that knows it; the
             // copy shares both, and the reference it takes is on the second.
-            const shared = type === VT_RECORD ? get32(record, VALUE + 4) : pointer;
+            const shared = type === VT_RECORD ? fieldOf(record, VALUE + 4) : pointer;
             if (shared !== 0)
             {
                 owed.addRef.push(shared);
@@ -334,13 +321,13 @@ export function createPropVariantFunctions(host){
         {
             // A size, and then the bytes it counts.
             const size = pointer;
-            const data = get32(record, VALUE + 4);
+            const data = fieldOf(record, VALUE + 4);
             const copied = size === 0 || data === 0 ? 0 : duplicate(data, size, made);
             if (size !== 0 && data !== 0 && copied === 0)
             {
                 return E_OUTOFMEMORY;
             }
-            put32(record, VALUE + 4, copied);
+            setField(record, VALUE + 4, copied);
             return record;
         }
         const answer = copyOwned(type, pointer, -1, made);
@@ -371,7 +358,7 @@ export function createPropVariantFunctions(host){
         /** @param {number} value */
         const one = value=>{
             const bytes = new Uint8Array(4);
-            put32(bytes, 0, value);
+            setField(bytes, 0, value);
             return bytes;
         };
         switch (type)
@@ -407,18 +394,18 @@ export function createPropVariantFunctions(host){
                 {
                     return S_OK;
                 }
-                const header = host.readMemory(clip, CLIPDATA_SIZE).slice();
-                const data = get32(header, 8);
-                const length = Math.max(0, get32(header, 0) - FORMAT_BYTES);
+                const header = guest.snapshot(clip, CLIPDATA_SIZE);
+                const data = fieldOf(header, 8);
+                const length = Math.max(0, fieldOf(header, 0) - FORMAT_BYTES);
                 const copy = data === 0 || length === 0 ? 0 : duplicate(data, length, made);
                 if (data !== 0 && length !== 0 && copy === 0)
                 {
                     return E_OUTOFMEMORY;
                 }
-                put32(header, 8, copy);
+                setField(header, 8, copy);
                 if (at >= 0)
                 {
-                    host.writeMemory(at, header);
+                    guest.setBytes(at, header);
                     return S_OK;
                 }
                 const block = wholeAddress(host.heap.allocate(CLIPDATA_SIZE));
@@ -427,7 +414,7 @@ export function createPropVariantFunctions(host){
                     return E_OUTOFMEMORY;
                 }
                 made.blocks.push(block);
-                host.writeMemory(block, header);
+                guest.setBytes(block, header);
                 return one(block);
             }
             case VT_CLSID: {
@@ -451,15 +438,15 @@ export function createPropVariantFunctions(host){
      * @param {number} address @param {Owed} owed
      */
     const release = (address, owed)=>{
-        const vt = readU16(address);
+        const vt = guest.u16(address);
         if (!holdable(vt))
         {
             return false;
         }
         const type = vt & VT_TYPEMASK;
         const form = vt & ~VT_TYPEMASK;
-        const pointer = readU32(address + VALUE);
-        const second = readU32(address + VALUE + 4);
+        const pointer = guest.u32(address + VALUE);
+        const second = guest.u32(address + VALUE + 4);
         if (form === VT_BYREF)
         {
             return true;
@@ -488,7 +475,7 @@ export function createPropVariantFunctions(host){
                 }
                 else
                 {
-                    releaseOwned(type, readU32(at), at);
+                    releaseOwned(type, guest.u32(at), at);
                 }
             }
             host.heap.free(second);
@@ -547,7 +534,7 @@ export function createPropVariantFunctions(host){
                 {
                     break;
                 }
-                const data = readU32(clip + 8);
+                const data = guest.u32(clip + 8);
                 if (data !== 0)
                 {
                     host.heap.free(data);
@@ -600,7 +587,7 @@ export function createPropVariantFunctions(host){
             return S_OK;
         }
         return calls.reduce((before, [object, slot])=>before.then(()=>
-            call(readU32(readU32(object) + slot * 4), [object], thread)),
+            call(guest.u32(guest.u32(object) + slot * 4), [object], thread)),
         Promise.resolve(0)).then(()=>S_OK);
     };
 
@@ -643,7 +630,7 @@ export function createPropVariantFunctions(host){
                     made.strings.forEach(string=>host.bstr?.free(string));
                     return after(waited(owed), ()=>after(destroyAll(made.arrays), ()=>copy));
                 }
-                host.writeMemory(wholeAddress(dest), copy);
+                guest.setBytes(dest, copy);
                 return settle(owed, thread, 'PropVariantCopy');
             },
         },
@@ -666,7 +653,7 @@ export function createPropVariantFunctions(host){
                 /** @type {Owed} */
                 const owed = { addRef: [], release: [] };
                 const known = release(wholeAddress(pvar), owed);
-                host.writeMemory(wholeAddress(pvar), new Uint8Array(PROPVARIANT_SIZE));
+                guest.setBytes(pvar, new Uint8Array(PROPVARIANT_SIZE));
                 if (!known)
                 {
                     return STG_E_INVALIDPARAMETER;

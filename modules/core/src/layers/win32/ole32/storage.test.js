@@ -178,12 +178,7 @@ function setup(width = {}){
                 return nextPointer;
             },
         },
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-        /** @param {number} address @param {number} value @param {number} length */
-        fillMemory: (address, value, length)=>bytes.fill(value, address, address + length),
+        guest: guestOver(bytes, width.pointerSize ?? 4),
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
         /** @param {number} entry @param {(number | bigint)[]} args */
@@ -1072,6 +1067,28 @@ test('a class travels through a stream, ours or the program\'s own', async()=>{
     assert.equal(await fns.ReadClassStm.handler([guest, GUID_AT]), S_OK);
     assert.equal(formatGuid(host.bytes.subarray(GUID_AT, GUID_AT + 16)), CLSID_A);
     assert.equal(host.heap.live.size, 0, 'the buffers lent to the guest were taken back');
+});
+
+test('a 64-bit stream the program made is called at its method\'s whole address', async()=>{
+    // A vtable slot of a 64-bit process is a quadword: an entry read as its low
+    // dword is another address.
+    const { host, fns } = setup({ pointerSize: 8 });
+    host.putU32(GUEST_OBJECT, GUEST_VTABLE);
+    host.putU32(GUEST_OBJECT + 4, 0);
+    for (let slot = 0; slot < 5; slot++)
+    {
+        host.putU32(GUEST_VTABLE + slot * 8, 0x5000 + slot * 0x10);
+        host.putU32(GUEST_VTABLE + slot * 8 + 4, 1);
+    }
+    /** @type {number[]} */
+    const entries = [];
+    /** @type {any} */ (host).call = async(/** @type {number} */ entry)=>{
+        entries.push(entry);
+        return 0;
+    };
+    host.putGuid(GUID_AT, CLSID_A);
+    await fns.WriteClassStm.handler([GUEST_OBJECT, GUID_AT]);
+    assert.deepEqual(entries, [0x5000 + 4 * 0x10 + 2 ** 32], 'Write at its slot\'s eight bytes');
 });
 
 test('OleSaveToStream asks the object for its class and then lets it save', async()=>{

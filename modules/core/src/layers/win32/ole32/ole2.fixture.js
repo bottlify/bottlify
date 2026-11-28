@@ -428,12 +428,7 @@ export function oleProcess(options = {}){
     };
 
     const storage = /** @type {any} */ (createStorageFunctions({
-        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            bytes.slice(address, address + length),
-        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, address),
-        fillMemory: (address, value, length)=>bytes.fill(value, address, address + length),
-        heap, registry, vtables,
+        guest: env.guest, heap, registry, vtables,
     }));
     /** A docfile in memory, its root storage open read-write. */
     const docfile = ()=>{

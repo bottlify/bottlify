@@ -10,6 +10,7 @@
  * PROPVARIANT may hold, what each copy owns, and what a clear lets go of.
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPropVariantFunctions } from './propvariant.js';
@@ -50,10 +51,9 @@ const VALID = {
 
 /** Guest memory, a task heap that counts what it holds, and objects that count references. */
 /**
- * @param {{ calls?: boolean, slowDestroy?: boolean, end?: number }} [options]  `end`: where
- *     an allocation ends and nothing may lie past it, so memory refuses a read across it.
+ * @param {{ calls?: boolean, slowDestroy?: boolean }} [options]
  */
-function build({ calls = true, slowDestroy = false, end = 0 } = {}){
+function build({ calls = true, slowDestroy = false } = {}){
     const bytes = new Uint8Array(0x40000);
     const view = new DataView(bytes.buffer);
     /** @type {Map<number, number>} */
@@ -155,12 +155,9 @@ function build({ calls = true, slowDestroy = false, end = 0 } = {}){
     /** @type {string[]} */
     const reported = [];
     const fns = /** @type {any} */ (createPropVariantFunctions({
-        readMemory: (at, length)=>{
-            assert.ok(at >= end || at + length <= end, `read of ${length} bytes at`
-                + ` 0x${at.toString(16)} runs past the end of an allocation`);
-            return bytes.subarray(at, at + length);
-        },
-        writeMemory: (at, data)=>bytes.set(data, at),
+        // The guest's memory ends where the test's bytes end: a read past them
+        // is a fault, as the memory layer's past its last region.
+        guest: guestOver(bytes),
         heap,
         bstr,
         safeArray,
@@ -321,8 +318,8 @@ test('strings are copied into memory of their own, and a BSTR up to its first NU
 
 test('a string ending just short of the end of its memory is copied without reading past it',
     async()=>{
-        const end = 0x3000;
-        const m = build({ end });
+        const m = build();
+        const end = m.bytes.length;
         m.set(SOURCE, VT_LPWSTR, m.wide(end - 8 - 24, 'Test String'));
         assert.equal(await m.fns.PropVariantCopy.handler([DEST, SOURCE]), S_OK);
         assert.equal(m.wideAt(m.read(DEST)[1]), 'Test String');

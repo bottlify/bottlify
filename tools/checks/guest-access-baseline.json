@@ -773,21 +773,6 @@
    "accessor writeU32": 1,
    "copy readMemory().slice()": 1
   },
-  "win32/ole32/propvariant.js": {
-   "accessor get32": 1,
-   "accessor put32": 1,
-   "accessor readU16": 1,
-   "accessor readU32": 1,
-   "copy readMemory().slice()": 3
-  },
-  "win32/ole32/storage.js": {
-   "accessor readU32": 1,
-   "accessor readU64": 1,
-   "accessor writeU32": 1,
-   "accessor writeU64": 1,
-   "copy readMemory().slice()": 6,
-   "string readWide": 1
-  },
   "win32/ole32/wbem.js": {
    "accessor writeU32": 1,
    "string readString": 1
