@@ -38,7 +38,7 @@ export function createBitmapFunctions({ guest }){
     const open = header=>{
         const size = guest.u32(header);
         const buffer = bufferOf(header);
-        const bytes = guest.bytes(buffer, Math.ceil(size / 8));
+        const bytes = guest.snapshot(buffer, Math.ceil(size / 8));
         return {
             size, bytes,
             /** @param {number} n */

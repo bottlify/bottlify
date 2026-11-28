@@ -72,8 +72,8 @@ export function createSortFunctions(host){
             left = new Uint8Array(width);
             right = new Uint8Array(width);
         }
-        guest.bytes(a, width, left);
-        guest.bytes(b, width, right);
+        guest.snapshot(a, width, left);
+        guest.snapshot(b, width, right);
         guest.setBytes(a, right.subarray(0, width));
         guest.setBytes(b, left.subarray(0, width));
     };

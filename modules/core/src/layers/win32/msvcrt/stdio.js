@@ -1076,7 +1076,7 @@ export function createStdioFunctions(host){
                 fail(EINVAL);
                 return 0;
             }
-            const stored = emit(stream, guest.bytes(buffer, wanted));
+            const stored = emit(stream, guest.snapshot(buffer, wanted));
             return Math.floor(stored / (size >>> 0));
         }) },
 

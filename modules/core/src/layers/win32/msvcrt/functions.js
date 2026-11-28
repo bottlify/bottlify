@@ -529,7 +529,7 @@ export function createMsvcrtFunctions(host){
      *
      * @param {number} list
      */
-    const varargsAt = list=>varargsSlots((address, length)=>guest.bytes(address, length),
+    const varargsAt = list=>varargsSlots((address, length)=>guest.snapshot(address, length),
         address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS,
         guest.pointerSize === 8 ? 2 : 1);
 

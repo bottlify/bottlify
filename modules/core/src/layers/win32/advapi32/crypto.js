@@ -29,7 +29,7 @@ import { createRc4 } from '../crypto/rc4.js';
 import { createProviderRegistry } from './providers.js';
 import { bigIntToBe, bigIntToLe, beToBigInt, leToBigInt, modPow } from '../crypto/rsa.js';
 import { wholeAddress } from '../common/pointers.js';
-import { writeMade } from '../common/guest.js';
+import { writeMade } from '../../../system/port.js';
 
 /** @typedef {import('../crypto/digest.js').Digest} Digest */
 /** @typedef {import('../crypto/rc4.js').StreamCipher} StreamCipher */

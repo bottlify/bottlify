@@ -362,9 +362,17 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      */
     const readInteger = (address, length)=>{
         address = unsigned(address);
-        if (length === 4 && reader !== null)
+        if (reader !== null)
         {
-            return reader.readU32(address);
+            if (length === 4)
+            {
+                return reader.readU32(address);
+            }
+            const small = reader.readSmall(address, /** @type {1 | 2} */ (length));
+            if (small >= 0)
+            {
+                return small;
+            }
         }
         if (length === 4 && raw.readU32)
         {
@@ -373,7 +381,8 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             readableSpan(address, 4);
             return raw.readU32(address);
         }
-        const bytes = read(address, length);
+        // In place: a byte or a word read is never a copy of its own.
+        const bytes = view(address, length);
         let value = 0;
         for (let i = length - 1; i >= 0; i--)
         {

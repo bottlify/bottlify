@@ -28,7 +28,7 @@ import { FONT_STYLE, SIMULATION, familiesOf, localized, matching, readFace } fro
 import { FontFormatError, analyzeFile, tagText } from './sfnt.js';
 import { GLYPH_COUNT, SYSTEM_FAMILIES, UNITS_PER_EM, createSystemFace } from './system.js';
 import { wholeAddress } from '../common/pointers.js';
-import { writeZeros } from '../common/guest.js';
+import { writeZeros } from '../../../system/port.js';
 import { utf16z } from '../common/utf16.js';
 import { readGuid } from '../../../system/guid.js';
 

@@ -45,7 +45,8 @@ import { COMPILED as SCAN } from './inguest-scan.x86.js';
 import { COMPILED as SCAN_LONG } from './inguest-scan.x64.js';
 import { setSingle } from './float.js';
 import { wholeAddress } from '../common/pointers.js';
-import { createGuest, writeMade } from '../common/guest.js';
+import { createGuest } from '../common/guest.js';
+import { writeMade } from '../../../system/port.js';
 
 /** How much of a long copy is read before it is written. */
 const MOVE_CHUNK = 0x10000;
@@ -378,7 +379,7 @@ export function guestMemory(host){
             const size = Math.min(MOVE_CHUNK, length - done);
             const offset = down ? length - done - size : done;
             guest.setBytes(at(destination + offset),
-                guest.bytes(at(source + offset), size, moving.subarray(0, size)));
+                guest.snapshot(at(source + offset), size, moving.subarray(0, size)));
         }
     };
     /** @param {number} address */

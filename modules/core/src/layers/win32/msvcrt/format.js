@@ -994,7 +994,7 @@ export function formatToString(format, varargs, readString, options = {}){
         {
             return null;
         }
-        const bytes = guest.bytes(buffer, length);
+        const bytes = guest.snapshot(buffer, length);
         if (!asWide)
         {
             return decode(bytes);

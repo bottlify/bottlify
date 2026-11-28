@@ -50,7 +50,7 @@ import {
 } from './reparse.js';
 import { pointerArg, pointerWidth, wholeAddress } from '../common/pointers.js';
 import { readSecurityAttributes } from '../common/security-attributes.js';
-import { writeZeros } from '../common/guest.js';
+import { writeZeros } from '../../../system/port.js';
 import { utf16 } from '../common/utf16.js';
 import { foldName } from '../../../system/text.js';
 

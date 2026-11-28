@@ -41,7 +41,7 @@ import { isSelfIssued, isSignedBy, parseCertificate, readGeneralNames, readName,
 import { msiSubject, readSubject } from '../wintrust/subject.js';
 import { nameToString, NAME_STR } from './names.js';
 import { wholeAddress } from '../common/pointers.js';
-import { writeMade, writeZeros } from '../common/guest.js';
+import { writeMade, writeZeros } from '../../../system/port.js';
 import { fromBase64 } from '../../../system/base64.js';
 import { utf16z } from '../common/utf16.js';
 

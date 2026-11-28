@@ -125,7 +125,7 @@ export function createLoaderFunctions({
      */
     const terminated = (counted, unit)=>{
         const length = guest.u16(counted);
-        const bytes = length > 0 ? guest.bytes(guest.ptr(counted + BUFFER), length) : null;
+        const bytes = length > 0 ? guest.snapshot(guest.ptr(counted + BUFFER), length) : null;
         const at = allocate(length + unit);
         if (bytes !== null)
         {

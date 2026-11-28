@@ -1690,7 +1690,7 @@ export function createIoFunctions(host, descriptors){
                 fail(EINVAL);
                 return -1;
             }
-            const bytes = guest.bytes(wholeAddress(buffer), wanted);
+            const bytes = guest.snapshot(wholeAddress(buffer), wanted);
             if (descriptors.put(descriptor, bytes) < wanted)
             {
                 fail(ENOSPC);
