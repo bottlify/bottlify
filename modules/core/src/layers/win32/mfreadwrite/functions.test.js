@@ -14,6 +14,8 @@ import { test } from 'node:test';
 import { MF_E_UNSUPPORTED_BYTESTREAM_TYPE, MF_E_UNSUPPORTED_SCHEME, createMfReadWriteFunctions,
     fileOfUrl } from './functions.js';
 
+import { guestOver } from '../common/guest.fixture.js';
+
 const FILE_NOT_FOUND = 0x80070002 | 0;
 const E_NOTIMPL = 0x80004001 | 0;
 const SOURCE_READER = [0x1777133c, 0x411b0881, 0x54ad77a5, 0xc414075f];
@@ -24,8 +26,7 @@ function machine(){
     /** @type {{ api: string, detail: string, kind?: string }[]} */
     const said = [];
     const fns = createMfReadWriteFunctions({
-        readMemory: (at, length)=>memory.subarray(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
         exists: path=>Promise.resolve(path === 'C:\\Content\\song.wma'),
         divergence: (api, detail, kind)=>said.push({ api, detail, kind }),
     });

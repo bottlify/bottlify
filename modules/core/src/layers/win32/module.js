@@ -3217,7 +3217,7 @@ export function createWin32Module(){
                 },
             });
             const mediaFoundation = createMfplatFunctions({
-                guest, readMemory, writeMemory, heap, vtables: comVtables, setRegisters,
+                guest, heap, vtables: comVtables, setRegisters,
                 now: ()=>kernel.clock.virtualTime(),
                 // A byte stream's file is kernel32's, opened and read through
                 // its own calls, so it fails as CreateFile and ReadFile do.
@@ -3249,7 +3249,7 @@ export function createWin32Module(){
                 },
             });
             const mfReadWrite = createMfReadWriteFunctions({
-                readMemory, writeMemory, divergence: config?.divergence,
+                guest, divergence: config?.divergence,
                 // By the program's own rules for a path: its directory, its drive.
                 exists: async path=>{
                     const name = heap.allocate((path.length + 1) * 2);

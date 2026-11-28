@@ -19,7 +19,6 @@
  * -- FAudio's xWMA playing silence, FNA's video not starting -- is its own.
  */
 
-import { formatGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const E_NOTIMPL = 0x80004001 | 0;
@@ -35,8 +34,7 @@ const CLSID_MF_SOURCE_READER = '{1777133C-0881-411B-A577-AD545F0714C4}';
 
 /**
  * @typedef {Object} MfReadWriteHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(path: string) => boolean | Promise<boolean>} exists
  *     Whether a file is there, by the program's own path rules (its current
  *     directory, its drive).
@@ -75,32 +73,7 @@ export function fileOfUrl(url){
  * @param {MfReadWriteHost} host
  */
 export function createMfReadWriteFunctions(host){
-    /** @param {number} at @param {number} value */
-    const putU32 = (at, value)=>{
-        if ((at >>> 0) !== 0)
-        {
-            host.writeMemory(wholeAddress(at), new Uint8Array(Uint32Array.of(value >>> 0).buffer));
-        }
-    };
-    /** A NUL-ended UTF-16 string, read a page at a time. @param {number} at */
-    const wide = at=>{
-        let text = '';
-        for (let address = wholeAddress(at); text.length < 32768;)
-        {
-            const bytes = host.readMemory(address, 0x1000 - (address & 0xfff));
-            for (let i = 0; i + 1 < bytes.length; i += 2)
-            {
-                const unit = bytes[i] | bytes[i + 1] << 8;
-                if (unit === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(unit);
-            }
-            address += bytes.length;
-        }
-        return text;
-    };
+    const { guest } = host;
 
     /**
      * A source reader for a URL, refused; why depends on what the URL names.
@@ -113,8 +86,9 @@ export function createMfReadWriteFunctions(host){
         {
             return E_POINTER;
         }
-        putU32(out, 0);
-        const text = wide(url);
+        guest.setPtr(out, 0);
+        // A URL is at most INTERNET_MAX_URL_LENGTH's 2084 characters; a name, 32767.
+        const text = guest.wstr(url, 65536);
         const file = fileOfUrl(text);
         if (file === null)
         {
@@ -146,7 +120,7 @@ export function createMfReadWriteFunctions(host){
         {
             return E_POINTER;
         }
-        putU32(out, 0);
+        guest.setPtr(out, 0);
         host.divergence?.(api, 'no source reader over a program\'s stream or source: no decoder'
             + ' reads it in this build', 'loss');
         return MF_E_UNSUPPORTED_BYTESTREAM_TYPE;
@@ -154,7 +128,10 @@ export function createMfReadWriteFunctions(host){
 
     /** @param {string} api @param {number} out */
     const noWriter = (api, out)=>{
-        putU32(out, 0);
+        if (out !== 0)
+        {
+            guest.setPtr(out, 0);
+        }
         host.divergence?.(api, 'no sink writer: nothing is written', 'loss');
         return E_NOTIMPL;
     };
@@ -185,7 +162,7 @@ export function createMfReadWriteFunctions(host){
     };
     /** @param {number} clsid */
     const isReader = clsid=>(clsid >>> 0) !== 0
-        && formatGuid(host.readMemory(wholeAddress(clsid), 16)) === CLSID_MF_SOURCE_READER;
+        && guest.guid(wholeAddress(clsid)) === CLSID_MF_SOURCE_READER;
 
     const table = {
         /** HRESULT MFCreateSourceReaderFromURL(LPCWSTR url, IMFAttributes *attributes, IMFSourceReader **reader) */
