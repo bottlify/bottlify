@@ -1694,7 +1694,7 @@ test('f32s/i32s/u8s are live, bounds-checked-once views: a view sees a scalar wr
 test('an out-of-region f32s/i32s/u8s view is refused, the way any guest memory access is', ()=>{
     const { guest } = guestMemoryHarness();
     assert.throws(()=>guest.f32s(0x5000, 4), /Unmapped/);
-    assert.throws(()=>guest.i32s(0x1ffc, 4), /runs past the end/);
+    assert.throws(()=>guest.i32s(0x1ffc, 4), /Unmapped read at 0x2000/);
     assert.throws(()=>guest.u8s(0x5000, 4), /Unmapped/);
 });
 
