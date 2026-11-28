@@ -423,7 +423,6 @@ const HOOK_DEPTH = 25;
 const HCBT_SYSCOMMAND = 8;
 const HCBT_SETFOCUS = 9;
 
-
 /** TranslateMessage answers for exactly these, translated or not. */
 const KEY_MESSAGES = new Set([WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP]);
 
@@ -502,7 +501,6 @@ export function watchDispatch(host, message, answer){
     }
     return answer;
 }
-
 
 /** The one style bit that changes what a window is rather than how it looks. */
 const WS_VISIBLE = 0x10000000;
@@ -604,7 +602,6 @@ const MAXIMUM_WAIT_OBJECTS = 64;
 
 /** The parent a message-only window is made with. */
 const HWND_MESSAGE = 0xfffffffd;
-
 
 /** PeekMessage takes this where a window goes to mean "thread messages only". */
 const HWND_THREAD_MESSAGES = 0xffffffff;
@@ -6887,12 +6884,8 @@ export function createWindowFunctions(host){
             copy: text=>clipboardAccess?.copy(text) ?? false,
         },
         guest,
-        readCString: guest.cstr,
-        writeMemory: guest.setBytes,
-        readMemory: guest.snapshot,
         draw,
         picture: (/** @type {number} */ handle)=>pictureOf(handle),
-        pointerSize: host.pointerSize === 8 ? 8 : 4,
         setLastError: code=>host.setLastError?.(code),
         imageListSize: himl=>host.imageListSize?.(himl) ?? null,
         live,
@@ -8351,7 +8344,6 @@ export function createWindowFunctions(host){
             })();
         });
     };
-
 
     // Named, because a message for a window with no procedure of its own is
     // handed to the default procedure in this table by `deliver` above.

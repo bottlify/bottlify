@@ -37,10 +37,8 @@ import {
     SB_THUMBPOSITION, SB_THUMBTRACK,
     after, pointOf,
 } from '../user32/controls.js';
-import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
 import { stableSort } from './stable-sort.js';
-import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const TREEVIEW_CLASS = 'SysTreeView32';
@@ -207,14 +205,6 @@ const TVHT_TOLEFT = 0x0800;
  * @typedef {import('../user32/controls.js').Rect} Rect
  */
 
-/** @param {number} value */
-const u32 = value=>new Uint8Array([
-    value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-]);
-
-/** Terminated, in the ANSI page the text was read in. @param {string} text */
-const stringBytes = text=>encodeAnsi(`${text}\0`);
-
 /**
  * Builds the window procedure of a tree view.
  *
@@ -224,6 +214,7 @@ const stringBytes = text=>encodeAnsi(`${text}\0`);
  *     => number | Promise<number>}
  */
 export function createTreeViewProcedure(host, tk){
+    const { guest } = host;
     /**
      * @typedef {Object} TreeNode
      * @property {number} handle
@@ -297,16 +288,6 @@ export function createTreeViewProcedure(host, tk){
     const siblingsOf = (record, item)=>(item.parent === 0
         ? state(record).roots
         : node(record, item.parent)?.children ?? []);
-
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), u32(value));
-    /** @param {number} address @returns {number} */
-    const readU32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @returns {number} signed */
-    const readI32 = address=>readU32(address) | 0;
 
     /** The row height, measured through a context on the window itself. @param {any} record */
     const measureHeight = record=>{
@@ -425,7 +406,7 @@ export function createTreeViewProcedure(host, tk){
         {
             return 0;
         }
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
         return host.send(notifyWindow(record), WM_NOTIFY, record.id & 0xffff, address,
             thread);
     };
@@ -457,11 +438,11 @@ export function createTreeViewProcedure(host, tk){
         new DataView(bytes.buffer).setInt32(NMTVDISPINFO.item + TVITEM.pszText,
             (address + NMTVDISPINFO.SIZE) | 0, true);
         header(bytes, record, TVN_GETDISPINFOA);
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
         return Promise.resolve(host.send(notifyWindow(record), WM_NOTIFY, record.id & 0xffff,
             address, thread)).then(()=>{
-            const pointer = readI32(address + NMTVDISPINFO.item + TVITEM.pszText) >>> 0;
-            const text = pointer === 0 ? '' : host.readCString(pointer, BUFFER);
+            const pointer = guest.i32(address + NMTVDISPINFO.item + TVITEM.pszText) >>> 0;
+            const text = pointer === 0 ? '' : guest.cstr(pointer, BUFFER);
             host.release?.(address);
             item.text = text;
             return text;
@@ -492,40 +473,40 @@ export function createTreeViewProcedure(host, tk){
             childrenCount: 0,
             expanded: false,
         };
-        const mask = readU32(address + TVITEM.mask);
+        const mask = guest.u32(address + TVITEM.mask);
         if ((mask & TVIF_TEXT) !== 0)
         {
-            const pointer = readI32(address + TVITEM.pszText);
+            const pointer = guest.i32(address + TVITEM.pszText);
             if (pointer === LPSTR_TEXTCALLBACK)
             {
                 item.textCallback = true;
             }
             else if (pointer !== 0)
             {
-                item.text = host.readCString(wholeAddress(pointer), 0x10000);
+                item.text = guest.cstr(pointer, 0x10000);
                 item.textCallback = false;
             }
         }
         if ((mask & TVIF_PARAM) !== 0)
         {
-            item.param = readU32(address + TVITEM.lParam);
+            item.param = guest.u32(address + TVITEM.lParam);
         }
         if ((mask & TVIF_IMAGE) !== 0)
         {
-            item.image = readI32(address + TVITEM.iImage);
+            item.image = guest.i32(address + TVITEM.iImage);
         }
         if ((mask & TVIF_SELECTEDIMAGE) !== 0)
         {
-            item.selectedImage = readI32(address + TVITEM.iSelectedImage);
+            item.selectedImage = guest.i32(address + TVITEM.iSelectedImage);
         }
         if ((mask & TVIF_STATE) !== 0)
         {
-            const bits = readU32(address + TVITEM.stateMask);
-            item.state = (item.state & ~bits) | (readU32(address + TVITEM.state) & bits);
+            const bits = guest.u32(address + TVITEM.stateMask);
+            item.state = (item.state & ~bits) | (guest.u32(address + TVITEM.state) & bits);
         }
         if ((mask & TVIF_CHILDREN) !== 0)
         {
-            item.childrenCount = readI32(address + TVITEM.cChildren);
+            item.childrenCount = guest.i32(address + TVITEM.cChildren);
         }
         return item;
     };
@@ -1120,8 +1101,8 @@ export function createTreeViewProcedure(host, tk){
                 {
                     return 0;
                 }
-                const parent = readU32(at + TVINSERTSTRUCT.hParent);
-                const afterFlag = readU32(at + TVINSERTSTRUCT.hInsertAfter);
+                const parent = guest.u32(at + TVINSERTSTRUCT.hParent);
+                const afterFlag = guest.u32(at + TVINSERTSTRUCT.hInsertAfter);
                 const item = readItem(record, at + TVINSERTSTRUCT.item);
                 place(record, item, parent === TVI_ROOT ? 0 : parent, afterFlag);
                 host.invalidate(record);
@@ -1150,12 +1131,12 @@ export function createTreeViewProcedure(host, tk){
                 // TVSORTCB: the parent, the program's comparison and its word;
                 // the comparison is handed the two items' lParams.
                 const at = message.lParam >>> 0;
-                const compare = at === 0 ? 0 : readU32(at + 4);
+                const compare = at === 0 ? 0 : guest.u32(at + 4);
                 if (compare === 0 || !host.call)
                 {
                     return 0;
                 }
-                const parent = readU32(at);
+                const parent = guest.u32(at);
                 const siblings = parent === 0 || parent === TVI_ROOT ? state(record).roots
                     : node(record, parent)?.children;
                 if (!siblings || siblings.length === 0)
@@ -1163,7 +1144,7 @@ export function createTreeViewProcedure(host, tk){
                     return 0;
                 }
                 const call = host.call;
-                const word = readU32(at + 8);
+                const word = guest.u32(at + 8);
                 return sortChildren(record, siblings, (a, b)=>call(compare, [a.param, b.param,
                     word], thread));
             }
@@ -1266,12 +1247,12 @@ export function createTreeViewProcedure(host, tk){
                 {
                     return 0;
                 }
-                const item = node(record, readU32(at + TVITEM.hItem));
+                const item = node(record, guest.u32(at + TVITEM.hItem));
                 if (!item)
                 {
                     return 0;
                 }
-                const mask = readU32(at + TVITEM.mask);
+                const mask = guest.u32(at + TVITEM.mask);
                 // A callback text is the parent's to give: ask before filling
                 // the buffer, which is what makes this case asynchronous.
                 const asked = (mask & TVIF_TEXT) !== 0 && item.textCallback
@@ -1279,34 +1260,33 @@ export function createTreeViewProcedure(host, tk){
                 return after(/** @type {any} */ (asked ?? 0), ()=>{
                     if ((mask & TVIF_TEXT) !== 0)
                     {
-                        const buffer = readI32(at + TVITEM.pszText) >>> 0;
-                        const room = readI32(at + TVITEM.cchTextMax);
+                        const buffer = guest.i32(at + TVITEM.pszText) >>> 0;
+                        const room = guest.i32(at + TVITEM.cchTextMax);
                         if (buffer !== 0 && room > 0)
                         {
-                            host.writeMemory(buffer,
-                                stringBytes(item.text.slice(0, room - 1)));
+                            guest.writeAnsi(buffer, item.text, room);
                         }
                     }
                     if ((mask & TVIF_PARAM) !== 0)
                     {
-                        writeU32(at + TVITEM.lParam, item.param);
+                        guest.set32(at + TVITEM.lParam, item.param);
                     }
                     if ((mask & TVIF_STATE) !== 0)
                     {
-                        writeU32(at + TVITEM.state,
-                            item.state & readU32(at + TVITEM.stateMask));
+                        guest.set32(at + TVITEM.state,
+                            item.state & guest.u32(at + TVITEM.stateMask));
                     }
                     if ((mask & TVIF_IMAGE) !== 0)
                     {
-                        writeU32(at + TVITEM.iImage, item.image);
+                        guest.set32(at + TVITEM.iImage, item.image);
                     }
                     if ((mask & TVIF_SELECTEDIMAGE) !== 0)
                     {
-                        writeU32(at + TVITEM.iSelectedImage, item.selectedImage);
+                        guest.set32(at + TVITEM.iSelectedImage, item.selectedImage);
                     }
                     if ((mask & TVIF_CHILDREN) !== 0)
                     {
-                        writeU32(at + TVITEM.cChildren, item.childrenCount);
+                        guest.set32(at + TVITEM.cChildren, item.childrenCount);
                     }
                     return 1;
                 });
@@ -1317,7 +1297,7 @@ export function createTreeViewProcedure(host, tk){
                 {
                     return 0;
                 }
-                const item = node(record, readU32(at + TVITEM.hItem));
+                const item = node(record, guest.u32(at + TVITEM.hItem));
                 if (!item)
                 {
                     return 0;
@@ -1334,8 +1314,8 @@ export function createTreeViewProcedure(host, tk){
                 {
                     return 0;
                 }
-                const x = readI32(at + TVHT.x);
-                const y = readI32(at + TVHT.y);
+                const x = guest.i32(at + TVHT.x);
+                const y = guest.i32(at + TVHT.y);
                 const area = tk.clientRect(record);
                 const outside = (x < 0 ? TVHT_TOLEFT : 0)
                     | (x >= area.right - area.left ? TVHT_TORIGHT : 0)
@@ -1344,8 +1324,8 @@ export function createTreeViewProcedure(host, tk){
                 const hit = outside === 0 ? rowAtPoint(record, y, height) : null;
                 if (!hit)
                 {
-                    writeU32(at + TVHT.hItem, 0);
-                    writeU32(at + TVHT.flags, outside || TVHT_NOWHERE);
+                    guest.set32(at + TVHT.hItem, 0);
+                    guest.set32(at + TVHT.flags, outside || TVHT_NOWHERE);
                     return 0;
                 }
                 // The parts of the row as the paint lays them out: the
@@ -1360,8 +1340,8 @@ export function createTreeViewProcedure(host, tk){
                         : x < label ? TVHT_ONITEMSTATEICON
                             : x < label + measureWidth(record, hit.item.text) + 2
                                 ? TVHT_ONITEMLABEL : TVHT_ONITEMRIGHT;
-                writeU32(at + TVHT.hItem, hit.item.handle);
-                writeU32(at + TVHT.flags, flags);
+                guest.set32(at + TVHT.hItem, hit.item.handle);
+                guest.set32(at + TVHT.flags, flags);
                 return hit.item.handle;
             }
             case TVM_SETBKCOLOR:

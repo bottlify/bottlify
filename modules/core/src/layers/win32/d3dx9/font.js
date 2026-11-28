@@ -8,7 +8,6 @@ import { createComObject } from '../ole32/objects.js';
 import { writeTextMetrics, writeTextMetricsW } from '../gdi32/structs.js';
 import { DEVICE, TEXTURE, createDeviceCalls } from './device.js';
 import { SPRITE } from './sprite.js';
-import { wholeAddress } from '../common/pointers.js';
 
 /**
  * ID3DXFont: text drawn on the program's device, as D3DX draws it -- each
@@ -54,8 +53,6 @@ const D3DPOOL_MANAGED = 1;
 /**
  * @typedef {Object} FontHost
  * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
@@ -83,7 +80,8 @@ const boxOf = ({ advance, left, top, width, height })=>({ advance, left, top, wi
  * @param {ReturnType<typeof import('./sprite.js').createSprites>} sprites
  */
 export function createFonts(host, sprites){
-    const { u32, putU32s, method } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
 
     /** The LOGFONT the font engine is asked with. @param {FontDesc} desc */
     const logFontOf = desc=>({ height: desc.height, width: desc.width,
@@ -219,14 +217,14 @@ export function createFonts(host, sprites){
             {
                 if (page.texture === 0)
                 {
-                    putU32s(scratch, [0]);
+                    guest.set32s(scratch, [0]);
                     const made = await method(thread, state.device, DEVICE.CreateTexture,
                         [PAGE, PAGE, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, scratch, 0]);
                     if (made !== D3D_OK)
                     {
                         return made;
                     }
-                    page.texture = u32(scratch);
+                    page.texture = guest.u32(scratch);
                     // A page starts transparent: what lies between glyphs is never drawn,
                     // but a filtered edge reads it.
                     page.writes.unshift({ x: 0, y: 0, width: PAGE, height: PAGE, code: -1 });
@@ -237,8 +235,8 @@ export function createFonts(host, sprites){
                 {
                     return locked;
                 }
-                const pitch = u32(scratch + 4);
-                const bits = u32(scratch + 8);
+                const pitch = guest.u32(scratch + 4);
+                const bits = guest.u32(scratch + 8);
                 const into = { bits, pitch, write: page.writes[0] };
                 for (const write of page.writes)
                 {
@@ -337,7 +335,8 @@ export function createFonts(host, sprites){
      */
     const draw = async(state, spriteAt, codes, rectAt, format, color, thread)=>{
         await null;
-        const rect = rectAt === 0 ? [0, 0, 0, 0] : [0, 1, 2, 3].map(i=>u32(rectAt + i * 4) | 0);
+        const rect = rectAt === 0 ? [0, 0, 0, 0] : [0, 1, 2,
+            3].map(i=>guest.u32(rectAt + i * 4) | 0);
         const [left, top, right, bottom] = rect;
         const metrics = metricsOf(state);
         const lines = layout(state, codes, format, right - left);
@@ -348,7 +347,7 @@ export function createFonts(host, sprites){
             if (rectAt !== 0)
             {
                 const widest = Math.max(0, ...lines.map(line=>line.width));
-                putU32s(rectAt + 8, [left + widest, top + height]);
+                guest.set32s(rectAt + 8, [left + widest, top + height]);
             }
             return height;
         }
@@ -412,9 +411,9 @@ export function createFonts(host, sprites){
      */
     const units = (at, count, isWide)=>{
         const unit = isWide ? 2 : 1;
-        const length = count < 0 ? host.guest.stringBytes(wholeAddress(at), isWide, 4096).length
+        const length = count < 0 ? host.guest.stringBytes(at, isWide, 4096).length
             : count * unit;
-        const bytes = host.guest.snapshot(wholeAddress(at), length);
+        const bytes = host.guest.snapshot(at, length);
         return isWide ? [...new Uint16Array(bytes.buffer, bytes.byteOffset, length >> 1)]
             : [...bytes];
     };
@@ -442,7 +441,7 @@ export function createFonts(host, sprites){
                 bytes[24 + i] = c.charCodeAt(0) & 0xff;
             }
         });
-        host.guest.setBytes(wholeAddress(at), bytes);
+        host.guest.setBytes(at, bytes);
     };
 
     /** @param {any} state @param {number} at @param {boolean} isWide */
@@ -480,7 +479,7 @@ export function createFonts(host, sprites){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32s(out, [object.state.device]);
+                guest.set32s(out, [object.state.device]);
                 const thread = host.currentThread?.();
                 return Promise.resolve().then(()=>method(thread, object.state.device, 1, []))
                     .then(()=>D3D_OK);
@@ -522,17 +521,17 @@ export function createFonts(host, sprites){
                 return upload(state, thread).then(answer=>{
                     if ((textureOut >>> 0) !== 0)
                     {
-                        putU32s(textureOut, [glyph.page >= 0 ? state.pages[glyph.page].texture
+                        guest.set32s(textureOut, [glyph.page >= 0 ? state.pages[glyph.page].texture
                             : 0]);
                     }
                     if ((box >>> 0) !== 0)
                     {
-                        putU32s(box, [glyph.x, glyph.y, glyph.x + glyph.width,
+                        guest.set32s(box, [glyph.x, glyph.y, glyph.x + glyph.width,
                             glyph.y + glyph.height]);
                     }
                     if ((cell >>> 0) !== 0)
                     {
-                        putU32s(cell, [glyph.advance, 0]);
+                        guest.set32s(cell, [glyph.advance, 0]);
                     }
                     return answer;
                 });
@@ -592,7 +591,7 @@ export function createFonts(host, sprites){
             object.release();
             return E_OUTOFMEMORY;
         }
-        putU32s(out, [pointer]);
+        guest.set32s(out, [pointer]);
         return D3D_OK;
     };
 

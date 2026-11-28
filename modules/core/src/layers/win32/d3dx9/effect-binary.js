@@ -135,17 +135,17 @@ function read(bytes, messages){
     }
     const base = 8;
     const view = new DataView(bytes.buffer, bytes.byteOffset + base, bytes.byteLength - base);
-    const u32 = (/** @type {number} */ offset)=>view.getUint32(offset, true);
+    const at32 = (/** @type {number} */ offset)=>view.getUint32(offset, true);
     let at = whole.getUint32(4, true);
 
     const next = ()=>{
-        const value = u32(at);
+        const value = at32(at);
         at += 4;
         return value;
     };
     /** A name at an offset: its length, then its bytes, the last a NUL. */
     const nameAt = (/** @type {number} */ offset)=>{
-        const size = u32(offset);
+        const size = at32(offset);
         if (size === 0)
         {
             return null;
@@ -177,7 +177,7 @@ function read(bytes, messages){
      */
     const typedef = (cursor, flags)=>{
         const take = ()=>{
-            const value = u32(cursor.at);
+            const value = at32(cursor.at);
             cursor.at += 4;
             return value;
         };
@@ -250,14 +250,14 @@ function read(bytes, messages){
         {
             for (let i = 0; i < param.bytes; i += 4)
             {
-                param.init.push({ word: u32(cursor.at) });
+                param.init.push({ word: at32(cursor.at) });
                 cursor.at += 4;
             }
             return;
         }
         if (ownsObject(param.type))
         {
-            const id = u32(cursor.at);
+            const id = at32(cursor.at);
             cursor.at += 4;
             /** @type {Slot} */
             const slot = param.type === PT.STRING ? { string: '' }
@@ -271,7 +271,7 @@ function read(bytes, messages){
         }
         if (isSamplerType(param.type))
         {
-            const count = u32(cursor.at);
+            const count = at32(cursor.at);
             cursor.at += 4;
             /** @type {StateModel[]} */
             const list = [];
@@ -292,10 +292,10 @@ function read(bytes, messages){
      * @returns {RawState}
      */
     const readState = (cursor, label)=>{
-        const operation = u32(cursor.at);
-        const index = u32(cursor.at + 4);
-        const typeAt = u32(cursor.at + 8);
-        const valueAt = u32(cursor.at + 12);
+        const operation = at32(cursor.at);
+        const index = at32(cursor.at + 4);
+        const typeAt = at32(cursor.at + 8);
+        const valueAt = at32(cursor.at + 12);
         cursor.at += 16;
         const name = STATE_NAMES[operation];
         if (name === undefined)
@@ -307,7 +307,7 @@ function read(bytes, messages){
         const param = typedef({ at: typeAt }, 0);
         value(param, { at: valueAt }, [], label);
         const objectId = param.cls === PC.OBJECT && ownsObject(param.type)
-            ? u32(valueAt) : -1;
+            ? at32(valueAt) : -1;
         /** @type {StateModel} */
         const model = { name, kind: entry.kind, op: entry.op, index, value: entry.value,
             source: entry.kind === 'vs' || entry.kind === 'ps'

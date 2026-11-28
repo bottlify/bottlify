@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createInvoker, effectiveType } from './invoke.js';
 import { parseTypeLib } from './typelib.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const library = parseTypeLib(
     new Uint8Array(readFileSync(new URL('./msft-typelib.bin', import.meta.url))));
@@ -44,9 +45,8 @@ function fakeHost(){
         /** What the fake method does when called: writes and an answer. */
         answer: /** @type {(entry: number, args: number[]) => number} */ (()=>0),
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
+        guest: guestOver(bytes),
         /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
         heap: {
             /** @param {number} size */
             allocate: size=>{

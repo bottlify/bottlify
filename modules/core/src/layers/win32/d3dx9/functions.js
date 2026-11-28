@@ -51,7 +51,6 @@ import { createShaderSemantics } from './semantics.js';
 import { createMeshFunctions } from './mesh.js';
 import { createMeshObjects } from './mesh-object.js';
 import { createShapes } from './shapes.js';
-import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { createDeclarationFunctions } from './fvf.js';
 import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
@@ -94,7 +93,6 @@ const NOT_BUILT = {
     D3DXSimplifyMesh: [28, 6],
     D3DXUVAtlasPartition: [68, 11, 12, 13, 14],
 };
-
 
 /** D3D_SDK_VERSION of the DirectX 9 headers every d3dx9 version was built against. */
 const D3D_SDK_VERSION = 32;
@@ -150,11 +148,6 @@ withLongCode(QUATERNION, QUATERNION_LONG);
 /**
  * @typedef {Object} D3dxHost
  * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number) => number} [readU32]  A word read in place.
- * @property {4 | 8} [pointerSize]  8 in a 64-bit process.
- * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  *           Where a COM object gets the interface pointer a program holds.
@@ -206,6 +199,7 @@ withLongCode(QUATERNION, QUATERNION_LONG);
  *     the layout of ID3DXEffect changed at 26 and 27. The latest when absent.
  */
 export function createD3dxFunctions(host, options = {}){
+    const { guest } = host;
     const textures = createTextureLoader(host);
     const sprites = createSprites(host);
     const fonts = createFonts(host, sprites);
@@ -232,38 +226,16 @@ export function createD3dxFunctions(host, options = {}){
         }
         return text;
     };
+    /**
+     * A string D3DX reads byte for byte, a character each.
+     *
+     * @param {number} at @returns {string}
+     */
+    const latinAt = at=>latin1(guest.stringBytes(at, false, 4096));
+    /** A pointer's bytes in the calling process. */
+    const POINTER = guest.pointerSize;
     /** Text as the bytes D3DX hands back: one a character, then a NUL. @param {string} text */
     const encode = text=>Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff);
-    /** @param {number} address */
-    const u32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /**
-     * A NUL-ended string's bytes, at most 4 KB of them, read a window at a time
-     * so one at the end of what the program allocated is not read past.
-     *
-     * @param {number} address
-     */
-    const cString = address=>readToTerminator(host, address, 1, 4096).bytes;
-    /** @param {number} at @param {number} value */
-    const putU32 = (at, value)=>host.writeMemory(wholeAddress(at), Uint8Array.of(value & 0xff,
-        value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
-
-    /** A pointer's bytes in the calling process. */
-    const POINTER = host.pointerSize === 8 ? 8 : 4;
-    /**
-     * A pointer written whole: its high half zero in a 64-bit process.
-     *
-     * @param {number} at @param {number} value
-     */
-    const putPointer = (at, value)=>{
-        putU32(at, value);
-        if (POINTER === 8)
-        {
-            putU32(at + 4, 0);
-        }
-    };
 
     /**
      * An ID3DXBuffer holding these bytes, its pointer written to `out`.
@@ -280,7 +252,7 @@ export function createD3dxFunctions(host, options = {}){
         {
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(data, bytes);
+        guest.setBytes(data, bytes);
         const object = createComObject(IID_ID3DXBUFFER, { interfaces: [buffer],
             state: { data, size }, destroy: ()=>heap.free(data) });
         const pointer = vtables.publish(object, IID_ID3DXBUFFER);
@@ -289,7 +261,7 @@ export function createD3dxFunctions(host, options = {}){
             object.release();
             return E_OUTOFMEMORY;
         }
-        putPointer(out, pointer);
+        guest.setPtr(out, pointer);
         return 0;
     };
 
@@ -303,7 +275,7 @@ export function createD3dxFunctions(host, options = {}){
             face, out] = args;
         if ((out >>> 0) !== 0)
         {
-            putPointer(out, 0);
+            guest.setPtr(out, 0);
         }
         if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
         {
@@ -325,7 +297,7 @@ export function createD3dxFunctions(host, options = {}){
         {
             return D3DERR_INVALIDCALL;
         }
-        const bytes = host.readMemory(wholeAddress(desc), 24);
+        const bytes = guest.snapshot(desc, 24);
         const view = new DataView(bytes.slice().buffer);
         return createFont([device, view.getInt32(0, true), view.getUint32(4, true),
             view.getUint32(8, true), view.getUint32(12, true), view.getUint32(16, true),
@@ -340,9 +312,9 @@ export function createD3dxFunctions(host, options = {}){
         }
         if (!isWide)
         {
-            return latin1(cString(at)).slice(0, 31);
+            return latinAt(at).slice(0, 31);
         }
-        return charactersOf(readToTerminator(host, at, 2, 32).bytes, 2).slice(0, 31);
+        return guest.wstr(at, 64).slice(0, 31);
     };
 
     /**
@@ -354,11 +326,12 @@ export function createD3dxFunctions(host, options = {}){
     const macrosAt = at=>{
         /** @type {[string, string][]} */
         const macros = [];
-        for (let entry = wholeAddress(at); entry !== 0 && u32(entry) !== 0 && macros.length < 1024;
+        for (let entry = wholeAddress(at); entry !== 0 && guest.u32(entry) !== 0
+            && macros.length < 1024;
             entry += 2 * POINTER)
         {
-            const value = u32(entry + POINTER);
-            macros.push([latin1(cString(u32(entry))), value === 0 ? '' : latin1(cString(value))]);
+            const value = guest.u32(entry + POINTER);
+            macros.push([latinAt(guest.u32(entry)), value === 0 ? '' : latinAt(value)]);
         }
         return macros;
     };
@@ -396,21 +369,22 @@ export function createD3dxFunctions(host, options = {}){
         }
         try
         {
-            host.writeMemory(scratch, encode(name));
+            guest.setBytes(scratch, encode(name));
             const dataOut = scratch + name.length + 1;
             const bytesOut = dataOut + 8;
-            putPointer(dataOut, 0);
-            putU32(bytesOut, 0);
-            const vtable = u32(include);
-            const answer = await callGuest({ entry: u32(vtable), args: [include, system ? 1 : 0,
+            guest.setPtr(dataOut, 0);
+            guest.set32(bytesOut, 0);
+            const vtable = guest.u32(include);
+            const answer = await callGuest({ entry: guest.u32(vtable), args: [include,
+                system ? 1 : 0,
                 scratch, 0, dataOut, bytesOut], thread });
-            const data = u32(dataOut);
+            const data = guest.u32(dataOut);
             if ((answer | 0) < 0 || data === 0)
             {
                 return null;
             }
-            const text = latin1(host.readMemory(data, u32(bytesOut)).slice());
-            await callGuest({ entry: u32(vtable + POINTER), args: [include, data], thread });
+            const text = latin1(guest.snapshot(data, guest.u32(bytesOut)));
+            await callGuest({ entry: guest.u32(vtable + POINTER), args: [include, data], thread });
             return text;
         }
         finally
@@ -433,9 +407,6 @@ export function createD3dxFunctions(host, options = {}){
      * once its includes are found the same.
      */
     const compiles = createCompileCache(host.compiles);
-
-    /** A wide string, at most 1024 characters. @param {number} address */
-    const wideAt = address=>charactersOf(readToTerminator(host, address, 2, 1024).bytes, 2);
 
     /** @typedef {NonNullable<import('./preprocess.js').PreprocessOptions['include']>} Include */
 
@@ -504,14 +475,14 @@ export function createD3dxFunctions(host, options = {}){
     const shaderSources = {
         /** @param {number} data @param {number} size @param {number} include */
         memory: (data, size, include)=>/** @type {ShaderSource} */ ({
-            text: untilNul(host.readMemory(wholeAddress(data), size >>> 0)),
+            text: untilNul(guest.snapshot(data, size >>> 0)),
             include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) }),
         /**
          * @param {string} api @param {number} file @param {boolean} wide @param {number} include
          * @returns {ShaderSource}
          */
         file: (api, file, wide, include)=>{
-            const path = wide ? wideAt(file) : latin1(cString(file));
+            const path = wide ? guest.wstr(file, 2048) : latinAt(file);
             return { text: fileText(api, path),
                 include: (include >>> 0) === 0 ? besides(api, path) : includer(include >>> 0) };
         },
@@ -524,7 +495,7 @@ export function createD3dxFunctions(host, options = {}){
          */
         resource: (api, module, name, wide, include)=>{
             const key = (name >>> 0) < 0x10000 ? name >>> 0
-                : wide ? wideAt(name) : latin1(cString(name));
+                : wide ? guest.wstr(name, 2048) : latinAt(name);
             const read = async()=>{
                 if (!host.resource)
                 {
@@ -577,7 +548,7 @@ export function createD3dxFunctions(host, options = {}){
         {
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(wholeAddress(out), new Uint8Array(4));
+                guest.fill(out, 0, 4);
             }
         }
     };
@@ -771,8 +742,8 @@ export function createD3dxFunctions(host, options = {}){
             return D3DERR_INVALIDCALL;
         }
         return compileWork(api, source(include), macrosAt(defines), {
-            entry: (entry >>> 0) === 0 ? 'main' : latin1(cString(entry)),
-            profile: latin1(cString(profile)), flags: flags >>> 0 },
+            entry: (entry >>> 0) === 0 ? 'main' : latinAt(entry),
+            profile: latinAt(profile), flags: flags >>> 0 },
         shaderOut, errorsOut, tableOut);
     };
 
@@ -824,7 +795,7 @@ export function createD3dxFunctions(host, options = {}){
                 {
                     if ((args[at] >>> 0) !== 0)
                     {
-                        host.writeMemory(args[at] >>> 0, new Uint8Array(4));
+                        guest.fill(args[at] >>> 0, 0, 4);
                     }
                 }
                 host.divergence?.(name, 'answered E_NOTIMPL: nothing is built on a device here');
@@ -842,7 +813,7 @@ export function createD3dxFunctions(host, options = {}){
             handler: ([device, out])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    putPointer(out, 0);
+                    guest.setPtr(out, 0);
                 }
                 if (wholeAddress(device) === 0 || wholeAddress(out) === 0 || !host.vtables)
                 {
@@ -853,7 +824,7 @@ export function createD3dxFunctions(host, options = {}){
                 {
                     return E_OUTOFMEMORY;
                 }
-                putPointer(out, pointer);
+                guest.setPtr(out, pointer);
                 return 0;
             },
         },
@@ -899,7 +870,7 @@ export function createD3dxFunctions(host, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(wholeAddress(out), new Uint8Array(4));
+                guest.fill(out, 0, 4);
                 if (!host.heap || !host.vtables)
                 {
                     return E_NOTIMPL;
@@ -952,7 +923,7 @@ export function createD3dxFunctions(host, options = {}){
             handler: ([shader, , comments, out])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    host.writeMemory(wholeAddress(out), new Uint8Array(4));
+                    guest.fill(out, 0, 4);
                 }
                 if (wholeAddress(shader) === 0 || wholeAddress(out) === 0 || !host.heap
                     || !host.vtables)
@@ -966,7 +937,7 @@ export function createD3dxFunctions(host, options = {}){
                 const length = functionLength(at=>{
                     while (words.length <= at)
                     {
-                        words.push(u32(wholeAddress(shader) + words.length * 4));
+                        words.push(guest.u32(wholeAddress(shader) + words.length * 4));
                     }
                     return words[at];
                 });
@@ -983,7 +954,7 @@ export function createD3dxFunctions(host, options = {}){
                 {
                     listing = disassembleShader(Uint32Array.from(words),
                         wholeAddress(comments) === 0
-                            ? undefined : { comments: latin1(cString(comments)) });
+                            ? undefined : { comments: latinAt(comments) });
                 }
                 catch (e){
                     host.divergence?.('D3DXDisassembleShader', `refused: ${

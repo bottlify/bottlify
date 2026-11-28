@@ -85,10 +85,9 @@ const DDS_MAGIC = 0x20534444;
 const DDS_HEADERS = 148;
 /**
  * @typedef {Object} D3dx10Host
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number) => number} [readU32]
- * @property {(address: number, value: number) => void} [writeU32]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ publish: (object: any, interfaceId: string) => number,
  *     unpublish?: (object: any, interfaceId: string) => boolean }} [vtables]
@@ -137,7 +136,8 @@ const D3DX10_PROFILE = Object.freeze({ prefix: 'D3DX10', sdk: D3D10_SDK_VERSION,
  */
 export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
     const { prefix } = profile;
-    const { u32, putU32s, method, string } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
     const blob = {
         id: IID_ID3D10BLOB,
         methods: [
@@ -175,7 +175,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             object.release();
             return E_OUTOFMEMORY;
         }
-        putU32s(out, [pointer]);
+        guest.set32s(out, [pointer]);
         return S_OK;
     };
 
@@ -183,7 +183,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
     const answer = (at, hr)=>{
         if ((at >>> 0) !== 0)
         {
-            putU32s(at, [hr >>> 0]);
+            guest.set32s(at, [hr >>> 0]);
         }
         return hr;
     };
@@ -205,7 +205,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
                 mipFilter: D3DX10_DEFAULT }, srcInfo: 0 };
         }
         const [width, height, depth, firstMip, mips, usage, bind, cpu, misc, format, filter,
-            mipFilter, srcInfo] = Array.from({ length: 13 }, (_, i)=>u32(at + i * 4));
+            mipFilter, srcInfo] = Array.from({ length: 13 }, (_, i)=>guest.u32(at + i * 4));
         return { info: { width, height, depth, firstMip, mips, usage, bind, cpu, misc, format,
             filter, mipFilter }, srcInfo };
     };
@@ -258,7 +258,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
         try
         {
             const { width, height, depth, mips, arraySize, format, usage, bind, cpu, misc } = plan;
-            putU32s(block, plan.dimension === DIMENSION.TEXTURE3D
+            guest.set32s(block, plan.dimension === DIMENSION.TEXTURE3D
                 ? [width, height, depth, mips, format, usage, bind, cpu, misc]
                 : plan.dimension === DIMENSION.TEXTURE1D
                     ? [width, mips, arraySize, format, usage, bind, cpu, misc]
@@ -272,7 +272,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
                 records.push(at, pitch, slice);
                 at += data.length;
             }
-            putU32s(block + descBytes, records);
+            guest.set32s(block + descBytes, records);
             return await method(thread, device,
                 plan.dimension === DIMENSION.TEXTURE3D ? profile.device.CreateTexture3D
                     : plan.dimension === DIMENSION.TEXTURE1D ? profile.device.CreateTexture1D
@@ -293,7 +293,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
      * @param {number} at @param {import('./dds10.js').DxgiImage} image
      */
     const writeInfo = (at, image)=>{
-        putU32s(at, [image.width, image.height, image.depth ?? 1, image.arraySize,
+        guest.set32s(at, [image.width, image.height, image.depth ?? 1, image.arraySize,
             image.mipLevels, image.cube ? MISC_TEXTURECUBE : 0, image.dxgi, image.dimension,
             image.fileFormat]);
     };
@@ -320,7 +320,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
         {
             return { early: E_FAIL };
         }
-        if (size < 4 || u32(data) !== DDS_MAGIC)
+        if (size < 4 || guest.u32(data) !== DDS_MAGIC)
         {
             return { bytes: host.readMemory(data, size).slice() };
         }
@@ -352,7 +352,8 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
         {
             return { early: E_FAIL };
         }
-        const bytes = host.readFile ? await host.readFile(string(at, wide, 260)) : null;
+        const bytes = host.readFile ? await host.readFile(guest.text(at, wide,
+            wide ? 260 * 2 : 260)) : null;
         return bytes ? { bytes } : { hr: profile.fileNotFound };
     };
     /**
@@ -362,7 +363,8 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
      * @returns {Promise<Found>}
      */
     const fromResource = async(module, at, wide)=>{
-        const name = at === 0 ? null : at < 0x10000 ? at : string(at, wide, 256);
+        const name = at === 0 ? null : at < 0x10000 ? at : guest.text(at, wide,
+            wide ? 256 * 2 : 256);
         const bytes = name === null ? null : await host.resource?.(module, name, RT_RCDATA) ?? null;
         return bytes ? { bytes } : { early: D3DX10_ERR_INVALID_DATA };
     };
@@ -377,7 +379,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
 
     /** @type {Record<string, any>} */
     const loaders = createDataLoaders(host, { prefix, fileNotFound: profile.fileNotFound,
-        string });
+        string: (at, wide, max)=>guest.text(at, wide, wide ? max * 2 : max) });
 
     /** @param {Source} source @param {boolean} [headerOnly] @returns {Promise<Found>} */
     const found = (source, headerOnly)=>(source.kind === 'Memory' ? Promise.resolve(fromMemory(
@@ -416,7 +418,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
                 return processor;
             }
             // ID3DX10ThreadPump::AddWorkItem(loader, processor, pHResult, ppDeviceObject).
-            return await method(thread, pump, 3, [u32(pair), u32(pair + 4), hr, out]);
+            return await method(thread, pump, 3, [guest.u32(pair), guest.u32(pair + 4), hr, out]);
         }
         finally
         {
@@ -448,7 +450,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
         {
             return E_OUTOFMEMORY;
         }
-        putU32s(out, [pointer]);
+        guest.set32s(out, [pointer]);
         return S_OK;
     };
 
@@ -485,7 +487,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             let result = await create(device, plan, held, thread);
             if (view && result === S_OK)
             {
-                const texture = u32(held);
+                const texture = guest.u32(held);
                 result = await method(thread, device, profile.device.CreateShaderResourceView,
                     [texture, 0, out]);
                 await method(thread, texture, UNKNOWN_RELEASE, []);
@@ -655,7 +657,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
          * @param {number[]} args
          */
         const open = async(_self, [, nameAt, , dataOut, bytesOut])=>{
-            const file = string(nameAt >>> 0, false, 260);
+            const file = guest.cstr(nameAt >>> 0, 260);
             const path = /^([A-Za-z]:)?\\/.test(file) ? file : `${directory}${file}`;
             const bytes = host.readFile ? await host.readFile(path) : null;
             if (!bytes)
@@ -669,8 +671,8 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             }
             host.writeMemory(at, bytes);
             held.add(at);
-            putU32s(dataOut >>> 0, [at]);
-            putU32s(bytesOut >>> 0, [bytes.length]);
+            guest.set32s(dataOut >>> 0, [at]);
+            guest.set32s(bytesOut >>> 0, [bytes.length]);
             return S_OK;
         };
         /**
@@ -745,19 +747,19 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
                     shaderOut, errorsOut], ...(thread === undefined ? {} : { thread }) });
             return answer(hrAt, hr | 0);
         }
-        const entry = entryAt === 0 ? '' : string(entryAt, false, 256);
-        const target = profileAt === 0 ? '' : string(profileAt, false, 32);
+        const entry = entryAt === 0 ? '' : guest.cstr(entryAt, 256);
+        const target = profileAt === 0 ? '' : guest.cstr(profileAt, 32);
         const reason = 'error X0000: this build has no HLSL compiler for'
             + ` ${target || 'this profile'} (${entry || 'no entry point'})`;
         host.divergence?.(`${prefix}CompileFromMemory`, `refused ${profile} ${entry}: no shader`
             + ' model 4 compiler');
         if (shaderOut !== 0)
         {
-            putU32s(shaderOut, [0]);
+            guest.set32s(shaderOut, [0]);
         }
         if (errorsOut !== 0)
         {
-            putU32s(errorsOut, [0]);
+            guest.set32s(errorsOut, [0]);
             giveBlob(errorsOut, Uint8Array.from([...reason, '\0'], c=>c.charCodeAt(0) & 0xff));
         }
         return answer(hrAt, E_FAIL);
@@ -878,13 +880,13 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
                     errorsOut, hrAt] = args.map(wholeAddress);
                 if (shaderOut !== 0)
                 {
-                    putU32s(shaderOut, [0]);
+                    guest.set32s(shaderOut, [0]);
                 }
                 if (errorsOut !== 0)
                 {
-                    putU32s(errorsOut, [0]);
+                    guest.set32s(errorsOut, [0]);
                 }
-                const path = file === 0 ? '' : string(file, wide, 260);
+                const path = file === 0 ? '' : guest.text(file, wide, wide ? 260 * 2 : 260);
                 const bytes = file === 0 || !host.readFile ? null : await host.readFile(path);
                 if (!bytes)
                 {

@@ -10,6 +10,7 @@ import { createD3dx10Functions } from './functions.js';
 import { DIMENSION } from './dds10.js';
 import { dds10 } from './dds10.fixture.js';
 import { D3DX11_PROFILE } from '../d3dx11/functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * Guest memory, a bump heap, and a device whose vtable's slot N holds N, so
@@ -29,6 +30,7 @@ function machine(){
     /** @type {{ slot: number, args: number[], desc: number[], data: number[][] }[]} */
     const calls = [];
     const host = {
+        guest: guestOver(memory),
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             memory.subarray(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
@@ -105,8 +107,9 @@ test('D3DX10CreateTextureFromResource takes a name past 2 GiB as a name, not a n
     /** @type {unknown[]} */
     const asked = [];
     // The low megabyte stands for every address: 0x9000_8000 reads what 0x8000 holds.
-    host.readMemory = (/** @type {number} */ at, /** @type {number} */ length)=>
-        memory.subarray((at >>> 0) & 0xfffff, ((at >>> 0) & 0xfffff) + length);
+    const low = host.guest;
+    host.guest = { ...low, text: (at, wide, limit, counted)=>low.text((at >>> 0) & 0xfffff, wide,
+        limit, counted) };
     /** @type {any} */ (host).resource = async(/** @type {number} */ _, /** @type {unknown} */ name)=>{
         asked.push(name);
         return null;

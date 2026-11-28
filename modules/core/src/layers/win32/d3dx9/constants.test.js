@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createConstantTables, registerValues } from './constants.js';
 import { COMPILED as SETTERS_LONG } from './constants-setters.x64.js';
 import { COMPILED as SETTERS_32 } from './constants-setters.x86.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * A vertex shader's bytecode as a compiler writes it: the version token, then
@@ -93,9 +94,7 @@ function machine(code = shader(), options = {}){
         view.setUint32(0x200 + slot * pointer, slot, true);
     }
     const tables = createConstantTables({
-        ...options.pointerSize ? { pointerSize: options.pointerSize } : {},
-        readMemory: (address, length)=>memory.subarray(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory, options.pointerSize),
         heap: { allocate: bytes=>{
             const at = free;
             free += bytes + 15 & ~15;

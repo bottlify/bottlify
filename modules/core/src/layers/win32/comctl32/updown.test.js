@@ -71,11 +71,6 @@ function setup({ style = 0, refuse = false, subclass = false } = {}){
         live: (/** @type {number} */ hwnd)=>records[hwnd] ?? null,
         children: ()=>[records[EDIT], records[UPDOWN]],
         guest: guestOver(memory),
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            memory.subarray(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, at),
-        readCString,
         allocate: (/** @type {number} */ bytes)=>(heap += (bytes + 15) & ~15) - ((bytes + 15) & ~15),
         release: ()=>{},
         invalidate: ()=>{},

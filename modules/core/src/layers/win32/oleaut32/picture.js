@@ -24,6 +24,7 @@ import { decodeJpeg } from '../../media/internal/jpeg.js';
 import { isPng, readPng } from '../../media/internal/png.js';
 import { decodeGifFrames, isGif } from '../../media/internal/gif.js';
 import { wholeAddress } from '../common/pointers.js';
+import { WHOLE } from '../common/guest.js';
 
 export const IID_IPICTURE = '{7BF80980-BF32-101A-8BBB-00AA00300CAB}';
 export const IID_IPICTUREDISP = '{7BF80981-BF32-101A-8BBB-00AA00300CAB}';
@@ -121,8 +122,7 @@ const toHimetric = value=>Math.round(value * HIMETRIC_PER_INCH / PIXELS_PER_INCH
 
 /**
  * @typedef {Object} PictureHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => void} free
  * @property {(name: string, args: number[]) => any} gdi32
@@ -137,19 +137,7 @@ const toHimetric = value=>Math.round(value * HIMETRIC_PER_INCH / PIXELS_PER_INCH
 
 /** @param {PictureHost} host */
 export function createPictureObjects(host){
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>
-        host.writeMemory(wholeAddress(address),
-            new Uint8Array(new Uint32Array([value >>> 0]).buffer));
-    /** @param {number} address @param {number} value */
-    const writeU16 = (address, value)=>
-        host.writeMemory(wholeAddress(address),
-            new Uint8Array(new Uint16Array([value & 0xffff]).buffer));
+    const { guest } = host;
     /**
      * Guest memory holding `bytes` while `use` runs, given back after; null
      * when there is none.
@@ -164,7 +152,7 @@ export function createPictureObjects(host){
         {
             return null;
         }
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         try
         {
             return use(at);
@@ -188,7 +176,7 @@ export function createPictureObjects(host){
         {
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         let answer;
         try
         {
@@ -214,7 +202,7 @@ export function createPictureObjects(host){
         {
             return null;
         }
-        const words = new Int32Array(host.readMemory(at, 12).slice().buffer);
+        const words = new Int32Array(guest.snapshot(at, 12).buffer);
         return { width: words[1], height: Math.abs(words[2]) };
     });
 
@@ -231,10 +219,9 @@ export function createPictureObjects(host){
         {
             return null;
         }
-        const object = new DataView(host.readMemory(at, 24).slice().buffer);
-        const width = object.getInt32(4, true);
-        const height = Math.abs(object.getInt32(8, true));
-        const depth = object.getUint16(18, true) * object.getUint16(16, true);
+        const width = guest.i32(at + 4);
+        const height = Math.abs(guest.i32(at + 8));
+        const depth = guest.u16(at + 18) * guest.u16(at + 16);
         // A depth past a colour table's is written at 24 bits.
         const bitCount = depth <= 1 ? 1 : depth <= 4 ? 4 : depth <= 8 ? 8 : 24;
         const colours = bitCount <= 8 ? 1 << bitCount : 0;
@@ -257,7 +244,7 @@ export function createPictureObjects(host){
             const lines = host.gdi32('GetDIBits',
                 [screen, bitmap, 0, height, info + infoBytes, info, DIB_RGB_COLORS]) | 0;
             host.user32('ReleaseDC', [0, screen]);
-            return lines === 0 ? null : host.readMemory(info, file.length - 14).slice();
+            return lines === 0 ? null : guest.snapshot(info, file.length - 14);
         });
         if (!filled)
         {
@@ -283,7 +270,7 @@ export function createPictureObjects(host){
         {
             return null;
         }
-        const [, , , mask, colour] = new Uint32Array(host.readMemory(at, 20).slice().buffer);
+        const [, , , mask, colour] = new Uint32Array(guest.snapshot(at, 20).buffer);
         try
         {
             const image = bitmapFile(colour === 0 ? mask : colour);
@@ -350,7 +337,7 @@ export function createPictureObjects(host){
             const lines = host.gdi32('GetDIBits',
                 [screen, bitmap, 0, height, at + 48, at, DIB_RGB_COLORS]) | 0;
             host.user32('ReleaseDC', [0, screen]);
-            return lines === 0 ? null : host.readMemory(at + 48, stride * height).slice();
+            return lines === 0 ? null : guest.snapshot(at + 48, stride * height);
         });
     };
 
@@ -388,7 +375,7 @@ export function createPictureObjects(host){
             return null;
         }
         return lend(new Uint8Array(size), at=>((host.gdi32('GetEnhMetaFileBits',
-            [metafile, size, at]) >>> 0) === size ? host.readMemory(at, size).slice() : null));
+            [metafile, size, at]) >>> 0) === size ? guest.snapshot(at, size) : null));
     };
 
     /**
@@ -401,7 +388,7 @@ export function createPictureObjects(host){
         {
             return { width: 0, height: 0 };
         }
-        const frame = new Int32Array(host.readMemory(at + 24, 16).slice().buffer);
+        const frame = new Int32Array(guest.snapshot(at + 24, 16).buffer);
         return { width: frame[2] - frame[0], height: frame[3] - frame[1] };
     }) ?? { width: 0, height: 0 };
 
@@ -493,7 +480,7 @@ export function createPictureObjects(host){
      * @returns {Promise<number> | number}
      */
     const writeStream = (stream, bytes, thread)=>{
-        const entry = readU32(readU32(stream) + STREAM_WRITE * 4);
+        const entry = guest.u32(guest.u32(stream) + STREAM_WRITE * 4);
         return lendUntil(bytes, at=>host.call(entry, [stream, at, bytes.length, 0], thread));
     };
 
@@ -506,7 +493,7 @@ export function createPictureObjects(host){
             {
                 return E_POINTER;
             }
-            writeU32(out, get(object.state));
+            guest.set32(out, get(object.state));
             return S_OK;
         },
     });
@@ -532,7 +519,7 @@ export function createPictureObjects(host){
                 {
                     return E_FAIL;
                 }
-                writeU32(out, state.hpal);
+                guest.set32(out, state.hpal);
                 return S_OK;
             } },
         { name: 'get_Type', argBytes: 8,
@@ -542,7 +529,7 @@ export function createPictureObjects(host){
                 {
                     return E_POINTER;
                 }
-                writeU16(out, state.type);
+                guest.set16(out, state.type);
                 return S_OK;
             } },
         getter('get_Width', 8, state=>state.width),
@@ -570,13 +557,13 @@ export function createPictureObjects(host){
                 }
                 if ((dcOut >>> 0) !== 0)
                 {
-                    writeU32(dcOut, state.curDC);
+                    guest.set32(dcOut, state.curDC);
                 }
                 host.gdi32('SelectObject', [hdc, state.handle]);
                 state.curDC = hdc >>> 0;
                 if ((bitmapOut >>> 0) !== 0)
                 {
-                    writeU32(bitmapOut, state.handle);
+                    guest.set32(bitmapOut, state.handle);
                 }
                 return S_OK;
             } },
@@ -587,7 +574,7 @@ export function createPictureObjects(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, state.keep ? 1 : 0);
+                guest.set32(out, state.keep ? 1 : 0);
                 return S_OK;
             } },
         { name: 'put_KeepOriginalFormat', argBytes: 8,
@@ -617,7 +604,7 @@ export function createPictureObjects(host){
                 return after(writeStream(stream, bytes, host.callerThread()), hr=>{
                     if ((hr | 0) >= 0 && (sizeOut >>> 0) !== 0)
                     {
-                        writeU32(sizeOut, bytes.length);
+                        guest.set32(sizeOut, bytes.length);
                     }
                     return hr | 0;
                 });
@@ -629,27 +616,12 @@ export function createPictureObjects(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, state.type === PICTYPE.ICON ? PICTURE_TRANSPARENT
+                guest.set32(out, state.type === PICTYPE.ICON ? PICTURE_TRANSPARENT
                     : state.type === PICTYPE.METAFILE || state.type === PICTYPE.ENHMETAFILE
                         ? PICTURE_SCALABLE | PICTURE_TRANSPARENT : 0);
                 return S_OK;
             } },
     ]);
-
-    /** @param {number} address @returns {string} */
-    const readWide = address=>{
-        let text = '';
-        for (let at = wholeAddress(address); text.length < 256; at += 2)
-        {
-            const [low, high] = host.readMemory(at, 2);
-            if ((low | high) === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(low | high << 8);
-        }
-        return text;
-    };
 
     const DISPATCH_METHODS = Object.freeze([
         ...IUNKNOWN,
@@ -660,7 +632,7 @@ export function createPictureObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 return S_OK;
             } },
         { name: 'GetTypeInfo', argBytes: 16, invoke: ()=>DISP_E_BADINDEX },
@@ -670,9 +642,9 @@ export function createPictureObjects(host){
                 let hr = S_OK;
                 for (let index = 0; index < (count >>> 0); index++)
                 {
-                    const name = readWide(readU32(names + index * 4)).toLowerCase();
+                    const name = guest.wstr(guest.u32(names + index * 4), WHOLE).toLowerCase();
                     const id = index === 0 ? DISPIDS.get(name) : undefined;
-                    writeU32(out + index * 4, id ?? -1);
+                    guest.set32(out + index * 4, id ?? -1);
                     if (id === undefined)
                     {
                         hr = DISP_E_UNKNOWNNAME;
@@ -696,18 +668,18 @@ export function createPictureObjects(host){
                     const view = new DataView(variant.buffer);
                     view.setUint16(0, id === 3 ? VT_I2 : VT_I4, true);
                     view.setInt32(8, value | 0, true);
-                    host.writeMemory(wholeAddress(result), variant);
+                    guest.setBytes(result, variant);
                     return S_OK;
                 }
                 if ((flags & DISPATCH_PROPERTYPUT) !== 0 && id === 2)
                 {
                     // DISPPARAMS: rgvarg, rgdispidNamedArgs, cArgs, cNamedArgs.
-                    if ((params >>> 0) === 0 || readU32(params + 8) < 1
+                    if ((params >>> 0) === 0 || guest.u32(params + 8) < 1
                         || state.type !== PICTYPE.BITMAP)
                     {
                         return (params >>> 0) === 0 ? E_INVALIDARG : DISP_E_BADPARAMCOUNT;
                     }
-                    state.hpal = readU32(readU32(params) + 8);
+                    state.hpal = guest.u32(guest.u32(params) + 8);
                     return S_OK;
                 }
                 if ((flags & DISPATCH_METHOD) !== 0 && id === 6)
@@ -739,7 +711,7 @@ export function createPictureObjects(host){
                 {
                     return E_POINTER;
                 }
-                host.writeMemory(wholeAddress(out), CLSID_STDPICTURE_BYTES);
+                guest.setBytes(out, CLSID_STDPICTURE_BYTES);
                 return S_OK;
             } },
         { name: 'IsDirty', argBytes: 4, invoke: ()=>S_FALSE },
@@ -795,8 +767,8 @@ export function createPictureObjects(host){
                 {
                     return E_FAIL;
                 }
-                writeU32(wholeAddress(out), SAVED_HEADER + bytes.length);
-                writeU32(wholeAddress(out) + 4, 0);
+                guest.set32(wholeAddress(out), SAVED_HEADER + bytes.length);
+                guest.set32(wholeAddress(out) + 4, 0);
                 return S_OK;
             } },
     ]);
@@ -819,13 +791,13 @@ export function createPictureObjects(host){
     const publish = (state, iid, out)=>{
         if (iid !== IID_IUNKNOWN && !(iid in interfaces))
         {
-            writeU32(out, 0);
+            guest.set32(out, 0);
             destroy(state);
             return E_NOINTERFACE;
         }
         const adapter = host.adapt(state, interfaces, ()=>destroy(state));
         const pointer = host.publish(adapter, iid === IID_IUNKNOWN ? IID_IPICTURE : iid);
-        writeU32(out, pointer);
+        guest.set32(out, pointer);
         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
     };
 
@@ -861,8 +833,8 @@ export function createPictureObjects(host){
         {
             return made(PICTYPE.UNINITIALIZED, 0);
         }
-        const type = readU32(desc + 4) | 0;
-        const handle = readU32(desc + 8);
+        const type = guest.u32(desc + 4) | 0;
+        const handle = guest.u32(desc + 8);
         switch (type)
         {
             case PICTYPE.UNINITIALIZED:
@@ -871,7 +843,7 @@ export function createPictureObjects(host){
             case PICTYPE.BITMAP:
             {
                 const state = made(type, handle);
-                state.hpal = readU32(desc + 12);
+                state.hpal = guest.u32(desc + 12);
                 const size = bitmapSize(handle);
                 return size ? sized(state, size.width, size.height) : state;
             }
@@ -880,8 +852,8 @@ export function createPictureObjects(host){
             case PICTYPE.METAFILE:
             {
                 const state = made(type, handle);
-                state.width = readU32(desc + 12) | 0;
-                state.height = readU32(desc + 16) | 0;
+                state.width = guest.u32(desc + 12) | 0;
+                state.height = guest.u32(desc + 16) | 0;
                 return state;
             }
             case PICTYPE.ENHMETAFILE:
@@ -904,14 +876,14 @@ export function createPictureObjects(host){
      * @returns {number} the HBITMAP, 0 when it could not be made
      */
     const bitmapOf = (width, height, bgra)=>lend(new Uint8Array(48), info=>{
-        host.writeMemory(info, new Uint8Array(new Int32Array([40, width, -height,
-            32 << 16 | 1, BI_RGB, 0, 0, 0, 0, 0, 0]).buffer));
+        guest.set32s(info, [40, width, -height,
+            32 << 16 | 1, BI_RGB, 0, 0, 0, 0, 0, 0]);
         const bitmap = host.gdi32('CreateDIBSection', [0, info, DIB_RGB_COLORS, info + 44, 0, 0])
             >>> 0;
-        const bits = bitmap === 0 ? 0 : readU32(info + 44);
+        const bits = bitmap === 0 ? 0 : guest.u32(info + 44);
         if (bits !== 0)
         {
-            host.writeMemory(bits, bgra);
+            guest.setBytes(bits, bgra);
         }
         return bitmap;
     }) ?? 0;
@@ -956,10 +928,10 @@ export function createPictureObjects(host){
         return lend(header, info=>{
             const bitmap = host.gdi32('CreateDIBSection',
                 [0, info, DIB_RGB_COLORS, info + offset, 0, 0]) >>> 0;
-            const bits = bitmap === 0 ? 0 : readU32(info + offset);
+            const bits = bitmap === 0 ? 0 : guest.u32(info + offset);
             if (bits !== 0)
             {
-                host.writeMemory(bits, dib.subarray(offset, offset + length));
+                guest.setBytes(bits, dib.subarray(offset, offset + length));
             }
             return bitmap;
         }) ?? 0;
@@ -1255,18 +1227,18 @@ export function createPictureObjects(host){
         }
         try
         {
-            const read = readU32(readU32(stream) + STREAM_READ * 4);
+            const read = guest.u32(guest.u32(stream) + STREAM_READ * 4);
             /** @type {Uint8Array[]} */
             const pieces = [];
             let total = 0;
             while (total < limit)
             {
                 const wanted = Math.min(READ_PIECE, limit - total);
-                writeU32(block + READ_PIECE, 0);
+                guest.set32(block + READ_PIECE, 0);
                 const hr = (await host.call(read, [stream, block, wanted, block + READ_PIECE],
                     thread)) | 0;
-                const count = hr < 0 ? 0 : Math.min(readU32(block + READ_PIECE), wanted);
-                pieces.push(host.readMemory(block, count).slice());
+                const count = hr < 0 ? 0 : Math.min(guest.u32(block + READ_PIECE), wanted);
+                pieces.push(guest.snapshot(block, count));
                 total += count;
                 if (hr < 0 || count < wanted)
                 {
@@ -1342,8 +1314,8 @@ export function createPictureObjects(host){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
-            if ((desc >>> 0) !== 0 && readU32(desc) < 12)
+            guest.set32(out, 0);
+            if ((desc >>> 0) !== 0 && guest.u32(desc) < 12)
             {
                 return E_INVALIDARG;
             }
@@ -1368,7 +1340,7 @@ export function createPictureObjects(host){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             let image = bytes;
             while (image.length >= SAVED_HEADER && new DataView(image.buffer, image.byteOffset, 8)
                 .getUint32(0, true) === SAVED_PICTURE)
@@ -1396,7 +1368,7 @@ export function createPictureObjects(host){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             if ((stream >>> 0) === 0)
             {
                 return E_POINTER;

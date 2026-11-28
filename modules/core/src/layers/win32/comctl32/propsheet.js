@@ -31,7 +31,7 @@
  * ANSI window.
  */
 
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 import { after } from '../user32/controls.js';
 import { wholeAddress } from '../common/pointers.js';
 
@@ -267,8 +267,7 @@ const wizardFlags = flags=>(flags & (PSH_WIZARD | PSH_WIZARD_LITE | PSH_WIZARD97
  * address, PropertySheet reports failure rather than a sheet it cannot make.
  *
  * @typedef {Object} SheetHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [user32]
  *           user32's exports by name, looked up when a sheet needs one.
  * @property {(bytes: number) => number} [allocate]
@@ -328,6 +327,7 @@ const wizardFlags = flags=>(flags & (PSH_WIZARD | PSH_WIZARD_LITE | PSH_WIZARD97
  * @param {SheetHost} host
  */
 export function createPropertySheetFunctions(host){
+    const { guest } = host;
     /** @type {Map<number, Page>} */
     const pages = new Map();
     /** @type {Map<number, Sheet>} */
@@ -356,46 +356,8 @@ export function createPropertySheetFunctions(host){
     const inTurn = (...steps)=>steps.reduce((done, step)=>after(done, step),
         /** @type {any} */ (0));
 
-    /** @param {number} address */
-    const u32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address */
-    const u16 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 2);
-        return bytes[0] | bytes[1] << 8;
-    };
-    /** @param {number} address @param {number} value */
-    const putU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
     /** @param {number} address @param {boolean} wide */
-    const readText = (address, wide)=>{
-        let text = '';
-        /** @type {number[]} */
-        const bytes = [];
-        for (let at = wholeAddress(address), count = 0; count < 1024; count++)
-        {
-            const unit = wide ? u16(at) : host.readMemory(at, 1)[0];
-            if (unit === 0)
-            {
-                break;
-            }
-            if (wide)
-            {
-                text += String.fromCharCode(unit);
-            }
-            else
-            {
-                bytes.push(unit);
-            }
-            at += wide ? 2 : 1;
-        }
-        return wide ? text : decodeAnsi(Uint8Array.from(bytes));
-    };
+    const readText = (address, wide)=>guest.text(address, wide, wide ? 2048 : 1024);
     /** Terminated, as UTF-16 or in the ANSI page. @param {string} text @param {boolean} wide */
     const encode = (text, wide)=>{
         const bytes = new Uint8Array((text.length + 1) * (wide ? 2 : 1));
@@ -417,7 +379,7 @@ export function createPropertySheetFunctions(host){
         const address = host.allocate?.(bytes.length) ?? 0;
         if (address !== 0)
         {
-            host.writeMemory(address, bytes);
+            guest.setBytes(address, bytes);
         }
         return address;
     };
@@ -454,14 +416,14 @@ export function createPropertySheetFunctions(host){
     const describe = base=>{
         let at = 0;
         const skip = ()=>{
-            const first = u16(base + at);
+            const first = guest.u16(base + at);
             if (first === 0xffff)
             {
                 at += 4;
                 return '';
             }
             let text = '';
-            for (let unit = first; unit !== 0; unit = u16(base + at))
+            for (let unit = first; unit !== 0; unit = guest.u16(base + at))
             {
                 text += String.fromCharCode(unit);
                 at += 2;
@@ -469,11 +431,11 @@ export function createPropertySheetFunctions(host){
             at += 2;
             return text;
         };
-        const extended = u16(base) === 1 && u16(base + 2) === 0xffff;
-        const style = u32(base + (extended ? 12 : 0));
-        const count = u16(base + (extended ? 16 : 8));
-        const cx = u16(base + (extended ? 22 : 14)) << 16 >> 16;
-        const cy = u16(base + (extended ? 24 : 16)) << 16 >> 16;
+        const extended = guest.u16(base) === 1 && guest.u16(base + 2) === 0xffff;
+        const style = guest.u32(base + (extended ? 12 : 0));
+        const count = guest.u16(base + (extended ? 16 : 8));
+        const cx = guest.u16(base + (extended ? 22 : 14)) << 16 >> 16;
+        const cy = guest.u16(base + (extended ? 24 : 16)) << 16 >> 16;
         at = extended ? 26 : 18;
         skip();
         skip();
@@ -489,7 +451,7 @@ export function createPropertySheetFunctions(host){
             at += extended ? 24 : 18;
             skip();
             skip();
-            const extra = u16(base + at);
+            const extra = guest.u16(base + at);
             at += extended ? 2 + extra : (extra === 0 ? 2 : extra);
         }
         return { extended, style, cx, cy, title, size: at };
@@ -497,13 +459,13 @@ export function createPropertySheetFunctions(host){
 
     /** The template a page's dialog is made from, where it is, or zero. @param {Page} page */
     const templateOf = page=>{
-        const flags = u32(page.handle + PSP.dwFlags);
-        const named = u32(page.handle + PSP.pszTemplate);
+        const flags = guest.u32(page.handle + PSP.dwFlags);
+        const named = guest.u32(page.handle + PSP.pszTemplate);
         if ((flags & PSP_DLGINDIRECT) !== 0)
         {
             return named;
         }
-        const instance = u32(page.handle + PSP.hInstance);
+        const instance = guest.u32(page.handle + PSP.hInstance);
         const key = named < MAX_INTRESOURCE ? named : readText(named, page.wide);
         const found = host.findResource?.(instance, RT_DIALOG, key) ?? null;
         const base = host.moduleBase?.(instance) ?? 0;
@@ -512,10 +474,11 @@ export function createPropertySheetFunctions(host){
 
     /** A page's title: its own, or its template's caption. @param {Page} page */
     const titleOf = page=>{
-        const flags = u32(page.handle + PSP.dwFlags);
+        const flags = guest.u32(page.handle + PSP.dwFlags);
         if ((flags & PSP_USETITLE) !== 0)
         {
-            return stringOf(u32(page.handle + PSP.pszTitle), u32(page.handle + PSP.hInstance),
+            return stringOf(guest.u32(page.handle + PSP.pszTitle),
+                guest.u32(page.handle + PSP.hInstance),
                 page.wide);
         }
         const template = templateOf(page);
@@ -530,8 +493,8 @@ export function createPropertySheetFunctions(host){
      * @returns {number | Promise<number>} what it answered, or 1 without one
      */
     const pageCallback = (page, message, thread)=>{
-        const flags = u32(page.handle + PSP.dwFlags);
-        const callback = u32(page.handle + PSP.pfnCallback);
+        const flags = guest.u32(page.handle + PSP.dwFlags);
+        const callback = guest.u32(page.handle + PSP.pfnCallback);
         if ((flags & PSP_USECALLBACK) === 0 || callback === 0 || !host.call)
         {
             return 1;
@@ -555,24 +518,24 @@ export function createPropertySheetFunctions(host){
         {
             return 0;
         }
-        const size = u32(address);
+        const size = guest.u32(address);
         if (size < PSP.V1_SIZE || size > 0x10000)
         {
             return 0;
         }
-        const handle = place(host.readMemory(wholeAddress(address), size));
+        const handle = place(guest.snapshot(address, size));
         if (handle === 0)
         {
             return 0;
         }
         /** @type {Page} */
         const page = { handle, wide, titleCopy: 0 };
-        const flags = u32(handle + PSP.dwFlags);
-        const title = u32(handle + PSP.pszTitle);
+        const flags = guest.u32(handle + PSP.dwFlags);
+        const title = guest.u32(handle + PSP.pszTitle);
         if ((flags & PSP_USETITLE) !== 0 && title >= MAX_INTRESOURCE)
         {
             page.titleCopy = place(encode(readText(title, wide), wide));
-            putU32(handle + PSP.pszTitle, page.titleCopy);
+            guest.set32(handle + PSP.pszTitle, page.titleCopy);
         }
         pages.set(handle, page);
         if (size > PSP.V1_SIZE)
@@ -626,18 +589,18 @@ export function createPropertySheetFunctions(host){
      * @param {Sheet} sheet @param {Page} page @returns {Entry}
      */
     const entryFor = (sheet, page)=>{
-        const flags = u32(page.handle + PSP.dwFlags);
-        const recent = u32(page.handle + PSP.dwSize) >= PSP.V2_SIZE;
+        const flags = guest.u32(page.handle + PSP.dwFlags);
+        const recent = guest.u32(page.handle + PSP.dwSize) >= PSP.V2_SIZE;
         /** @param {number} flag @param {number} at */
         const text = (flag, at)=>(recent && (flags & flag) !== 0
-            ? stringOf(u32(page.handle + at), sheet.instance, page.wide) : '');
+            ? stringOf(guest.u32(page.handle + at), sheet.instance, page.wide) : '');
         return { page, hwnd: 0,
             headerTitle: text(PSP_USEHEADERTITLE, PSP.pszHeaderTitle),
             headerSubtitle: text(PSP_USEHEADERSUBTITLE, PSP.pszHeaderSubTitle) };
     };
 
     /** @param {Entry} entry  Whether it is a Wizard97 page without the header. */
-    const exterior = entry=>(u32(entry.page.handle + PSP.dwFlags) & PSP_HIDEHEADER) !== 0;
+    const exterior = entry=>(guest.u32(entry.page.handle + PSP.dwFlags) & PSP_HIDEHEADER) !== 0;
 
     /**
      * Where a page sits in the sheet: a Wizard97 interior page under the
@@ -660,22 +623,22 @@ export function createPropertySheetFunctions(host){
     const sheetTemplate = (flags, caption)=>{
         /** @type {number[]} */
         const words = [];
-        const word = (/** @type {number} */ value)=>words.push(value & 0xffff);
-        const dword = (/** @type {number} */ value)=>{
-            word(value);
-            word(value >>> 16);
+        const pushWord = (/** @type {number} */ value)=>words.push(value & 0xffff);
+        const pushDword = (/** @type {number} */ value)=>{
+            pushWord(value);
+            pushWord(value >>> 16);
         };
         const text = (/** @type {string} */ value)=>{
             for (let index = 0; index < value.length; index++)
             {
-                word(value.charCodeAt(index));
+                pushWord(value.charCodeAt(index));
             }
-            word(0);
+            pushWord(0);
         };
         const align = ()=>{
             if (words.length % 2 !== 0)
             {
-                word(0);
+                pushWord(0);
             }
         };
         const shown = (/** @type {boolean} */ on)=>(on ? WS_VISIBLE : 0);
@@ -715,32 +678,32 @@ export function createPropertySheetFunctions(host){
                     shown((flags & PSH_HASHELP) !== 0) | WS_TABSTOP | BS_PUSHBUTTON],
             ];
         const style = (flags & PSH_MODELESS) !== 0 ? SHEET_STYLE | WS_VISIBLE : SHEET_STYLE;
-        dword(style);
-        dword(0);
-        word(controls.length);
-        [0, 0, 212, 188].forEach(word);
-        word(0);
-        word(0);
+        pushDword(style);
+        pushDword(0);
+        pushWord(controls.length);
+        [0, 0, 212, 188].forEach(pushWord);
+        pushWord(0);
+        pushWord(0);
         text(caption);
-        word(SHEET_FONT.points);
+        pushWord(SHEET_FONT.points);
         text(SHEET_FONT.face);
         for (const [id, cls, label, controlStyle] of controls)
         {
             align();
-            dword((WS_CHILD | controlStyle) >>> 0);
-            dword(0);
-            [0, 0, BUTTON.width, BUTTON.height, id].forEach(word);
+            pushDword((WS_CHILD | controlStyle) >>> 0);
+            pushDword(0);
+            [0, 0, BUTTON.width, BUTTON.height, id].forEach(pushWord);
             if (typeof cls === 'number')
             {
-                word(0xffff);
-                word(cls);
+                pushWord(0xffff);
+                pushWord(cls);
             }
             else
             {
                 text(cls);
             }
             text(label);
-            word(0);
+            pushWord(0);
         }
         const bytes = new Uint8Array(words.length * 2);
         words.forEach((value, index)=>{
@@ -758,7 +721,7 @@ export function createPropertySheetFunctions(host){
      */
     const pageTemplate = template=>{
         const shape = describe(template);
-        const bytes = host.readMemory(template, shape.size);
+        const bytes = guest.snapshot(template, shape.size);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const styleAt = shape.extended ? 12 : 0;
         const exStyleAt = shape.extended ? 8 : 4;
@@ -771,12 +734,12 @@ export function createPropertySheetFunctions(host){
 
     /** Reads the RECT at a sheet's scratch memory. @param {Sheet} sheet */
     const readRect = sheet=>({
-        left: u32(sheet.scratch) | 0, top: u32(sheet.scratch + 4) | 0,
-        right: u32(sheet.scratch + 8) | 0, bottom: u32(sheet.scratch + 12) | 0,
+        left: guest.u32(sheet.scratch) | 0, top: guest.u32(sheet.scratch + 4) | 0,
+        right: guest.u32(sheet.scratch + 8) | 0, bottom: guest.u32(sheet.scratch + 12) | 0,
     });
     /** @param {Sheet} sheet @param {number[]} values */
     const writeRect = (sheet, values)=>values.forEach((value, index)=>
-        putU32(sheet.scratch + index * 4, value));
+        guest.set32(sheet.scratch + index * 4, value));
 
     /** Dialog units in the sheet's font, as pixels. @param {Sheet} sheet */
     const units = (sheet, /** @type {number} */ x, /** @type {number} */ y)=>{
@@ -985,8 +948,8 @@ export function createPropertySheetFunctions(host){
             {
                 return 0;
             }
-            return after(api('CreateDialogIndirectParamA', [u32(page.handle + PSP.hInstance),
-                copy, sheet.hwnd, u32(page.handle + PSP.pfnDlgProc), page.handle]), made=>{
+            return after(api('CreateDialogIndirectParamA', [guest.u32(page.handle + PSP.hInstance),
+                copy, sheet.hwnd, guest.u32(page.handle + PSP.pfnDlgProc), page.handle]), made=>{
                 free(copy);
                 const hwnd = wholeAddress(made);
                 if (hwnd === 0)
@@ -1161,7 +1124,7 @@ export function createPropertySheetFunctions(host){
 
     /** A page's index by the resource id its template was named by, or -1. */
     const indexOfId = (/** @type {Sheet} */ sheet, /** @type {number} */ id)=>sheet.entries
-        .findIndex(entry=>u32(entry.page.handle + PSP.pszTemplate) === id);
+        .findIndex(entry=>guest.u32(entry.page.handle + PSP.pszTemplate) === id);
 
     /**
      * Inserts a page's tab and entry, a description taken for a page if it
@@ -1191,7 +1154,7 @@ export function createPropertySheetFunctions(host){
                 sheet.current++;
             }
             return after(addTab(sheet, at, titleOf(page)), ()=>{
-                if ((u32(page.handle + PSP.dwFlags) & PSP_PREMATURE) === 0)
+                if ((guest.u32(page.handle + PSP.dwFlags) & PSP_PREMATURE) === 0)
                 {
                     return 1;
                 }
@@ -1376,7 +1339,7 @@ export function createPropertySheetFunctions(host){
                 {
                     return 0;
                 }
-                const flags = u32(sheet.entries[index].page.handle + PSP.dwFlags);
+                const flags = guest.u32(sheet.entries[index].page.handle + PSP.dwFlags);
                 return (flags & PSP_PREMATURE) !== 0
                     ? after(ensureCreated(sheet, index, thread), ()=>premature(index + 1))
                     : premature(index + 1);
@@ -1413,12 +1376,12 @@ export function createPropertySheetFunctions(host){
      * @returns {boolean | Promise<boolean>} whether the key was the sheet's
      */
     const pageKey = (sheet, msg, send, turnTo)=>{
-        const target = u32(msg);
-        const key = u32(msg + 8);
+        const target = guest.u32(msg);
+        const key = guest.u32(msg + 8);
         const held = (/** @type {number} */ vk)=>(api('GetKeyState', [vk]) & 0x8000) !== 0;
         const turn = key === VK_NEXT ? 1 : key === VK_PRIOR ? -1
             : key === VK_TAB ? (held(VK_SHIFT) ? -1 : 1) : 0;
-        if (u32(msg + 4) !== WM_KEYDOWN || turn === 0 || !held(VK_CONTROL)
+        if (guest.u32(msg + 4) !== WM_KEYDOWN || turn === 0 || !held(VK_CONTROL)
             || (target !== sheet.hwnd && api('IsChild', [sheet.hwnd, target]) === 0))
         {
             return false;
@@ -1459,7 +1422,7 @@ export function createPropertySheetFunctions(host){
                 [message.hwnd, message.message, message.wParam, message.lParam,
                     message.time ?? 0, message.x ?? 0, message.y ?? 0].forEach((value, index)=>
                     view.setUint32(index * 4, value >>> 0, true));
-                host.writeMemory(msg, bytes);
+                guest.setBytes(msg, bytes);
                 return pageKey(sheet, msg, send, index=>send(sheet.hwnd, PSM_SETCURSEL, index, 0));
             },
         }), result=>{
@@ -1504,11 +1467,11 @@ export function createPropertySheetFunctions(host){
                 return done === null ? 0 : after(done, ()=>1);
             }
             case WM_NOTIFY: {
-                if ((u32(handle + 4) & 0xffff) !== IDC_TABCONTROL)
+                if ((guest.u32(handle + 4) & 0xffff) !== IDC_TABCONTROL)
                 {
                     return 0;
                 }
-                const code = u32(handle + 8) | 0;
+                const code = guest.u32(handle + 8) | 0;
                 if (code === TCN_SELCHANGING)
                 {
                     return after(notifyPage(sheet, sheet.current, PSN_KILLACTIVE, 0), refused=>
@@ -1655,7 +1618,7 @@ export function createPropertySheetFunctions(host){
                 return answer(sheet, indexOfId(sheet, handle));
             case PSM_INDEXTOID: {
                 const entry = sheet.entries[index];
-                return answer(sheet, entry ? u32(entry.page.handle + PSP.pszTemplate) : 0);
+                return answer(sheet, entry ? guest.u32(entry.page.handle + PSP.pszTemplate) : 0);
             }
             case PSM_GETRESULT:
                 return answer(sheet, sheet.ended ? sheet.result : -1);
@@ -1733,17 +1696,18 @@ export function createPropertySheetFunctions(host){
             host.divergence?.('PropertySheet', 'no window manager to make a sheet with');
             return -1;
         }
-        if ((header >>> 0) === 0 || u32(header) < PSH.V1_SIZE)
+        if ((header >>> 0) === 0 || guest.u32(header) < PSH.V1_SIZE)
         {
             return -1;
         }
-        const flags = u32(header + PSH.dwFlags);
-        const count = u32(header + PSH.nPages);
-        const list = u32(header + PSH.phpage);
+        const flags = guest.u32(header + PSH.dwFlags);
+        const count = guest.u32(header + PSH.nPages);
+        const list = guest.u32(header + PSH.phpage);
         /** @type {Sheet} */
         const sheet = {
-            hwnd: 0, wide, flags, instance: u32(header + PSH.hInstance),
-            owner: u32(header + PSH.hwndParent), callback: u32(header + PSH.pfnCallback),
+            hwnd: 0, wide, flags, instance: guest.u32(header + PSH.hInstance),
+            owner: guest.u32(header + PSH.hwndParent),
+            callback: guest.u32(header + PSH.pfnCallback),
             entries: [], current: -1, start: 0, changed: new Set(), applied: false, restart: 0,
             result: 0, ended: false,
             template: 0, scratch: 0, tab: 0, origin: { x: 0, y: 0 }, header: 0,
@@ -1759,11 +1723,11 @@ export function createPropertySheetFunctions(host){
             if ((flags & PSH_PROPSHEETPAGE) !== 0)
             {
                 made = createPage(cursor, wide, thread);
-                cursor += Math.max(PSP.V1_SIZE, u32(cursor));
+                cursor += Math.max(PSP.V1_SIZE, guest.u32(cursor));
             }
             else
             {
-                const value = u32(list + index * 4);
+                const value = guest.u32(list + index * 4);
                 made = pages.has(value) ? value : createPage(value, wide, thread);
             }
             return after(made, handle=>{
@@ -1776,12 +1740,12 @@ export function createPropertySheetFunctions(host){
             });
         };
         return after(collect(0), ()=>{
-            const start = u32(header + PSH.nStartPage);
+            const start = guest.u32(header + PSH.nStartPage);
             sheet.start = (flags & PSH_USEPSTARTPAGE) !== 0
                 ? Math.max(0, sheet.entries.findIndex(entry=>titleOf(entry.page)
                     === stringOf(start, sheet.instance, wide)))
                 : start < sheet.entries.length ? start : 0;
-            const named = stringOf(u32(header + PSH.pszCaption), sheet.instance, wide);
+            const named = stringOf(guest.u32(header + PSH.pszCaption), sheet.instance, wide);
             const caption = (flags & PSH_PROPTITLE) !== 0 ? `Properties for ${named}` : named;
             sheet.template = place(sheetTemplate(flags, caption));
             if (sheet.template === 0)

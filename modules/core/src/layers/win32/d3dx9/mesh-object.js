@@ -127,8 +127,7 @@ export function vertexConverter(from, to){
 
 /**
  * @typedef {Object} MeshHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
@@ -154,7 +153,8 @@ export function vertexConverter(from, to){
  * @param {{ giveBuffer: (out: number, bytes: Uint8Array) => number }} buffers
  */
 export function createMeshObjects(host, buffers){
-    const { u32, putU32s, method } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
     const heap = ()=>/** @type {NonNullable<MeshHost['heap']>} */ (host.heap);
     /** Meshes by the interface pointer a program holds. @type {Map<number, any>} */
     const byPointer = new Map();
@@ -193,7 +193,7 @@ export function createMeshObjects(host, buffers){
      * @returns {Promise<Uint8Array | number>}
      */
     const throughLock = (thread, buffer, length, bytes)=>withScratch(4, async at=>{
-        putU32s(at, [0]);
+        guest.set32s(at, [0]);
         const locked = await method(thread, buffer, VERTEX_BUFFER.Lock, [0, 0, at,
             bytes ? 0 : D3DLOCK_READONLY]);
         if (locked !== D3D_OK)
@@ -203,11 +203,11 @@ export function createMeshObjects(host, buffers){
         let read = bytes;
         if (bytes)
         {
-            host.writeMemory(u32(at), bytes);
+            guest.setBytes(guest.u32(at), bytes);
         }
         else
         {
-            read = host.readMemory(u32(at), length).slice();
+            read = guest.snapshot(guest.u32(at), length);
         }
         await method(thread, buffer, VERTEX_BUFFER.Unlock, []);
         return /** @type {Uint8Array} */ (read);
@@ -238,8 +238,8 @@ export function createMeshObjects(host, buffers){
         state.vertices * state.stride, null);
 
     /** @param {any} state */
-    const attributesOf = state=>[...new Uint32Array(host.readMemory(state.attributes,
-        state.faces * 4).slice().buffer)];
+    const attributesOf = state=>[...new Uint32Array(guest.snapshot(state.attributes,
+        state.faces * 4).buffer)];
 
     /**
      * Each vertex's position, as the declaration places it.
@@ -261,11 +261,11 @@ export function createMeshObjects(host, buffers){
     };
 
     /** An adjacency's DWORDs, three a face. @param {any} state @param {number} at */
-    const adjacencyAt = (state, at)=>[...new Uint32Array(host.readMemory(wholeAddress(at),
-        state.faces * 12).slice().buffer)];
+    const adjacencyAt = (state, at)=>[...new Uint32Array(guest.snapshot(at,
+        state.faces * 12).buffer)];
 
     /** @param {number} at @param {number[]} values */
-    const putAll = (at, values)=>host.writeMemory(wholeAddress(at),
+    const putAll = (at, values)=>guest.setBytes(at,
         new Uint8Array(Uint32Array.from(values).buffer));
 
     /**
@@ -284,7 +284,7 @@ export function createMeshObjects(host, buffers){
         const made = [];
         const declaration = declarationBytes(spec.elements);
         const answer = await withScratch(8 + declaration.length, async at=>{
-            putU32s(at, [0, 0]);
+            guest.set32s(at, [0, 0]);
             const vb = vertexBufferOf(spec.options);
             const ib = indexBufferOf(spec.options);
             let result = await method(thread, spec.device, DEVICE.CreateVertexBuffer,
@@ -293,23 +293,23 @@ export function createMeshObjects(host, buffers){
             {
                 return result;
             }
-            made.push(u32(at));
+            made.push(guest.u32(at));
             result = await method(thread, spec.device, DEVICE.CreateIndexBuffer,
                 [spec.faces * 3 * (wide ? 4 : 2), ib.usage, ib.format, ib.pool, at + 4, 0]);
             if (result !== D3D_OK)
             {
                 return result;
             }
-            made.push(u32(at + 4));
-            host.writeMemory(at + 8, declaration);
-            putU32s(at, [0]);
+            made.push(guest.u32(at + 4));
+            guest.setBytes(at + 8, declaration);
+            guest.set32s(at, [0]);
             result = await method(thread, spec.device, DEVICE.CreateVertexDeclaration,
                 [at + 8, at]);
             if (result !== D3D_OK)
             {
                 return result;
             }
-            made.push(u32(at));
+            made.push(guest.u32(at));
             return D3D_OK;
         });
         const release = async()=>{
@@ -329,7 +329,7 @@ export function createMeshObjects(host, buffers){
             await release();
             return failed(E_OUTOFMEMORY);
         }
-        host.writeMemory(attributes, new Uint8Array(spec.faces * 4));
+        guest.fill(attributes, 0, spec.faces * 4);
         await method(thread, spec.device, UNKNOWN_ADDREF, []);
         const [vb, ib, declared] = made;
         const state = { device: spec.device, options: spec.options, fvf: spec.fvf,
@@ -486,10 +486,10 @@ export function createMeshObjects(host, buffers){
             await method(thread, made.pointer, UNKNOWN_RELEASE, []);
             return answer;
         }
-        host.writeMemory(copy.attributes, host.readMemory(state.attributes, state.faces * 4)
+        guest.setBytes(copy.attributes, guest.snapshot(state.attributes, state.faces * 4)
             .slice());
         copy.table = state.table.map((/** @type {any} */ range)=>({ ...range }));
-        putU32s(out, [made.pointer]);
+        guest.set32s(out, [made.pointer]);
         return D3D_OK;
     };
 
@@ -632,7 +632,7 @@ export function createMeshObjects(host, buffers){
             {
                 return D3DERR_INVALIDCALL;
             }
-            host.writeMemory(wholeAddress(out), declarationBytes(object.state.elements));
+            guest.setBytes(out, declarationBytes(object.state.elements));
             return D3D_OK;
         } },
         /** DWORD GetNumBytesPerVertex() */
@@ -642,7 +642,7 @@ export function createMeshObjects(host, buffers){
         /** HRESULT GetDevice(LPDIRECT3DDEVICE9 *ppDevice) -- a reference the caller releases. */
         later('GetDevice', 8, async(state, [out], thread)=>{
             await method(thread, state.device, UNKNOWN_ADDREF, []);
-            putU32s(out, [state.device]);
+            guest.set32s(out, [state.device]);
             return D3D_OK;
         }, (_, [out])=>(out >>> 0) === 0),
         /**
@@ -654,7 +654,7 @@ export function createMeshObjects(host, buffers){
             device >>> 0, out >>> 0, thread), (_, [, fvf, device, out])=>{
             if ((out >>> 0) !== 0)
             {
-                putU32s(out, [0]);
+                guest.set32s(out, [0]);
             }
             return (out >>> 0) === 0 || (device >>> 0) === 0 || !declaratorFromFvf(fvf >>> 0);
         }),
@@ -663,27 +663,27 @@ export function createMeshObjects(host, buffers){
          *     LPDIRECT3DDEVICE9 pD3DDevice, LPD3DXMESH *ppCloneMesh)
          */
         later('CloneMesh', 20, (state, [options, declaration, device, out], thread)=>{
-            const elements = /** @type {any} */ (readDeclaration(host.readMemory, declaration));
+            const elements = /** @type {any} */ (readDeclaration(guest, declaration));
             return clone(state, options >>> 0, elements, fvfFromDeclarator(elements) ?? 0,
                 device >>> 0, out >>> 0, thread);
         }, (_, [, declaration, device, out])=>{
             if ((out >>> 0) !== 0)
             {
-                putU32s(out, [0]);
+                guest.set32s(out, [0]);
             }
             return (out >>> 0) === 0 || (device >>> 0) === 0 || (declaration >>> 0) === 0
-                || !readDeclaration(host.readMemory, declaration);
+                || !readDeclaration(guest, declaration);
         }),
         /** HRESULT GetVertexBuffer(LPDIRECT3DVERTEXBUFFER9 *ppVB) */
         later('GetVertexBuffer', 8, async(state, [out], thread)=>{
             await method(thread, state.vb, UNKNOWN_ADDREF, []);
-            putU32s(out, [state.vb]);
+            guest.set32s(out, [state.vb]);
             return D3D_OK;
         }, (_, [out])=>(out >>> 0) === 0),
         /** HRESULT GetIndexBuffer(LPDIRECT3DINDEXBUFFER9 *ppIB) */
         later('GetIndexBuffer', 8, async(state, [out], thread)=>{
             await method(thread, state.ib, UNKNOWN_ADDREF, []);
-            putU32s(out, [state.ib]);
+            guest.set32s(out, [state.ib]);
             return D3D_OK;
         }, (_, [out])=>(out >>> 0) === 0),
         /** HRESULT LockVertexBuffer(DWORD Flags, LPVOID *ppData) */
@@ -711,7 +711,7 @@ export function createMeshObjects(host, buffers){
             }
             if ((size >>> 0) !== 0)
             {
-                putU32s(size, [ranges.length]);
+                guest.set32s(size, [ranges.length]);
             }
             return D3D_OK;
         } },
@@ -723,8 +723,8 @@ export function createMeshObjects(host, buffers){
                 return indices;
             }
             const given = (reps >>> 0) === 0 ? Array.from({ length: state.vertices }, (_, i)=>i)
-                : [...new Uint32Array(host.readMemory(wholeAddress(reps),
-                    state.vertices * 4).slice()
+                : [...new Uint32Array(guest.snapshot(reps,
+                    state.vertices * 4)
                     .buffer)];
             putAll(out, adjacencyFromPointReps(indices, given));
             return D3D_OK;
@@ -766,12 +766,12 @@ export function createMeshObjects(host, buffers){
          * refused.
          */
         later('UpdateSemantics', 8, async(state, [declaration], thread)=>{
-            const elements = /** @type {any} */ (readDeclaration(host.readMemory, declaration));
+            const elements = /** @type {any} */ (readDeclaration(guest, declaration));
             const made = await withScratch(4 + MAX_FVF_DECL_SIZE * 8, async at=>{
-                host.writeMemory(at + 4, declarationBytes(elements));
+                guest.setBytes(at + 4, declarationBytes(elements));
                 const answer = await method(thread, state.device, DEVICE.CreateVertexDeclaration,
                     [at + 4, at]);
-                return answer === D3D_OK ? { declared: u32(at) } : answer;
+                return answer === D3D_OK ? { declared: guest.u32(at) } : answer;
             });
             if (typeof made === 'number')
             {
@@ -784,7 +784,7 @@ export function createMeshObjects(host, buffers){
             return D3D_OK;
         }, (state, [declaration])=>{
             const elements = (declaration >>> 0) === 0 ? null
-                : readDeclaration(host.readMemory, declaration);
+                : readDeclaration(guest, declaration);
             return !elements || declVertexSize(elements, 0) > state.stride;
         }),
     ];
@@ -797,7 +797,7 @@ export function createMeshObjects(host, buffers){
             {
                 return D3DERR_INVALIDCALL;
             }
-            putU32s(out, [object.state.attributes]);
+            guest.set32s(out, [object.state.attributes]);
             return D3D_OK;
         } },
         /** HRESULT UnlockAttributeBuffer() */
@@ -816,13 +816,13 @@ export function createMeshObjects(host, buffers){
             {
                 return answer;
             }
-            const copy = byPointer.get(u32(out)).state;
+            const copy = byPointer.get(guest.u32(out)).state;
             const optimized = await optimize(copy, [flags, adjacencyIn, adjacencyOut, faceRemap,
                 vertexRemap], thread);
             if (optimized !== D3D_OK)
             {
                 await method(thread, copy.pointer, UNKNOWN_RELEASE, []);
-                putU32s(out, [0]);
+                guest.set32s(out, [0]);
             }
             return optimized;
         }, (_, [flags, , , , vertexRemap, out])=>{
@@ -830,7 +830,7 @@ export function createMeshObjects(host, buffers){
             {
                 if ((at >>> 0) !== 0)
                 {
-                    putU32s(at, [0]);
+                    guest.set32s(at, [0]);
                 }
             }
             return (out >>> 0) === 0 || badFlags(flags);
@@ -846,7 +846,7 @@ export function createMeshObjects(host, buffers){
             (_, [flags, , , , vertexRemap])=>{
                 if ((vertexRemap >>> 0) !== 0)
                 {
-                    putU32s(vertexRemap, [0]);
+                    guest.set32s(vertexRemap, [0]);
                 }
                 return badFlags(flags);
             }),
@@ -858,7 +858,7 @@ export function createMeshObjects(host, buffers){
                 return D3DERR_INVALIDCALL;
             }
             const words = count === 0 ? []
-                : [...new Uint32Array(host.readMemory(wholeAddress(table), count * 20)
+                : [...new Uint32Array(guest.snapshot(table, count * 20)
                     .slice().buffer)];
             object.state.table = Array.from({ length: count }, (_, i)=>{
                 const [id, faceStart, faceCount, vertexStart, vertexCount]
@@ -885,7 +885,7 @@ export function createMeshObjects(host, buffers){
     const createMesh = ([faces, vertices, options, , device, out], elements, fvf)=>{
         if ((out >>> 0) !== 0)
         {
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
         }
         if ((out >>> 0) === 0 || (device >>> 0) === 0 || (faces >>> 0) === 0
             || (vertices >>> 0) === 0 || !elements || declVertexSize(elements, 0) === 0
@@ -900,7 +900,7 @@ export function createMeshObjects(host, buffers){
             .then(made=>{
                 if (made.answer === D3D_OK)
                 {
-                    putU32s(out, [made.pointer]);
+                    guest.set32s(out, [made.pointer]);
                 }
                 return made.answer;
             });
@@ -921,7 +921,7 @@ export function createMeshObjects(host, buffers){
                 /** @param {number[]} args */
                 handler: args=>{
                     const elements = wholeAddress(args[3]) === 0 ? null
-                        : readDeclaration(host.readMemory, args[3]);
+                        : readDeclaration(guest, args[3]);
                     return createMesh(args, elements, elements ? fvfFromDeclarator(elements) ?? 0
                         : 0);
                 },

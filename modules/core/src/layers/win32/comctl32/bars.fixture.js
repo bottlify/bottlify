@@ -216,8 +216,7 @@ export function setupBars(gdiEngine){
     const gdi32 = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (gdi.table));
     const imageLists = createImageLists({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
+        guest: memory.guest,
         gdi32: name=>gdi32[name],
         bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
     });

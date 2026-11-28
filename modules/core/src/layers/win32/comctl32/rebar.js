@@ -42,7 +42,6 @@ import {
 import { notifyWindow } from './notify.js';
 import { readText, writeText } from './strings.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
-import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const REBAR_CLASS = 'ReBarWindow32';
@@ -234,7 +233,8 @@ const bandInfoLayout = pointer=>(pointer === 8
  *     => number | Promise<number>}
  */
 export function createRebarProcedure(host, tk, images){
-    const pointer = host.pointerSize ?? 4;
+    const { guest } = host;
+    const pointer = guest.pointerSize;
     const INFO = bandInfoLayout(pointer);
 
     /**
@@ -265,25 +265,9 @@ export function createRebarProcedure(host, tk, images){
         return held;
     };
 
-    /** @param {number} address */
-    const u32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const setU32 = (address, value)=>host.writeMemory(wholeAddress(address),
-        new Uint8Array(new Uint32Array([value >>> 0]).buffer));
-    /** A pointer-wide field: a handle or an address, its low half what counts. */
-    const setPointer = (/** @type {number} */ address, /** @type {number} */ value)=>{
-        setU32(address, value);
-        if (pointer === 8)
-        {
-            setU32(address + 4, 0);
-        }
-    };
     /** @param {number} address @param {Rect} rect */
-    const setRect = (address, rect)=>host.writeMemory(wholeAddress(address), new Uint8Array(
-        new Int32Array([rect.left, rect.top, rect.right, rect.bottom]).buffer));
+    const setRect = (address, rect)=>guest.set32s(address,
+        [rect.left, rect.top, rect.right, rect.bottom]);
 
     /** @param {any} record */
     const ownerOf = record=>state(record).owner ?? notifyWindow(record);
@@ -622,10 +606,10 @@ export function createRebarProcedure(host, tk, images){
         {
             return 0;
         }
-        host.writeMemory(address, new Uint8Array(size));
-        setPointer(address, record.hwnd);
-        setPointer(address + pointer, record.id);
-        setU32(address + 2 * pointer, code);
+        guest.fill(address, 0, size);
+        guest.setPtr(address, record.hwnd);
+        guest.setPtr(address + pointer, record.id);
+        guest.set32(address + 2 * pointer, code);
         fill?.(address + 3 * pointer);
         return after(host.send(target, WM_NOTIFY, record.id, address, thread), answer=>{
             host.release?.(address);
@@ -674,35 +658,35 @@ export function createRebarProcedure(host, tk, images){
      * @param {Band} band @param {number} address @param {boolean} wide
      */
     const readInfo = (band, address, wide)=>{
-        const size = u32(address);
+        const size = guest.u32(address);
         if (address === 0 || size < INFO.v3)
         {
             return false;
         }
-        const mask = u32(address + INFO.fMask);
+        const mask = guest.u32(address + INFO.fMask);
         const v6 = size >= INFO.v6;
         if ((mask & RBBIM_STYLE) !== 0)
         {
-            band.style = u32(address + INFO.fStyle) & ~RBBS_FIXEDHEADER;
+            band.style = guest.u32(address + INFO.fStyle) & ~RBBS_FIXEDHEADER;
             band.fixedHeader = null;
         }
         if ((mask & RBBIM_COLORS) !== 0)
         {
-            band.fore = u32(address + INFO.clrFore);
-            band.back = u32(address + INFO.clrBack);
+            band.fore = guest.u32(address + INFO.clrFore);
+            band.back = guest.u32(address + INFO.clrBack);
         }
         if ((mask & RBBIM_TEXT) !== 0)
         {
-            const text = u32(address + INFO.lpText);
+            const text = guest.ptr(address + INFO.lpText);
             band.text = text === 0 ? '' : readText(host, text, wide);
         }
         if ((mask & RBBIM_IMAGE) !== 0)
         {
-            band.image = u32(address + INFO.iImage) | 0;
+            band.image = guest.u32(address + INFO.iImage) | 0;
         }
         if ((mask & RBBIM_CHILD) !== 0)
         {
-            const child = u32(address + INFO.hwndChild);
+            const child = guest.ptr(address + INFO.hwndChild);
             if (band.child !== 0 && band.child !== child)
             {
                 band.dropped.push(band.child);
@@ -711,38 +695,38 @@ export function createRebarProcedure(host, tk, images){
         }
         if ((mask & RBBIM_CHILDSIZE) !== 0)
         {
-            band.cxMinChild = u32(address + INFO.cxMinChild) | 0;
-            band.cyMinChild = u32(address + INFO.cyMinChild) | 0;
+            band.cxMinChild = guest.u32(address + INFO.cxMinChild) | 0;
+            band.cyMinChild = guest.u32(address + INFO.cyMinChild) | 0;
             // Only a band of variable height keeps the rest: any other is
             // as tall as its least (Wine's rebar test, test_bandinfo).
             const variable = (band.style & RBBS_VARIABLEHEIGHT) !== 0;
-            band.cyChild = variable ? u32(address + INFO.cyChild) | 0 : band.cyMinChild;
-            band.cyMaxChild = variable ? u32(address + INFO.cyMaxChild) | 0 : NO_MAXIMUM;
-            band.cyIntegral = variable ? u32(address + INFO.cyIntegral) | 0 : 0;
+            band.cyChild = variable ? guest.u32(address + INFO.cyChild) | 0 : band.cyMinChild;
+            band.cyMaxChild = variable ? guest.u32(address + INFO.cyMaxChild) | 0 : NO_MAXIMUM;
+            band.cyIntegral = variable ? guest.u32(address + INFO.cyIntegral) | 0 : 0;
         }
         if ((mask & RBBIM_SIZE) !== 0)
         {
-            band.cx = u32(address + INFO.cx) | 0;
+            band.cx = guest.u32(address + INFO.cx) | 0;
         }
         if ((mask & RBBIM_BACKGROUND) !== 0)
         {
-            band.bitmap = u32(address + INFO.hbmBack);
+            band.bitmap = guest.ptr(address + INFO.hbmBack);
         }
         if ((mask & RBBIM_ID) !== 0)
         {
-            band.id = u32(address + INFO.wID);
+            band.id = guest.u32(address + INFO.wID);
         }
         if (v6 && (mask & RBBIM_IDEALSIZE) !== 0)
         {
-            band.cxIdeal = u32(address + INFO.cxIdeal) | 0;
+            band.cxIdeal = guest.u32(address + INFO.cxIdeal) | 0;
         }
         if (v6 && (mask & RBBIM_LPARAM) !== 0)
         {
-            band.param = host.readMemory(address + INFO.lParam, pointer).slice();
+            band.param = guest.snapshot(address + INFO.lParam, pointer);
         }
         if (v6 && (mask & RBBIM_HEADERSIZE) !== 0)
         {
-            band.fixedHeader = u32(address + INFO.cxHeader) | 0;
+            band.fixedHeader = guest.u32(address + INFO.cxHeader) | 0;
         }
         return true;
     };
@@ -755,71 +739,71 @@ export function createRebarProcedure(host, tk, images){
      * @param {any} record @param {Band} band @param {number} address @param {boolean} wide
      */
     const writeInfo = (record, band, address, wide)=>{
-        const size = u32(address);
+        const size = guest.u32(address);
         if (size < INFO.v3)
         {
             return false;
         }
         measureBands(record);
-        const mask = u32(address + INFO.fMask);
+        const mask = guest.u32(address + INFO.fMask);
         const v6 = size >= INFO.v6;
         if ((mask & RBBIM_STYLE) !== 0)
         {
-            setU32(address + INFO.fStyle, band.style
+            guest.set32(address + INFO.fStyle, band.style
                 | (band.fixedHeader !== null ? RBBS_FIXEDHEADER : 0));
         }
         if ((mask & RBBIM_COLORS) !== 0)
         {
-            setU32(address + INFO.clrFore, band.fore);
-            setU32(address + INFO.clrBack, band.back);
+            guest.set32(address + INFO.clrFore, band.fore);
+            guest.set32(address + INFO.clrBack, band.back);
         }
         if ((mask & RBBIM_TEXT) !== 0)
         {
-            writeText(host, u32(address + INFO.lpText), band.text, wide,
-                u32(address + INFO.cch) | 0);
+            writeText(host, guest.ptr(address + INFO.lpText), band.text, wide,
+                guest.u32(address + INFO.cch) | 0);
         }
         if ((mask & RBBIM_IMAGE) !== 0)
         {
-            setU32(address + INFO.iImage, band.image);
+            guest.set32(address + INFO.iImage, band.image);
         }
         if ((mask & RBBIM_CHILD) !== 0)
         {
-            setPointer(address + INFO.hwndChild, band.child);
+            guest.setPtr(address + INFO.hwndChild, band.child);
         }
         if ((mask & RBBIM_CHILDSIZE) !== 0)
         {
-            setU32(address + INFO.cxMinChild, band.cxMinChild);
-            setU32(address + INFO.cyMinChild, band.cyMinChild);
+            guest.set32(address + INFO.cxMinChild, band.cxMinChild);
+            guest.set32(address + INFO.cyMinChild, band.cyMinChild);
             if ((band.style & RBBS_VARIABLEHEIGHT) !== 0)
             {
-                setU32(address + INFO.cyChild, childHeight(band));
-                setU32(address + INFO.cyMaxChild, band.cyMaxChild);
-                setU32(address + INFO.cyIntegral, band.cyIntegral);
+                guest.set32(address + INFO.cyChild, childHeight(band));
+                guest.set32(address + INFO.cyMaxChild, band.cyMaxChild);
+                guest.set32(address + INFO.cyIntegral, band.cyIntegral);
             }
         }
         if ((mask & RBBIM_SIZE) !== 0)
         {
-            setU32(address + INFO.cx, band.cx);
+            guest.set32(address + INFO.cx, band.cx);
         }
         if ((mask & RBBIM_BACKGROUND) !== 0)
         {
-            setPointer(address + INFO.hbmBack, band.bitmap);
+            guest.setPtr(address + INFO.hbmBack, band.bitmap);
         }
         if ((mask & RBBIM_ID) !== 0)
         {
-            setU32(address + INFO.wID, band.id);
+            guest.set32(address + INFO.wID, band.id);
         }
         if (v6 && (mask & RBBIM_IDEALSIZE) !== 0)
         {
-            setU32(address + INFO.cxIdeal, band.cxIdeal);
+            guest.set32(address + INFO.cxIdeal, band.cxIdeal);
         }
         if (v6 && (mask & RBBIM_LPARAM) !== 0)
         {
-            host.writeMemory(address + INFO.lParam, band.param);
+            guest.setBytes(address + INFO.lParam, band.param);
         }
         if (v6 && (mask & RBBIM_HEADERSIZE) !== 0)
         {
-            setU32(address + INFO.cxHeader, band.header);
+            guest.set32(address + INFO.cxHeader, band.header);
         }
         return true;
     };
@@ -972,10 +956,8 @@ export function createRebarProcedure(host, tk, images){
      */
     const hitTest = (record, address)=>{
         const held = state(record);
-        const bytes = host.readMemory(address, 8);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, 8);
-        const x = view.getInt32(0, true);
-        const y = view.getInt32(4, true);
+        const x = guest.i32(address);
+        const y = guest.i32(address + 4);
         const [along, across] = held.vertical ? [y, x] : [x, y];
         const index = held.bands.findIndex(band=>visible(band) && along >= band.rect.left
             && along < band.rect.right && across >= band.rect.top && across < band.rect.bottom);
@@ -989,8 +971,8 @@ export function createRebarProcedure(host, tk, images){
                     && band.header >= GRIPPER ? RBHT_GRABBER
                     : along < band.rect.left + band.header ? RBHT_CAPTION : RBHT_CLIENT;
         }
-        setU32(address + 8, flags);
-        setU32(address + 12, index);
+        guest.set32(address + 8, flags);
+        guest.set32(address + 12, index);
         return index;
     };
 
@@ -1028,7 +1010,7 @@ export function createRebarProcedure(host, tk, images){
                 // WS_BORDER gives a rebar an edge two pixels wide.
                 if ((record.style & (WS_BORDER | WS_DLGFRAME)) === WS_BORDER && lParam !== 0)
                 {
-                    const bytes = host.readMemory(lParam, 16);
+                    const bytes = guest.snapshot(lParam, 16);
                     const rect = new Int32Array(bytes.slice().buffer);
                     setRect(lParam, { left: rect[0] + BORDER_EDGE, top: rect[1] + BORDER_EDGE,
                         right: rect[2] - BORDER_EDGE, bottom: rect[3] - BORDER_EDGE });
@@ -1091,19 +1073,19 @@ export function createRebarProcedure(host, tk, images){
             }
             case RB_GETBARINFO:
             case RB_SETBARINFO: {
-                if (lParam === 0 || u32(lParam) < 8 + pointer)
+                if (lParam === 0 || guest.u32(lParam) < 8 + pointer)
                 {
                     return 0;
                 }
-                if ((u32(lParam + 4) & RBIM_IMAGELIST) !== 0)
+                if ((guest.u32(lParam + 4) & RBIM_IMAGELIST) !== 0)
                 {
                     if (id === RB_GETBARINFO)
                     {
-                        setPointer(lParam + 8, held.list);
+                        guest.setPtr(lParam + 8, held.list);
                     }
                     else
                     {
-                        held.list = u32(lParam + 8);
+                        held.list = guest.ptr(lParam + 8);
                         return after(layout(record, thread), ()=>1);
                     }
                 }
@@ -1159,8 +1141,8 @@ export function createRebarProcedure(host, tk, images){
                 {
                     return 0;
                 }
-                setU32(lParam + 4, CLR_DEFAULT);
-                setU32(lParam + 8, CLR_DEFAULT);
+                guest.set32(lParam + 4, CLR_DEFAULT);
+                guest.set32(lParam + 8, CLR_DEFAULT);
                 return 1;
             case RB_SETCOLORSCHEME:
                 return 0;
@@ -1234,12 +1216,12 @@ export function createRebarProcedure(host, tk, images){
                 // lParam, the chevron's rectangle and the caller's lParam.
                 return after(notify(record, RBN_CHEVRONPUSHED, thread, 4 * pointer + 16,
                     address=>{
-                        setU32(address, wParam);
-                        setU32(address + 4, band.id);
-                        host.writeMemory(address + 8, band.param);
+                        guest.set32(address, wParam);
+                        guest.set32(address + 4, band.id);
+                        guest.setBytes(address + 8, band.param);
                         const rect = address + 8 + pointer;
                         setRect(rect, onClient(record, chevronOf(band)));
-                        setPointer(rect + 16, lParam);
+                        guest.setPtr(rect + 16, lParam);
                     }), ()=>0);
             }
             case RB_SETPALETTE: {

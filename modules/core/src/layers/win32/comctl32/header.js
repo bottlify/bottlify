@@ -154,17 +154,7 @@ const DT_END_ELLIPSIS = 0x8000;
  * @param {any} tk  The drawing helpers the system classes share.
  */
 export function createHeaderProcedure(host, tk){
-    /** @param {number} at */
-    const read32 = at=>{
-        const b = host.readMemory(wholeAddress(at), 4);
-        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
-    };
-    /** @param {number} at @param {number} value */
-    const write32 = (at, value)=>{
-        const v = value >>> 0;
-        host.writeMemory(wholeAddress(at),
-            Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
-    };
+    const { guest } = host;
 
     /** @param {any} record */
     const state = record=>{
@@ -196,10 +186,10 @@ export function createHeaderProcedure(host, tk){
         {
             return 0;
         }
-        host.writeMemory(block, new Uint8Array(size));
-        write32(block, record.hwnd);
-        write32(block + 4, record.id);
-        write32(block + 8, code);
+        guest.fill(block, 0, size);
+        guest.set32(block, record.hwnd);
+        guest.set32(block + 4, record.id);
+        guest.set32(block + 8, code);
         fill(block);
         return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
             const result = read ? read(block, answer) : answer;
@@ -214,42 +204,42 @@ export function createHeaderProcedure(host, tk){
      * @param {HeaderItem} item @param {number} info @param {boolean} wide
      */
     const store = (item, info, wide)=>{
-        const mask = read32(info + HDITEM.mask);
+        const mask = guest.u32(info + HDITEM.mask);
         if (mask & HDI_WIDTH)
         {
-            item.width = read32(info + HDITEM.cxy) | 0;
+            item.width = guest.u32(info + HDITEM.cxy) | 0;
         }
         if (mask & HDI_FORMAT)
         {
-            item.fmt = read32(info + HDITEM.fmt);
+            item.fmt = guest.u32(info + HDITEM.fmt);
         }
         if (mask & HDI_TEXT)
         {
-            const pointer = read32(info + HDITEM.pszText);
+            const pointer = guest.u32(info + HDITEM.pszText);
             item.hasText = true;
             item.text = pointer === LPSTR_TEXTCALLBACK ? null
                 : pointer === 0 ? '' : readText(host, pointer, wide);
         }
         if (mask & HDI_LPARAM)
         {
-            item.lParam = read32(info + HDITEM.lParam);
+            item.lParam = guest.u32(info + HDITEM.lParam);
         }
         if (mask & HDI_BITMAP)
         {
-            item.bitmap = read32(info + HDITEM.hbm);
+            item.bitmap = guest.u32(info + HDITEM.hbm);
         }
         if (mask & HDI_IMAGE)
         {
-            item.image = read32(info + HDITEM.iImage) | 0;
+            item.image = guest.u32(info + HDITEM.iImage) | 0;
         }
         if (mask & HDI_FILTER)
         {
-            item.type = read32(info + HDITEM.type);
-            item.filter = read32(info + HDITEM.pvFilter);
+            item.type = guest.u32(info + HDITEM.type);
+            item.filter = guest.u32(info + HDITEM.pvFilter);
         }
         if (mask & HDI_STATE)
         {
-            item.state = read32(info + HDITEM.state);
+            item.state = guest.u32(info + HDITEM.state);
         }
     };
 
@@ -274,17 +264,17 @@ export function createHeaderProcedure(host, tk){
         {
             return '';
         }
-        host.writeMemory(buffer, new Uint8Array(2));
+        guest.fill(buffer, 0, 2);
         return after(notify(record, wide ? HDN_GETDISPINFOW : HDN_GETDISPINFOA, DISPINFO.SIZE,
             block=>{
-                write32(block + DISPINFO.iItem, index);
-                write32(block + DISPINFO.mask, HDI_TEXT);
-                write32(block + DISPINFO.pszText, buffer);
-                write32(block + DISPINFO.cchTextMax, room);
-                write32(block + DISPINFO.lParam, item.lParam);
+                guest.set32(block + DISPINFO.iItem, index);
+                guest.set32(block + DISPINFO.mask, HDI_TEXT);
+                guest.set32(block + DISPINFO.pszText, buffer);
+                guest.set32(block + DISPINFO.cchTextMax, room);
+                guest.set32(block + DISPINFO.lParam, item.lParam);
             }, thread, block=>{
-                const mask = read32(block + DISPINFO.mask);
-                const pointer = read32(block + DISPINFO.pszText);
+                const mask = guest.u32(block + DISPINFO.mask);
+                const pointer = guest.u32(block + DISPINFO.pszText);
                 const text = pointer === 0 || pointer === LPSTR_TEXTCALLBACK ? ''
                     : readText(host, pointer, wide);
                 if (mask & HDI_DI_SETITEM)
@@ -308,47 +298,47 @@ export function createHeaderProcedure(host, tk){
     const fill = (record, index, info, wide, thread)=>{
         const held = state(record);
         const item = held.items[index];
-        const mask = read32(info + HDITEM.mask);
+        const mask = guest.u32(info + HDITEM.mask);
         if (mask & HDI_WIDTH)
         {
-            write32(info + HDITEM.cxy, item.width);
+            guest.set32(info + HDITEM.cxy, item.width);
         }
         if (mask & HDI_FORMAT)
         {
-            write32(info + HDITEM.fmt, item.fmt);
+            guest.set32(info + HDITEM.fmt, item.fmt);
         }
         if (mask & HDI_LPARAM)
         {
-            write32(info + HDITEM.lParam, item.lParam);
+            guest.set32(info + HDITEM.lParam, item.lParam);
         }
         if (mask & HDI_BITMAP)
         {
-            write32(info + HDITEM.hbm, item.bitmap);
+            guest.set32(info + HDITEM.hbm, item.bitmap);
         }
         if (mask & HDI_IMAGE)
         {
-            write32(info + HDITEM.iImage, item.image);
+            guest.set32(info + HDITEM.iImage, item.image);
         }
         if (mask & HDI_ORDER)
         {
-            write32(info + HDITEM.iOrder, held.order.indexOf(index));
+            guest.set32(info + HDITEM.iOrder, held.order.indexOf(index));
         }
         if (mask & HDI_FILTER)
         {
-            write32(info + HDITEM.type, item.type);
-            write32(info + HDITEM.pvFilter, item.filter);
+            guest.set32(info + HDITEM.type, item.type);
+            guest.set32(info + HDITEM.pvFilter, item.filter);
         }
         if (mask & HDI_STATE)
         {
-            write32(info + HDITEM.state, item.state);
+            guest.set32(info + HDITEM.state, item.state);
         }
         if (!(mask & HDI_TEXT))
         {
             return 1;
         }
         return after(textOf(record, index, thread), text=>{
-            writeText(host, read32(info + HDITEM.pszText), text, wide,
-                read32(info + HDITEM.cchTextMax) | 0);
+            writeText(host, guest.u32(info + HDITEM.pszText), text, wide,
+                guest.u32(info + HDITEM.cchTextMax) | 0);
             return 1;
         });
     };
@@ -390,11 +380,11 @@ export function createHeaderProcedure(host, tk){
      */
     const customDraw = (record, stage, hdc, box, item, thread)=>notify(record,
         NM_CUSTOMDRAW, CUSTOMDRAW.SIZE, block=>{
-            write32(block + CUSTOMDRAW.dwDrawStage, stage);
-            write32(block + CUSTOMDRAW.hdc, hdc);
+            guest.set32(block + CUSTOMDRAW.dwDrawStage, stage);
+            guest.set32(block + CUSTOMDRAW.hdc, hdc);
             [box.left, box.top, box.right, box.bottom]
-                .forEach((value, i)=>write32(block + CUSTOMDRAW.rc + i * 4, value));
-            write32(block + CUSTOMDRAW.dwItemSpec, item);
+                .forEach((value, i)=>guest.set32(block + CUSTOMDRAW.rc + i * 4, value));
+            guest.set32(block + CUSTOMDRAW.dwItemSpec, item);
         }, thread);
 
     /**
@@ -416,7 +406,7 @@ export function createHeaderProcedure(host, tk){
             }
             [ODT_HEADER, record.id, index, ODA_DRAWENTIRE, 0, record.hwnd, hdc,
                 box.left, box.top, box.right, box.bottom, item.lParam]
-                .forEach((value, i)=>write32(block + i * 4, value));
+                .forEach((value, i)=>guest.set32(block + i * 4, value));
             return after(host.send(to, WM_DRAWITEM, record.id, block, thread), ()=>{
                 host.release?.(block);
                 return 0;
@@ -502,7 +492,7 @@ export function createHeaderProcedure(host, tk){
                 return held.items.length;
             case HDM.INSERTITEMA:
             case HDM.INSERTITEMW: {
-                if (lParam >>> 0 === 0 || (wParam | 0) < 0 || read32(lParam + HDITEM.mask) === 0)
+                if (lParam >>> 0 === 0 || (wParam | 0) < 0 || guest.u32(lParam + HDITEM.mask) === 0)
                 {
                     return -1;
                 }
@@ -512,7 +502,7 @@ export function createHeaderProcedure(host, tk){
                 const item = { width: 0, text: '', hasText: false, fmt: 0, lParam: 0, bitmap: 0,
                     image: 0, type: 0, filter: 0, state: 0 };
                 store(item, lParam, wide);
-                const mask = read32(lParam + HDITEM.mask);
+                const mask = guest.u32(lParam + HDITEM.mask);
                 // An inserted item's kind follows what it was handed, whatever
                 // its format said: a text makes it a string item, a bitmap a
                 // bitmap one, an image an image one.
@@ -522,7 +512,7 @@ export function createHeaderProcedure(host, tk){
                 {
                     item.fmt |= HDF_IMAGE;
                 }
-                const asked = read32(lParam + HDITEM.iOrder) | 0;
+                const asked = guest.u32(lParam + HDITEM.iOrder) | 0;
                 // An item takes the place in the display order it names, or
                 // its index's; the indices at or past it move up by one.
                 const order = mask & HDI_ORDER && asked >= 0 && asked <= held.items.length
@@ -568,23 +558,23 @@ export function createHeaderProcedure(host, tk){
                 const wide = message.message === HDM.SETITEMW;
                 // The parent reads the item in the spelling it asked for: one
                 // handed in the other is copied over with its text converted.
-                const mask = read32(lParam + HDITEM.mask);
-                const textAt = read32(lParam + HDITEM.pszText);
+                const mask = guest.u32(lParam + HDITEM.mask);
+                const textAt = guest.u32(lParam + HDITEM.pszText);
                 const convert = wide !== held.unicode && mask & HDI_TEXT
                     && textAt !== 0 && textAt !== LPSTR_TEXTCALLBACK;
                 const copy = convert ? host.allocate?.(HDITEM.SIZE + MAX_TEXT * 2) ?? 0 : 0;
                 if (copy !== 0)
                 {
-                    host.writeMemory(copy, host.readMemory(lParam, HDITEM.SIZE));
+                    guest.copy(copy, lParam, HDITEM.SIZE);
                     writeText(host, copy + HDITEM.SIZE, readText(host, textAt, wide),
                         held.unicode, MAX_TEXT);
-                    write32(copy + HDITEM.pszText, copy + HDITEM.SIZE);
+                    guest.set32(copy + HDITEM.pszText, copy + HDITEM.SIZE);
                 }
                 const shown = copy !== 0 ? copy : lParam;
                 const tell = (/** @type {number} */ codeA, /** @type {number} */ codeW)=>
                     notify(record, held.unicode ? codeW : codeA, NMHEADER_SIZE, block=>{
-                        write32(block + 12, index);
-                        write32(block + 20, shown);
+                        guest.set32(block + 12, index);
+                        guest.set32(block + 20, shown);
                     }, thread);
                 const done = (/** @type {number} */ answer)=>{
                     if (copy !== 0)
@@ -601,7 +591,7 @@ export function createHeaderProcedure(host, tk){
                     store(held.items[index], lParam, wide);
                     if (mask & HDI_ORDER)
                     {
-                        const to = read32(lParam + HDITEM.iOrder) | 0;
+                        const to = guest.u32(lParam + HDITEM.iOrder) | 0;
                         if (to >= 0 && to < held.items.length)
                         {
                             held.order = held.order.filter((/** @type {number} */ i)=>
@@ -621,7 +611,7 @@ export function createHeaderProcedure(host, tk){
                 }
                 const box = layout(record)[index];
                 [box.left, box.top, box.right, box.bottom]
-                    .forEach((value, i)=>write32(lParam + i * 4, value));
+                    .forEach((value, i)=>guest.set32(lParam + i * 4, value));
                 return 1;
             }
             case HDM.LAYOUT: {
@@ -629,17 +619,17 @@ export function createHeaderProcedure(host, tk){
                 {
                     return 0;
                 }
-                const rect = read32(lParam);
-                const position = read32(lParam + 4);
+                const rect = guest.u32(lParam);
+                const position = guest.u32(lParam + 4);
                 if (rect === 0 || position === 0)
                 {
                     return 0;
                 }
-                const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>read32(rect + at) | 0);
+                const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>guest.u32(rect + at) | 0);
                 const height = Math.min(naturalHeight(record), Math.max(0, bottom - top));
                 [record.hwnd, 0, left, top, right - left, height, 0]
-                    .forEach((value, i)=>write32(position + i * 4, value));
-                write32(rect + 4, top + height);
+                    .forEach((value, i)=>guest.set32(position + i * 4, value));
+                guest.set32(rect + 4, top + height);
                 return 1;
             }
             case HDM.HITTEST: {
@@ -647,8 +637,8 @@ export function createHeaderProcedure(host, tk){
                 {
                     return -1;
                 }
-                const x = read32(lParam + HITTEST.x) | 0;
-                const y = read32(lParam + HITTEST.y) | 0;
+                const x = guest.u32(lParam + HITTEST.x) | 0;
+                const y = guest.u32(lParam + HITTEST.y) | 0;
                 const size = host.clientSize(record);
                 let flags = 0;
                 let found = -1;
@@ -691,8 +681,8 @@ export function createHeaderProcedure(host, tk){
                         flags = HHT_NOWHERE;
                     }
                 }
-                write32(lParam + HITTEST.flags, flags);
-                write32(lParam + HITTEST.iItem, found);
+                guest.set32(lParam + HITTEST.flags, flags);
+                guest.set32(lParam + HITTEST.iItem, found);
                 return found;
             }
             case HDM.ORDERTOINDEX: {
@@ -705,7 +695,7 @@ export function createHeaderProcedure(host, tk){
                     return 0;
                 }
                 held.order.forEach((/** @type {number} */ index, /** @type {number} */ i)=>
-                    write32(lParam + i * 4, index));
+                    guest.set32(lParam + i * 4, index));
                 return 1;
             }
             case HDM.SETORDERARRAY: {
@@ -714,7 +704,7 @@ export function createHeaderProcedure(host, tk){
                 {
                     return 0;
                 }
-                const order = Array.from({ length: count }, (_, i)=>read32(lParam + i * 4) | 0);
+                const order = Array.from({ length: count }, (_, i)=>guest.u32(lParam + i * 4) | 0);
                 if (order.some(i=>i < 0 || i >= count))
                 {
                     return 0;

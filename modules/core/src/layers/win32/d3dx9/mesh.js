@@ -153,8 +153,7 @@ export function vertexNormals(positions, indices, reps){
 
 /**
  * @typedef {Object} MeshHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
@@ -172,13 +171,10 @@ export function createMeshFunctions(host, buffers){
     const f = Math.fround;
     /** @param {number} at @returns {[number, number, number]} */
     const position = at=>{
-        const view = new DataView(host.readMemory(wholeAddress(at), 12).slice().buffer);
-        return [view.getFloat32(0, true), view.getFloat32(4, true), view.getFloat32(8, true)];
+        return [guest.f32(at), guest.f32(at + 4), guest.f32(at + 8)];
     };
-    /** @param {number} at @param {number[]} values */
-    const putFloats = (at, values)=>host.writeMemory(wholeAddress(at),
-        new Uint8Array(Float32Array.from(values).buffer));
-    const { u32, putU32s, method } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
 
     /**
      * Scratch memory for a call's out-values, given back however the work ends.
@@ -213,13 +209,13 @@ export function createMeshFunctions(host, buffers){
     const indicesOf = async(mesh, thread, at)=>{
         const faces = await method(thread, mesh, MESH.GetNumFaces, []);
         const wide = (await method(thread, mesh, MESH.GetOptions, []) & D3DXMESH_32BIT) !== 0;
-        putU32s(at, [0]);
+        guest.set32s(at, [0]);
         const locked = await method(thread, mesh, MESH.LockIndexBuffer, [D3DLOCK_READONLY, at]);
         if (locked !== D3D_OK)
         {
             return locked;
         }
-        const bytes = host.readMemory(u32(at), faces * 3 * (wide ? 4 : 2)).slice();
+        const bytes = guest.snapshot(guest.u32(at), faces * 3 * (wide ? 4 : 2));
         await method(thread, mesh, MESH.UnlockIndexBuffer, []);
         return [...(wide ? new Uint32Array(bytes.buffer) : new Uint16Array(bytes.buffer))];
     };
@@ -243,7 +239,7 @@ export function createMeshFunctions(host, buffers){
             const elements = new Map();
             for (let i = 0; i < 65; i++)
             {
-                const row = host.readMemory(at + i * 8, 8);
+                const row = guest.snapshot(at + i * 8, 8);
                 if (row[4] === D3DDECLTYPE_UNUSED || (row[0] | row[1] << 8) === 0xff)
                 {
                     break;
@@ -284,21 +280,21 @@ export function createMeshFunctions(host, buffers){
                 {
                     return converted;
                 }
-                reps = [...new Uint32Array(host.readMemory(repsAt, vertices * 4).slice().buffer)]
+                reps = [...new Uint32Array(guest.snapshot(repsAt, vertices * 4).buffer)]
                     .map((rep, i)=>(rep < vertices ? rep : i));
             }
             const stride = await method(thread, mesh, MESH.GetNumBytesPerVertex, []);
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
             const locked = await method(thread, mesh, MESH.LockVertexBuffer, [0, out]);
             if (locked !== D3D_OK)
             {
                 return locked;
             }
-            const data = u32(out);
+            const data = guest.u32(out);
             const positions = Array.from({ length: vertices }, (_, i)=>
                 position(data + i * stride + where.offset));
-            vertexNormals(positions, indices, reps).forEach((n, i)=>
-                putFloats(data + i * stride + normal.offset, n));
+            vertexNormals(positions, indices, reps).forEach((n, i)=>n.forEach((value, axis)=>
+                guest.setF32(data + i * stride + normal.offset + axis * 4, value)));
             return method(thread, mesh, MESH.UnlockVertexBuffer, []);
         });
         return answer;
@@ -315,13 +311,13 @@ export function createMeshFunctions(host, buffers){
         await null;
         const api = 'D3DXConvertMeshSubsetToSingleStrip';
         return withScratch(8, async at=>{
-            putU32s(at, [0]);
+            guest.set32s(at, [0]);
             const sized = await method(thread, mesh, MESH.GetAttributeTable, [0, at]);
             if (sized !== D3D_OK)
             {
                 return sized;
             }
-            const ranges = u32(at);
+            const ranges = guest.u32(at);
             if (ranges === 0)
             {
                 // The faces' attributes are then only in an ID3DXMesh's attribute
@@ -332,7 +328,7 @@ export function createMeshFunctions(host, buffers){
             const table = await withScratch(ranges * 20, async rows=>{
                 const read = await method(thread, mesh, MESH.GetAttributeTable, [rows, at]);
                 return read !== D3D_OK ? read
-                    : [...new Uint32Array(host.readMemory(rows, ranges * 20).slice().buffer)];
+                    : [...new Uint32Array(guest.snapshot(rows, ranges * 20).buffer)];
             });
             if (typeof table === 'number')
             {
@@ -364,13 +360,13 @@ export function createMeshFunctions(host, buffers){
             {
                 return D3DERR_INVALIDCALL;
             }
-            putU32s(at, [0, 0]);
+            guest.set32s(at, [0, 0]);
             const got = await method(thread, mesh, MESH.GetDevice, [at]);
             if (got !== D3D_OK)
             {
                 return got;
             }
-            const device = u32(at);
+            const device = guest.u32(at);
             const width = format === D3DFMT_INDEX32 ? 4 : 2;
             const made = await method(thread, device, DEVICE.CreateIndexBuffer, [strip.length
                 * width, usage, format, pool, at + 4, 0]);
@@ -379,20 +375,20 @@ export function createMeshFunctions(host, buffers){
             {
                 return made;
             }
-            const buffer = u32(at + 4);
+            const buffer = guest.u32(at + 4);
             const locked = await method(thread, buffer, INDEX_BUFFER.Lock, [0, 0, at, 0]);
             if (locked !== D3D_OK)
             {
                 await method(thread, buffer, UNKNOWN_RELEASE, []);
                 return locked;
             }
-            host.writeMemory(u32(at), new Uint8Array((width === 4 ? Uint32Array.from(strip)
+            guest.setBytes(guest.u32(at), new Uint8Array((width === 4 ? Uint32Array.from(strip)
                 : Uint16Array.from(strip)).buffer));
             await method(thread, buffer, INDEX_BUFFER.Unlock, []);
-            putU32s(out, [buffer]);
+            guest.set32s(out, [buffer]);
             if (countOut !== 0)
             {
-                putU32s(countOut, [strip.length]);
+                guest.set32s(countOut, [strip.length]);
             }
             return D3D_OK;
         });
@@ -423,8 +419,8 @@ export function createMeshFunctions(host, buffers){
                     + `${vertices}`);
             }
         });
-        const given = [...new Uint32Array(host.readMemory(wholeAddress(adjacency),
-            faces * 12).slice()
+        const given = [...new Uint32Array(guest.snapshot(adjacency,
+            faces * 12)
             .buffer)];
         return errors.concat(adjacencyErrors(given, faces));
     };
@@ -457,7 +453,7 @@ export function createMeshFunctions(host, buffers){
             handler: ([mesh, adjacency, out])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    putU32s(out, [0]);
+                    guest.set32s(out, [0]);
                 }
                 if (wholeAddress(mesh) === 0 || wholeAddress(adjacency) === 0 || !host.callGuest
                     || !host.heap)
@@ -494,7 +490,7 @@ export function createMeshFunctions(host, buffers){
                 {
                     if ((at >>> 0) !== 0)
                     {
-                        putU32s(at, [0]);
+                        guest.set32s(at, [0]);
                     }
                 }
                 if (wholeAddress(mesh) === 0 || wholeAddress(adjacency) === 0
@@ -518,12 +514,10 @@ export function createMeshFunctions(host, buffers){
                         const faces = await method(thread, mesh, MESH.GetNumFaces, []);
                         if (wholeAddress(adjacencyOut) !== 0)
                         {
-                            host.writeMemory(wholeAddress(adjacencyOut),
-                                host.readMemory(wholeAddress(adjacency),
-                                    faces * 12).slice());
+                            guest.copy(adjacencyOut, adjacency, faces * 12);
                         }
                         await method(thread, mesh, UNKNOWN_ADDREF, []);
-                        putU32s(meshOut, [mesh]);
+                        guest.set32s(meshOut, [mesh]);
                         return D3D_OK;
                     });
             },
@@ -545,7 +539,7 @@ export function createMeshFunctions(host, buffers){
             handler: ([mesh, attribute, options, out, countOut])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    putU32s(out, [0]);
+                    guest.set32s(out, [0]);
                 }
                 if (wholeAddress(mesh) === 0 || wholeAddress(out) === 0 || !host.callGuest
                     || !host.heap)
@@ -605,8 +599,8 @@ export function createMeshFunctions(host, buffers){
                         high[k] = Math.max(high[k], p[k]);
                     }
                 }
-                putFloats(minOut, low);
-                putFloats(maxOut, high);
+                low.forEach((value, i)=>guest.setF32(minOut + i * 4, value));
+                high.forEach((value, i)=>guest.setF32(maxOut + i * 4, value));
                 return D3D_OK;
             },
         },
@@ -647,8 +641,8 @@ export function createMeshFunctions(host, buffers){
                     radius = Math.max(radius, f(Math.sqrt(f(f(f(dx * dx) + f(dy * dy))
                         + f(dz * dz)))));
                 }
-                putFloats(centerOut, center);
-                putFloats(radiusOut, [radius]);
+                center.forEach((value, i)=>guest.setF32(centerOut + i * 4, value));
+                guest.setF32(radiusOut, radius);
                 return D3D_OK;
             },
         },

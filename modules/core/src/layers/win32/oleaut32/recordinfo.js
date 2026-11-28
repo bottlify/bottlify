@@ -18,11 +18,11 @@
  */
 
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { readGuid, writeGuid } from '../../../system/guid.js';
 import {
     isImport, resolveReference, TKIND_DISPATCH, TKIND_INTERFACE, TKIND_RECORD,
 } from './typelib.js';
 import { wholeAddress } from '../common/pointers.js';
+import { WHOLE } from '../common/guest.js';
 
 export const IID_IRECORDINFO = '{0000002F-0000-0000-C000-000000000046}';
 
@@ -52,8 +52,7 @@ const SIZES = Object.freeze({ 2: 2, 3: 4, 4: 4, 5: 8, 6: 8, 7: 8, 10: 4, 11: 2, 
 
 /**
  * @typedef {Object} RecordInfoHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => boolean }} heap
  * @property {(object: any, interfaceId: string) => number} publish
  * @property {(entry: number, args: number[], thread: unknown) => Promise<number>} call  into
@@ -85,22 +84,13 @@ const SIZES = Object.freeze({ 2: 2, 3: 4, 4: 4, 5: 8, 6: 8, 7: 8, 10: 4, 11: 2, 
 
 /** @param {RecordInfoHost} host */
 export function createRecordInfoObjects(host){
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        host.writeMemory(address, Uint8Array.from([
-            value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff]));
-    };
+    const { guest } = host;
     /**
      * @param {number} object @param {number} slot @param {number[]} args
      * @param {unknown} thread
      */
     const callMethod = (object, slot, args, thread)=>
-        host.call(readU32(readU32(object) + slot * 4), [object, ...args], thread);
+        host.call(guest.u32(guest.u32(object) + slot * 4), [object, ...args], thread);
 
     /**
      * The type a reference names within the library, or null for an import.
@@ -166,13 +156,13 @@ export function createRecordInfoObjects(host){
         switch (field.kind)
         {
             case 'bstr': return [()=>{
-                host.freeBstr(readU32(address));
-                writeU32(address, 0);
+                host.freeBstr(guest.u32(address));
+                guest.set32(address, 0);
             }];
             case 'variant': return [()=>host.clearVariant(address, thread)];
             case 'interface': return [()=>{
-                const pointer = readU32(address);
-                writeU32(address, 0);
+                const pointer = guest.u32(address);
+                guest.set32(address, 0);
                 return pointer === 0 ? 0 : callMethod(pointer, 2, [], thread);
             }];
             case 'record': return clearSteps(library, field.description, address, thread);
@@ -193,17 +183,16 @@ export function createRecordInfoObjects(host){
         const field = kindOf(library, variable.type);
         switch (field.kind)
         {
-            case 'bstr': return [()=>writeU32(target, host.copyBstr(readU32(source)))];
+            case 'bstr': return [()=>guest.set32(target, host.copyBstr(guest.u32(source)))];
             case 'variant': return [()=>host.copyVariant(target, source, thread)];
             case 'interface': return [()=>{
-                const pointer = readU32(source);
-                writeU32(target, pointer);
+                const pointer = guest.u32(source);
+                guest.set32(target, pointer);
                 return pointer === 0 ? 0 : callMethod(pointer, 1, [], thread);
             }];
             case 'record': return copySteps(library, field.description, source, target,
                 thread);
-            default: return [()=>host.writeMemory(target,
-                host.readMemory(source, sizeOf(library, variable.type)).slice())];
+            default: return [()=>guest.copy(target, source, sizeOf(library, variable.type))];
         }
     });
 
@@ -231,21 +220,6 @@ export function createRecordInfoObjects(host){
     const fieldNamed = (state, name)=>state.description.variables
         .find(variable=>variable.name?.toLowerCase() === name.toLowerCase()) ?? null;
 
-    /** @param {number} address */
-    const readWide = address=>{
-        let text = '';
-        for (let at = address;; at += 2)
-        {
-            const bytes = host.readMemory(at, 2);
-            const unit = bytes[0] | (bytes[1] << 8);
-            if (unit === 0)
-            {
-                return text;
-            }
-            text += String.fromCharCode(unit);
-        }
-    };
-
     /** @typedef {{ state: RecordState }} Self */
 
     const METHODS = Object.freeze([
@@ -257,8 +231,7 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(wholeAddress(record),
-                    new Uint8Array(state.description.instanceSize));
+                guest.fill(record, 0, state.description.instanceSize);
                 return S_OK;
             } },
         { name: 'RecordClear', argBytes: 8,
@@ -286,7 +259,7 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeGuid(host, out >>> 0,
+                guest.setGuid(out,
                     state.description.guid ?? '{00000000-0000-0000-0000-000000000000}');
                 return S_OK;
             } },
@@ -298,7 +271,7 @@ export function createRecordInfoObjects(host){
                     return E_INVALIDARG;
                 }
                 const bstr = host.allocateBstr(state.description.name);
-                writeU32(wholeAddress(out), bstr);
+                guest.set32(wholeAddress(out), bstr);
                 return bstr === 0 ? E_OUTOFMEMORY : S_OK;
             } },
         { name: 'GetSize', argBytes: 8,
@@ -308,7 +281,7 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(wholeAddress(out), state.description.instanceSize);
+                guest.set32(wholeAddress(out), state.description.instanceSize);
                 return S_OK;
             } },
         { name: 'GetTypeInfo', argBytes: 8,
@@ -318,7 +291,7 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(wholeAddress(out), state.typeInfo);
+                guest.set32(wholeAddress(out), state.typeInfo);
                 return callMethod(state.typeInfo, 1, [], host.thread()).then(()=>S_OK);
             } },
         { name: 'GetField', argBytes: 16,
@@ -328,7 +301,7 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                const field = fieldNamed(state, readWide(wholeAddress(name)));
+                const field = fieldNamed(state, guest.wstr(wholeAddress(name), WHOLE));
                 if (!field)
                 {
                     return TYPE_E_FIELDNOTFOUND;
@@ -344,8 +317,8 @@ export function createRecordInfoObjects(host){
                 {
                     const bytes = new Uint8Array(16);
                     bytes[0] = VT_BSTR;
-                    host.writeMemory(wholeAddress(out), bytes);
-                    writeU32(wholeAddress(out) + 8, host.copyBstr(readU32(at)));
+                    guest.setBytes(out, bytes);
+                    guest.set32(wholeAddress(out) + 8, host.copyBstr(guest.u32(at)));
                     return S_OK;
                 }
                 if (size === undefined)
@@ -354,8 +327,8 @@ export function createRecordInfoObjects(host){
                 }
                 const bytes = new Uint8Array(16);
                 bytes[0] = vt;
-                bytes.set(host.readMemory(at, size), 8);
-                host.writeMemory(wholeAddress(out), bytes);
+                bytes.set(guest.snapshot(at, size), 8);
+                guest.setBytes(out, bytes);
                 return S_OK;
             } },
         ...['GetFieldNoCopy', 'PutField', 'PutFieldNoCopy'].map(name=>({
@@ -376,16 +349,16 @@ export function createRecordInfoObjects(host){
                 const all = state.description.variables;
                 if ((names >>> 0) === 0)
                 {
-                    writeU32(wholeAddress(count), all.length);
+                    guest.set32(wholeAddress(count), all.length);
                     return S_OK;
                 }
-                const room = Math.min(readU32(wholeAddress(count)), all.length);
+                const room = Math.min(guest.u32(wholeAddress(count)), all.length);
                 for (let index = 0; index < room; index++)
                 {
-                    writeU32(wholeAddress(names) + index * 4,
+                    guest.set32(wholeAddress(names) + index * 4,
                         host.allocateBstr(all[index].name ?? ''));
                 }
-                writeU32(wholeAddress(count), room);
+                guest.set32(wholeAddress(count), room);
                 return S_OK;
             } },
         { name: 'IsMatchingType', argBytes: 8,
@@ -405,7 +378,7 @@ export function createRecordInfoObjects(host){
                     return 0;
                 }
                 return callMethod(other >>> 0, 6, [slot], host.thread()).then(hr=>{
-                    const same = (hr | 0) >= 0 && readGuid(host, slot)
+                    const same = (hr | 0) >= 0 && guest.guid(slot)
                         === (state.description.guid ?? '{00000000-0000-0000-0000-000000000000}');
                     host.heap.free(slot);
                     return same ? 1 : 0;
@@ -417,7 +390,7 @@ export function createRecordInfoObjects(host){
                 const record = host.heap.allocate(Math.max(state.description.instanceSize, 1));
                 if (record !== 0)
                 {
-                    host.writeMemory(record, new Uint8Array(state.description.instanceSize));
+                    guest.fill(record, 0, state.description.instanceSize);
                 }
                 return record;
             } },
@@ -433,8 +406,8 @@ export function createRecordInfoObjects(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                host.writeMemory(record, new Uint8Array(state.description.instanceSize));
-                writeU32(wholeAddress(out), record);
+                guest.fill(record, 0, state.description.instanceSize);
+                guest.set32(wholeAddress(out), record);
                 return inOrder(copySteps(state.library, state.description, from >>> 0, record,
                     host.thread()));
             } },

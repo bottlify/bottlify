@@ -243,82 +243,6 @@
    "accessor dword": 1,
    "accessor setDword": 1
   },
-  "win32/comctl32/comboex.js": {
-   "accessor i32": 1,
-   "accessor setI32": 1,
-   "accessor setPointer": 1
-  },
-  "win32/comctl32/dpa.js": {
-   "accessor getPtr": 1,
-   "accessor read32": 1,
-   "accessor setPtr": 1,
-   "accessor write32": 1
-  },
-  "win32/comctl32/functions.js": {
-   "accessor u32": 1
-  },
-  "win32/comctl32/header.js": {
-   "accessor read32": 1,
-   "accessor write32": 1
-  },
-  "win32/comctl32/helpers.js": {
-   "accessor i32": 1,
-   "copy readMemory().slice()": 1
-  },
-  "win32/comctl32/imagelist-stream.js": {
-   "accessor u32": 1,
-   "accessor word": 1
-  },
-  "win32/comctl32/listview.js": {
-   "accessor read32": 1,
-   "accessor word": 1,
-   "accessor write32": 1
-  },
-  "win32/comctl32/monthcal.js": {
-   "accessor readI32": 1,
-   "accessor writeI32": 1
-  },
-  "win32/comctl32/pager.js": {
-   "accessor setPointer": 1,
-   "accessor setU32": 1,
-   "accessor u32": 1,
-   "copy readMemory().slice()": 7,
-   "string putWide": 1
-  },
-  "win32/comctl32/propsheet.js": {
-   "accessor dword": 1,
-   "accessor putU32": 1,
-   "accessor u16": 1,
-   "accessor u32": 1,
-   "accessor word": 1
-  },
-  "win32/comctl32/rebar.js": {
-   "accessor setPointer": 1,
-   "accessor setU32": 1,
-   "accessor u32": 1,
-   "copy readMemory().slice()": 1
-  },
-  "win32/comctl32/tab.js": {
-   "accessor readU32": 1,
-   "string readWide": 1
-  },
-  "win32/comctl32/toolbar.js": {
-   "accessor read32": 1,
-   "accessor write32": 1
-  },
-  "win32/comctl32/tooltips.js": {
-   "accessor read32": 1,
-   "accessor write32": 1
-  },
-  "win32/comctl32/treeview.js": {
-   "accessor readI32": 1,
-   "accessor readU32": 1,
-   "accessor u32": 1,
-   "accessor writeU32": 1
-  },
-  "win32/comctl32/updown.js": {
-   "copy readMemory().slice()": 1
-  },
   "win32/comdlg32/functions.js": {
    "accessor u32": 1
   },
@@ -360,74 +284,6 @@
   },
   "win32/d3dx10/loaders.js": {
    "accessor writeU32": 1
-  },
-  "win32/d3dx9/constants.js": {
-   "accessor dword": 1,
-   "accessor f32": 1,
-   "accessor u16": 1,
-   "accessor u32": 2,
-   "copy readMemory().slice()": 1,
-   "string readString": 1,
-   "string string": 1
-  },
-  "win32/d3dx9/device.js": {
-   "accessor putPointer": 1,
-   "accessor putU32s": 1,
-   "string string": 1
-  },
-  "win32/d3dx9/effect-binary.js": {
-   "accessor u32": 1
-  },
-  "win32/d3dx9/effect.js": {
-   "accessor putU32": 1,
-   "accessor writeWords": 1,
-   "copy readMemory().slice()": 3,
-   "string writeString": 1
-  },
-  "win32/d3dx9/functions.js": {
-   "accessor putPointer": 1,
-   "accessor putU32": 1,
-   "accessor u32": 1,
-   "copy readMemory().slice()": 1,
-   "string wideAt": 1
-  },
-  "win32/d3dx9/fvf.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/d3dx9/hlsl-build.js": {
-   "accessor f32": 1
-  },
-  "win32/d3dx9/hlsl-ctab.js": {
-   "string stringAt": 1
-  },
-  "win32/d3dx9/line.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/d3dx9/mesh-object.js": {
-   "copy readMemory().slice()": 6
-  },
-  "win32/d3dx9/mesh.js": {
-   "accessor putFloats": 1,
-   "copy readMemory().slice()": 6
-  },
-  "win32/d3dx9/render-to-surface.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/d3dx9/save-texture.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/d3dx9/semantics.js": {
-   "accessor readU32": 1
-  },
-  "win32/d3dx9/sprite.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/d3dx9/texture-tools.js": {
-   "copy readMemory().slice()": 2
-  },
-  "win32/d3dx9/texture.js": {
-   "copy readMemory().slice()": 1,
-   "string stringAt": 1
   },
   "win32/dbghelp/functions.js": {
    "accessor readU32": 1,
@@ -684,15 +540,6 @@
   "win32/offline/functions.js": {
    "accessor u32": 1
   },
-  "win32/oleaut32/errorinfo.js": {
-   "accessor writeU32": 1,
-   "string readWide": 1
-  },
-  "win32/oleaut32/invoke.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 1
-  },
   "win32/oleaut32/marshal.js": {
    "accessor pointer": 1,
    "accessor put32": 1,
@@ -701,39 +548,6 @@
    "accessor word": 1,
    "copy readMemory().slice()": 2,
    "string readString": 1
-  },
-  "win32/oleaut32/objects.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "string readWide": 1
-  },
-  "win32/oleaut32/picture.js": {
-   "accessor readU32": 1,
-   "accessor writeU16": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 8,
-   "string readWide": 1
-  },
-  "win32/oleaut32/recordinfo.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 1,
-   "string readWide": 1
-  },
-  "win32/oleaut32/sltg.js": {
-   "accessor u16": 1,
-   "accessor u32": 1
-  },
-  "win32/oleaut32/stddispatch.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
-  "win32/oleaut32/stdole.js": {
-   "accessor pointer": 1
-  },
-  "win32/oleaut32/typelib.js": {
-   "accessor word": 1,
-   "string stringAt": 1
   },
   "win32/oledlg/functions.js": {
    "accessor readU32": 1,
@@ -798,10 +612,6 @@
   },
   "win32/quartz/transforms.js": {
    "copy readMemory().slice()": 2
-  },
-  "win32/riched/richedit.js": {
-   "accessor readU32": 1,
-   "copy readMemory().slice()": 1
   },
   "win32/rpcrt4/functions.js": {
    "accessor writeU32": 1,

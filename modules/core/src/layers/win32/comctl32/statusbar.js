@@ -114,7 +114,8 @@ const DT_SINGLELINE = 0x0020;
  *     => number | Promise<number>}
  */
 export function createStatusBarProcedure(host, tk){
-    const pointer = host.pointerSize ?? 4;
+    const { guest } = host;
+    const pointer = guest.pointerSize;
     /**
      * @param {any} record
      * @returns {{ parts: Part[], simple: boolean, simplePart: Part, minHeight: number,
@@ -142,7 +143,7 @@ export function createStatusBarProcedure(host, tk){
             (character < ' ' && character !== '\t' ? ' ' : character)).join(''));
 
     /** @param {number} address @param {string} text @param {boolean} wide */
-    const writeText = (address, text, wide)=>host.writeMemory(address, wide
+    const writeText = (address, text, wide)=>guest.setBytes(address, wide
         ? utf16z(text)
         : encodeAnsi(`${text}\0`));
 
@@ -294,7 +295,7 @@ export function createStatusBarProcedure(host, tk){
         [rect.left, rect.top, rect.right, rect.bottom].forEach((value, side)=>
             view.setInt32(at + side * 4, value, true));
         put(at + 16, data, true);
-        host.writeMemory(block, bytes);
+        guest.setBytes(block, bytes);
         return after(host.send(to, WM_DRAWITEM, record.id, block), ()=>{
             host.release?.(block);
             return 0;
@@ -329,7 +330,7 @@ export function createStatusBarProcedure(host, tk){
         view.setUint32(header, item >>> 0, true);
         view.setInt32(header + pointer * 2, point.x, true);
         view.setInt32(header + pointer * 2 + 4, point.y, true);
-        host.writeMemory(block, bytes);
+        guest.setBytes(block, bytes);
         return after(host.send(to, WM_NOTIFY, record.id, block, thread), ()=>{
             host.release?.(block);
             return 0;
@@ -411,11 +412,9 @@ export function createStatusBarProcedure(host, tk){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(lParam, wParam * 4);
-                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                 held.parts = Array.from({ length: wParam }, (_, index)=>({
                     ...(held.parts[index] ?? { text: '', type: 0 }),
-                    right: view.getInt32(index * 4, true),
+                    right: guest.i32(lParam + index * 4),
                 }));
                 host.invalidate(record);
                 return 1;
@@ -424,7 +423,7 @@ export function createStatusBarProcedure(host, tk){
                 if (lParam !== 0)
                 {
                     const rights = held.parts.slice(0, wParam).map(part=>part.right);
-                    host.writeMemory(lParam, new Uint8Array(new Int32Array(rights).buffer));
+                    guest.set32s(lParam, rights);
                 }
                 return held.parts.length;
             }
@@ -433,7 +432,7 @@ export function createStatusBarProcedure(host, tk){
                 {
                     return 0;
                 }
-                host.writeMemory(lParam, new Uint8Array(new Int32Array(BORDERS).buffer));
+                guest.set32s(lParam, BORDERS);
                 return 1;
             case SB_SETMINHEIGHT:
                 held.minHeight = wParam;
@@ -450,8 +449,8 @@ export function createStatusBarProcedure(host, tk){
                 {
                     return 0;
                 }
-                host.writeMemory(lParam, new Uint8Array(new Int32Array([rect.left, rect.top,
-                    rect.right, rect.bottom]).buffer));
+                guest.set32s(lParam, [rect.left, rect.top,
+                    rect.right, rect.bottom]);
                 return 1;
             }
             case SB_SETBKCOLOR: {

@@ -53,7 +53,6 @@ import { notifyWindow } from './notify.js';
 import { readText, writeText, LPSTR_TEXTCALLBACK } from './strings.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
 import { stripOfBitmapId } from './strips.js';
-import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
 /** The class name a program creates the control by. */
@@ -256,6 +255,7 @@ const DT_SINGLELINE = 0x0020;
  *     => number | Promise<number>}
  */
 export function createToolbarProcedure(host, tk, images, resources = {}){
+    const { guest } = host;
     /**
      * @param {any} record
      * @returns {{ buttons: Button[], structSize: number, bitmap: { cx: number, cy: number },
@@ -296,21 +296,9 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
     /** @param {string} name @param {...number} args */
     const imageCall = (name, ...args)=>images?.functions[name]?.handler(args) ?? -1;
 
-    /** @param {number} at */
-    const read32 = at=>{
-        const b = host.readMemory(wholeAddress(at), 4);
-        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
-    };
-    /** @param {number} at @param {number} value */
-    const write32 = (at, value)=>{
-        const v = value >>> 0;
-        host.writeMemory(wholeAddress(at),
-            Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
-    };
-
     /** @param {number} address @param {boolean} wide @returns {Button} */
     const readButton = (address, wide)=>{
-        const bytes = host.readMemory(address, TBBUTTON_SIZE);
+        const bytes = guest.snapshot(address, TBBUTTON_SIZE);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const string = view.getInt32(16, true);
         return {
@@ -336,7 +324,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         bytes[9] = button.style;
         view.setUint32(12, button.data, true);
         view.setInt32(16, typeof button.string === 'number' ? button.string : -1, true);
-        host.writeMemory(address, bytes.subarray(0, Math.min(TBBUTTON_SIZE,
+        guest.setBytes(address, bytes.subarray(0, Math.min(TBBUTTON_SIZE,
             state(record).structSize)));
     };
 
@@ -497,9 +485,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         {
             return -1;
         }
-        const bytes = host.readMemory(address, 8);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, 8);
-        return addFrom(record, count, view.getUint32(0, true), view.getUint32(4, true));
+        return addFrom(record, count, guest.u32(address), guest.u32(address + 4));
     };
 
     /**
@@ -564,10 +550,8 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         {
             return 0;
         }
-        const bytes = host.readMemory(address, 20);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, 20);
         const [oldInstance, oldId, instance, id] = [0, 4, 8, 12]
-            .map(at=>view.getUint32(at, true));
+            .map(at=>guest.u32(address + at));
         const source = held.sources.find(entry=>entry.instance === oldInstance
             && entry.id === oldId);
         const bitmap = instance === 0 ? id : resources.loadBitmap?.(instance, id) ?? 0;
@@ -576,7 +560,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             return 0;
         }
         Object.assign(source, { instance, id, bitmap, strip: null,
-            declared: view.getInt32(16, true) });
+            declared: guest.i32(address + 16) });
         if (!held.ownList)
         {
             host.divergence?.('TB_REPLACEBITMAP', 'a list the program gave is not refilled');
@@ -702,9 +686,9 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             return previous;
         }
         return after(notifyOwner(record, TBN_HOTITEMCHANGE, 12, block=>{
-            write32(block + 12, idOld);
-            write32(block + 16, idNew);
-            write32(block + 20, target ? HICF_OTHER : HICF_LEAVING);
+            guest.set32(block + 12, idOld);
+            guest.set32(block + 16, idNew);
+            guest.set32(block + 20, target ? HICF_OTHER : HICF_LEAVING);
         }, thread), refused=>{
             if ((refused | 0) === 0)
             {
@@ -729,10 +713,10 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         {
             return 0;
         }
-        host.writeMemory(block, new Uint8Array(12 + extra));
-        write32(block, record.hwnd);
-        write32(block + 4, record.id);
-        write32(block + 8, code);
+        guest.fill(block, 0, 12 + extra);
+        guest.set32(block, record.hwnd);
+        guest.set32(block + 4, record.id);
+        guest.set32(block + 8, code);
         write(block);
         return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
             host.release?.(block);
@@ -756,8 +740,8 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         {
             return 0;
         }
-        const code = read32(lParam + 8);
-        const from = read32(lParam + 4);
+        const code = guest.u32(lParam + 8);
+        const from = guest.u32(lParam + 4);
         if (code === TTN_GETDISPINFOA || code === TTN_GETDISPINFOW)
         {
             return after(infoTip(record, lParam, code === TTN_GETDISPINFOW, thread),
@@ -769,10 +753,10 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         }
         const size = 12 + 8 + CBEMAXSTRLEN + 4;
         return withCopy(size, copy=>{
-            host.writeMemory(copy, host.readMemory(lParam, 20));
-            write32(copy + 8, CBEN_ENDEDITA);
+            guest.copy(copy, lParam, 20);
+            guest.set32(copy + 8, CBEN_ENDEDITA);
             writeText(host, copy + 20, readText(host, lParam + 20, true), false, CBEMAXSTRLEN);
-            write32(copy + 20 + CBEMAXSTRLEN, read32(lParam + 20 + CBEMAXSTRLEN * 2));
+            guest.set32(copy + 20 + CBEMAXSTRLEN, guest.u32(lParam + 20 + CBEMAXSTRLEN * 2));
             return host.send(to, WM_NOTIFY, from, copy, thread);
         }, 'CBEN_ENDEDITW');
     };
@@ -789,7 +773,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             host.divergence?.('WM_NOTIFY', `no memory to convert ${what}: not forwarded`);
             return 0;
         }
-        host.writeMemory(at, new Uint8Array(size));
+        guest.fill(at, 0, size);
         return after(use(at), answer=>{
             host.release?.(at);
             return answer;
@@ -805,24 +789,24 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
      */
     const infoTip = (record, info, wide, thread)=>{
         const held = state(record);
-        const command = read32(info + 4) | 0;
+        const command = guest.u32(info + 4) | 0;
         const button = held.buttons[indexOf(record, command)];
         const own = held.unicode;
         return withCopy(28 + INFOTIPSIZE * (own ? 2 : 1), block=>{
-            write32(block, record.hwnd);
-            write32(block + 4, record.id);
-            write32(block + 8, own ? TBN_GETINFOTIPW : TBN_GETINFOTIPA);
-            write32(block + 12, block + 28);
-            write32(block + 16, INFOTIPSIZE);
-            write32(block + 20, command);
-            write32(block + 24, button?.data ?? 0);
+            guest.set32(block, record.hwnd);
+            guest.set32(block + 4, record.id);
+            guest.set32(block + 8, own ? TBN_GETINFOTIPW : TBN_GETINFOTIPA);
+            guest.set32(block + 12, block + 28);
+            guest.set32(block + 16, INFOTIPSIZE);
+            guest.set32(block + 20, command);
+            guest.set32(block + 24, button?.data ?? 0);
             return after(host.send(ownerOf(record), WM_NOTIFY, record.id, block, thread), ()=>{
-                const pointer = read32(block + 12);
+                const pointer = guest.u32(block + 12);
                 const text = pointer !== 0 ? readText(host, pointer, own) : '';
                 if (text !== '')
                 {
                     writeText(host, info + 16, text, wide, TIP_TEXT);
-                    write32(info + 12, info + 16);
+                    guest.set32(info + 12, info + 16);
                 }
                 return 0;
             });
@@ -838,7 +822,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
     const tipText = (record, info, wide, thread)=>{
         const held = state(record);
         const to = ownerOf(record);
-        const from = read32(info + 4);
+        const from = guest.u32(info + 4);
         if (wide === held.unicode)
         {
             return host.send(to, WM_NOTIFY, from, info, thread);
@@ -847,27 +831,27 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         /** NMTTDISPINFO's hinst, uFlags and lParam, after a szText of either width. */
         const tail = (/** @type {boolean} */ w)=>16 + TIP_TEXT * (w ? 2 : 1);
         return withCopy(tail(own) + 12, copy=>{
-            host.writeMemory(copy, host.readMemory(info, 12));
-            write32(copy + 8, own ? TTN_GETDISPINFOW : TTN_GETDISPINFOA);
+            guest.copy(copy, info, 12);
+            guest.set32(copy + 8, own ? TTN_GETDISPINFOW : TTN_GETDISPINFOA);
             writeText(host, copy + 16, readText(host, info + 16, wide, TIP_TEXT), own, TIP_TEXT);
-            const text = read32(info + 12);
-            write32(copy + 12, text === info + 16 ? copy + 16 : text);
-            host.writeMemory(copy + tail(own), host.readMemory(info + tail(wide), 12));
+            const text = guest.u32(info + 12);
+            guest.set32(copy + 12, text === info + 16 ? copy + 16 : text);
+            guest.copy(copy + tail(own), info + tail(wide), 12);
             return after(host.send(to, WM_NOTIFY, from, copy, thread), answer=>{
-                const given = read32(copy + 12);
+                const given = guest.u32(copy + 12);
                 // Text the owner gave, at either place, comes back in the
                 // tooltip's encoding; a resource id or the callback stays.
                 if (given === copy + 16 || given > 0xffff && given !== LPSTR_TEXTCALLBACK)
                 {
                     writeText(host, info + 16, readText(host, given, own, TIP_TEXT), wide,
                         TIP_TEXT);
-                    write32(info + 12, info + 16);
+                    guest.set32(info + 12, info + 16);
                 }
                 else
                 {
-                    write32(info + 12, given);
+                    guest.set32(info + 12, given);
                 }
-                host.writeMemory(info + tail(wide), host.readMemory(copy + tail(own), 12));
+                guest.copy(info + tail(wide), copy + tail(own), 12);
                 return answer;
             });
         }, 'TTN_GETDISPINFO');
@@ -959,7 +943,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         const view = new DataView(bytes.buffer);
         [rect.left, rect.top, rect.right, rect.bottom]
             .forEach((value, at)=>view.setInt32(at * 4, value, true));
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
     };
 
     /**
@@ -1231,9 +1215,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 {
                     return -1 >>> 0;
                 }
-                const bytes = host.readMemory(lParam, 8);
-                const view = new DataView(bytes.buffer, bytes.byteOffset, 8);
-                const index = hit(record, view.getInt32(0, true), view.getInt32(4, true));
+                const index = hit(record, guest.i32(lParam), guest.i32(lParam + 4));
                 // A separator answers its index negated, nowhere -1.
                 return (index < 0 ? -1
                     : (held.buttons[index].style & TBSTYLE_SEP) !== 0 ? -index : index) >>> 0;
@@ -1246,7 +1228,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 }
                 const width = Math.max(0, ...rects.map(rect=>rect.right)) - held.indent;
                 const height = Math.max(0, ...rects.map(rect=>rect.bottom)) - held.top;
-                host.writeMemory(lParam, new Uint8Array(new Int32Array([width, height]).buffer));
+                guest.set32s(lParam, [width, height]);
                 return 1;
             }
             case TB_GETROWS:
@@ -1280,11 +1262,11 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             case TB_GETBUTTONINFOW: {
                 // A structure of any other size is refused, as is a button
                 // the command (or, under TBIF_BYINDEX, the index) names none of.
-                if (lParam === 0 || read32(lParam + BUTTONINFO.cbSize) !== BUTTONINFO.SIZE)
+                if (lParam === 0 || guest.u32(lParam + BUTTONINFO.cbSize) !== BUTTONINFO.SIZE)
                 {
                     return -1;
                 }
-                const mask = read32(lParam + BUTTONINFO.dwMask);
+                const mask = guest.u32(lParam + BUTTONINFO.dwMask);
                 const index = mask & TBIF_BYINDEX ? wParam | 0 : indexOf(record, wParam);
                 const button = held.buttons[index];
                 if (!button)
@@ -1293,45 +1275,45 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 }
                 if (mask & TBIF_COMMAND)
                 {
-                    write32(lParam + BUTTONINFO.idCommand, button.command);
+                    guest.set32(lParam + BUTTONINFO.idCommand, button.command);
                 }
                 if (mask & TBIF_IMAGE)
                 {
-                    write32(lParam + BUTTONINFO.iImage, button.image);
+                    guest.set32(lParam + BUTTONINFO.iImage, button.image);
                 }
                 if (mask & TBIF_STATE || mask & TBIF_STYLE)
                 {
-                    host.writeMemory(lParam + BUTTONINFO.fsState, Uint8Array.of(
+                    guest.setBytes(lParam + BUTTONINFO.fsState, Uint8Array.of(
                         mask & TBIF_STATE ? button.state
-                            : host.readMemory(lParam + BUTTONINFO.fsState, 1)[0],
+                            : guest.u8(lParam + BUTTONINFO.fsState),
                         mask & TBIF_STYLE ? button.style
-                            : host.readMemory(lParam + BUTTONINFO.fsStyle, 1)[0]));
+                            : guest.u8(lParam + BUTTONINFO.fsStyle)));
                 }
                 if (mask & TBIF_SIZE)
                 {
                     const rect = layout(record)[index];
                     const width = rect ? rect.right - rect.left : button.width ?? 0;
-                    host.writeMemory(lParam + BUTTONINFO.cx, Uint8Array.of(width & 0xff,
+                    guest.setBytes(lParam + BUTTONINFO.cx, Uint8Array.of(width & 0xff,
                         width >>> 8 & 0xff));
                 }
                 if (mask & TBIF_LPARAM)
                 {
-                    write32(lParam + BUTTONINFO.lParam, button.data);
+                    guest.set32(lParam + BUTTONINFO.lParam, button.data);
                 }
                 if (mask & TBIF_TEXT)
                 {
-                    writeText(host, read32(lParam + BUTTONINFO.pszText), textOf(record, button),
-                        id === TB_GETBUTTONINFOW, read32(lParam + BUTTONINFO.cchText) | 0);
+                    writeText(host, guest.u32(lParam + BUTTONINFO.pszText), textOf(record, button),
+                        id === TB_GETBUTTONINFOW, guest.u32(lParam + BUTTONINFO.cchText) | 0);
                 }
                 return index;
             }
             case TB_SETBUTTONINFOA:
             case TB_SETBUTTONINFOW: {
-                if (lParam === 0 || read32(lParam + BUTTONINFO.cbSize) !== BUTTONINFO.SIZE)
+                if (lParam === 0 || guest.u32(lParam + BUTTONINFO.cbSize) !== BUTTONINFO.SIZE)
                 {
                     return 0;
                 }
-                const mask = read32(lParam + BUTTONINFO.dwMask);
+                const mask = guest.u32(lParam + BUTTONINFO.dwMask);
                 const index = mask & TBIF_BYINDEX ? wParam | 0 : indexOf(record, wParam);
                 const button = held.buttons[index];
                 if (!button)
@@ -1340,32 +1322,32 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 }
                 if (mask & TBIF_COMMAND)
                 {
-                    button.command = read32(lParam + BUTTONINFO.idCommand) | 0;
+                    button.command = guest.u32(lParam + BUTTONINFO.idCommand) | 0;
                 }
                 if (mask & TBIF_IMAGE)
                 {
-                    button.image = read32(lParam + BUTTONINFO.iImage) | 0;
+                    button.image = guest.u32(lParam + BUTTONINFO.iImage) | 0;
                 }
                 if (mask & TBIF_STATE)
                 {
-                    button.state = host.readMemory(lParam + BUTTONINFO.fsState, 1)[0];
+                    button.state = guest.u8(lParam + BUTTONINFO.fsState);
                 }
                 if (mask & TBIF_STYLE)
                 {
-                    button.style = host.readMemory(lParam + BUTTONINFO.fsStyle, 1)[0];
+                    button.style = guest.u8(lParam + BUTTONINFO.fsStyle);
                 }
                 if (mask & TBIF_SIZE)
                 {
-                    const [low, high] = host.readMemory(lParam + BUTTONINFO.cx, 2);
+                    const [low, high] = guest.snapshot(lParam + BUTTONINFO.cx, 2);
                     button.width = low | high << 8;
                 }
                 if (mask & TBIF_LPARAM)
                 {
-                    button.data = read32(lParam + BUTTONINFO.lParam);
+                    button.data = guest.u32(lParam + BUTTONINFO.lParam);
                 }
                 if (mask & TBIF_TEXT)
                 {
-                    const pointer = read32(lParam + BUTTONINFO.pszText);
+                    const pointer = guest.u32(lParam + BUTTONINFO.pszText);
                     button.string = pointer === 0 ? '' : readText(host, pointer,
                         id === TB_SETBUTTONINFOW);
                 }
@@ -1382,7 +1364,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 const text = textOf(record, button);
                 if (lParam !== 0)
                 {
-                    host.writeMemory(lParam, id === TB_GETBUTTONTEXTW
+                    guest.setBytes(lParam, id === TB_GETBUTTONTEXTW
                         ? utf16z(text)
                         : encodeAnsi(`${text}\0`));
                 }
@@ -1415,7 +1397,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             case WM_STYLECHANGED:
                 if ((message.wParam | 0) === GWL_STYLE && lParam !== 0)
                 {
-                    restyled(record, read32(lParam));
+                    restyled(record, guest.u32(lParam));
                 }
                 return 0;
             case TB_GETSTYLE:

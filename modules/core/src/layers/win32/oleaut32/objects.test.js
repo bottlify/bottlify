@@ -12,6 +12,7 @@ import { parseTypeLib } from './typelib.js';
 import { IID_IUNKNOWN, IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const library = parseTypeLib(
     new Uint8Array(readFileSync(new URL('./msft-typelib.bin', import.meta.url))));
@@ -44,9 +45,8 @@ function fakeHost(){
         reported,
         blocks,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
+        guest: guestOver(bytes),
         /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
         heap: {
             /** @param {number} size */
             allocate: size=>{
@@ -89,7 +89,7 @@ function fakeHost(){
         /** @param {number} address */
         u16: address=>bytes[address] | (bytes[address + 1] << 8),
         /** @param {number} address @param {number} value */
-        putU32: (address, value)=>host.writeMemory(address, Uint8Array.from([
+        putU32: (address, value)=>host.guest.setBytes(address, Uint8Array.from([
             value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff])),
         /** @param {number} address @param {string} text */
         putWide: (address, text)=>{
@@ -166,7 +166,7 @@ test('a type is one object however it is reached, and keeps the library alive', 
     assert.equal(entry.object.interfaceFor('{00020412-0000-0000-C000-000000000046}'), null,
         'no ITypeInfo2');
 
-    host.writeMemory(GUID, Uint8Array.from([0x70, 0x61, 0x09, 0xcc, 0xcb, 0xe2, 0xd2, 0x11,
+    host.guest.setBytes(GUID, Uint8Array.from([0x70, 0x61, 0x09, 0xcc, 0xcb, 0xe2, 0xd2, 0x11,
         0x80, 0xc8, 0x00, 0x10, 0x4b, 0x1f, 0x6c, 0xea]));
     assert.equal(host.invoke(lib, 'GetTypeInfoOfGuid', [GUID, OUT2]), 0);
     assert.equal(host.u32(OUT2), info, 'the same pointer for the same type');
@@ -282,7 +282,7 @@ test('names go both ways: GetNames, GetIDsOfNames, FindName and IsName', ()=>{
     host.putWide(0x400, 'isetupobjects');
     assert.equal(host.invoke(lib, 'IsName', [0x400, 0, OUT]), 0);
     assert.equal(host.u32(OUT), 1);
-    host.writeMemory(OUT2, Uint8Array.from([4, 0]));
+    host.guest.setBytes(OUT2, Uint8Array.from([4, 0]));
     assert.equal(host.invoke(lib, 'FindName', [0x400, 0, NAMES, 0x500, OUT2]), 0);
     assert.equal(host.u16(OUT2), 1, 'one type found');
     assert.equal(host.u32(NAMES), info, 'the type, by its one pointer');

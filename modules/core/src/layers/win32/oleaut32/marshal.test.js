@@ -10,13 +10,13 @@ import { readFileSync } from 'node:fs';
 import { HKEY_CLASSES_ROOT, createHive } from '../advapi32/registry.js';
 import { parseTypeLib } from './typelib.js';
 import { createAutomationFunctions } from './functions.js';
-import { guestOver } from '../common/guest.fixture.js';
 import {
     IID_IDISPATCH, PARAMFLAG_FIN, PARAMFLAG_FOUT, argumentBytes, argumentSlots,
     createInterfaceCatalog, describeType, layoutOf, marshalReply, marshalRequest, sizeOf,
     unmarshalReply,
     unmarshalRequest, unsupportedAt,
 } from './marshal.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const LIBRARY = parseTypeLib(new Uint8Array(
     readFileSync(new URL('./msft-typelib.bin', import.meta.url))));

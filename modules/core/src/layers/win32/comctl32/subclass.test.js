@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { guestOver } from '../common/guest.fixture.js';
 import { createSubclassFunctions } from './subclass.js';
 import { COMCTL32_ORDINALS } from './functions.js';
 
@@ -90,7 +91,7 @@ function setup(){
         SendMessage: message=>run(window.proc, message),
     };
     const fns = createSubclassFunctions({
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
         user32: name=>(user32[name] ? { handler: user32[name] } : undefined),
         call: (entry, args)=>run(entry, args),
         callerThread: ()=>null,

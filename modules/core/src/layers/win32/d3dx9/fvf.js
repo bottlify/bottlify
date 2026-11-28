@@ -222,24 +222,23 @@ export function declVertexSize(elements, stream){
  * A declaration in guest memory, up to its end, at most MAX_FVF_DECL_SIZE
  * elements; null when no end is found among them.
  *
- * @param {(address: number, length: number) => Uint8Array} readMemory @param {number} at
+ * @param {import('../../../system/port.js').Port} guest @param {number} at
  * @returns {VertexElement[] | null}
  */
-export function readDeclaration(readMemory, at){
-    const bytes = readMemory(wholeAddress(at), MAX_FVF_DECL_SIZE * 8).slice();
-    const view = new DataView(bytes.buffer);
+export function readDeclaration(guest, at){
     /** @type {VertexElement[]} */
     const elements = [];
-    for (let i = 0; i * 8 + 8 <= bytes.length; i++)
+    for (let i = 0; i < MAX_FVF_DECL_SIZE; i++)
     {
-        const stream = view.getUint16(i * 8, true);
-        const type = bytes[i * 8 + 4];
+        const element = at + i * 8;
+        const stream = guest.u16(element);
+        const type = guest.u8(element + 4);
         if (stream === 0xff && type === DECLTYPE.UNUSED)
         {
             return elements;
         }
-        elements.push({ stream, offset: view.getUint16(i * 8 + 2, true), type,
-            method: bytes[i * 8 + 5], usage: bytes[i * 8 + 6], usageIndex: bytes[i * 8 + 7] });
+        elements.push({ stream, offset: guest.u16(element + 2), type, method: guest.u8(element + 5),
+            usage: guest.u8(element + 6), usageIndex: guest.u8(element + 7) });
     }
     return null;
 }
@@ -266,10 +265,10 @@ const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 
 /**
- * @param {{ readMemory: (address: number, length: number) => Uint8Array,
- *     writeMemory: (address: number, bytes: Uint8Array) => void }} host
+ * @param {{ guest: import('../common/guest.js').Guest }} host
  */
 export function createDeclarationFunctions(host){
+    const { guest } = host;
     return {
         /**
          * HRESULT D3DXDeclaratorFromFVF(DWORD FVF,
@@ -284,7 +283,7 @@ export function createDeclarationFunctions(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(wholeAddress(out), declarationBytes(elements));
+                guest.setBytes(out, declarationBytes(elements));
                 return D3D_OK;
             },
         },
@@ -297,13 +296,13 @@ export function createDeclarationFunctions(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                const elements = readDeclaration(host.readMemory, declaration);
+                const elements = readDeclaration(guest, declaration);
                 const fvf = elements && fvfFromDeclarator(elements);
                 if (fvf === null || fvf === undefined)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(wholeAddress(out), new Uint8Array(Uint32Array.of(fvf).buffer));
+                guest.set32(out, fvf);
                 return D3D_OK;
             },
         },
@@ -312,7 +311,7 @@ export function createDeclarationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([declaration, stream])=>(wholeAddress(declaration) === 0 ? 0
-                : declVertexSize(readDeclaration(host.readMemory, declaration) ?? [],
+                : declVertexSize(readDeclaration(guest, declaration) ?? [],
                     stream >>> 0)),
         },
         /** UINT D3DXGetDeclLength(const D3DVERTEXELEMENT9 *pDecl) -- the elements before the end. */
@@ -320,7 +319,7 @@ export function createDeclarationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([declaration])=>(wholeAddress(declaration) === 0 ? 0
-                : readDeclaration(host.readMemory, declaration)?.length ?? MAX_FVF_DECL_SIZE),
+                : readDeclaration(guest, declaration)?.length ?? MAX_FVF_DECL_SIZE),
         },
     };
 }

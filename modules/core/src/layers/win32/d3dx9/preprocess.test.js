@@ -89,8 +89,6 @@ test('D3DXPreprocessShader answers the text in a buffer; D3DXCompileShader fails
         const said = [];
         const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
             guest: guestOver(memory),
-            readMemory: (address, length)=>memory.subarray(address, address + length),
-            writeMemory: (address, bytes)=>memory.set(bytes, address),
             heap: { allocate: bytes=>{
                 const at = free;
                 free += bytes + 15 & ~15;
@@ -137,8 +135,6 @@ test('an #include goes to the program\'s ID3DXInclude, Open then Close, on the c
         const calls = [];
         const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
             guest: guestOver(memory),
-            readMemory: (address, length)=>memory.subarray(address, address + length),
-            writeMemory: (address, bytes)=>memory.set(bytes, address),
             heap: { allocate: bytes=>{
                 const at = free;
                 free += bytes + 15 & ~15;

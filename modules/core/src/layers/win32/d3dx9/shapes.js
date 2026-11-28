@@ -280,7 +280,8 @@ const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
  * @param {{ giveBuffer: (out: number, bytes: Uint8Array) => number }} buffers
  */
 export function createShapes(host, meshes, buffers){
-    const { putU32s, method } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
 
     /**
      * A shape made a mesh on the device, its adjacency given as a buffer
@@ -322,7 +323,7 @@ export function createShapes(host, meshes, buffers){
             await method(thread, made.pointer, 2, []);
             return answer;
         }
-        putU32s(out, [made.pointer]);
+        guest.set32s(out, [made.pointer]);
         return D3D_OK;
     };
 
@@ -348,7 +349,7 @@ export function createShapes(host, meshes, buffers){
             {
                 if (at !== 0)
                 {
-                    putU32s(at, [0]);
+                    guest.set32s(at, [0]);
                 }
             }
             if (device === 0 || out === 0 || !host.callGuest || !host.heap || !host.vtables)

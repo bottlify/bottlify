@@ -9,15 +9,13 @@ import assert from 'node:assert/strict';
 import {
     COMCTL32_ORDINALS, VERSION_6_EXPORTS, commonControlsFaces, createComctlFunctions,
 } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /** @param {((bitmap: number) => { width: number, height: number }) | undefined} bitmapSize */
 function machine(bitmapSize = undefined){
     const memory = new Uint8Array(0x400);
     const host = {
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>
-            memory.slice(a, a + n),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>
-            memory.set(b, a),
+        guest: guestOver(memory),
         bitmapSize,
     };
     /** @param {number} at @param {number} value */
@@ -118,8 +116,7 @@ test('_TrackMouseEvent is user32\'s TrackMouseEvent when there is one to hand it
     /** @type {number[]} */
     const asked = [];
     const comctl = /** @type {any} */ (createComctlFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         trackMouseEvent: request=>{
             asked.push(request);
             return 0;
@@ -137,7 +134,7 @@ test('InitCommonControls is the export ordinal 17 names, and takes nothing', ()=
 });
 
 test('the ordinal-only entry point and the two drawing calls declare what they pop', ()=>{
-    const fns = createComctlFunctions({ readMemory: ()=>new Uint8Array(4), writeMemory: ()=>{} });
+    const fns = createComctlFunctions({ guest: guestOver(new Uint8Array(4)) });
     assert.equal(fns.InitCommonControls.argBytes, 0);
     assert.equal(fns.InitCommonControls.handler(), 0);
     assert.equal(fns.ImageList_Draw.argBytes, 24);
@@ -198,8 +195,8 @@ test('Common Controls 6 is version 6, with the exports and classes the 5.82 libr
     };
     // A machine with user32 behind the call, which knows every class.
     const user32 = { handler: ()=>1 };
-    const faces = commonControlsFaces({ readMemory: (a, n)=>m.memory.slice(a, a + n),
-        writeMemory: (a, b)=>m.memory.set(b, a), allocate: ()=>0x200, user32: ()=>user32 });
+    const faces = commonControlsFaces({ guest: guestOver(m.memory), allocate: ()=>0x200,
+        user32: ()=>user32 });
     m.memory.fill(0, 0x100);
     for (const [name, five, six] of [['SysAnimate32', 1, 1], ['Button', 0, 1], ['SysLink', 0, 1],
         ['flatsb_class32', 0, 0], ['non-existent', 0, 0]])
@@ -215,8 +212,7 @@ test('CreateUpDownControl makes the control by its class and sets its buddy, ran
     /** @type {any[]} */
     const calls = [];
     const comctl = /** @type {any} */ (createComctlFunctions({
-        readMemory: (a, n)=>memory.slice(a, a + n),
-        writeMemory: (a, b)=>memory.set(b, a),
+        guest: guestOver(memory),
         allocate: ()=>0x100,
         release: ()=>{},
         user32: name=>({

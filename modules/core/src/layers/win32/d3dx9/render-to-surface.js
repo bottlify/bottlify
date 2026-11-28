@@ -36,8 +36,7 @@ const SCRATCH_BYTES = 32 + 12 + 24;
 
 /**
  * @typedef {Object} RenderToSurfaceHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
  *     [callGuest]
@@ -51,7 +50,8 @@ const SCRATCH_BYTES = 32 + 12 + 24;
  *     D3DXLoadSurfaceFromSurface, for a surface drawn through a target of D3DX's own.
  */
 export function createRenderToSurface(host, textures){
-    const { u32, putU32s, method } = createDeviceCalls(host);
+    const { method } = createDeviceCalls(host);
+    const { guest } = host;
 
     /**
      * BeginScene's work, once its handler has returned.
@@ -80,14 +80,14 @@ export function createRenderToSurface(host, textures){
                 state.inScene = false;
                 return described;
             }
-            const [format, , usage] = [0, 4, 8].map(o=>u32(scratch + o));
-            const [width, height] = [24, 28].map(o=>u32(scratch + o));
-            putU32s(out, [0, 0, 0]);
+            const [format, , usage] = [0, 4, 8].map(o=>guest.u32(scratch + o));
+            const [width, height] = [24, 28].map(o=>guest.u32(scratch + o));
+            guest.set32s(out, [0, 0, 0]);
             await call(DEVICE.GetRenderTarget, [0, out]);
             await call(DEVICE.GetDepthStencilSurface, [out + 4]);
             await call(DEVICE.GetViewport, [view]);
-            state.saved = { target: u32(out), depth: u32(out + 4),
-                viewport: host.readMemory(view, 24).slice() };
+            state.saved = { target: guest.u32(out), depth: guest.u32(out + 4),
+                viewport: guest.snapshot(view, 24) };
             state.surface = surface >>> 0;
             let target = state.surface;
             if (!(usage & D3DUSAGE_RENDERTARGET))
@@ -99,12 +99,12 @@ export function createRenderToSurface(host, textures){
                     await restore(state, thread);
                     return made;
                 }
-                state.ownTarget = u32(out + 8);
+                state.ownTarget = guest.u32(out + 8);
                 target = state.ownTarget;
             }
             if (state.desc.depthStencil)
             {
-                putU32s(out + 8, [0]);
+                guest.set32s(out + 8, [0]);
                 const made = await call(DEVICE.CreateDepthStencilSurface, [width, height,
                     state.desc.depthFormat, 0, 0, 1, out + 8, 0]);
                 if (made !== D3D_OK)
@@ -112,7 +112,7 @@ export function createRenderToSurface(host, textures){
                     await restore(state, thread);
                     return made;
                 }
-                state.ownDepth = u32(out + 8);
+                state.ownDepth = guest.u32(out + 8);
             }
             await call(DEVICE.SetRenderTarget, [0, target]);
             await call(DEVICE.SetDepthStencilSurface, [state.ownDepth]);
@@ -151,7 +151,7 @@ export function createRenderToSurface(host, textures){
             const view = heap.allocate(24);
             if (view !== 0)
             {
-                host.writeMemory(view, saved.viewport);
+                guest.setBytes(view, saved.viewport);
                 await call(DEVICE.SetViewport, [view]);
                 heap.free(view);
             }
@@ -204,7 +204,7 @@ export function createRenderToSurface(host, textures){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                putU32s(out, [object.state.device]);
+                guest.set32s(out, [object.state.device]);
                 const thread = host.currentThread?.();
                 return Promise.resolve().then(()=>method(thread, object.state.device,
                     UNKNOWN_ADDREF, [])).then(()=>D3D_OK);
@@ -216,7 +216,7 @@ export function createRenderToSurface(host, textures){
                     return D3DERR_INVALIDCALL;
                 }
                 const d = object.state.desc;
-                putU32s(at, [d.width, d.height, d.format, d.depthStencil, d.depthFormat]);
+                guest.set32s(at, [d.width, d.height, d.format, d.depthStencil, d.depthFormat]);
                 return D3D_OK;
             } },
             /** HRESULT BeginScene(LPDIRECT3DSURFACE9 pSurface, CONST D3DVIEWPORT9 *pViewport) */
@@ -258,7 +258,7 @@ export function createRenderToSurface(host, textures){
     const create = ([device, width, height, format, depthStencil, depthFormat, out])=>{
         if ((out >>> 0) !== 0)
         {
-            putU32s(out, [0]);
+            guest.set32s(out, [0]);
         }
         if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
         {
@@ -278,7 +278,7 @@ export function createRenderToSurface(host, textures){
             return E_OUTOFMEMORY;
         }
         byPointer.set(pointer, object);
-        putU32s(out, [pointer]);
+        guest.set32s(out, [pointer]);
         return D3D_OK;
     };
 

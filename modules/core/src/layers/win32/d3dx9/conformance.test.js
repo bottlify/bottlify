@@ -22,6 +22,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { guestMemory } from '../msvcrt/guest-code.js';
 import { loadModel } from '../../../../scripts/guest-code/model.mjs';
+import { guestOver } from '../common/guest.fixture.js';
 
 /** @param {string} name */
 async function modelOf(name){
@@ -41,8 +42,7 @@ const MODELS = {
 const memory = new Uint8Array(0x4000);
 const view = new DataView(memory.buffer);
 const guest = guestMemory({
-    readMemory: (address, length)=>memory.subarray(address, address + length),
-    writeMemory: (address, bytes)=>memory.set(bytes, address),
+    guest: guestOver(memory),
 });
 
 /** @param {number} address @param {number[]} values */

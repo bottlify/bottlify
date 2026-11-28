@@ -12,6 +12,7 @@
  */
 
 import { createMfplatFunctions } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 
@@ -91,6 +92,7 @@ export function mfMachine(options = {}){
     const registers = {};
 
     const host = {
+        guest: guestOver(memory),
         /** @param {number} at @param {number} length */
         readMemory: (at, length)=>memory.subarray(at, at + length),
         /** @param {number} at @param {Uint8Array} bytes */

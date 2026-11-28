@@ -24,7 +24,6 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 /** The class name a program creates the control by. */
 export const TOOLTIPS_CLASS = 'tooltips_class32';
@@ -128,6 +127,7 @@ const MAX_TEXT = 1024;
  * @param {{ loadString?: (instance: number, id: number) => string | null }} [resources]
  */
 export function createTooltipProcedure(host, tk, resources){
+    const { guest } = host;
     let told = false;
     const notShown = ()=>{
         if (!told)
@@ -136,44 +136,8 @@ export function createTooltipProcedure(host, tk, resources){
             host.divergence?.('tooltips_class32', 'a tip is not popped up over the program');
         }
     };
-    /** @param {number} at */
-    const read32 = at=>{
-        const b = host.readMemory(wholeAddress(at), 4);
-        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
-    };
-    /** @param {number} at @param {number} value */
-    const write32 = (at, value)=>{
-        const v = value >>> 0;
-        host.writeMemory(wholeAddress(at),
-            Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
-    };
-    /**
-     * A string handed in, read a piece at a time up to its terminator: a
-     * buffer at the top of the stack has nothing readable past it.
-     *
-     * @param {number} address @param {boolean} wide
-     */
-    const readText = (address, wide)=>{
-        if (!wide)
-        {
-            return host.readCString(wholeAddress(address), MAX_TEXT);
-        }
-        let text = '';
-        for (let at = wholeAddress(address); text.length < MAX_TEXT; at += 32)
-        {
-            const bytes = host.readMemory(at, 32);
-            for (let i = 0; i < 32; i += 2)
-            {
-                const unit = bytes[i] | bytes[i + 1] << 8;
-                if (unit === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(unit);
-            }
-        }
-        return text;
-    };
+    /** A string handed in, up to its terminator. @param {number} address @param {boolean} wide */
+    const readText = (address, wide)=>guest.text(address, wide, wide ? MAX_TEXT * 2 : MAX_TEXT);
     /**
      * A copy into the program's buffer. An ANSI copy of a tool's text is at
      * most eighty characters, and one that long has no terminator (Wine's
@@ -186,15 +150,13 @@ export function createTooltipProcedure(host, tk, resources){
         {
             return;
         }
-        const clipped = text.slice(0, room - 1);
         if (!wide)
         {
-            const bytes = encodeAnsi(`${clipped}\0`);
-            host.writeMemory(wholeAddress(address),
-                bytes.length > ANSI_COPY ? bytes.slice(0, ANSI_COPY) : bytes);
+            const bytes = encodeAnsi(`${text.slice(0, room - 1)}\0`);
+            guest.setBytes(address, bytes.subarray(0, ANSI_COPY));
             return;
         }
-        host.writeMemory(wholeAddress(address), utf16z(clipped));
+        guest.writeWide(address, text, room);
     };
 
     /** @param {any} record */
@@ -235,8 +197,8 @@ export function createTooltipProcedure(host, tk, resources){
 
     /** The tool a TOOLINFO names, by its window and id. @param {any} record @param {number} info */
     const find = (record, info)=>{
-        const hwnd = read32(info + TOOLINFO.hwnd);
-        const id = read32(info + TOOLINFO.uId);
+        const hwnd = guest.u32(info + TOOLINFO.hwnd);
+        const id = guest.u32(info + TOOLINFO.uId);
         return state(record).tools.findIndex((/** @type {Tool} */ tool)=>
             tool.hwnd === hwnd && tool.id === id);
     };
@@ -250,7 +212,8 @@ export function createTooltipProcedure(host, tk, resources){
      * @param {number} info @param {boolean} wide @param {number} [version]
      */
     const acceptable = (info, wide, version = 5)=>info >>> 0 !== 0
-        && (!wide || read32(info + TOOLINFO.cbSize) <= (version >= 6 ? TOOLINFO.V3 : TOOLINFO.V2));
+        && (!wide
+            || guest.u32(info + TOOLINFO.cbSize) <= (version >= 6 ? TOOLINFO.V3 : TOOLINFO.V2));
 
     /**
      * The room a title takes beside and above a version 5 tip's text: its
@@ -274,14 +237,15 @@ export function createTooltipProcedure(host, tk, resources){
 
     /** @param {any} record @param {number} info @param {boolean} wide @returns {Tool} */
     const readTool = (record, info, wide)=>({
-        flags: read32(info + TOOLINFO.uFlags),
-        hwnd: read32(info + TOOLINFO.hwnd),
-        id: read32(info + TOOLINFO.uId),
+        flags: guest.u32(info + TOOLINFO.uFlags),
+        hwnd: guest.u32(info + TOOLINFO.hwnd),
+        id: guest.u32(info + TOOLINFO.uId),
         rect: /** @type {[number, number, number, number]} */ ([0, 4, 8, 12]
-            .map(at=>read32(info + TOOLINFO.rect + at) | 0)),
-        hinst: read32(info + TOOLINFO.hinst),
-        text: textOf(record, read32(info + TOOLINFO.lpszText), wide),
-        lParam: read32(info + TOOLINFO.cbSize) >= TOOLINFO.V2 ? read32(info + TOOLINFO.lParam) : 0,
+            .map(at=>guest.u32(info + TOOLINFO.rect + at) | 0)),
+        hinst: guest.u32(info + TOOLINFO.hinst),
+        text: textOf(record, guest.u32(info + TOOLINFO.lpszText), wide),
+        lParam: guest.u32(info + TOOLINFO.cbSize) >= TOOLINFO.V2
+            ? guest.u32(info + TOOLINFO.lParam) : 0,
     });
 
     /**
@@ -321,25 +285,26 @@ export function createTooltipProcedure(host, tk, resources){
         }
         try
         {
-            host.writeMemory(block, new Uint8Array(size));
-            write32(block, record.hwnd);
-            write32(block + 4, tool.id);
-            write32(block + 8, wide ? TTN_GETDISPINFOW : TTN_GETDISPINFOA);
+            guest.fill(block, 0, size);
+            guest.set32(block, record.hwnd);
+            guest.set32(block + 4, tool.id);
+            guest.set32(block + 8, wide ? TTN_GETDISPINFOW : TTN_GETDISPINFOA);
             // The text points at the structure's own buffer, which a window
             // that answers with a short string copies into.
-            write32(block + DISPINFO.lpszText, block + DISPINFO.szText);
-            write32(block + DISPINFO.szText + (wide ? 160 : 80), tool.hinst);
-            write32(block + DISPINFO.szText + (wide ? 164 : 84), tool.flags);
-            write32(block + DISPINFO.szText + (wide ? 168 : 88), tool.lParam);
+            guest.set32(block + DISPINFO.lpszText, block + DISPINFO.szText);
+            guest.set32(block + DISPINFO.szText + (wide ? 160 : 80), tool.hinst);
+            guest.set32(block + DISPINFO.szText + (wide ? 164 : 84), tool.flags);
+            guest.set32(block + DISPINFO.szText + (wide ? 168 : 88), tool.lParam);
             await host.send(tool.hwnd, WM_NOTIFY, tool.id, block, thread);
-            const answer = read32(block + DISPINFO.lpszText);
+            const answer = guest.u32(block + DISPINFO.lpszText);
             if (answer === 0 || answer === LPSTR_TEXTCALLBACK)
             {
                 return '';
             }
             if (answer >>> 16 === 0)
             {
-                return resources?.loadString?.(read32(block + DISPINFO.szText + (wide ? 160 : 80)),
+                return resources?.loadString?.(
+                    guest.u32(block + DISPINFO.szText + (wide ? 160 : 80)),
                     answer) ?? '';
             }
             return readText(answer, wide);
@@ -358,25 +323,25 @@ export function createTooltipProcedure(host, tk, resources){
      * @param {Tool} tool @param {number} info @param {boolean} wide
      */
     const writeTool = (tool, info, wide)=>{
-        write32(info + TOOLINFO.uFlags, tool.flags);
-        write32(info + TOOLINFO.hwnd, tool.hwnd);
-        write32(info + TOOLINFO.uId, tool.id);
-        tool.rect.forEach((value, index)=>write32(info + TOOLINFO.rect + index * 4, value));
-        write32(info + TOOLINFO.hinst, tool.hinst);
+        guest.set32(info + TOOLINFO.uFlags, tool.flags);
+        guest.set32(info + TOOLINFO.hwnd, tool.hwnd);
+        guest.set32(info + TOOLINFO.uId, tool.id);
+        tool.rect.forEach((value, index)=>guest.set32(info + TOOLINFO.rect + index * 4, value));
+        guest.set32(info + TOOLINFO.hinst, tool.hinst);
         const text = tool.text;
         if (text.kind === 'string')
         {
-            writeText(read32(info + TOOLINFO.lpszText), text.text, wide);
+            writeText(guest.u32(info + TOOLINFO.lpszText), text.text, wide);
         }
         else
         {
-            write32(info + TOOLINFO.lpszText,
+            guest.set32(info + TOOLINFO.lpszText,
                 text.kind === 'callback' ? LPSTR_TEXTCALLBACK
                     : text.kind === 'resource' ? text.id : 0);
         }
-        if (read32(info + TOOLINFO.cbSize) >= TOOLINFO.V2)
+        if (guest.u32(info + TOOLINFO.cbSize) >= TOOLINFO.V2)
         {
-            write32(info + TOOLINFO.lParam, tool.lParam);
+            guest.set32(info + TOOLINFO.lParam, tool.lParam);
         }
     };
 
@@ -436,7 +401,7 @@ export function createTooltipProcedure(host, tk, resources){
                 if (index >= 0)
                 {
                     held.tools[index].rect = /** @type {[number, number, number, number]} */ (
-                        [0, 4, 8, 12].map(at=>read32(lParam + TOOLINFO.rect + at) | 0));
+                        [0, 4, 8, 12].map(at=>guest.u32(lParam + TOOLINFO.rect + at) | 0));
                 }
                 return 0;
             }
@@ -465,7 +430,7 @@ export function createTooltipProcedure(host, tk, resources){
                 const index = lParam >>> 0 === 0 ? -1 : find(record, lParam);
                 if (index >= 0)
                 {
-                    held.tools[index].text = textOf(record, read32(lParam + TOOLINFO.lpszText),
+                    held.tools[index].text = textOf(record, guest.u32(lParam + TOOLINFO.lpszText),
                         wide);
                 }
                 return 0;
@@ -473,7 +438,7 @@ export function createTooltipProcedure(host, tk, resources){
             case TTM.GETTEXTA:
             case TTM.GETTEXTW: {
                 const index = lParam >>> 0 === 0 ? -1 : find(record, lParam);
-                const buffer = lParam >>> 0 === 0 ? 0 : read32(lParam + TOOLINFO.lpszText);
+                const buffer = lParam >>> 0 === 0 ? 0 : guest.u32(lParam + TOOLINFO.lpszText);
                 if (index < 0)
                 {
                     writeText(buffer, '', wide);
@@ -509,9 +474,9 @@ export function createTooltipProcedure(host, tk, resources){
                 {
                     return 0;
                 }
-                const hwnd = read32(lParam + HITTEST.hwnd);
-                const x = read32(lParam + HITTEST.x) | 0;
-                const y = read32(lParam + HITTEST.y) | 0;
+                const hwnd = guest.u32(lParam + HITTEST.hwnd);
+                const x = guest.u32(lParam + HITTEST.x) | 0;
+                const y = guest.u32(lParam + HITTEST.y) | 0;
                 const tool = held.tools.find((/** @type {Tool} */ t)=>(t.flags & TTF_IDISHWND
                     ? t.id === hwnd
                     : t.hwnd === hwnd && x >= t.rect[0] && x < t.rect[2] && y >= t.rect[1]
@@ -562,14 +527,14 @@ export function createTooltipProcedure(host, tk, resources){
             case TTM.SETMARGIN:
                 if (lParam >>> 0 !== 0)
                 {
-                    held.margin = [0, 4, 8, 12].map(at=>read32(lParam + at) | 0);
+                    held.margin = [0, 4, 8, 12].map(at=>guest.u32(lParam + at) | 0);
                 }
                 return 0;
             case TTM.GETMARGIN:
                 if (lParam >>> 0 !== 0)
                 {
                     held.margin.forEach((/** @type {number} */ value, /** @type {number} */ i)=>
-                        write32(lParam + i * 4, value));
+                        guest.set32(lParam + i * 4, value));
                 }
                 return 0;
             case TTM.SETTITLEA:
@@ -581,9 +546,9 @@ export function createTooltipProcedure(host, tk, resources){
             case TTM.GETTITLE:
                 if (lParam >>> 0 !== 0)
                 {
-                    write32(lParam + GETTITLE.uTitleBitmap, held.icon);
-                    writeText(read32(lParam + GETTITLE.pszTitle), held.title, true,
-                        read32(lParam + GETTITLE.cch));
+                    guest.set32(lParam + GETTITLE.uTitleBitmap, held.icon);
+                    writeText(guest.u32(lParam + GETTITLE.pszTitle), held.title, true,
+                        guest.u32(lParam + GETTITLE.cch));
                 }
                 return 0;
             case TTM.TRACKPOSITION:
@@ -618,10 +583,10 @@ export function createTooltipProcedure(host, tk, resources){
                     ? BALLOON_MARGIN + (at === 1 ? BALLOON_STEM : 0) : TEXT_MARGIN)
                     + (at === 0 ? title[0] : at === 1 ? title[1] : 0));
                 const sign = wParam !== 0 ? 1 : -1;
-                const rect = [0, 4, 8, 12].map(at=>read32(lParam + at) | 0);
+                const rect = [0, 4, 8, 12].map(at=>guest.u32(lParam + at) | 0);
                 [rect[0] - sign * sides[0], rect[1] - sign * sides[1],
                     rect[2] + sign * sides[2], rect[3] + sign * sides[3]]
-                    .forEach((value, index)=>write32(lParam + index * 4, value));
+                    .forEach((value, index)=>guest.set32(lParam + index * 4, value));
                 return 1;
             }
             default:

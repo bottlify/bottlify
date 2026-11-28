@@ -8,33 +8,38 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStdDispatchObjects, IID_IDISPATCH } from './stddispatch.js';
 import { createAdapter } from './objects.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const IID_NULL = new Uint8Array(16);
 
-/** A memory, a type information whose vtable records calls, and the objects. */
-function fixture(){
+/**
+ * A memory, a type information whose vtable records calls, and the objects.
+ *
+ * @param {4 | 8} [pointerSize]  the width the vtables are laid out at
+ */
+function fixture(pointerSize = 4){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
+    const guest = guestOver(bytes, pointerSize);
     /** @type {[number, number[]][]} */
     const calls = [];
     const TYPEINFO = 0x100;
     const VTABLE = 0x200;
-    view.setUint32(TYPEINFO, VTABLE, true);
+    guest.setPtr(TYPEINFO, VTABLE);
     for (let slot = 0; slot < 22; slot++)
     {
-        view.setUint32(VTABLE + slot * 4, 0x9000 + slot, true);
+        guest.setPtr(VTABLE + slot * pointerSize, 0x9000 + slot);
     }
     const OUTER = 0x400;
-    view.setUint32(OUTER, VTABLE + 0x100, true);
+    guest.setPtr(OUTER, VTABLE + 0x100);
     for (let slot = 0; slot < 3; slot++)
     {
-        view.setUint32(VTABLE + 0x100 + slot * 4, 0x9100 + slot, true);
+        guest.setPtr(VTABLE + 0x100 + slot * pointerSize, 0x9100 + slot);
     }
     /** @type {any[]} */
     const published = [];
     const objects = createStdDispatchObjects({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest,
         publish: (object, id)=>{
             published.push([object, id]);
             return 0x7000 + published.length;
@@ -118,4 +123,10 @@ test('an aggregate\'s inner IUnknown hands out IDispatch counted on the outer ob
     assert.equal(await unknown[0].invoke(adapter, [0x700, 0x600]), 0x80004002 | 0);
     assert.equal(view.getUint32(0x600, true), 0);
     assert.equal(unknown[0].invoke(adapter, [0x700, 0]), 0x80004003 | 0);
+});
+
+test('a 64-bit type information\'s methods are read from its vtable of pointers', async()=>{
+    const { calls, objects, TYPEINFO } = fixture(8);
+    assert.equal(await objects.create(0, 0x500, TYPEINFO), 0x7001);
+    assert.deepEqual(calls.shift(), [0x9001, [TYPEINFO]], 'AddRef, slot 1 of eight-byte slots');
 });

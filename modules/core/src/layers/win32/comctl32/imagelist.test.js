@@ -71,8 +71,7 @@ function machine(wired = {}){
     // Guest memory a list describes its image in, from the top of the space.
     let scratch = 0x100000;
     const lists = createImageLists({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         allocate: size=>(scratch -= (size + 15) & ~15),
         release: ()=>undefined,
         gdi32: name=>gdi32[name],
@@ -716,8 +715,7 @@ test('ImageList_GetIcon makes an icon of the image and its mask through CreateIc
     /** @type {number[]} */
     const released = [];
     const icon = createImageListIcons({
-        readMemory: (address, length)=>m.bytes.slice(address, address + length),
-        writeMemory: (address, data)=>m.bytes.set(data, address),
+        guest: guestOver(m.bytes),
         allocate: bytes=>{
             const at = next;
             next += (bytes + 15) & ~15;

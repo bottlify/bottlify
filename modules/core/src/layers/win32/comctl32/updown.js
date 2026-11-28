@@ -178,6 +178,7 @@ export const parsePosition = (text, base)=>{
  *     => number | Promise<number>}
  */
 export function createUpDownProcedure(host, tk, subclassing){
+    const { guest } = host;
     /** The buddy's subclass procedure, made the first time a buddy is hooked. */
     let buddyProc = 0;
 
@@ -226,7 +227,7 @@ export function createUpDownProcedure(host, tk, subclassing){
         {
             return then(0, 0);
         }
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
         return after(host.send(hwnd, message, wParam, address, thread), answer=>after(
             then(address, answer), result=>{
                 host.release?.(address);
@@ -263,7 +264,7 @@ export function createUpDownProcedure(host, tk, subclassing){
                 {
                     return false;
                 }
-                const value = parsePosition(host.readCString(address, TEXT_LIMIT), held.base);
+                const value = parsePosition(guest.cstr(address, TEXT_LIMIT), held.base);
                 if (value === null || !inBounds(held, value))
                 {
                     return false;
@@ -292,7 +293,7 @@ export function createUpDownProcedure(host, tk, subclassing){
         const text = formatPosition(held.pos, held.base, (record.style & UDS_NOTHOUSANDS) === 0);
         return withBuffer(held.buddy, WM_GETTEXT, TEXT_LIMIT, new Uint8Array(TEXT_LIMIT), thread,
             address=>{
-                if (address !== 0 && host.readCString(address, TEXT_LIMIT) === text)
+                if (address !== 0 && guest.cstr(address, TEXT_LIMIT) === text)
                 {
                     return 0;
                 }
@@ -353,8 +354,7 @@ export function createUpDownProcedure(host, tk, subclassing){
                         refused: (answer | 0) !== 0,
                         // The parent may change the step it is told of.
                         delta: address === 0 ? delta
-                            : new DataView(host.readMemory(address + 16, 4).slice().buffer)
-                                .getInt32(0, true),
+                            : guest.i32(address + 16),
                     }));
             return after(asked, (/** @type {{ refused: boolean, delta: number }} */ answer)=>{
                 if (answer.refused)
@@ -612,11 +612,11 @@ export function createUpDownProcedure(host, tk, subclassing){
             case UDM_GETRANGE32:
                 if ((message.wParam >>> 0) !== 0)
                 {
-                    host.guest.set32(wholeAddress(message.wParam), held.lower);
+                    host.guest.set32(message.wParam, held.lower);
                 }
                 if ((message.lParam >>> 0) !== 0)
                 {
-                    host.guest.set32(wholeAddress(message.lParam), held.upper);
+                    host.guest.set32(message.lParam, held.upper);
                 }
                 return 0;
             case UDM_SETPOS:
@@ -630,7 +630,7 @@ export function createUpDownProcedure(host, tk, subclassing){
                 return after(readBuddy(record, thread), read=>{
                     if ((message.lParam >>> 0) !== 0)
                     {
-                        host.guest.set32(wholeAddress(message.lParam), read ? 0 : 1);
+                        host.guest.set32(message.lParam, read ? 0 : 1);
                     }
                     return held.pos;
                 });
@@ -657,10 +657,8 @@ export function createUpDownProcedure(host, tk, subclassing){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(at, count * 8);
-                const view = new DataView(bytes.slice().buffer);
                 held.accel = Array.from({ length: count }, (_, index)=>({
-                    sec: view.getUint32(index * 8, true), inc: view.getUint32(index * 8 + 4, true),
+                    sec: guest.u32(at + index * 8), inc: guest.u32(at + index * 8 + 4),
                 }));
                 return 1;
             }
@@ -669,8 +667,8 @@ export function createUpDownProcedure(host, tk, subclassing){
                 const count = Math.min(message.wParam >>> 0, held.accel.length);
                 for (let index = 0; index < (at === 0 ? 0 : count); index++)
                 {
-                    host.guest.set32(wholeAddress(at + index * 8), held.accel[index].sec);
-                    host.guest.set32(wholeAddress(at + index * 8 + 4), held.accel[index].inc);
+                    host.guest.set32(at + index * 8, held.accel[index].sec);
+                    host.guest.set32(at + index * 8 + 4, held.accel[index].inc);
                 }
                 return held.accel.length;
             }

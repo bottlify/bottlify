@@ -39,7 +39,7 @@ const PROPERTY = 'CC32SubclassInfo';
 
 /**
  * @typedef {Object} SubclassHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [user32]
  * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
  * @property {() => unknown} [callerThread]
@@ -74,6 +74,7 @@ const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'f
  * @param {SubclassHost} host
  */
 export function createSubclassFunctions(host){
+    const { guest } = host;
     /** @type {Map<number, Subclassed>} */
     const windows = new Map();
     let installed = 0;
@@ -94,7 +95,7 @@ export function createSubclassFunctions(host){
         {
             return;
         }
-        host.writeMemory(name, new Uint8Array([...PROPERTY].map(c=>c.charCodeAt(0)).concat(0)));
+        guest.setBytes(name, new Uint8Array([...PROPERTY].map(c=>c.charCodeAt(0)).concat(0)));
         user32(call, [hwnd, name, ...rest]);
         host.release?.(name);
     };
@@ -226,7 +227,7 @@ export function createSubclassFunctions(host){
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, found?.ref ?? 0, true);
-                    host.writeMemory(wholeAddress(out), bytes);
+                    guest.setBytes(out, bytes);
                 }
                 return found ? 1 : 0;
             },

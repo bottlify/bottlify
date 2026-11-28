@@ -61,8 +61,7 @@ const RT_RCDATA = 10;
 
 /**
  * @typedef {Object} TextureHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
@@ -147,7 +146,8 @@ function formatFromFile(file){
  * @param {TextureHost} host
  */
 export function createTextureLoader(host){
-    const { u32, putU32s, putPointer, lockedRect, method: call, string } = createDeviceCalls(host);
+    const { lockedRect, method: call } = createDeviceCalls(host);
+    const { guest } = host;
     const images = createImageCache(host.images);
 
     /**
@@ -164,14 +164,14 @@ export function createTextureLoader(host){
      *
      * @param {number} at @param {import('./images.js').Image} image
      */
-    const writeInfo = (at, image)=>putU32s(at, infoOf(image));
+    const writeInfo = (at, image)=>guest.set32s(at, infoOf(image));
 
     /**
      * A string argument, a path or a resource's name, narrow or wide.
      *
      * @param {number} at @param {boolean} wide
      */
-    const stringAt = (at, wide)=>string(at, wide, 1024);
+    const nameAt = (at, wide)=>guest.text(at, wide, wide ? 1024 * 2 : 1024);
 
     /**
      * The ways to an image file's bytes, each null when there are none.
@@ -179,13 +179,13 @@ export function createTextureLoader(host){
     const sources = {
         /** @param {number} data @param {number} size */
         memory: (data, size)=>((data >>> 0) === 0 || (size >>> 0) === 0 ? null
-            : host.readMemory(wholeAddress(data), size >>> 0).slice()),
+            : guest.snapshot(data, size >>> 0)),
         /**
          * @param {string} api @param {number} at @param {boolean} wide
          * @returns {Promise<Uint8Array | null>}
          */
         file: async(api, at, wide)=>{
-            const path = stringAt(at, wide);
+            const path = nameAt(at, wide);
             if (!host.readFile)
             {
                 host.divergence?.(api, `no file reader is given to this layer: ${path}`);
@@ -205,7 +205,7 @@ export function createTextureLoader(host){
          * @returns {Promise<Uint8Array | null>}
          */
         resource: async(api, module, name, wide)=>{
-            const key = (name >>> 0) < 0x10000 ? name >>> 0 : stringAt(name, wide);
+            const key = (name >>> 0) < 0x10000 ? name >>> 0 : nameAt(name, wide);
             if (!host.resource)
             {
                 host.divergence?.(api, `no resource reader is given to this layer: ${key}`);
@@ -402,7 +402,7 @@ export function createTextureLoader(host){
         }
         if (ask.info !== 0)
         {
-            putU32s(ask.info, decoded.info);
+            guest.set32s(ask.info, decoded.info);
         }
         return upload(device, decoded, { usage: ask.usage, pool: ask.pool, out: ask.out, thread });
     };
@@ -465,7 +465,7 @@ export function createTextureLoader(host){
         }
         if (ask.info !== 0)
         {
-            putU32s(ask.info, decoded.info);
+            guest.set32s(ask.info, decoded.info);
         }
         return upload(device, decoded, { usage: ask.usage, pool: ask.pool, out: ask.out, thread });
     };
@@ -537,7 +537,7 @@ export function createTextureLoader(host){
         const { device, given, found, ask } = parse(args.map(wholeAddress));
         if (ask.out !== 0)
         {
-            putPointer(ask.out, 0);
+            guest.setPtr(ask.out, 0);
         }
         if (device === 0 || !given || ask.out === 0 || !host.callGuest || !host.heap)
         {
@@ -571,7 +571,7 @@ export function createTextureLoader(host){
         const { device, given, found, ask } = parse(args.map(wholeAddress));
         if (ask.out !== 0)
         {
-            putPointer(ask.out, 0);
+            guest.setPtr(ask.out, 0);
         }
         if (device === 0 || !given || ask.out === 0 || !host.callGuest || !host.heap)
         {
@@ -672,7 +672,7 @@ export function createTextureLoader(host){
         let failed = D3D_OK;
         /** @param {number} given @param {number} into @returns {Promise<number | null>} */
         const create = async(given, into)=>{
-            putPointer(scratch, 0);
+            guest.setPtr(scratch, 0);
             const answer = plan.cube
                 ? await method(device, DEVICE.CreateCubeTexture, [plan.w, plan.count, given,
                     plan.target, into, scratch, 0])
@@ -686,7 +686,7 @@ export function createTextureLoader(host){
                 failed = answer;
                 return null;
             }
-            return u32(scratch);
+            return guest.u32(scratch);
         };
         try
         {
@@ -713,9 +713,9 @@ export function createTextureLoader(host){
                         return answer;
                     }
                     // A box's pointer follows two pitches, at the same place at both widths.
-                    const pitch = u32(locked);
-                    const slicePitch = plan.depth ? u32(locked + 4) : 0;
-                    const bits = plan.depth ? u32(locked + 8) : lockedRect(locked).bits;
+                    const pitch = guest.u32(locked);
+                    const slicePitch = plan.depth ? guest.u32(locked + 4) : 0;
+                    const bits = plan.depth ? guest.u32(locked + 8) : lockedRect(locked).bits;
                     const { rowBytes, rows } = layoutOf(plan.target, Math.max(1, plan.w >> level),
                         Math.max(1, plan.h >> level));
                     const slices = plan.depth ? Math.max(1, plan.depth >> level) : 1;
@@ -726,7 +726,7 @@ export function createTextureLoader(host){
                             for (let row = 0; row < rows; row++)
                             {
                                 const from = (z * rows + row) * rowBytes;
-                                host.writeMemory(bits + z * slicePitch + row * pitch,
+                                guest.setBytes(bits + z * slicePitch + row * pitch,
                                     bytes.subarray(from, from + rowBytes));
                             }
                         }
@@ -736,7 +736,7 @@ export function createTextureLoader(host){
             }
             if (lockable)
             {
-                putPointer(out, filled);
+                guest.setPtr(out, filled);
                 return D3D_OK;
             }
             const placed = await create(usage, pool);
@@ -752,7 +752,7 @@ export function createTextureLoader(host){
                 await method(placed, UNKNOWN_RELEASE, []);
                 return answer;
             }
-            putPointer(out, placed);
+            guest.setPtr(out, placed);
             return D3D_OK;
         }
         finally
@@ -830,7 +830,7 @@ export function createTextureLoader(host){
             const fill = ()=>{
                 for (let row = 0, { pitch, bits } = lockedRect(locked); row < write.rows; row++)
                 {
-                    host.writeMemory(bits + row * pitch,
+                    guest.setBytes(bits + row * pitch,
                         bytes.subarray(row * write.rowBytes, (row + 1) * write.rowBytes));
                 }
             };
@@ -886,17 +886,17 @@ export function createTextureLoader(host){
         let copy = 0;
         try
         {
-            putPointer(scratch, 0);
+            guest.setPtr(scratch, 0);
             let answer = await method(dest, SURFACE.GetDevice, [scratch]);
-            device = answer === D3D_OK ? u32(scratch) : 0;
+            device = answer === D3D_OK ? guest.u32(scratch) : 0;
             if (device === 0)
             {
                 return answer === D3D_OK ? D3DERR_INVALIDCALL : answer;
             }
-            putPointer(made, 0);
+            guest.setPtr(made, 0);
             answer = await method(device, DEVICE.CreateOffscreenPlainSurface,
                 [to.width, to.height, to.format, D3DPOOL_SYSTEMMEM, made, 0]);
-            copy = answer === D3D_OK ? u32(made) : 0;
+            copy = answer === D3D_OK ? guest.u32(made) : 0;
             if (copy === 0)
             {
                 return answer === D3D_OK ? D3DERR_INVALIDCALL : answer;
@@ -908,8 +908,8 @@ export function createTextureLoader(host){
             }
             fill();
             await method(copy, SURFACE.UnlockRect, []);
-            host.writeMemory(corner, new Uint8Array(new Int32Array(destRect === 0
-                ? [0, 0] : [u32(destRect) | 0, u32(destRect + 4) | 0]).buffer));
+            guest.set32s(corner, destRect === 0
+                ? [0, 0] : [guest.u32(destRect) | 0, guest.u32(destRect + 4) | 0]);
             return await method(device, DEVICE.UpdateSurface, [copy, 0, dest, corner]);
         }
         finally
@@ -939,10 +939,10 @@ export function createTextureLoader(host){
         {
             return answer;
         }
-        const format = u32(scratch);
+        const format = guest.u32(scratch);
         const [left, top, right, bottom] = rect === 0
-            ? [0, 0, u32(scratch + 24), u32(scratch + 28)]
-            : [0, 4, 8, 12].map(at=>u32(rect + at));
+            ? [0, 0, guest.u32(scratch + 24), guest.u32(scratch + 28)]
+            : [0, 4, 8, 12].map(at=>guest.u32(rect + at));
         return { format, width: right - left, height: bottom - top };
     };
 
@@ -957,7 +957,7 @@ export function createTextureLoader(host){
         const packed = new Uint8Array(rowBytes * rows);
         for (let row = 0; row < rows; row++)
         {
-            packed.set(host.readMemory(bits + row * pitch, rowBytes), row * rowBytes);
+            packed.set(guest.snapshot(bits + row * pitch, rowBytes), row * rowBytes);
         }
         return packed;
     };
@@ -1023,7 +1023,7 @@ export function createTextureLoader(host){
         {
             return D3DERR_INVALIDCALL;
         }
-        const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>u32(sourceRect + at));
+        const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>guest.u32(sourceRect + at));
         return intoSurface('D3DXLoadSurfaceFromMemory', dest, destRect, colorKey,
             async()=>({ format, width: right - left, height: bottom - top }),
             async from=>{
@@ -1059,7 +1059,7 @@ export function createTextureLoader(host){
             }
             const [left, top, right, bottom] = sourceRect === 0
                 ? [0, 0, image.width, image.height]
-                : [0, 4, 8, 12].map(at=>u32(sourceRect + at) | 0);
+                : [0, 4, 8, 12].map(at=>guest.u32(sourceRect + at) | 0);
             if (left < 0 || top < 0 || right > image.width || bottom > image.height)
             {
                 return D3DERR_INVALIDCALL;

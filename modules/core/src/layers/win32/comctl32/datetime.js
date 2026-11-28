@@ -44,7 +44,6 @@ import {
     MCSC_BACKGROUND, MCSC_TRAILINGTEXT, daysIn, isTimeOfDay, compareTimes, withWeekday,
     noTime, takeRange, calendarNames, localNow,
 } from './monthcal.js';
-import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const DATETIMEPICK_CLASS = 'SysDateTimePick32';
@@ -273,7 +272,8 @@ export const typeField = (time, letter, number)=>{
  *     thread?: unknown) => number | Promise<number>}
  */
 export function createDateTimePickProcedure(host, tk, sources = {}){
-    const pointer = host.pointerSize ?? 4;
+    const { guest } = host;
+    const pointer = guest.pointerSize;
     /** NMHDR's size: a window, an id as wide as a pointer, the code. */
     const HEADER = pointer === 8 ? 24 : 12;
 
@@ -310,19 +310,15 @@ export function createDateTimePickProcedure(host, tk, sources = {}){
 
     /** @param {number} address @returns {Time} */
     const readTime = address=>{
-        const view = new DataView(host.readMemory(wholeAddress(address), 16).buffer);
-        const field = (/** @type {number} */ at)=>view.getUint16(at * 2, true);
+        const field = (/** @type {number} */ at)=>guest.u16(address + at * 2);
         return { year: field(0), month: field(1), dow: field(2), day: field(3), hour: field(4),
             minute: field(5), second: field(6), ms: field(7) };
     };
 
     /** @param {number} address @param {Time} time */
     const writeTime = (address, time)=>{
-        const bytes = new Uint8Array(16);
-        const view = new DataView(bytes.buffer);
         [time.year, time.month, time.dow, time.day, time.hour, time.minute, time.second, time.ms]
-            .forEach((value, at)=>view.setUint16(at * 2, value & 0xffff, true));
-        host.writeMemory(wholeAddress(address), bytes);
+            .forEach((value, at)=>guest.set16(address + at * 2, value));
     };
 
     /** @param {any} record  The picture the text is written in. */
@@ -402,10 +398,9 @@ export function createDateTimePickProcedure(host, tk, sources = {}){
         {
             return 0;
         }
-        host.writeMemory(block, new Uint8Array(size));
-        const header = new Uint8Array(new Int32Array([record.hwnd, record.id, 0]).buffer);
-        host.writeMemory(block, header);
-        host.writeMemory(block + 2 * pointer, new Uint8Array(new Int32Array([code]).buffer));
+        guest.fill(block, 0, size);
+        guest.set32s(block, [record.hwnd, record.id, 0]);
+        guest.set32(block + 2 * pointer, code);
         fill(block);
         return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
             host.release?.(block);
@@ -422,8 +417,7 @@ export function createDateTimePickProcedure(host, tk, sources = {}){
     const tellChange = (record, thread)=>{
         const held = state(record);
         return notify(record, DTN_DATETIMECHANGE, HEADER + 4 + 16, block=>{
-            host.writeMemory(block + HEADER, new Uint8Array(new Int32Array(
-                [held.valid ? GDT_VALID : GDT_NONE]).buffer));
+            guest.set32(block + HEADER, held.valid ? GDT_VALID : GDT_NONE);
             writeTime(block + HEADER + 4, held.valid ? held.time : noTime());
         }, thread);
     };
@@ -646,9 +640,8 @@ export function createDateTimePickProcedure(host, tk, sources = {}){
      */
     const fromCalendar = (record, block, thread)=>{
         const held = state(record);
-        const view = new DataView(host.readMemory(wholeAddress(block), HEADER).buffer);
-        const from = pointer === 8 ? Number(view.getBigUint64(0, true)) : view.getUint32(0, true);
-        const code = view.getUint32(2 * pointer, true);
+        const from = guest.ptr(block);
+        const code = guest.u32(block + 2 * pointer);
         if (held.calendar === 0 || from !== held.calendar || code !== MCN_SELECT)
         {
             return 0;
@@ -878,11 +871,9 @@ export function createDateTimePickProcedure(host, tk, sources = {}){
                 // (Wine's test_dts_shownone).
                 if ((message.wParam | 0) === GWL_STYLE && lParam !== 0)
                 {
-                    const view = new DataView(host.readMemory(lParam, 8).buffer);
-                    const old = view.getUint32(0, true);
-                    const wanted = view.getUint32(4, true);
-                    host.writeMemory(lParam + 4, new Uint8Array(new Uint32Array(
-                        [((wanted & ~DTS_SHOWNONE) | (old & DTS_SHOWNONE)) >>> 0]).buffer));
+                    const old = guest.u32(lParam);
+                    const wanted = guest.u32(lParam + 4);
+                    guest.set32(lParam + 4, (wanted & ~DTS_SHOWNONE) | (old & DTS_SHOWNONE));
                 }
                 return 0;
             case WM_STYLECHANGED:

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RICHEDIT_CLASSES, createRichEditControls, rtfToText } from './richedit.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const WM_USER = 0x0400;
 const EM_EXGETSEL = WM_USER + 52;
@@ -61,10 +62,7 @@ function richEdit(source, step = 7){
     const view = new DataView(memory.buffer);
     const CALLBACK = 0x401000;
     const host = /** @type {any} */ ({
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            memory.subarray(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-            memory.set(bytes, at),
+        guest: guestOver(memory),
         allocate: (/** @type {number} */ bytes)=>{
             const at = heap;
             heap += bytes;

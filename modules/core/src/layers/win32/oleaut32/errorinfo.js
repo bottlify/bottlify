@@ -16,8 +16,8 @@
  */
 
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { readGuid, writeGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
+import { WHOLE } from '../common/guest.js';
 
 /** The two interfaces. */
 export const IID_ICREATEERRORINFO = '{22F03340-547D-101B-8E65-08002B2BD119}';
@@ -29,8 +29,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 
 /**
  * @typedef {Object} ErrorInfoHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(object: any, interfaceId: string) => number} publish
  * @property {(text: string) => number} allocateBstr
  * @property {(state: ErrorInfoState, interfaces: Record<string, readonly any[]>) => any} adapt
@@ -51,27 +50,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @returns {{ create: () => number }} the ICreateErrorInfo pointer, or 0
  */
 export function createErrorInfoObjects(host){
-    const memory = { readMemory: host.readMemory, writeMemory: host.writeMemory };
-
-    /** @param {number} address @returns {string} */
-    const readWide = address=>{
-        let text = '';
-        for (let at = address;; at += 2)
-        {
-            const bytes = host.readMemory(at, 2);
-            const unit = bytes[0] | (bytes[1] << 8);
-            if (unit === 0)
-            {
-                return text;
-            }
-            text += String.fromCharCode(unit);
-        }
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        host.writeMemory(address, Uint8Array.from([
-            value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff]));
-    };
+    const { guest } = host;
 
     /**
      * @param {string} name
@@ -81,7 +60,7 @@ export function createErrorInfoObjects(host){
         name, argBytes: 8,
         /** @param {{ state: ErrorInfoState }} object @param {number[]} args */
         invoke: (object, [text])=>{
-            set(object.state, (text >>> 0) === 0 ? null : readWide(wholeAddress(text)));
+            set(object.state, (text >>> 0) === 0 ? null : guest.wstr(wholeAddress(text), WHOLE));
             return S_OK;
         },
     });
@@ -99,7 +78,7 @@ export function createErrorInfoObjects(host){
             }
             const text = get(object.state);
             const bstr = text === null ? 0 : host.allocateBstr(text);
-            writeU32(wholeAddress(out), bstr);
+            guest.set32(wholeAddress(out), bstr);
             return text !== null && bstr === 0 ? E_OUTOFMEMORY : S_OK;
         },
     });
@@ -113,7 +92,7 @@ export function createErrorInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                object.state.guid = readGuid(memory, guid >>> 0);
+                object.state.guid = guest.guid(guid);
                 return S_OK;
             } },
         setter('SetSource', (state, text)=>{
@@ -142,8 +121,7 @@ export function createErrorInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeGuid(memory, out >>> 0,
-                    object.state.guid ?? '{00000000-0000-0000-0000-000000000000}');
+                guest.setGuid(out, object.state.guid ?? '{00000000-0000-0000-0000-000000000000}');
                 return S_OK;
             } },
         getter('GetSource', state=>state.source),
@@ -156,7 +134,7 @@ export function createErrorInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(wholeAddress(out), object.state.helpContext);
+                guest.set32(wholeAddress(out), object.state.helpContext);
                 return S_OK;
             } },
     ]);

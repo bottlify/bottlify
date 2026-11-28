@@ -7,6 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IID, bitsOf, createDwriteFunctions, f32 } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057;
@@ -39,6 +40,7 @@ function harness(options = {}){
     const said = [];
     let result = 0;
     const host = {
+        guest: guestOver(memory),
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             memory.subarray(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>memory.set(bytes, at),

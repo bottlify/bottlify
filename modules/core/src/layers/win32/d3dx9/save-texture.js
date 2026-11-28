@@ -7,7 +7,6 @@
 import { LOCKED_RECT_BYTES, SURFACE, TEXTURE, createDeviceCalls } from './device.js';
 import { IFF } from './images.js';
 import { FMT, decodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
-import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
 
 /**
@@ -180,8 +179,7 @@ export function writeBmp(bgra, width, height, alpha, dib = false){
 
 /**
  * @typedef {Object} SaveHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
@@ -196,7 +194,8 @@ export function writeBmp(bgra, width, height, alpha, dib = false){
  * @param {{ giveBuffer: (out: number, bytes: Uint8Array) => number }} buffers
  */
 export function createTextureSaver(host, buffers){
-    const { u32, lockedRect, method } = createDeviceCalls(host);
+    const { lockedRect, method } = createDeviceCalls(host);
+    const { guest } = host;
 
     /**
      * A level's or a surface's area as an image file can keep it: its rows'
@@ -228,7 +227,7 @@ export function createTextureSaver(host, buffers){
         const bytes = new Uint8Array(layout.rowBytes * layout.rows);
         for (let row = 0; row < layout.rows; row++)
         {
-            bytes.set(host.readMemory(bits + row * pitch, layout.rowBytes), row * layout.rowBytes);
+            bytes.set(guest.snapshot(bits + row * pitch, layout.rowBytes), row * layout.rowBytes);
         }
         return bytes;
     };
@@ -272,7 +271,7 @@ export function createTextureSaver(host, buffers){
             }
             const [{ width, height, bytes }] = levels;
             const colours = (palette >>> 0) === 0 ? undefined
-                : host.readMemory(wholeAddress(palette), 1024).slice();
+                : guest.snapshot(palette, 1024);
             if (format === FMT.P8 && !colours)
             {
                 return D3DERR_INVALIDCALL;
@@ -315,9 +314,9 @@ export function createTextureSaver(host, buffers){
             {
                 return described;
             }
-            format = u32(scratch);
-            const width = u32(scratch + 24);
-            const height = u32(scratch + 28);
+            format = guest.u32(scratch);
+            const width = guest.u32(scratch + 24);
+            const height = guest.u32(scratch + 28);
             const layout = layoutFor(api, fileFormat, format, width, height);
             if (typeof layout === 'number')
             {
@@ -350,10 +349,10 @@ export function createTextureSaver(host, buffers){
         {
             return described;
         }
-        const format = u32(scratch);
-        const [full, tall] = [u32(scratch + 24), u32(scratch + 28)];
+        const format = guest.u32(scratch);
+        const [full, tall] = [guest.u32(scratch + 24), guest.u32(scratch + 28)];
         const [left, top, right, bottom] = (rect >>> 0) === 0 ? [0, 0, full, tall]
-            : [0, 4, 8, 12].map(at=>u32(wholeAddress(rect) + at) | 0);
+            : [0, 4, 8, 12].map(at=>guest.u32(wholeAddress(rect) + at) | 0);
         if (left < 0 || top < 0 || right > full || bottom > tall || right <= left
             || bottom <= top)
         {
@@ -377,13 +376,11 @@ export function createTextureSaver(host, buffers){
     };
 
     /**
-     * A file's name, at most MAX_PATH characters, read a window at a time so
-     * one at the end of what the program allocated is not read past.
+     * A file's name, at most MAX_PATH characters.
      *
      * @param {number} at @param {boolean} wide
      */
-    const pathAt = (at, wide)=>charactersOf(
-        readToTerminator(host, at, wide ? 2 : 1, 260).bytes, wide ? 2 : 1);
+    const pathAt = (at, wide)=>guest.text(at, wide, wide ? 520 : 260);
 
     /**
      * D3DXSaveTextureToFile and D3DXSaveSurfaceToFile: the file made, then written whole.
@@ -431,7 +428,7 @@ export function createTextureSaver(host, buffers){
         handler: ([out, fileFormat, source, palette, rect])=>{
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(wholeAddress(out), new Uint8Array(4));
+                guest.fill(out, 0, 4);
             }
             if ((out >>> 0) === 0 || (source >>> 0) === 0 || !host.callGuest || !host.heap)
             {

@@ -69,7 +69,7 @@ function literal(v){
 }
 
 /** @param {number} x */
-const f32 = x=>Math.fround(x);
+const fround = x=>Math.fround(x);
 
 /**
  * What a lane-wise operation does to literal operands, for the operations
@@ -79,23 +79,23 @@ const f32 = x=>Math.fround(x);
  */
 const FOLD = {
     mov: v=>v[0],
-    add: v=>f32(v[0] + v[1]),
-    sub: v=>f32(v[0] - v[1]),
-    mul: v=>f32(v[0] * v[1]),
-    mad: v=>f32(f32(v[0] * v[1]) + v[2]),
+    add: v=>fround(v[0] + v[1]),
+    sub: v=>fround(v[0] - v[1]),
+    mul: v=>fround(v[0] * v[1]),
+    mad: v=>fround(fround(v[0] * v[1]) + v[2]),
     min: v=>Math.min(v[0], v[1]),
     max: v=>Math.max(v[0], v[1]),
     slt: v=>(v[0] < v[1] ? 1 : 0),
     sge: v=>(v[0] >= v[1] ? 1 : 0),
     cmp: v=>(v[0] >= 0 ? v[1] : v[2]),
-    frc: v=>f32(v[0] - Math.floor(v[0])),
+    frc: v=>fround(v[0] - Math.floor(v[0])),
     abs: v=>Math.abs(v[0]),
-    lrp: v=>f32(f32(v[0] * f32(v[1] - v[2])) + v[2]),
-    rcp: v=>(v[0] === 0 ? Infinity : f32(1 / v[0])),
-    rsq: v=>(v[0] === 0 ? Infinity : f32(1 / Math.sqrt(Math.abs(v[0])))),
-    exp: v=>f32(hm.exp2(v[0])),
-    pow: v=>f32(hm.pow(Math.abs(v[0]), v[1])),
-    log: v=>(v[0] === 0 ? -Infinity : f32(hm.log2(Math.abs(v[0])))),
+    lrp: v=>fround(fround(v[0] * fround(v[1] - v[2])) + v[2]),
+    rcp: v=>(v[0] === 0 ? Infinity : fround(1 / v[0])),
+    rsq: v=>(v[0] === 0 ? Infinity : fround(1 / Math.sqrt(Math.abs(v[0])))),
+    exp: v=>fround(hm.exp2(v[0])),
+    pow: v=>fround(hm.pow(Math.abs(v[0]), v[1])),
+    log: v=>(v[0] === 0 ? -Infinity : fround(hm.log2(Math.abs(v[0])))),
 };
 
 /**
@@ -125,7 +125,7 @@ export function createBuilder(profile){
     const vec = src=>({ w: lanesOf(src), src });
 
     /** @param {number[]} values @returns {Vec} */
-    const imm = values=>vec({ kind: 'imm', values: values.map(f32) });
+    const imm = values=>vec({ kind: 'imm', values: values.map(fround) });
 
     /** @param {number} x @param {number} [w] @returns {Vec} */
     const num = (x, w = 1)=>imm(new Array(w).fill(x));
@@ -591,7 +591,7 @@ export function createBuilder(profile){
         const y = literal(args[1]);
         if (x && y)
         {
-            return num(f32(x.reduce((sum, v, i)=>f32(sum + f32(v * y[i])), 0)));
+            return num(fround(x.reduce((sum, v, i)=>fround(sum + fround(v * y[i])), 0)));
         }
         if (w === 2 && profile.dp2add)
         {

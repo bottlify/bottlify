@@ -17,6 +17,7 @@ import { createAdapter } from './objects.js';
 import {
     CTL_E_INVALIDPICTURE, IID_IPICTURE, IID_IPICTUREDISP, PICTYPE, createPictureObjects,
 } from './picture.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const S_OK = 0;
 const E_NOINTERFACE = 0x80004002 | 0;
@@ -56,8 +57,7 @@ function setup(streamBytes = new Uint8Array(0)){
     view.setUint32(STREAM + 0x10 + 12, 0x7003, true);
     view.setUint32(STREAM + 0x10 + 16, 0x7004, true);
     const pictures = createPictureObjects({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         allocate: size=>{
             const at = next;
             next += (size + 15) & ~15;

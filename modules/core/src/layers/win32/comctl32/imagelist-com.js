@@ -15,7 +15,6 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { formatGuid } from '../../../system/guid.js';
 
 export const IID_IIMAGELIST = '{46EB5926-582E-4017-9FDF-E8998DAA0950}';
 export const IID_IIMAGELIST2 = '{192B9D83-50FC-457B-90A0-2B82A8B5DAE1}';
@@ -34,15 +33,13 @@ const KNOWN = new Set([IID_IIMAGELIST, IID_IIMAGELIST2, '{00000000-0000-0000-C00
  * @typedef {Object} ImageListComHost
  * @property {(object: any, interfaceId: string) => number} publish  the interface's pointer
  * @property {(name: string, args: number[]) => any} flat  a flat export of comctl32's lists
- * @property {(address: number, value: number) => void} putU32
- * @property {(address: number) => Uint8Array} readGuid  sixteen bytes
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(handle: number, cx: number, cy: number, flags: number, initial: number,
  *     grow: number) => boolean} initialize  a list made empty again at a size and depth
  * @property {(handle: number, index: number) => number | null} itemFlags  an image's
  *     ILIF_* flags, null for no such image
  */
-
 
 /**
  * @param {ImageListComHost} host
@@ -71,7 +68,7 @@ export function createImageListObjects(host){
         }
         if ((out >>> 0) !== 0)
         {
-            host.putU32(out >>> 0, answer >>> 0);
+            host.guest.set32(out, answer);
         }
         return S_OK;
     };
@@ -87,17 +84,17 @@ export function createImageListObjects(host){
         }
         if (made === 0)
         {
-            host.putU32(out >>> 0, 0);
+            host.guest.setPtr(out, 0);
             return E_FAIL;
         }
         const object = objects.get(made >>> 0);
-        if (!object || !KNOWN.has(formatGuid(host.readGuid(riid >>> 0))))
+        if (!object || !KNOWN.has(host.guest.guid(riid)))
         {
             host.flat('ImageList_Destroy', [made]);
-            host.putU32(out >>> 0, 0);
+            host.guest.setPtr(out, 0);
             return E_NOINTERFACE;
         }
-        host.putU32(out >>> 0, made >>> 0);
+        host.guest.setPtr(out, made);
         return S_OK;
     };
 
@@ -152,7 +149,7 @@ export function createImageListObjects(host){
             {
                 return E_INVALIDARG;
             }
-            host.putU32(out >>> 0, flat('ImageList_GetImageCount', [h]) >>> 0);
+            host.guest.set32(out, flat('ImageList_GetImageCount', [h]));
             return S_OK;
         }),
         method('SetImageCount', 4, (h, [count])=>ok(flat('ImageList_SetImageCount',
@@ -161,7 +158,7 @@ export function createImageListObjects(host){
             const before = flat('ImageList_SetBkColor', [h, color]);
             if ((out >>> 0) !== 0)
             {
-                host.putU32(out >>> 0, before >>> 0);
+                host.guest.set32(out, before);
             }
             return S_OK;
         }),
@@ -170,7 +167,7 @@ export function createImageListObjects(host){
             {
                 return E_INVALIDARG;
             }
-            host.putU32(out >>> 0, flat('ImageList_GetBkColor', [h]) >>> 0);
+            host.guest.set32(out, flat('ImageList_GetBkColor', [h]));
             return S_OK;
         }),
         method('BeginDrag', 12, (h, [i, dx, dy])=>ok(flat('ImageList_BeginDrag', [h, i, dx, dy]))),
@@ -191,7 +188,7 @@ export function createImageListObjects(host){
             {
                 return E_INVALIDARG;
             }
-            host.putU32(out >>> 0, flags);
+            host.guest.set32(out, flags);
             return S_OK;
         }),
         method('GetOverlayImage', 8, null),
@@ -249,7 +246,7 @@ export function createImageListObjects(host){
         make,
         handOut,
         /** @param {number} at @returns {string} */
-        guidAt: at=>((at >>> 0) === 0 ? '' : formatGuid(host.readGuid(at >>> 0))),
+        guidAt: at=>((at >>> 0) === 0 ? '' : host.guest.guid(at)),
         /** @param {number} handle */
         objectOf: handle=>objects.get(handle >>> 0) ?? null,
         /**
@@ -265,16 +262,16 @@ export function createImageListObjects(host){
             }
             if (!object)
             {
-                host.putU32(out >>> 0, 0);
+                host.guest.setPtr(out, 0);
                 return E_INVALIDARG;
             }
-            if (!KNOWN.has(formatGuid(host.readGuid(riid >>> 0))))
+            if (!KNOWN.has(host.guest.guid(riid)))
             {
-                host.putU32(out >>> 0, 0);
+                host.guest.setPtr(out, 0);
                 return E_NOINTERFACE;
             }
             object.addRef();
-            host.putU32(out >>> 0, handle >>> 0);
+            host.guest.setPtr(out, handle);
             return S_OK;
         },
     };

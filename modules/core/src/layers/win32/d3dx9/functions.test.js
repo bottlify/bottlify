@@ -23,8 +23,6 @@ function machine(){
     const fns = createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'),
         images: freshSpace('d3dx-images'),
         guest: guestOver(memory),
-        readMemory: (address, length)=>memory.subarray(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
         divergence: api=>diverged.push(api),
     });
     /** @param {number} address @param {number[]} values */
@@ -184,8 +182,6 @@ test('D3DXCreateBuffer hands over a zeroed block behind an ID3DXBuffer, freed wi
     const freed = [];
     const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
         guest: guestOver(memory),
-        readMemory: (address, length)=>memory.subarray(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
         heap: { allocate: ()=>0x800, free: address=>freed.push(address) },
         vtables: { publish: (object, id)=>{
             published.push({ object, id });
@@ -326,15 +322,6 @@ function endingMemory(ends){
     let free = 0x100;
     const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
         guest: guestOver(memory, 4, ends),
-        readMemory: (address, length)=>{
-            for (const end of ends)
-            {
-                assert.ok(address >= end || address + length <= end, `read of ${length} bytes`
-                    + ` at 0x${address.toString(16)} runs past an end at 0x${end.toString(16)}`);
-            }
-            return memory.subarray(address, address + length);
-        },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
         readFile: async path=>{
             opened.push(path);
             return new TextEncoder().encode('float4 tint() : COLOR0 { return 1; }');

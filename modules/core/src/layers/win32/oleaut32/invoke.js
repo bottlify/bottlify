@@ -101,8 +101,7 @@ const SLOT_BYTES = VARIANT_BYTES;
 
 /**
  * @typedef {Object} InvokeHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => boolean }} heap
  * @property {(entry: number, args: number[]) => Promise<number>} call
  *           Calls a guest routine, stdcall, and resolves with EAX.
@@ -260,16 +259,7 @@ function variantOf(bytes, vt){
  * @param {InvokeHost} host
  */
 export function createInvoker(host){
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        host.writeMemory(address, Uint8Array.from([
-            value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff]));
-    };
+    const { guest } = host;
 
     /**
      * Reads a variant, and the value behind a reference.
@@ -278,11 +268,11 @@ export function createInvoker(host){
      * @returns {VariantValue | null} null when a reference points nowhere
      */
     const loadVariant = pvar=>{
-        const head = host.readMemory(pvar, 2);
+        const head = guest.snapshot(pvar, 2);
         const declared = head[0] | (head[1] << 8);
         const vt = declared & VT_TYPEMASK;
         const byref = (declared & VT_BYREF) !== 0;
-        const at = byref ? readU32(pvar + VARIANT_VALUE) : pvar + VARIANT_VALUE;
+        const at = byref ? guest.u32(pvar + VARIANT_VALUE) : pvar + VARIANT_VALUE;
         if (byref && at === 0)
         {
             return null;
@@ -291,37 +281,35 @@ export function createInvoker(host){
         const value = {
             vt: declared, reference: byref ? at : 0, pointer: 0, number: null, text: null,
         };
-        const data = host.readMemory(at, 8);
-        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
         switch (vt)
         {
             case VT_BSTR:
-                value.pointer = view.getUint32(0, true);
+                value.pointer = guest.u32(at);
                 value.text = host.readBstr(value.pointer);
                 break;
             case VT_DISPATCH:
             case VT_UNKNOWN:
-                value.pointer = view.getUint32(0, true);
+                value.pointer = guest.u32(at);
                 break;
             case VT_EMPTY:
             case VT_NULL:
                 value.number = 0;
                 break;
-            case VT_I1: value.number = view.getInt8(0); break;
-            case VT_UI1: value.number = view.getUint8(0); break;
+            case VT_I1: value.number = guest.i8(at); break;
+            case VT_UI1: value.number = guest.u8(at); break;
             case VT_I2:
-            case VT_BOOL: value.number = view.getInt16(0, true); break;
-            case VT_UI2: value.number = view.getUint16(0, true); break;
+            case VT_BOOL: value.number = guest.i16(at); break;
+            case VT_UI2: value.number = guest.u16(at); break;
             case VT_I4:
             case VT_INT:
             case VT_ERROR:
-            case VT_HRESULT: value.number = view.getInt32(0, true); break;
+            case VT_HRESULT: value.number = guest.i32(at); break;
             case VT_UI4:
-            case VT_UINT: value.number = view.getUint32(0, true); break;
-            case VT_R4: value.number = view.getFloat32(0, true); break;
+            case VT_UINT: value.number = guest.u32(at); break;
+            case VT_R4: value.number = guest.f32(at); break;
             case VT_R8:
-            case VT_DATE: value.number = view.getFloat64(0, true); break;
-            case VT_CY: value.number = Number(view.getBigInt64(0, true)) / 10000; break;
+            case VT_DATE: value.number = guest.f64(at); break;
+            case VT_CY: value.number = Number(guest.i64(at)) / 10000; break;
             default:
                 break;
         }
@@ -343,16 +331,16 @@ export function createInvoker(host){
      * @returns {number | Promise<number>} an HRESULT
      */
     const invoke = (library, type, fn, instance, flags, params, result, excepInfo, argErr)=>{
-        const argsAt = readU32(params);
-        const namedAt = readU32(params + 4);
-        const count = readU32(params + 8);
-        const named = readU32(params + 12);
+        const argsAt = guest.u32(params);
+        const namedAt = guest.u32(params + 4);
+        const count = guest.u32(params + 8);
+        const named = guest.u32(params + 12);
         // The one named argument with a meaning here is a property's new
         // value, which sits first in the list -- where the last parameter is
         // found anyway.
         if (named > 1 || (named === 1
             && ((flags & (DISPATCH_PROPERTYPUT | DISPATCH_PROPERTYPUTREF)) === 0
-                || (readU32(namedAt) | 0) !== DISPID_PROPERTYPUT)))
+                || (guest.u32(namedAt) | 0) !== DISPID_PROPERTYPUT)))
         {
             host.divergence('ITypeInfo::Invoke',
                 `${type.name}.${fn.name}: named arguments are not matched by name`);
@@ -379,7 +367,7 @@ export function createInvoker(host){
         {
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(slots, new Uint8Array(SLOT_BYTES * Math.max(fn.parameters.length, 1)));
+        guest.fill(slots, 0, SLOT_BYTES * Math.max(fn.parameters.length, 1));
         const giveUp = (/** @type {number} */ code, /** @type {number} */ index)=>{
             host.heap.free(slots);
             for (const bstr of temporaryStrings)
@@ -388,7 +376,7 @@ export function createInvoker(host){
             }
             if (argErr !== 0)
             {
-                writeU32(argErr, index);
+                guest.set32(argErr, index);
             }
             return code;
         };
@@ -449,7 +437,7 @@ export function createInvoker(host){
                 if (element === VT_SAFEARRAY && (value.vt & VT_ARRAY) !== 0)
                 {
                     // SAFEARRAY(T) *: a slot holding the array the variant carries.
-                    host.writeMemory(slot, host.readMemory(argument + VARIANT_VALUE, WORD).slice());
+                    guest.copy(slot, argument + VARIANT_VALUE, WORD);
                     words.push(slot);
                     continue;
                 }
@@ -463,21 +451,21 @@ export function createInvoker(host){
                 const bytes = new Uint8Array(laid.length * WORD);
                 const view = new DataView(bytes.buffer);
                 laid.forEach((word, at)=>view.setUint32(at * WORD, word, true));
-                host.writeMemory(slot, bytes);
+                guest.setBytes(slot, bytes);
                 words.push(slot);
                 continue;
             }
 
             if (wanted === VT_VARIANT)
             {
-                words.push(...wordsOf(host.readMemory(argument, VARIANT_BYTES)));
+                words.push(...wordsOf(guest.snapshot(argument, VARIANT_BYTES)));
                 continue;
             }
             if (wanted === VT_SAFEARRAY && (value.vt & VT_ARRAY) !== 0)
             {
                 // SAFEARRAY(T) is passed as the array itself: the pointer a
                 // VT_ARRAY variant holds, or the one its reference points at.
-                words.push(readU32(byref ? value.reference : argument + VARIANT_VALUE));
+                words.push(guest.u32(byref ? value.reference : argument + VARIANT_VALUE));
                 continue;
             }
             const laid = layOut(wanted, value, temporaryStrings);
@@ -490,8 +478,8 @@ export function createInvoker(host){
             words.push(...laid);
         }
 
-        const vtable = readU32(instance);
-        const entry = readU32(vtable + fn.vtableOffset);
+        const vtable = guest.u32(instance);
+        const entry = guest.u32(vtable + fn.vtableOffset);
         return host.call(entry, [instance, ...words]).then(returned=>{
             const hr = returned | 0;
             for (const bstr of temporaryStrings)
@@ -510,12 +498,12 @@ export function createInvoker(host){
                 // for.
                 const info = new Uint8Array(EXCEPINFO_BYTES);
                 new DataView(info.buffer).setInt32(EXCEPINFO_SCODE, hr, true);
-                host.writeMemory(excepInfo, info);
+                guest.setBytes(excepInfo, info);
                 return DISP_E_EXCEPTION;
             }
             if (retval !== null)
             {
-                const filled = variantOf(host.readMemory(retval.at, SLOT_BYTES), retval.vt);
+                const filled = variantOf(guest.snapshot(retval.at, SLOT_BYTES), retval.vt);
                 if (result !== 0 && filled !== null)
                 {
                     host.clearVariant(result);
@@ -523,7 +511,7 @@ export function createInvoker(host){
                     variant[0] = filled.vt & 0xff;
                     variant[1] = filled.vt >> 8;
                     variant.set(filled.value.subarray(0, 8), VARIANT_VALUE);
-                    host.writeMemory(result, variant);
+                    guest.setBytes(result, variant);
                 }
                 else if (filled === null)
                 {

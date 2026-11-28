@@ -4,8 +4,6 @@
  * See LICENSE for details
  */
 
-import { wholeAddress } from '../common/pointers.js';
-
 /**
  * D3DX's way to a program's device: the device's own methods, called through
  * the vtable its pointer leads to, as D3DX itself calls them. What a method
@@ -59,15 +57,10 @@ export const SURFACE = Object.freeze({ GetDevice: 3, GetDesc: 12, LockRect: 13, 
 
 /**
  * @typedef {Object} DeviceHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number) => number} [readU32]  A word read in place.
- * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
  *     [callGuest]
- * @property {4 | 8} [pointerSize]  8 in a 64-bit process: a COM table's slots, an out
- *     pointer and the pointer of a locked rectangle are quadwords there.
  */
 
 /**
@@ -81,32 +74,9 @@ export const POINTER_BYTES = 8;
  * @param {DeviceHost} host
  */
 export function createDeviceCalls(host){
-    /** A pointer's bytes in the calling process. Every address lies below 4 GiB. */
-    const pointer = host.pointerSize === 8 ? 8 : 4;
-    /**
-     * Read from the bytes the host hands back, not a copy of them: an effect's
-     * setters read a word at a time, and a buffer made for each word was most of
-     * their cost.
-     *
-     * @param {number} at
-     */
-    const u32 = host.readU32 ? (/** @type {number} */ at)=>/** @type {NonNullable<DeviceHost['readU32']>} */ (
-        host.readU32)(at >>> 0) >>> 0 : (/** @type {number} */ at)=>{
-        const bytes = host.readMemory(wholeAddress(at), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} at @param {number[]} values */
-    const putU32s = (at, values)=>{
-        if (values.length === 1 && host.writeU32)
-        {
-            host.writeU32(wholeAddress(at), values[0] >>> 0);
-            return;
-        }
-        const bytes = new Uint8Array(values.length * 4);
-        const view = new DataView(bytes.buffer);
-        values.forEach((v, i)=>view.setUint32(i * 4, v >>> 0, true));
-        host.writeMemory(wholeAddress(at), bytes);
-    };
+    const { guest } = host;
+    /** A pointer's bytes in the calling process. */
+    const pointer = guest.pointerSize;
     /**
      * A method of a COM object in guest memory, its answer as an unsigned HRESULT.
      *
@@ -115,62 +85,14 @@ export function createDeviceCalls(host){
      */
     const method = (thread, object, slot, rest)=>
         /** @type {NonNullable<DeviceHost['callGuest']>} */ (host.callGuest)({
-            entry: u32(u32(object) + slot * pointer), args: [object >>> 0, ...rest],
+            entry: guest.ptr(guest.ptr(object) + slot * pointer), args: [object, ...rest],
             ...(thread === undefined ? {} : { thread }),
         }).then(answer=>answer >>> 0);
-    /**
-     * A pointer written whole: its high half zero in a 64-bit process, where the
-     * caller's slot holds whatever was there before.
-     *
-     * @param {number} at @param {number} value
-     */
-    const putPointer = (at, value)=>putU32s(at, pointer === 8 ? [value, 0] : [value]);
     /**
      * A D3DLOCKED_RECT read: the pointer follows the pitch at the pointer's own alignment.
      *
      * @param {number} at
      */
-    const lockedRect = at=>({ pitch: u32(at), bits: u32(at + pointer) });
-    /**
-     * A NUL-ended string, narrow or wide, of at most `max` characters, read a
-     * page at a time: a name near the end of its region -- one on the stack's
-     * last page -- ends before the region does, and a fixed-size read past it
-     * faulted the caller.
-     *
-     * @param {number} at @param {boolean} [wide] @param {number} [max]
-     */
-    const string = (at, wide = false, max = 4096)=>{
-        const width = wide ? 2 : 1;
-        /** @type {number[]} */
-        const units = [];
-        let address = wholeAddress(at);
-        while (units.length < max)
-        {
-            const room = Math.min((max - units.length) * width, 0x1000 - (address & 0xfff));
-            let bytes;
-            try
-            {
-                bytes = host.readMemory(address, room);
-            }
-            catch (e){
-                if (units.length === 0 && address === (at >>> 0))
-                {
-                    throw e;
-                }
-                break;
-            }
-            for (let i = 0; i + width <= bytes.length; i += width)
-            {
-                const unit = wide ? bytes[i] | (bytes[i + 1] << 8) : bytes[i];
-                if (unit === 0)
-                {
-                    return String.fromCharCode(...units);
-                }
-                units.push(unit);
-            }
-            address += room;
-        }
-        return String.fromCharCode(...units);
-    };
-    return { u32, putU32s, putPointer, lockedRect, method, string, pointer };
+    const lockedRect = at=>({ pitch: guest.u32(at), bits: guest.ptr(at + pointer) });
+    return { lockedRect, method, pointer };
 }
