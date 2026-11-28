@@ -19,9 +19,7 @@
  * GetURL, InvokeCommand after IUnknown's three.
  */
 
-import { writeGuid } from '../../../system/guid.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
 const CLSID_INTERNET_SHORTCUT = '{FBF23B40-E3F0-101B-8488-00AA003E56F8}';
@@ -68,10 +66,7 @@ const IPERSIST_FILE_SLOTS = [
 
 /**
  * @typedef {Object} InternetShortcutHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} allocate
  *           Task memory: a string GetURL and GetCurFile hand back is the
  *           caller's to free with CoTaskMemFree.
@@ -84,11 +79,6 @@ const IPERSIST_FILE_SLOTS = [
  */
 
 /** @typedef {(state: ShortcutState, args: number[]) => number | Promise<number>} Method */
-
-/** @param {number} value */
-const dword = value=>new Uint8Array([
-    value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
-]);
 
 /**
  * The address a `.url` file holds: `URL=` in its `[InternetShortcut]`
@@ -132,6 +122,7 @@ const shortcutText = url=>`[InternetShortcut]\r\nURL=${url}\r\n`;
  * @returns {() => import('../ole32/objects.js').ComClassDefinition}
  */
 export function createInternetShortcut(host){
+    const { guest } = host;
     /**
      * A string in task memory, its pointer written to `slot`; S_FALSE and a
      * null for none.
@@ -145,18 +136,18 @@ export function createInternetShortcut(host){
         }
         if (text === null)
         {
-            host.writeMemory(slot, dword(0));
+            guest.set32(slot, 0);
             return S_FALSE;
         }
         const bytes = wide ? utf16z(text) : encodeAnsi(`${text}\0`);
         const block = host.allocate(bytes.length);
         if (block === 0)
         {
-            host.writeMemory(slot, dword(0));
+            guest.set32(slot, 0);
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(block, bytes);
-        host.writeMemory(slot, dword(block));
+        guest.setBytes(block, bytes);
+        guest.set32(slot, block);
         return S_OK;
     };
 
@@ -175,8 +166,7 @@ export function createInternetShortcut(host){
                 state.dirty = true;
                 return S_OK;
             }
-            const given = (wide ? host.readWideString : host.readCString)(address >>> 0,
-                MAX_STRING).trim();
+            const given = host.guest.text(address, wide, MAX_STRING).trim();
             if (!SCHEME.test(given))
             {
                 if (((flags >>> 0) & (IURL_SETURL_FL_GUESS_PROTOCOL
@@ -212,12 +202,12 @@ export function createInternetShortcut(host){
     const persistFile = {
         GetClassID: (state, [out])=>{
             void state;
-            return writeGuid(host, out >>> 0, CLSID_INTERNET_SHORTCUT) ? S_OK : E_FAIL;
+            return host.guest.setGuid(out, CLSID_INTERNET_SHORTCUT) ? S_OK : E_FAIL;
         },
         IsDirty: state=>(state.dirty ? S_OK : S_FALSE),
         /** HRESULT Load(LPCOLESTR pszFileName, DWORD dwMode) */
         Load: (state, [name])=>{
-            const path = host.readWideString(wholeAddress(name), MAX_STRING * 2);
+            const path = guest.wstr(name, MAX_STRING * 2);
             const files = host.files;
             const entry = files?.stat(path);
             if (!files || !entry || entry.exists === false || entry.isDirectory)
@@ -259,7 +249,7 @@ export function createInternetShortcut(host){
          */
         Save: (state, [name, remember])=>{
             const given = (name >>> 0) === 0 ? null
-                : host.readWideString(wholeAddress(name), MAX_STRING * 2);
+                : guest.wstr(name, MAX_STRING * 2);
             const path = given ?? state.curFile;
             if (path === null)
             {
@@ -299,7 +289,7 @@ export function createInternetShortcut(host){
         },
         SaveCompleted: (state, [name])=>{
             state.curFile = (name >>> 0) === 0 ? null
-                : host.readWideString(wholeAddress(name), MAX_STRING * 2);
+                : guest.wstr(name, MAX_STRING * 2);
             state.dirty = false;
             return S_OK;
         },

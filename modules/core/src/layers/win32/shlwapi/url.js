@@ -22,7 +22,7 @@
  */
 
 import { hasScheme } from './path.js';
-import { dword, u32 } from './text.js';
+import { dwordBytes } from './text.js';
 import { applyScheme, escapeUrl, hashData, parseUrl, urlPart, URL_ESCAPE_AS_UTF8 }
     from './url-parts.js';
 import { encodeAnsi } from '../kernel32/locale.js';
@@ -820,8 +820,7 @@ const locationIndex = url=>{
 
 /**
  * @typedef {Object} UrlHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -830,6 +829,7 @@ const locationIndex = url=>{
  * @param {{ A: import('./text.js').Width, W: import('./text.js').Width }} widths
  */
 export function createUrlFunctions(host, { A, W }){
+    const { guest } = host;
     /** @param {string} name @param {number} argBytes
      *  @param {(width: import('./text.js').Width, args: number[]) => number} body
      *  @param {{ returns?: string }} [marshal]  `returns: 'pointer'` for an address answered */
@@ -841,8 +841,8 @@ export function createUrlFunctions(host, { A, W }){
     });
 
     /** @param {number} address */
-    const countAt = address=>((address >>> 0) === 0 || !host.readMemory
-        ? null : u32(host.readMemory(wholeAddress(address), 4)));
+    const countAt = address=>((address >>> 0) === 0
+        ? null : guest.u32(address));
 
     /**
      * An answer into a buffer the caller counts the room of: written, with
@@ -857,15 +857,15 @@ export function createUrlFunctions(host, { A, W }){
     const answer = (width, text, buffer, count, room, success = S_OK)=>{
         if (text.length < room && (buffer >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(buffer), width.sz(text));
-            host.writeMemory(wholeAddress(count), dword(text.length));
+            guest.setBytes(buffer, width.sz(text));
+            guest.set32(count, text.length);
             return success;
         }
         if (text.length < room)
         {
             return E_INVALIDARG;
         }
-        host.writeMemory(wholeAddress(count), dword(text.length + 1));
+        guest.set32(count, text.length + 1);
         return E_POINTER;
     };
 
@@ -894,11 +894,11 @@ export function createUrlFunctions(host, { A, W }){
         const room = /** @type {number} */ (countAt(count));
         if (text.length >= room)
         {
-            host.writeMemory(wholeAddress(count), dword(text.length + 1));
+            guest.set32(count, text.length + 1);
             return E_POINTER;
         }
-        host.writeMemory(wholeAddress(buffer), width.sz(text));
-        host.writeMemory(wholeAddress(count), dword(text.length));
+        guest.setBytes(buffer, width.sz(text));
+        guest.set32(count, text.length);
         return success;
     };
 
@@ -928,7 +928,7 @@ export function createUrlFunctions(host, { A, W }){
                 width.char);
             if (((flags >>> 0) & URL_UNESCAPE_INPLACE) !== 0)
             {
-                host.writeMemory(wholeAddress(pointer), width.sz(result));
+                guest.setBytes(pointer, width.sz(result));
                 return S_OK;
             }
             const room = countAt(count);
@@ -1068,8 +1068,8 @@ export function createUrlFunctions(host, { A, W }){
             }
             if (kind === 'empty')
             {
-                host.writeMemory(wholeAddress(buffer), width.sz(''));
-                host.writeMemory(wholeAddress(count), dword(0));
+                guest.setBytes(buffer, width.sz(''));
+                guest.set32(count, 0);
                 return width.wide ? S_OK : S_FALSE;
             }
             return counted(width, text, buffer, count, S_OK);
@@ -1087,7 +1087,7 @@ export function createUrlFunctions(host, { A, W }){
             {
                 return E_INVALIDARG;
             }
-            host.writeMemory(wholeAddress(out), hash(encodeAnsi(url), size >>> 0));
+            guest.setBytes(out, hash(encodeAnsi(url), size >>> 0));
             return S_OK;
         }),
 
@@ -1105,11 +1105,11 @@ export function createUrlFunctions(host, { A, W }){
                 {
                     return E_INVALIDARG;
                 }
-                if ((length >>> 0) === 0 || (size >>> 0) === 0 || !host.readMemory)
+                if ((length >>> 0) === 0 || (size >>> 0) === 0)
                 {
                     return S_OK;
                 }
-                host.writeMemory(wholeAddress(out), hash(host.readMemory(wholeAddress(input),
+                guest.setBytes(out, hash(guest.snapshot(input,
                     length >>> 0),
                 size >>> 0));
                 return S_OK;
@@ -1133,17 +1133,17 @@ export function createUrlFunctions(host, { A, W }){
             const result = parseUrl(url);
             if (result === null)
             {
-                host.writeMemory(wholeAddress(parsed) + 4, dword(0));
+                guest.set32(parsed + 4, 0);
                 return URL_E_INVALID_SYNTAX;
             }
             const suffix = result.protocolLength + 1;
             const fields = new Uint8Array(20);
-            fields.set(dword(input), 0);
-            fields.set(dword(result.protocolLength), 4);
-            fields.set(dword((input >>> 0) + suffix * width.unit), 8);
-            fields.set(dword(url.length - suffix), 12);
-            fields.set(dword(result.number), 16);
-            host.writeMemory(wholeAddress(parsed) + 4, fields);
+            fields.set(dwordBytes(input), 0);
+            fields.set(dwordBytes(result.protocolLength), 4);
+            fields.set(dwordBytes((input >>> 0) + suffix * width.unit), 8);
+            fields.set(dwordBytes(url.length - suffix), 12);
+            fields.set(dwordBytes(result.number), 16);
+            guest.setBytes(parsed + 4, fields);
             return S_OK;
         }),
 
@@ -1223,7 +1223,7 @@ export function createUrlFunctions(host, { A, W }){
                     host.divergence?.('UrlFixupW', 'a mistyped scheme is not mended: the URL is'
                         + ' copied as it is');
                 }
-                host.writeMemory(wholeAddress(out), W.sz(url.slice(0, (room >>> 0) - 1)));
+                guest.setBytes(out, W.sz(url.slice(0, (room >>> 0) - 1)));
                 return url.length < (room >>> 0) ? S_FALSE : E_POINTER;
             },
         },

@@ -35,8 +35,7 @@ export const IDLIST_ORDINALS = Object.freeze([
 
 /**
  * @typedef {Object} IdListHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} [allocate]  The task allocator's memory.
  * @property {(address: number) => void} [free]
  */
@@ -45,9 +44,10 @@ export const IDLIST_ORDINALS = Object.freeze([
  * @param {IdListHost} host
  */
 export function createIdListFunctions(host){
+    const { guest } = host;
     /** @param {number} at */
     const cbAt = at=>{
-        const bytes = host.readMemory(wholeAddress(at), 2);
+        const bytes = guest.snapshot(at, 2);
         return bytes[0] | bytes[1] << 8;
     };
 
@@ -77,7 +77,7 @@ export function createIdListFunctions(host){
     /** @param {number} list  The bytes of a list, its terminator with them. */
     const bytesOf = list=>{
         const { end } = walk(list);
-        return host.readMemory(wholeAddress(list), end - (list >>> 0) + 2).slice();
+        return guest.snapshot(list, end - (list >>> 0) + 2);
     };
 
     /** @param {Uint8Array} bytes @returns {number} a list holding them, 0 for no memory */
@@ -85,13 +85,13 @@ export function createIdListFunctions(host){
         const at = host.allocate?.(bytes.length) ?? 0;
         if (at !== 0)
         {
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
         }
         return at;
     };
 
     /** @param {number} at  One item's bytes, `cb` and all. */
-    const itemBytes = at=>host.readMemory(wholeAddress(at), cbAt(at)).slice();
+    const itemBytes = at=>guest.snapshot(at, cbAt(at));
 
     /** @param {...Uint8Array} parts @returns {Uint8Array} the items, then a terminator */
     const joined = (...parts)=>{
@@ -182,7 +182,7 @@ export function createIdListFunctions(host){
                 {
                     return 0;
                 }
-                host.writeMemory(last, Uint8Array.of(0, 0));
+                guest.setBytes(last, Uint8Array.of(0, 0));
                 return 1;
             },
         },

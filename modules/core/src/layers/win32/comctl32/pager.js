@@ -27,7 +27,7 @@
 
 import { WM_CREATE, WM_PAINT, COLOR_3DFACE, after } from '../user32/controls.js';
 import { encodeAnsi } from '../kernel32/locale.js';
-import { notifyWindow } from './notify.js';
+import { NMHDR, notifyWindow, sendNotify } from './notify.js';
 import { readText } from './strings.js';
 import { utf16 } from '../common/utf16.js';
 
@@ -177,7 +177,6 @@ const CBEN_DRAGBEGINW = -809;
 const CBEN_ENDEDITW = -806;
 const DTN_FORMATW = -743;
 const TTN_GETDISPINFOW = -530;
-const LPSTR_TEXTCALLBACK = 0xffffffff;
 
 /**
  * @typedef {import('../user32/controls.js').ControlHost} ControlHost
@@ -196,7 +195,7 @@ export function createPagerProcedure(host, tk){
     const { guest } = host;
     const pointer = guest.pointerSize;
     const wide = pointer === 8 ? 1 : 0;
-    const HEADER = 3 * pointer;
+    const HEADER = NMHDR.sizeOf(pointer);
 
     /**
      * @param {any} record
@@ -217,6 +216,14 @@ export function createPagerProcedure(host, tk){
 
     /** @param {At} at */
     const offset = at=>at[wide];
+
+    /**
+     * A text pointer that names a string: not NULL and not LPSTR_TEXTCALLBACK,
+     * all ones at the width, which `ptr` cannot tell from an address.
+     *
+     * @param {number} at
+     */
+    const named = at=>guest.ptr(at) !== 0 && guest.iptr(at) !== -1;
 
     /** Guest memory, zeroed. @param {number} bytes */
     const block = bytes=>{
@@ -286,9 +293,9 @@ export function createPagerProcedure(host, tk){
             }
             return ()=>{};
         }
-        const original = guest.u32(textAt);
+        const original = guest.ptr(textAt);
         const room = maxAt !== 0 ? guest.u32(maxAt) | 0 : 0;
-        const textual = original !== 0 && original !== LPSTR_TEXTCALLBACK;
+        const textual = named(textAt);
         /** @type {number[]} */
         const made = [];
         let handed = original;
@@ -310,11 +317,13 @@ export function createPagerProcedure(host, tk){
             handed = ansiCopy(readText(host, original, true), room);
             made.push(handed);
         }
-        guest.setPtr(textAt, handed);
+        if (handed !== original)
+        {
+            guest.setPtr(textAt, handed);
+        }
         return ()=>{
-            const now = guest.u32(textAt);
-            if ((field.flags & RECEIVE) !== 0 && textual && now !== 0
-                && now !== LPSTR_TEXTCALLBACK)
+            const now = guest.ptr(textAt);
+            if ((field.flags & RECEIVE) !== 0 && textual && named(textAt))
             {
                 // What the parent left - in the buffer it was given, or a
                 // string of its own - in the program's buffer.
@@ -355,10 +364,9 @@ export function createPagerProcedure(host, tk){
         /** @type {number[]} */
         const made = [copy];
         const textAt = copy + 8;
-        const text = guest.u32(textAt);
-        if ((mask & 0x0002) !== 0 && text !== 0 && text !== LPSTR_TEXTCALLBACK)
+        if ((mask & 0x0002) !== 0 && named(textAt))
         {
-            const ansi = ansiCopy(readText(host, text, true));
+            const ansi = ansiCopy(readText(host, guest.ptr(textAt), true));
             made.push(ansi);
             guest.setPtr(textAt, ansi);
         }
@@ -436,7 +444,7 @@ export function createPagerProcedure(host, tk){
             80)).subarray(0, 79));
         guest.setPtr(copy + HEADER, copy + textOffset);
         guest.copy(copy + ansiRest, address + wideRest, tail);
-        return after(host.send(parentOf(record), WM_NOTIFY, guest.u32(address + pointer), copy,
+        return after(host.send(parentOf(record), WM_NOTIFY, guest.ptr(address + pointer), copy,
             thread),
         answer=>{
             const text = guest.ptr(copy + HEADER);
@@ -478,7 +486,7 @@ export function createPagerProcedure(host, tk){
         guest.set32(address + 2 * pointer, -756);
         guest.setPtr(formatAt, ansiFormat);
         guest.setPtr(displayAt, display);
-        return after(host.send(parentOf(record), WM_NOTIFY, guest.u32(address + pointer), address,
+        return after(host.send(parentOf(record), WM_NOTIFY, guest.ptr(address + pointer), address,
             thread), answer=>{
             guest.setPtr(formatAt, format);
             host.release?.(ansiFormat);
@@ -565,24 +573,19 @@ export function createPagerProcedure(host, tk){
     const calcSize = (record, thread)=>{
         const held = state(record);
         const child = held.child !== 0 ? host.live(held.child) : null;
-        const to = parentOf(record);
-        const address = child && to !== 0 ? block(HEADER + 12) : 0;
-        if (!child || address === 0)
+        if (!child)
         {
             return 0;
         }
         const across = (record.style & PGS_HORZ) !== 0;
-        guest.setPtr(address, record.hwnd);
-        guest.setPtr(address + pointer, record.id);
-        guest.set32(address + 2 * pointer, PGN_CALCSIZE);
-        guest.set32(address + HEADER, across ? PGF_CALCWIDTH : PGF_CALCHEIGHT);
-        guest.set32(address + HEADER + 4, child.width);
-        guest.set32(address + HEADER + 8, child.height);
-        return after(host.send(to, WM_NOTIFY, record.id, address, thread), ()=>{
-            held.extent = guest.u32(address + HEADER + (across ? 4 : 8)) | 0;
-            host.release?.(address);
-            return 0;
-        });
+        return after(sendNotify(host, record, parentOf(record), PGN_CALCSIZE, HEADER + 12, thread,
+            address=>{
+                guest.set32(address + HEADER, across ? PGF_CALCWIDTH : PGF_CALCHEIGHT);
+                guest.set32(address + HEADER + 4, child.width);
+                guest.set32(address + HEADER + 8, child.height);
+            }, address=>{
+                held.extent = guest.u32(address + HEADER + (across ? 4 : 8)) | 0;
+            }), ()=>0);
     };
 
     /**

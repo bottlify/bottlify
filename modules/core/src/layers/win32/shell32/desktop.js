@@ -18,7 +18,6 @@
 
 import { createRefusals } from '../common/refusal.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 const E_FAIL = 0x80004005 | 0;
 
@@ -48,14 +47,11 @@ const SETTINGS = Object.freeze([
 
 /**
  * @typedef {Object} DesktopHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(code: number) => void} [setLastError]
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
  *     | undefined} [library]
- * @property {(address: number, maxLength: number) => string} [readCString]
- * @property {(address: number, maxLength: number) => string} [readWideString]
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
  */
@@ -109,14 +105,11 @@ const ABN_POSCHANGED = 1;
  * @property {[number, number, number, number] | null} space  left, top, right, bottom
  */
 
-/** @param {number} value */
-const dword = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff,
-    value >>> 24 & 0xff);
-
 /**
  * @param {DesktopHost} host
  */
 export function createDesktopFunctions(host){
+    const { guest } = host;
     const refuse = createRefusals(host);
 
     /**
@@ -149,13 +142,13 @@ export function createDesktopFunctions(host){
             const allocate = /** @type {(bytes: number) => number} */ (host.allocate);
             const free = /** @type {(address: number) => void} */ (host.free);
             /** @param {string} value */
-            const wide = value=>{
+            const wideCopy = value=>{
                 const at = allocate(value.length * 2 + 2);
-                host.writeMemory(at, utf16z(value));
+                guest.writeWide(at, value);
                 return at;
             };
-            const textAt = wide(text);
-            const captionAt = wide(caption);
+            const textAt = wideCopy(text);
+            const captionAt = wideCopy(caption);
             const release = ()=>{
                 free(textAt);
                 free(captionAt);
@@ -172,11 +165,6 @@ export function createDesktopFunctions(host){
     /** @type {AppBar[]} The bars, in the order they were registered. */
     const bars = [];
 
-    /** @param {number} at */
-    const readInt = at=>{
-        const bytes = host.readMemory?.(at >>> 0, 4) ?? new Uint8Array(4);
-        return bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24;
-    };
 
     /**
      * A bar's rectangle where the bars registered before it leave room: each
@@ -231,19 +219,19 @@ export function createDesktopFunctions(host){
      * @returns {number}
      */
     const appBarMessage = (message, data)=>{
-        if (data === 0 || !host.readMemory)
+        if (data === 0)
         {
             return 0;
         }
-        const window = readInt(data + APPBARDATA.hWnd) >>> 0;
+        const window = guest.i32(data + APPBARDATA.hWnd) >>> 0;
         const index = bars.findIndex(bar=>bar.window === window);
         const bar = bars[index];
         /** @returns {[number, number, number, number]} */
         const rect = ()=>/** @type {[number, number, number, number]} */ (
-            [0, 4, 8, 12].map(at=>readInt(data + APPBARDATA.rc + at)));
+            [0, 4, 8, 12].map(at=>guest.i32(data + APPBARDATA.rc + at)));
         /** @param {[number, number, number, number]} values */
         const writeRect = values=>values.forEach((value, at)=>
-            host.writeMemory(data + APPBARDATA.rc + at * 4, dword(value)));
+            guest.set32(data + APPBARDATA.rc + at * 4, value));
         switch (message)
         {
             case ABM_NEW:
@@ -251,7 +239,7 @@ export function createDesktopFunctions(host){
                 {
                     return 0;
                 }
-                bars.push({ window, message: readInt(data + APPBARDATA.uCallbackMessage) >>> 0,
+                bars.push({ window, message: guest.i32(data + APPBARDATA.uCallbackMessage) >>> 0,
                     edge: ABE_BOTTOM, space: null });
                 return 1;
             case ABM_REMOVE:
@@ -269,7 +257,7 @@ export function createDesktopFunctions(host){
                 {
                     return 0;
                 }
-                const edge = readInt(data + APPBARDATA.uEdge) >>> 0;
+                const edge = guest.i32(data + APPBARDATA.uEdge) >>> 0;
                 const space = clipped(bar, rect());
                 writeRect(space);
                 if (message === ABM_SETPOS)
@@ -309,11 +297,11 @@ export function createDesktopFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([state, mask])=>{
-                if (wholeAddress(state) === 0 || !host.readMemory)
+                if (wholeAddress(state) === 0)
                 {
                     return 0;
                 }
-                const held = host.readMemory(wholeAddress(state), 4);
+                const held = guest.snapshot(state, 4);
                 let bits = (held[0] | held[1] << 8 | held[2] << 16 | held[3] << 24) >>> 0;
                 for (const [flag, bit, on] of SETTINGS)
                 {
@@ -322,7 +310,7 @@ export function createDesktopFunctions(host){
                         bits = on ? (bits | 1 << bit) >>> 0 : (bits & ~(1 << bit)) >>> 0;
                     }
                 }
-                host.writeMemory(wholeAddress(state), dword(bits));
+                guest.set32(state, bits);
                 return 0;
             },
         },
@@ -333,8 +321,8 @@ export function createDesktopFunctions(host){
          *
          * A modal box that returns TRUE once it is closed (`aboutBox`).
          */
-        ShellAboutA: about(address=>host.readCString?.(address, ABOUT_TEXT_LIMIT) ?? ''),
-        ShellAboutW: about(address=>host.readWideString?.(address, ABOUT_TEXT_LIMIT * 2) ?? ''),
+        ShellAboutA: about(address=>guest.cstr(address, ABOUT_TEXT_LIMIT) ?? ''),
+        ShellAboutW: about(address=>guest.wstr(address, ABOUT_TEXT_LIMIT * 2) ?? ''),
 
         /**
          * HRESULT SHLoadInProc(REFCLSID rclsid)

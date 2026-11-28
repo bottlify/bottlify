@@ -81,8 +81,6 @@ export function createMfplatFunctions(host){
     };
 
     const { putU64 } = kit;
-    /** @param {number} at @param {number} value */
-    const putU32 = (at, value)=>kit.putU32s(at, [value]);
     /** A LONGLONG answered in EDX:EAX. @param {bigint} value */
     const answer64 = value=>{
         const bits = BigInt.asUintN(64, value);
@@ -181,8 +179,8 @@ export function createMfplatFunctions(host){
                     return E_POINTER;
                 }
                 const rate = timeToFrameRate(kit.wide(low, high));
-                putU32(numerator, rate.numerator);
-                putU32(denominator, rate.denominator);
+                host.guest.set32(numerator, rate.numerator);
+                host.guest.set32(denominator, rate.denominator);
                 return S_OK;
             } },
         /** LONGLONG MFllMulDiv(LONGLONG a, LONGLONG b, LONGLONG c, LONGLONG d): (a * b + d) / c */
@@ -203,7 +201,7 @@ export function createMfplatFunctions(host){
                     return E_POINTER;
                 }
                 const size = imageSize(guidAt(subtype), width >>> 0, height >>> 0);
-                putU32(out, size ?? 0);
+                host.guest.set32(out, size ?? 0);
                 return size === null ? E_INVALIDARG : S_OK;
             } },
         /**
@@ -228,7 +226,7 @@ export function createMfplatFunctions(host){
             {
                 return E_POINTER;
             }
-            putU32(out, TIMER_PERIOD_MS);
+            host.guest.set32(out, TIMER_PERIOD_MS);
             return S_OK;
         } },
         /** MFTIME MFGetSystemTime(void): the clock in 100-nanosecond units. */
@@ -245,7 +243,7 @@ export function createMfplatFunctions(host){
                 return drive((function* (){
                     const items = yield objects.attributes.itemsOf(attributes,
                         host.callerThread?.());
-                    putU32(out, blobOf(items).length);
+                    host.guest.set32(out, blobOf(items).length);
                     return S_OK;
                 })());
             } },
@@ -267,7 +265,7 @@ export function createMfplatFunctions(host){
                     {
                         return MF_E_BUFFERTOOSMALL;
                     }
-                    host.writeMemory(wholeAddress(buffer), bytes);
+                    host.guest.setBytes(wholeAddress(buffer), bytes);
                     return S_OK;
                 })());
             } },
@@ -284,7 +282,7 @@ export function createMfplatFunctions(host){
                 {
                     return E_POINTER;
                 }
-                const bytes = Uint8Array.from(host.readMemory(wholeAddress(buffer), size >>> 0));
+                const bytes = host.guest.snapshot(wholeAddress(buffer), size >>> 0);
                 const items = deserialize(bytes, at=>formatGuid(at));
                 if (!items)
                 {
@@ -303,7 +301,7 @@ export function createMfplatFunctions(host){
                 {
                     return E_POINTER;
                 }
-                kit.putU32s(out, [0]);
+                host.guest.setPtr(out, 0);
                 return streams.createFile(access >>> 0, open >>> 0, flags >>> 0,
                     kit.wideString(url)).then(made=>(typeof made === 'number' ? made
                     : kit.give(out, made)));
@@ -321,7 +319,7 @@ export function createMfplatFunctions(host){
                 {
                     return E_POINTER;
                 }
-                kit.putU32s(out, [0]);
+                host.guest.setPtr(out, 0);
                 if (!host.tempPath)
                 {
                     return E_NOTIMPL;
@@ -402,7 +400,7 @@ export function createMfplatFunctions(host){
             {
                 return MF_E_SHUTDOWN;
             }
-            kit.putU32s(out, [async.allocateQueue()]);
+            host.guest.set32(out, async.allocateQueue());
             return S_OK;
         } },
         /** HRESULT MFLockWorkQueue(DWORD queue), MFUnlockWorkQueue(DWORD queue) */

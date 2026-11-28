@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMeshFunctions, indexBufferOf, singleStrip, vertexNormals } from './mesh.js';
 import { deviceRig } from './device.fixture.js';
-import { guestOver } from '../common/guest.fixture.js';
+import { guestOver, recordingGuest } from '../common/guest.fixture.js';
 
 const D3DERR_INVALIDCALL = 0x8876086c;
 const VERTICES = 0x100;
@@ -283,3 +283,57 @@ test('D3DXValidMesh finds fault with indices past the vertices and an adjacency 
     assert.equal(r.view.getUint32(out, true), 0, 'no mesh out');
     assert.equal(told.at(-1), 'face 0 uses vertex 2, past the mesh\'s 2\n');
 });
+
+test('in a 64-bit process D3DXComputeNormals writes through a vertex buffer locked past 4 GiB',
+    async()=>{
+        const VERTEX_DATA = 0x2_0000_0000;
+        const INDEX_DATA = 0x2_0000_1000;
+        const { guest, use } = recordingGuest({ pointerSize: 8 });
+        use(new Uint8Array(0x10000));
+        let next = 0x4000;
+        const MESH = 0x100;
+        guest.setPtr(MESH, 0x200);
+        for (let slot = 0; slot < 32; slot++)
+        {
+            guest.setPtr(0x200 + slot * 8, 0xe0000 + slot);
+        }
+        [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]].forEach((p, i)=>p.forEach((value, axis)=>
+            guest.setF32(VERTEX_DATA + i * 24 + axis * 4, value)));
+        [0, 1, 2, 0, 2, 3].forEach((index, i)=>guest.set16(INDEX_DATA + i * 2, index));
+        /** @type {Record<number, (args: number[]) => number>} */
+        const answers = {
+            4: ()=>2, 5: ()=>4, 8: ()=>24, 9: ()=>0,
+            7: ([, at])=>{
+                [[0, 0, 2, 0, 0, 0], [0, 12, 2, 0, 3, 0], [0xff, 0, 17, 0, 0, 0]]
+                    .forEach(([stream, offset, type, way, usage, index], i)=>{
+                        guest.set16(at + i * 8, stream);
+                        guest.set16(at + i * 8 + 2, offset);
+                        guest.setBytes(at + i * 8 + 4, Uint8Array.of(type, way, usage, index));
+                    });
+                return 0;
+            },
+            15: ([, , out])=>{
+                guest.setPtr(out, VERTEX_DATA);
+                return 0;
+            },
+            17: ([, , out])=>{
+                guest.setPtr(out, INDEX_DATA);
+                return 0;
+            },
+        };
+        const api = /** @type {any} */ (createMeshFunctions(/** @type {any} */ ({ guest,
+            heap: { allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += (bytes + 15) & ~15;
+                return at;
+            }, free: ()=>{} },
+            callGuest: async(/** @type {{ entry: number, args: number[] }} */ { entry, args })=>
+                answers[entry - 0xe0000]?.(args) ?? 0,
+        })));
+        assert.equal(await api.D3DXComputeNormals.handler([MESH, 0]), 0);
+        for (let i = 0; i < 4; i++)
+        {
+            assert.deepEqual([0, 1, 2].map(axis=>guest.f32(VERTEX_DATA + i * 24 + 12 + axis * 4)),
+                [0, 0, 1], `vertex ${i}`);
+        }
+    });

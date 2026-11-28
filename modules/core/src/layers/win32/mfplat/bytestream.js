@@ -86,8 +86,12 @@ export function createByteStreams(kit, host, attributes, files){
     /** @param {any} object @returns {any} */
     const stateOf = object=>object.state;
 
-    /** @param {number} out @param {bigint} value */
-    const writeQword = (out, value)=>{
+    /**
+     * A QWORD answered through `out`, refused for a NULL one.
+     *
+     * @param {number} out @param {bigint} value
+     */
+    const answerQword = (out, value)=>{
         if ((out >>> 0) === 0)
         {
             return E_INVALIDARG;
@@ -153,7 +157,7 @@ export function createByteStreams(kit, host, attributes, files){
                 return E_INVALIDARG;
             }
             return drive((function* (){
-                return writeQword(out,
+                return answerQword(out,
                     yield /** @type {FileCalls} */ (files).size(stateOf(object).handle));
             })());
         } },
@@ -164,7 +168,7 @@ export function createByteStreams(kit, host, attributes, files){
                 return ok ? S_OK : E_ACCESSDENIED;
             })()) },
         { name: 'GetCurrentPosition', argBytes: 8,
-            invoke: (object, [out])=>writeQword(out, stateOf(object).position) },
+            invoke: (object, [out])=>answerQword(out, stateOf(object).position) },
         { name: 'SetCurrentPosition', argBytes: 12, quadwords: [1], invoke: (object, [low, high])=>{
             stateOf(object).position = kit.wide(low, high);
             return S_OK;

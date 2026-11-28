@@ -480,7 +480,7 @@ export function createPictureObjects(host){
      * @returns {Promise<number> | number}
      */
     const writeStream = (stream, bytes, thread)=>{
-        const entry = guest.u32(guest.u32(stream) + STREAM_WRITE * 4);
+        const entry = guest.method(stream, STREAM_WRITE);
         return lendUntil(bytes, at=>host.call(entry, [stream, at, bytes.length, 0], thread));
     };
 
@@ -1227,7 +1227,7 @@ export function createPictureObjects(host){
         }
         try
         {
-            const read = guest.u32(guest.u32(stream) + STREAM_READ * 4);
+            const read = guest.method(stream, STREAM_READ);
             /** @type {Uint8Array[]} */
             const pieces = [];
             let total = 0;

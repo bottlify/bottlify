@@ -34,8 +34,9 @@ const SECTION_BITS = 0x80000;
  * and a stream whose Read and Write are fake guest methods.
  *
  * @param {Uint8Array} [streamBytes]
+ * @param {4 | 8} [width]  the process's: its stream's methods past 4 GiB at 8
  */
-function setup(streamBytes = new Uint8Array(0)){
+function setup(streamBytes = new Uint8Array(0), width = 4){
     const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
     let next = 0x20000;
@@ -52,12 +53,14 @@ function setup(streamBytes = new Uint8Array(0)){
     const sections = [];
     /** @type {number[]} */
     const written = [];
-    // The stream's vtable: QueryInterface, AddRef, Release, Read (0x7003), Write (0x7004).
-    view.setUint32(STREAM, STREAM + 0x10, true);
-    view.setUint32(STREAM + 0x10 + 12, 0x7003, true);
-    view.setUint32(STREAM + 0x10 + 16, 0x7004, true);
+    // The stream's vtable: QueryInterface, AddRef, Release, Read, Write.
+    const guest = guestOver(bytes, width);
+    const read = width === 8 ? 0x1_0000_7003 : 0x7003;
+    guest.setPtr(STREAM, STREAM + 0x10);
+    guest.setPtr(STREAM + 0x10 + 3 * width, read);
+    guest.setPtr(STREAM + 0x10 + 4 * width, read + 1);
     const pictures = createPictureObjects({
-        guest: guestOver(bytes),
+        guest,
         allocate: size=>{
             const at = next;
             next += (size + 15) & ~15;
@@ -96,7 +99,7 @@ function setup(streamBytes = new Uint8Array(0)){
         },
         adapt: (state, interfaces, destroy)=>createAdapter(state, interfaces, destroy),
         call: async(entry, args)=>{
-            if (entry === 0x7003)
+            if (entry === read)
             {
                 const [, buffer, wanted, readOut] = args;
                 const piece = streamBytes.subarray(streamAt, streamAt + wanted);
@@ -106,6 +109,7 @@ function setup(streamBytes = new Uint8Array(0)){
                 return S_OK;
             }
             const [, buffer, count] = args;
+            assert.equal(entry, read + 1, 'Write');
             written.push(...bytes.subarray(buffer, buffer + count));
             return S_OK;
         },
@@ -229,6 +233,18 @@ test('a saved picture with nothing in it is an empty picture', async()=>{
     method(IID_IPICTURE, 'get_Type', SCRATCH);
     assert.equal(view.getInt16(SCRATCH, true), PICTYPE.NONE);
 });
+
+test('in a 64-bit process a stream\'s Read and Write are its methods at a slot of eight, whole',
+    async()=>{
+        const IID_IPERSISTSTREAM = '{00000109-0000-0000-C000-000000000046}';
+        const saved = savedHeaders(new Uint8Array(0), 1);
+        const { pictures, view, method, written } = setup(saved, 8);
+        assert.equal(await pictures.load(STREAM, 0, IID_IPICTURE, OUT), S_OK);
+        method(IID_IPICTURE, 'get_Type', SCRATCH);
+        assert.equal(view.getInt16(SCRATCH, true), PICTYPE.NONE);
+        assert.equal(await method(IID_IPERSISTSTREAM, 'Save', STREAM, 1), S_OK);
+        assert.deepEqual(written, [...saved]);
+    });
 
 test('a GIF is an indexed DIB section as deep as its colour table needs', async()=>{
     // 1 by 1, a two-entry global table (black, white), the one pixel index 1.

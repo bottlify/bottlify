@@ -85,7 +85,7 @@ export function createDeviceCalls(host){
      */
     const method = (thread, object, slot, rest)=>
         /** @type {NonNullable<DeviceHost['callGuest']>} */ (host.callGuest)({
-            entry: guest.ptr(guest.ptr(object) + slot * pointer), args: [object, ...rest],
+            entry: guest.method(object, slot), args: [object, ...rest],
             ...(thread === undefined ? {} : { thread }),
         }).then(answer=>answer >>> 0);
     /**

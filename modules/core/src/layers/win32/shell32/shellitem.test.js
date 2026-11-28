@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { IID_ISHELLITEM, createShellItems } from './shellitem.js';
 import { listBytes } from './namespace.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const IID_IPERSISTIDLIST = '{1079ACFC-29BD-11D3-8E0D-00C04F6837D5}';
 const E_INVALIDARG = 0x80070057 | 0;
@@ -22,16 +23,7 @@ function machine(){
     const published = [];
     const paths = new Map([['C:\\dir', 0x20000000 | 0x40000000], ['C:\\dir\\file', 0x40000000]]);
     const items = createShellItems({
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
-        readWideString: at=>{
-            let text = '';
-            for (let n = at; memory[n] | memory[n + 1]; n += 2)
-            {
-                text += String.fromCharCode(memory[n] | memory[n + 1] << 8);
-            }
-            return text;
-        },
+        guest: guestOver(memory),
         allocate: bytes=>{
             const at = heap;
             heap += bytes + 8;

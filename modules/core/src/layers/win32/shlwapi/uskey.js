@@ -16,7 +16,7 @@
  * here, by that address.
  */
 
-import { dword, u32 } from './text.js';
+import { u32Of } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
@@ -40,10 +40,7 @@ const ONLY_MACHINE = 0x10;
 
 /**
  * @typedef {Object} UsKeyHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => Record<string, { handler: (args: number[]) => any }>} [advapi32]
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
@@ -61,6 +58,7 @@ const ONLY_MACHINE = 0x10;
  * @param {UsKeyHost} host
  */
 export function createUsKeyFunctions(host){
+    const { guest } = host;
     /** @type {Map<number, UsKey>} */
     const keys = new Map();
 
@@ -70,8 +68,8 @@ export function createUsKeyFunctions(host){
 
     /** @param {'A' | 'W'} width @param {number} address */
     const readName = (width, address)=>((address >>> 0) === 0 ? ''
-        : width === 'W' ? host.readWideString?.(address >>> 0, 0x10000) ?? ''
-            : host.readCString(wholeAddress(address), 0x10000));
+        : width === 'W' ? guest.wstr(address >>> 0, 0x10000) ?? ''
+            : guest.cstr(address, 0x10000));
 
     /**
      * A wide string in a block of its own, for the calls made with the
@@ -86,7 +84,7 @@ export function createUsKeyFunctions(host){
             bytes[index * 2] = unit.charCodeAt(0) & 0xff;
             bytes[index * 2 + 1] = unit.charCodeAt(0) >>> 8;
         });
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         return at;
     };
 
@@ -105,12 +103,12 @@ export function createUsKeyFunctions(host){
         const out = /** @type {(bytes: number) => number} */ (host.allocate)(4);
         try
         {
-            host.writeMemory(out, dword(0));
+            guest.set32(out, 0);
             const status = create
                 ? registry('RegCreateKeyExW', [parent, name, 0, 0, 0, access, 0, out, 0])
                 : registry('RegOpenKeyExW', [parent, name, 0, access, out]);
             return status === ERROR_SUCCESS
-                ? u32(/** @type {(a: number, l: number) => Uint8Array} */ (host.readMemory)(out, 4))
+                ? guest.u32(out)
                 : 0;
         }
         finally
@@ -120,7 +118,7 @@ export function createUsKeyFunctions(host){
         }
     };
 
-    const usable = ()=>Boolean(host.advapi32 && host.allocate && host.readMemory);
+    const usable = ()=>Boolean(host.advapi32 && host.allocate);
 
     /**
      * SHRegOpenUSKey and SHRegCreateUSKey: the path under each root, or
@@ -163,7 +161,7 @@ export function createUsKeyFunctions(host){
         }
         keys.set(handle, { user, machine,
             path: parent ? `${parent.path}\\${sub}` : sub, access: access >>> 0 });
-        host.writeMemory(wholeAddress(out), dword(handle));
+        guest.set32(out, handle);
         return ERROR_SUCCESS;
     };
 
@@ -304,8 +302,7 @@ export function createUsKeyFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const read = /** @type {(a: number, l: number) => Uint8Array} */ (host.readMemory);
-            const room = (sizeOut >>> 0) !== 0 ? u32(read(wholeAddress(sizeOut), 4)) : 0;
+            const room = (sizeOut >>> 0) !== 0 ? guest.u32(wholeAddress(sizeOut)) : 0;
             let status = ERROR_FILE_NOT_FOUND;
             for (const open of [(ignoreUser | 0) !== 0 ? 0 : key.user, key.machine])
             {
@@ -315,7 +312,7 @@ export function createUsKeyFunctions(host){
                 }
                 if ((sizeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(sizeOut), dword(room));
+                    guest.set32(sizeOut, room);
                 }
                 status = registry(`RegQueryValueEx${width}`, [open, value, 0, typeOut, data,
                     sizeOut]);
@@ -328,8 +325,8 @@ export function createUsKeyFunctions(host){
                 && (sizeOut >>> 0) !== 0)
             {
                 const length = Math.min(fallbackSize >>> 0, room);
-                host.writeMemory(wholeAddress(data), read(wholeAddress(fallback), length).slice());
-                host.writeMemory(wholeAddress(sizeOut), dword(length));
+                guest.setBytes(data, guest.snapshot(wholeAddress(fallback), length));
+                guest.set32(sizeOut, length);
                 return ERROR_SUCCESS;
             }
             return status;
@@ -363,8 +360,7 @@ export function createUsKeyFunctions(host){
                 {
                     return opened;
                 }
-                const handle = u32(/** @type {(a: number, l: number) => Uint8Array} */ (
-                    host.readMemory)(out, 4));
+                const handle = guest.u32(out);
                 const key = /** @type {UsKey} */ (keys.get(handle));
                 const status = writeValue(width, key, [handle, value, type, data, size, flags]);
                 for (const open of [key.user, key.machine].filter(Boolean))
@@ -421,11 +417,10 @@ export function createUsKeyFunctions(host){
                 }
                 const info = /** @type {(bytes: number) => number} */ (host.allocate)(8);
                 registry('RegQueryInfoKeyW', [child, 0, 0, 0, info, 0, 0, info + 4, 0, 0, 0, 0]);
-                const counts = /** @type {(a: number, l: number) => Uint8Array} */ (
-                    host.readMemory)(info, 8);
+                const counts = guest.snapshot(info, 8);
                 host.free?.(info);
                 registry('RegCloseKey', [child]);
-                status = u32(counts) !== 0 || u32(counts, 4) !== 0 ? ERROR_KEY_HAS_CHILDREN
+                status = u32Of(counts) !== 0 || u32Of(counts, 4) !== 0 ? ERROR_KEY_HAS_CHILDREN
                     : registry(`RegDeleteKey${width}`, [open, subKey]);
             }
             return status;

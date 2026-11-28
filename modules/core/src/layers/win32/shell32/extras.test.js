@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShellExtras } from './extras.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * The extras over guest memory, a kernel32 that expands `%X%` to `y`, a
@@ -67,11 +68,7 @@ function machine(paths = [], table = {}, pointerSize = 4){
     /** @type {any[]} */
     const published = [];
     const extras = createShellExtras({
-        pointerSize,
-        readMemory: (at, length)=>memory.subarray(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
-        readCString: at=>narrow(at),
-        readWideString: at=>wide(at),
+        guest: guestOver(memory, /** @type {4 | 8} */ (pointerSize)),
         allocate: bytes=>{
             const at = heap;
             heap += bytes + 16;

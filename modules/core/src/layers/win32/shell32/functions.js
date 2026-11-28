@@ -50,9 +50,7 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
 import { urlOfShortcut } from './internet-shortcut.js';
-import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -243,8 +241,7 @@ const CSIDL_FOLDERS = Object.freeze({
 
 /**
  * @typedef {Object} ShellHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number) => void} [free]
  *           Gives back what `allocate` gave: ILFree and SHFree.
  * @property {(steps: Generator<{ entry: number, args: number[] }, any, number>) => any} [drive]
@@ -263,10 +260,6 @@ const CSIDL_FOLDERS = Object.freeze({
  *           The process's IMalloc, the same one CoGetMalloc answers with.
  *           Absent in a build without ole32 behind it, and then SHGetMalloc
  *           is refused.
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- * @property {(address: number, limit: number) => string} [readCString]
- *           Reads an ANSI argument string. Without it neither FindExecutable nor
- *           a launch can read the file it is asked about, and both refuse.
  * @property {(path: string) => string} [resolve]
  *           Qualifies a path against the process's current directory and
  *           normalises it; what FindExecutable writes back as the executable.
@@ -306,19 +299,12 @@ const CSIDL_FOLDERS = Object.freeze({
  *           The running program's path, what GetModuleFileName answers for
  *           it: CommandLineToArgvW's whole answer to an empty command line.
  * @property {(code: number) => void} [setLastError]
- * @property {number} [pointerSize]  8 in a 64-bit process, whose arrays of
- *           pointers CommandLineToArgvW lays out a quadword each; absent, 4.
  * @property {(clsid: string, factory: () => import('../ole32/objects.js').ComClassDefinition)
  *     => void} [registerClass]  Where CoCreateInstance finds a class of the shell's.
  */
 
 /** @param {string} text @returns {Uint8Array} text in the ANSI page, with its terminator */
 const sz = text=>encodeAnsi(`${text}\0`);
-
-/** @param {number} value */
-const dword = value=>new Uint8Array([
-    value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-]);
 
 /**
  * `then` on a value, or on what a promise of one settles to: an icon read
@@ -351,8 +337,7 @@ const SHDID_COMPUTER_FIXED = 8;
  * @param {ShellHost} host
  */
 export function createShellFunctions(host){
-    /** Memory to scan, where the host gives it: asked only once `host.readMemory` is seen. */
-    const scanned = /** @type {import('../common/scan-windows.js').ScannedMemory} */ (host);
+    const { guest } = host;
 
     /** @param {number} csidl @returns {string | null} */
     const folderOf = csidl=>host.folders?.[CSIDL_FOLDERS[csidl & ~CSIDL_FLAG_MASK]] ?? null;
@@ -366,7 +351,7 @@ export function createShellFunctions(host){
     const writePath = (buffer, path)=>{
         if (buffer !== 0)
         {
-            host.writeMemory(buffer, sz(path.slice(0, MAX_PATH - 1)));
+            guest.setBytes(buffer, sz(path.slice(0, MAX_PATH - 1)));
         }
     };
 
@@ -382,14 +367,12 @@ export function createShellFunctions(host){
             return;
         }
         const text = path.slice(0, MAX_PATH - 1);
-        host.writeMemory(buffer, utf16z(text));
+        guest.writeWide(buffer, text);
     };
 
-    const memory = host.readMemory
-        ? { readMemory: host.readMemory, writeMemory: host.writeMemory } : null;
-    const namespace = memory && host.volume && host.publish && host.allocate
+    const namespace = host.volume && host.publish && host.allocate
         ? createShellNamespace({
-            publish: host.publish, allocate: host.allocate, memory, volume: host.volume,
+            publish: host.publish, allocate: host.allocate, guest, volume: host.volume,
             documents: ()=>folderOf(CSIDL_PERSONAL),
         }) : null;
     if (namespace)
@@ -403,7 +386,7 @@ export function createShellFunctions(host){
         const at = host.allocate?.(2) ?? 0;
         if (at)
         {
-            host.writeMemory(at, Uint8Array.of(0, 0));
+            guest.setBytes(at, Uint8Array.of(0, 0));
         }
         return at;
     };
@@ -424,15 +407,15 @@ export function createShellFunctions(host){
         }
         const bytes = listBytes(text);
         const at = host.allocate(bytes.length);
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         return at;
     };
 
     /** @param {number} list @returns {string | null} */
     // The empty list is the desktop, whose files are its directory's.
-    const pathOf = list=>(list === 0 || !memory ? null
-        : itemsOf(memory, list).length === 0 ? folderOf(CSIDL_DESKTOPDIRECTORY)
-            : pathOfList(memory, list));
+    const pathOf = list=>(list === 0 ? null
+        : itemsOf(guest, list).length === 0 ? folderOf(CSIDL_DESKTOPDIRECTORY)
+            : pathOfList(guest, list));
 
     /**
      * The ANSI string an argument points at, or null when there is none to
@@ -442,13 +425,13 @@ export function createShellFunctions(host){
      * @returns {string | null}
      */
     const stringOf = address=>{
-        if ((address >>> 0) === 0 || !host.readCString)
+        if ((address >>> 0) === 0)
         {
             return null;
         }
         try
         {
-            return host.readCString(wholeAddress(address), WHOLE_NAME);
+            return guest.cstr(address, WHOLE_NAME);
         }
         catch (e){
             void e;
@@ -522,7 +505,7 @@ export function createShellFunctions(host){
         const volume = /** @type {any} */ (host.volume);
         const needed = ['stat', 'list', 'open', 'read', 'write', 'close', 'remove', 'mkdir',
             'rename', 'currentDirectory'];
-        return volume && host.readMemory && needed.every(name=>typeof volume[name] === 'function')
+        return volume && needed.every(name=>typeof volume[name] === 'function')
             ? /** @type {import('./fileop.js').FileOpVolume} */ (volume) : null;
     };
 
@@ -534,42 +517,38 @@ export function createShellFunctions(host){
      * @returns {string[] | null}
      */
     const listAt = (address, wide)=>{
-        if ((address >>> 0) === 0 || !host.readMemory)
+        if ((address >>> 0) === 0)
         {
             return null;
         }
         /** @type {string[]} */
         const names = [];
         const unit = wide ? 2 : 1;
-        // Each name read a window at a time, so a list at the end of what the
-        // program allocated is not read past; one cut short by the end of the
-        // list's room or of memory is no name.
-        for (let at = wholeAddress(address), read = 0; read < MAX_LIST;)
+        // A name cut short by the end of the list's room is no name.
+        for (let at = address, read = 0; read < MAX_LIST;)
         {
-            const { bytes, terminated } = readToTerminator(scanned, at, unit, MAX_LIST - read);
-            if (!terminated || bytes.length === 0)
+            const room = (MAX_LIST - read) * unit;
+            const length = guest.stringBytes(at, wide, room).length;
+            if (length === room || length === 0)
             {
                 return names;
             }
-            // An ANSI name is the page's, as the path of every other ANSI call is.
-            names.push(wide ? charactersOf(bytes, 2) : decodeAnsi(bytes));
-            read += bytes.length / unit + 1;
-            at += bytes.length + unit;
+            names.push(guest.text(at, wide, length, true));
+            read += length / unit + 1;
+            at += length + unit;
         }
         return names;
     };
 
     /**
-     * The UTF-16 string an argument points at, or null for a null pointer;
-     * read a window at a time, so one at the end of what the program
-     * allocated is not read past.
+     * The UTF-16 string an argument points at, or null for a null pointer.
      *
      * @param {number} address
      * @param {number} [limit]  How many characters are read at most.
      * @returns {string | null}
      */
-    const wideStringOf = (address, limit = MAX_PATH)=>((address >>> 0) === 0 || !host.readMemory
-        ? null : charactersOf(readToTerminator(scanned, address, 2, limit).bytes, 2));
+    const wideStringOf = (address, limit = MAX_PATH)=>guest.optionalText(address, true,
+        limit * 2);
 
     /**
      * A string argument in the spelling the call was made in.
@@ -598,20 +577,20 @@ export function createShellFunctions(host){
             const volume = fileVolume();
             if (!volume)
             {
-                host.writeMemory(at + SHFILEOPSTRUCT_ABORTED, dword(1));
+                guest.set32(at + SHFILEOPSTRUCT_ABORTED, 1);
                 return ERROR_CALL_NOT_IMPLEMENTED;
             }
             const from = listAt(dwordAt(at, SHFILEOPSTRUCT_FROM), wide);
             const flags = dwordAt(at, SHFILEOPSTRUCT_FLAGS) & 0xffff;
             if (from !== null)
             {
-                host.writeMemory(at + SHFILEOPSTRUCT_ABORTED, dword(0));
+                guest.set32(at + SHFILEOPSTRUCT_ABORTED, 0);
             }
             if ((flags & FOF_WANTMAPPINGHANDLE) !== 0)
             {
                 // Renames made on a collision are not kept as a mapping
                 // object, so there is none to hand over.
-                host.writeMemory(at + SHFILEOPSTRUCT_MAPPINGS, dword(0));
+                guest.set32(at + SHFILEOPSTRUCT_MAPPINGS, 0);
             }
             const deps = { volume, resolve: host.resolve, divergence: host.divergence };
             return runFileOperation(deps, {
@@ -642,19 +621,12 @@ export function createShellFunctions(host){
     });
 
     /**
-     * The dword a record holds at an offset, or zero with no memory to read.
+     * The dword a record holds at an offset.
      *
      * @param {number} record @param {number} offset
      * @returns {number}
      */
-    const dwordAt = (record, offset)=>{
-        if (!host.readMemory)
-        {
-            return 0;
-        }
-        const bytes = host.readMemory((record + offset) >>> 0, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
+    const dwordAt = (record, offset)=>guest.u32(record + offset);
 
     /** @type {Set<string>} The notification area's icons, by window and id. */
     const trayIcons = new Set();
@@ -891,10 +863,9 @@ export function createShellFunctions(host){
      */
     const environment = ()=>{
         const kernel32 = host.library?.('KERNEL32.dll');
-        const read = host.readMemory;
-        const block = kernel32 && read
+        const block = kernel32
             ? /** @type {number} */ (kernel32.GetEnvironmentStringsW?.handler([])) >>> 0 : 0;
-        if (!block || !read || !kernel32)
+        if (!block || !kernel32)
         {
             return null;
         }
@@ -903,13 +874,8 @@ export function createShellFunctions(host){
         let at = block;
         for (let count = 0; count < 0x8000; count++)
         {
-            let entry = '';
-            for (let pair = read(at, 2); (pair[0] | pair[1]) !== 0; pair = read(at, 2))
-            {
-                entry += String.fromCharCode(pair[0] | pair[1] << 8);
-                at += 2;
-            }
-            at += 2;
+            const entry = guest.wstr(at, 0x10000);
+            at += (entry.length + 1) * 2;
             if (entry === '')
             {
                 break;
@@ -956,9 +922,9 @@ export function createShellFunctions(host){
             workingDirectory: link.workingDirectory || null };
     };
 
-    const associations = host.library && host.readMemory && host.allocate
-        ? createAssociations({ readMemory: host.readMemory, writeMemory: host.writeMemory,
-            allocate: host.allocate, free: host.free, library: host.library })
+    const associations = host.library && host.allocate
+        ? createAssociations({ guest, allocate: host.allocate, free: host.free,
+            library: host.library })
         : null;
 
     /**
@@ -1144,11 +1110,10 @@ export function createShellFunctions(host){
                 ? { answer: SE_ERR_NOASSOC, record: null }
                 : start(field(SEI_VERB), expanded(field(SEI_FILE)), field(SEI_PARAMETERS),
                     expanded(field(SEI_DIRECTORY)), given);
-            host.writeMemory(at + SHELLEXECUTEINFO_HINSTAPP, dword(started.answer));
+            guest.set32(at + SHELLEXECUTEINFO_HINSTAPP, started.answer);
             if ((mask & SEE_MASK_NOCLOSEPROCESS) !== 0)
             {
-                host.writeMemory(at + SHELLEXECUTEINFO_PROCESS,
-                    dword(started.record?.handle ?? 0));
+                guest.set32(at + SHELLEXECUTEINFO_PROCESS, started.record?.handle ?? 0);
             }
             return started.answer === LAUNCH_SUCCESS ? 1 : 0;
         },
@@ -1333,7 +1298,7 @@ export function createShellFunctions(host){
                     'the program\'s path is not known: an empty line answers an empty argv[0]');
             }
             const args = text === '' ? [host.imagePath?.() ?? ''] : splitCommandLine(text);
-            const width = pointerWidth(host.pointerSize);
+            const width = pointerWidth(guest.pointerSize);
             const pointers = (args.length + 1) * width.size;
             const size = args.reduce((total, arg)=>total + (arg.length + 1) * 2, pointers);
             const block = host.allocate?.(size) ?? 0;
@@ -1352,8 +1317,8 @@ export function createShellFunctions(host){
                 }
                 at += (arg.length + 1) * 2;
             });
-            host.writeMemory(block, bytes);
-            host.writeMemory(wholeAddress(count), dword(args.length));
+            guest.setBytes(block, bytes);
+            guest.set32(count, args.length);
             return block;
         },
     };
@@ -1473,7 +1438,7 @@ export function createShellFunctions(host){
                     return after(readFileIcons(volume, path, first < -1 ? first : first + n,
                         side), found=>{
                         const handle = found.picture ? make(found.picture) : 0;
-                        host.writeMemory(array + n * 4, dword(handle));
+                        guest.setPtr(array + n * guest.pointerSize, handle);
                         return after(sizes(which + 1), rest=>handle !== 0 || rest);
                     });
                 };
@@ -1499,11 +1464,11 @@ export function createShellFunctions(host){
             const name = (textOf(file, wide) ?? '').trim();
             const volume = readableVolume();
             const path = name === '' || !volume ? null : locate(volume, name);
-            if (path === null || !volume || (indexAt >>> 0) === 0 || !host.readMemory)
+            if (path === null || !volume || (indexAt >>> 0) === 0)
             {
                 return 0;
             }
-            const held = host.readMemory(wholeAddress(indexAt), 2);
+            const held = guest.snapshot(indexAt, 2);
             const index = held[0] | held[1] << 8;
             return after(readFileIcons(volume, path, index), found=>{
                 if (!found.picture || !host.icon)
@@ -1516,7 +1481,7 @@ export function createShellFunctions(host){
                 if ((idAt >>> 0) !== 0)
                 {
                     const id = found.id ?? 0;
-                    host.writeMemory(wholeAddress(idAt), Uint8Array.of(id & 0xff, id >>> 8 & 0xff));
+                    guest.setBytes(idAt, Uint8Array.of(id & 0xff, id >>> 8 & 0xff));
                 }
                 return host.icon(found.picture);
             });
@@ -1558,7 +1523,7 @@ export function createShellFunctions(host){
             {
                 view.setUint32(0, /^[A-Za-z]:\\$/.test(path) ? SHDID_COMPUTER_FIXED
                     : entry.isDirectory ? SHDID_FS_DIRECTORY : SHDID_FS_FILE, true);
-                host.writeMemory(wholeAddress(out), bytes);
+                guest.setBytes(out, bytes);
                 return S_OK;
             }
             view.setUint32(WIN32_FIND_DATAA.dwFileAttributes, fileAttributes(entry), true);
@@ -1582,7 +1547,7 @@ export function createShellFunctions(host){
             {
                 bytes.set(encodeAnsi(name), WIN32_FIND_DATAA.cFileName);
             }
-            host.writeMemory(wholeAddress(out), bytes);
+            guest.setBytes(out, bytes);
             return S_OK;
         },
     });
@@ -1696,11 +1661,11 @@ export function createShellFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([info])=>{
-                if (wholeAddress(info) === 0 || !host.readMemory)
+                if (wholeAddress(info) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const head = host.readMemory(wholeAddress(info), 4);
+                const head = guest.snapshot(info, 4);
                 const size = (head[0] | head[1] << 8 | head[2] << 16 | head[3] << 24) >>> 0;
                 if (size !== 20 && size !== 32)
                 {
@@ -1716,7 +1681,7 @@ export function createShellFunctions(host){
                     fields.setUint32(20, (2900 << 16 | 5512) >>> 0, true);
                     fields.setUint32(24, 6 << 16, true);
                 }
-                host.writeMemory(wholeAddress(info) + 4, new Uint8Array(fields.buffer));
+                guest.setBytes(info + 4, new Uint8Array(fields.buffer));
                 return S_OK;
             },
         },
@@ -1805,7 +1770,7 @@ export function createShellFunctions(host){
                     return E_INVALIDARG;
                 }
                 const pointer = host.taskAllocator?.pointer() ?? 0;
-                host.writeMemory(wholeAddress(out), dword(pointer));
+                guest.setPtr(out, pointer);
                 return pointer === 0 ? E_NOTIMPL : S_OK;
             },
         },
@@ -1957,12 +1922,12 @@ export function createShellFunctions(host){
                     : virtual === CSIDL_CONTROLS ? CONTROL_PANEL : folderOf(csidl | 0);
                 if (folder === null)
                 {
-                    host.writeMemory(wholeAddress(out), dword(0));
+                    guest.setPtr(out, 0);
                     return E_INVALIDARG;
                 }
                 // The desktop is the namespace's root: the empty list.
                 const list = virtual === CSIDL_DESKTOP ? emptyList() : listFor(folder);
-                host.writeMemory(wholeAddress(out), dword(list));
+                guest.setPtr(out, list);
                 return list === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
@@ -1988,7 +1953,7 @@ export function createShellFunctions(host){
                 {
                     return namespace.desktop(wholeAddress(out));
                 }
-                host.writeMemory(wholeAddress(out), dword(0));
+                guest.setPtr(out, 0);
                 host.divergence?.('SHGetDesktopFolder',
                     'no shell namespace: reports E_FAIL with a null interface');
                 return E_FAIL;
@@ -2080,17 +2045,13 @@ export function createShellFunctions(host){
                 {
                     return namespace ? namespace.bind(list, riid, out) : E_FAIL;
                 }
-                const read = host.readMemory;
-                if (!host.drive || !read)
+                if (!host.drive)
                 {
-                    host.writeMemory(wholeAddress(out), dword(0));
+                    guest.setPtr(out, 0);
                     return E_NOTIMPL;
                 }
-                /** @param {number} at */
-                const u32 = at=>new DataView(read(wholeAddress(at),
-                    4).slice().buffer).getUint32(0, true);
                 // IShellFolder::BindToObject is its fifth method after IUnknown's three.
-                const entry = u32(u32(folder) + 5 * 4);
+                const entry = guest.method(folder, 5);
                 return host.drive((function* (){
                     return yield { entry,
                         args: [wholeAddress(folder), wholeAddress(list), 0, wholeAddress(riid),
@@ -2116,13 +2077,13 @@ export function createShellFunctions(host){
             handler: ([list, riid, out, last])=>{
                 if (wholeAddress(last) !== 0)
                 {
-                    host.writeMemory(wholeAddress(last), dword(0));
+                    guest.setPtr(last, 0);
                 }
                 if (wholeAddress(out) === 0 || (riid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(wholeAddress(out), dword(0));
+                guest.setPtr(out, 0);
                 if (wholeAddress(list) === 0)
                 {
                     return E_INVALIDARG;
@@ -2136,7 +2097,7 @@ export function createShellFunctions(host){
                     wholeAddress(out));
                 if (bound.hr === S_OK && wholeAddress(last) !== 0)
                 {
-                    host.writeMemory(wholeAddress(last), dword(bound.last));
+                    guest.setPtr(last, bound.last);
                 }
                 return bound.hr;
             },
@@ -2171,7 +2132,7 @@ export function createShellFunctions(host){
                 }
                 if ((reserved >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(out), dword(0));
+                    guest.setPtr(out, 0);
                     return E_INVALIDARG;
                 }
                 return table.SHGetSpecialFolderLocation.handler([window, csidl, out]);
@@ -2180,26 +2141,17 @@ export function createShellFunctions(host){
 
         ...createDesktopFunctions(host),
 
-        ...(namespace && memory && host.publish && host.allocate ? createShellItems({
-            readMemory: memory.readMemory, writeMemory: memory.writeMemory,
-            readWideString: host.readWideString, allocate: host.allocate, free: host.free,
+        ...(namespace && host.publish && host.allocate ? createShellItems({
+            guest, allocate: host.allocate, free: host.free,
             publish: host.publish, library: host.library,
         }, namespace) : {}),
 
-        ...(host.readMemory ? createIdListFunctions({ readMemory: host.readMemory,
-            writeMemory: host.writeMemory, allocate: host.allocate, free: host.free }) : {}),
-        // Without guest memory to read, every drop holds nothing: kernel32's
-        // lock is not reached, and the zeros read are never asked for.
-        ...createDropFunctions({
-            readMemory: host.readMemory ?? ((_, length)=>new Uint8Array(length)),
-            writeMemory: host.writeMemory, library: host.library }, decodeAnsi,
-        text=>encodeAnsi(text)),
-        ...(host.readMemory && host.readCString ? createShellExtras({
-            readMemory: host.readMemory, writeMemory: host.writeMemory,
-            readCString: host.readCString, readWideString: host.readWideString,
-            allocate: host.allocate, free: host.free, library: host.library,
+        ...createIdListFunctions({ guest, allocate: host.allocate, free: host.free }),
+        ...createDropFunctions({ guest, library: host.library }, decodeAnsi,
+            text=>encodeAnsi(text)),
+        ...createShellExtras({
+            guest, allocate: host.allocate, free: host.free, library: host.library,
             publish: host.publish, divergence: host.divergence,
-            pointerSize: host.pointerSize,
         }, {
             /** @returns {Record<string, { handler: (args: number[]) => any }>} */
             get table(){
@@ -2208,7 +2160,7 @@ export function createShellFunctions(host){
             listFor,
             exists: path=>namespace?.parse(path) !== null && namespace !== null,
             parse: name=>namespace?.parse(name) ?? null,
-        }) : {}),
+        }),
     };
     // The real library exports the ANSI form of several calls under their
     // bare names as well, and a program that looks one up by hand may ask

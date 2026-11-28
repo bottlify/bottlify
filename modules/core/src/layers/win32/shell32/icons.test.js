@@ -11,10 +11,10 @@ import { createShellFunctions } from './functions.js';
 import { programIcon } from './icons.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
-import { decodeAnsi } from '../kernel32/locale.js';
 import { buildImage, buildResources } from '../../loader/internal/resources.test.js';
 import { freshSpace } from '../../cache/testing.fixture.js';
 import { logHost } from '../../log/testing.fixture.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const RT_ICON = 3;
 const RT_GROUP_ICON = 14;
@@ -153,16 +153,7 @@ async function shellOver(files, extra = {}){
     /** @type {string[]} */
     const diverged = [];
     const shell = /** @type {any} */ (createShellFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
-        readCString: (address, limit)=>{
-            let end = address;
-            while (end < address + limit && memory[end] !== 0)
-            {
-                end++;
-            }
-            return decodeAnsi(memory.subarray(address, end));
-        },
+        guest: guestOver(memory),
         volume: { ...volume, drives: ()=>['C'] },
         folders: { System: 'C:\\WINDOWS\\system32', Windows: 'C:\\WINDOWS' },
         icon: picture=>{

@@ -21,10 +21,8 @@
 
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { createAdapter } from '../oleaut32/objects.js';
-import { dword, u32 } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
-import { utf16z } from '../common/utf16.js';
 
 export const IID_ISTREAM = '{0000000C-0000-0000-C000-000000000046}';
 export const IID_ISEQUENTIAL_STREAM = '{0C733A30-2A1C-11CE-ADE5-00AA0044773D}';
@@ -91,10 +89,7 @@ const COPY_CHUNK = 0x10000;
  * @property {{ offset: number, length: number }[]} locks
  *
  * @typedef {Object} StreamHost
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
  *     | undefined} [library]
  * @property {(object: any, iid: string) => number} [publish]
@@ -140,20 +135,19 @@ export function createFileArguments(mode, create){
  * @param {StreamHost} host
  */
 export function createStreams(host){
-    /** @param {number} address */
-    const readU32 = address=>u32(host.readMemory?.(address >>> 0, 4) ?? new Uint8Array(4));
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
+    const { guest } = host;
+    /** A DWORD answered through an out-parameter the caller may leave NULL. @param {number} address @param {number} value */
+    const answerOut = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(address), dword(value));
+            guest.set32(address, value);
         }
     };
-    /** @param {number} address @param {number} value */
-    const writeQuad = (address, value)=>{
+    /** A QWORD answered through an out-parameter the caller may leave NULL. @param {number} address @param {number} value */
+    const answerOutQuad = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(address), quadBytes(value));
+            guest.setBytes(address, quadBytes(value));
         }
     };
     /**
@@ -203,7 +197,7 @@ export function createStreams(host){
     const fileBacking = (handle, name)=>{
         /** @param {number} offset */
         const seek = offset=>scratch(4, async high=>{
-            host.writeMemory(high, dword(Math.floor(offset / 0x100000000)));
+            guest.set32(high, Math.floor(offset / 0x100000000));
             await kernel32('SetFilePointer', [handle, offset >>> 0, high, FILE_BEGIN]);
         });
         return {
@@ -219,22 +213,22 @@ export function createStreams(host){
                     {
                         return new Uint8Array(0);
                     }
-                    const count = readU32(at);
-                    return host.readMemory?.(at + 4, count).slice() ?? new Uint8Array(0);
+                    const count = guest.u32(at);
+                    return guest.snapshot(at + 4, count);
                 });
             },
             write: async(offset, bytes)=>{
                 await seek(offset);
                 return scratch(bytes.length + 4, async at=>{
-                    host.writeMemory(at + 4, bytes);
+                    guest.setBytes(at + 4, bytes);
                     const done = await kernel32('WriteFile', [handle, at + 4, bytes.length, at, 0]);
                     return done !== 0
-                        && readU32(at) === bytes.length;
+                        && guest.u32(at) === bytes.length;
                 });
             },
             size: ()=>scratch(4, async high=>{
                 const low = (await kernel32('GetFileSize', [handle, high])) >>> 0;
-                return quad(low, readU32(high));
+                return quad(low, guest.u32(high));
             }),
             resize: async size=>{
                 await seek(size);
@@ -310,7 +304,7 @@ export function createStreams(host){
         /** HRESULT Read(void *pv, ULONG cb, ULONG *pcbRead): S_FALSE when short. */
         { name: 'Read', argBytes: 16, invoke: async(object, [buffer, wanted, countOut])=>{
             const state = stateOf(object);
-            writeU32(countOut, 0);
+            answerOut(countOut, 0);
             if ((buffer >>> 0) === 0 && (wanted >>> 0) !== 0)
             {
                 return STG_E_INVALIDPOINTER;
@@ -318,10 +312,10 @@ export function createStreams(host){
             const bytes = await state.backing.read(state.position, wanted >>> 0);
             if (bytes.length > 0)
             {
-                host.writeMemory(wholeAddress(buffer), bytes);
+                guest.setBytes(buffer, bytes);
             }
             state.position += bytes.length;
-            writeU32(countOut, bytes.length);
+            answerOut(countOut, bytes.length);
             return bytes.length < (wanted >>> 0) ? S_FALSE : S_OK;
         } },
         /**
@@ -337,20 +331,20 @@ export function createStreams(host){
             }
             if ((count >>> 0) === 0)
             {
-                writeU32(countOut, 0);
+                answerOut(countOut, 0);
                 return S_OK;
             }
             if ((buffer >>> 0) === 0)
             {
                 return STG_E_INVALIDPOINTER;
             }
-            const bytes = host.readMemory?.(buffer >>> 0, count >>> 0).slice() ?? new Uint8Array(0);
+            const bytes = guest.snapshot(buffer >>> 0, count >>> 0);
             if (!await state.backing.write(state.position, bytes))
             {
                 return STG_E_ACCESSDENIED;
             }
             state.position += bytes.length;
-            writeU32(countOut, bytes.length);
+            answerOut(countOut, bytes.length);
             return S_OK;
         } },
         /** HRESULT Seek(LARGE_INTEGER dlibMove, DWORD dwOrigin, ULARGE_INTEGER *plibNewPosition) */
@@ -370,7 +364,7 @@ export function createStreams(host){
                     return STG_E_INVALIDFUNCTION;
                 }
                 state.position = next;
-                writeQuad(positionOut, next);
+                answerOutQuad(positionOut, next);
                 return S_OK;
             } },
         /** HRESULT SetSize(ULARGE_INTEGER libNewSize) */
@@ -429,8 +423,8 @@ export function createStreams(host){
                 target.position += bytes.length;
                 written += bytes.length;
             }
-            writeQuad(readOut, read);
-            writeQuad(writtenOut, written);
+            answerOutQuad(readOut, read);
+            answerOutQuad(writtenOut, written);
             return status;
         } },
         /** HRESULT Commit(DWORD grfCommitFlags): the bytes are the file's already. */
@@ -473,7 +467,7 @@ export function createStreams(host){
             {
                 return STG_E_INVALIDPOINTER;
             }
-            const STATSTG = statstgLayout(host.pointerSize);
+            const STATSTG = statstgLayout(guest.pointerSize);
             const record = new Uint8Array(STATSTG.SIZE_OF);
             const view = new DataView(record.buffer);
             if ((flags & STATFLAG_NONAME) === 0 && state.backing.name !== null)
@@ -486,13 +480,13 @@ export function createStreams(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                host.writeMemory(at, utf16z(name));
+                guest.writeWide(at, name);
                 view.setUint32(STATSTG.NAME, at, true);
             }
             view.setUint32(STATSTG.TYPE, STGTY_STREAM, true);
             record.set(quadBytes(await state.backing.size()), STATSTG.SIZE);
             view.setUint32(STATSTG.MODE, state.mode >>> 0, true);
-            host.writeMemory(wholeAddress(out), record);
+            guest.setBytes(out, record);
             return S_OK;
         } },
         /** HRESULT Clone(IStream **ppstm): not made, the out pointer untouched. */
@@ -537,7 +531,7 @@ export function createStreams(host){
         {
             return E_INVALIDARG;
         }
-        writeU32(out, 0);
+        answerOut(out, 0);
         if ((path >>> 0) === 0)
         {
             return (0x80070000 | ERROR_PATH_NOT_FOUND) | 0;
@@ -555,15 +549,15 @@ export function createStreams(host){
             return error === 0 ? STG_E_ACCESSDENIED : ((error & 0xffff) | 0x80070000) | 0;
         }
         // Read to its terminator: the caller's buffer may end at the top of its stack.
-        const name = (width === 'W' ? host.readWideString?.(path >>> 0, 0x8000)
-            : host.readCString(wholeAddress(path), 0x8000)) ?? '';
+        const name = (width === 'W' ? guest.wstr(path >>> 0, 0x8000)
+            : guest.cstr(path, 0x8000)) ?? '';
         const stream = publishStream(fileBacking(handle, name), mode);
         if (!stream)
         {
             await kernel32('CloseHandle', [handle]);
             return E_OUTOFMEMORY;
         }
-        writeU32(out, stream);
+        answerOut(out, stream);
         return S_OK;
     };
     /**
@@ -579,7 +573,7 @@ export function createStreams(host){
         handler: ([path, mode, out])=>{
             if (((mode >>> 0) & (STGM_CONVERT | STGM_DELETEONRELEASE | STGM_TRANSACTED)) !== 0)
             {
-                writeU32(out, 0);
+                answerOut(out, 0);
                 return E_INVALIDARG;
             }
             return openFile(width, path, mode >>> 0, 0, false, out);
@@ -603,7 +597,7 @@ export function createStreams(host){
             handler: ([path, mode, attributes, create, , out])=>{
                 if (((mode >>> 0) & STGM_TRANSACTED) !== 0 && (mode & STGM_ACCESS) === STGM_READ)
                 {
-                    writeU32(out, 0);
+                    answerOut(out, 0);
                     return E_INVALIDARG;
                 }
                 return openFile('W', path, mode >>> 0, attributes >>> 0, create !== 0, out);
@@ -620,8 +614,7 @@ export function createStreams(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([initial, size])=>publishStream(memoryBacking(wholeAddress(initial) === 0
-                ? new Uint8Array(0) : host.readMemory?.(wholeAddress(initial), size >>> 0)
-                    ?? new Uint8Array(0)), 0x2),
+                ? new Uint8Array(0) : guest.snapshot(wholeAddress(initial), size >>> 0)), 0x2),
         },
     };
 }

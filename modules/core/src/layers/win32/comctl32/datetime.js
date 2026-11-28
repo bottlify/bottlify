@@ -34,7 +34,7 @@ import {
     after,
 } from '../user32/controls.js';
 import { CHECK_MARK } from '../user32/paint.js';
-import { notifyWindow } from './notify.js';
+import { NMHDR, notifyWindow, sendNotify } from './notify.js';
 import { readText, writeText } from './strings.js';
 import { EVENT_OBJECT_VALUECHANGE, CHILDID_SELF, raiseEvent } from './winevents.js';
 import { dateTimePieces } from '../kernel32/datetime-format.js';
@@ -274,8 +274,7 @@ export const typeField = (time, letter, number)=>{
 export function createDateTimePickProcedure(host, tk, sources = {}){
     const { guest } = host;
     const pointer = guest.pointerSize;
-    /** NMHDR's size: a window, an id as wide as a pointer, the code. */
-    const HEADER = pointer === 8 ? 24 : 12;
+    const HEADER = NMHDR.sizeOf(pointer);
 
     /** @param {number} type @param {string} fallback */
     const localeText = (type, fallback)=>sources.localeText?.(type) || fallback;
@@ -391,22 +390,8 @@ export function createDateTimePickProcedure(host, tk, sources = {}){
      * @param {any} record @param {number} code @param {number} size
      * @param {(block: number) => void} fill @param {unknown} thread
      */
-    const notify = (record, code, size, fill, thread)=>{
-        const to = notifyWindow(record);
-        const block = to !== 0 ? host.allocate?.(size) ?? 0 : 0;
-        if (block === 0)
-        {
-            return 0;
-        }
-        guest.fill(block, 0, size);
-        guest.set32s(block, [record.hwnd, record.id, 0]);
-        guest.set32(block + 2 * pointer, code);
-        fill(block);
-        return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
-            host.release?.(block);
-            return answer;
-        });
-    };
+    const notify = (record, code, size, fill, thread)=>sendNotify(host, record,
+        notifyWindow(record), code, size, thread, fill);
 
     /**
      * DTN_DATETIMECHANGE: the moment a person made, or GDT_NONE when the

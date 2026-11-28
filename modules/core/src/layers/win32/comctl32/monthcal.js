@@ -39,7 +39,7 @@ import {
     WM_PAINT, WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_CAPTURECHANGED, WM_CREATE, WM_SETFONT, WM_GETFONT, after,
 } from '../user32/controls.js';
-import { notifyWindow } from './notify.js';
+import { NMHDR, notifyWindow, sendNotify } from './notify.js';
 import { renderDate } from '../kernel32/datetime-format.js';
 import { DAYS, MONTHS } from '../kernel32/locale-data.js';
 
@@ -138,7 +138,6 @@ export const MCN_GETDAYSTATE = -747 >>> 0;
 export const MCN_SELCHANGE = -749 >>> 0;
 
 const WM_SIZE = 0x0005;
-const WM_NOTIFY = 0x004e;
 const WM_NOTIFYFORMAT = 0x0055;
 const WM_STYLECHANGING = 0x007c;
 const WM_STYLECHANGED = 0x007d;
@@ -414,8 +413,7 @@ export const localNow = sources=>{
 export function createMonthCalProcedure(host, tk, sources = {}){
     const { guest } = host;
     const pointer = guest.pointerSize;
-    /** NMHDR's size: a window, an id as wide as a pointer, the code. */
-    const HEADER = pointer === 8 ? 24 : 12;
+    const HEADER = NMHDR.sizeOf(pointer);
 
     /** @param {number} type @param {string} fallback */
     const localeText = (type, fallback)=>sources.localeText?.(type) || fallback;
@@ -654,24 +652,8 @@ export function createMonthCalProcedure(host, tk, sources = {}){
      * @param {(block: number) => void} fill @param {unknown} thread
      * @param {(block: number) => void} [read]
      */
-    const notify = (record, code, size, fill, thread, read)=>{
-        const to = notifyWindow(record);
-        const block = to !== 0 ? host.allocate?.(size) ?? 0 : 0;
-        if (block === 0)
-        {
-            return 0;
-        }
-        guest.fill(block, 0, size);
-        guest.set32(block, record.hwnd);
-        guest.set32(block + pointer, record.id);
-        guest.set32(block + 2 * pointer, code);
-        fill(block);
-        return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
-            read?.(block);
-            host.release?.(block);
-            return answer;
-        });
-    };
+    const notify = (record, code, size, fill, thread, read)=>sendNotify(host, record,
+        notifyWindow(record), code, size, thread, fill, read);
 
     /**
      * MCN_SELCHANGE or MCN_SELECT: the selection's first and last day as

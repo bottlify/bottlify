@@ -14,7 +14,6 @@
 
 import { createAdapter } from '../oleaut32/objects.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { readGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
@@ -101,11 +100,7 @@ const IID_IIMAGELIST2 = '{192B9D83-50FC-457B-90A0-2B82A8B5DAE1}';
 
 /**
  * @typedef {Object} ExtrasHost
- * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
@@ -124,7 +119,7 @@ const IID_IIMAGELIST2 = '{192B9D83-50FC-457B-90A0-2B82A8B5DAE1}';
  */
 
 /** @param {number} value */
-const dword = value=>{
+const dwordBytes = value=>{
     const bytes = new Uint8Array(4);
     new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
     return bytes;
@@ -134,11 +129,12 @@ const dword = value=>{
  * @param {ExtrasHost} host @param {ExtrasParts} parts
  */
 export function createShellExtras(host, parts){
+    const { guest } = host;
     /**
      * SHSTOCKICONINFO: cbSize, hIcon (a handle wide, on its own boundary),
      * iSysImageIndex, iIcon, then szPath[MAX_PATH].
      */
-    const STOCK = host.pointerSize === 8 ? { icon: 8, image: 16, index: 20, path: 24 }
+    const STOCK = guest.pointerSize === 8 ? { icon: 8, image: 16, index: 20, path: 24 }
         : { icon: 4, image: 8, index: 12, path: 16 };
     const SHSTOCKICONINFO_SIZE = STOCK.path + MAX_PATH * 2;
     const { listFor, exists, parse } = parts;
@@ -151,22 +147,13 @@ export function createShellExtras(host, parts){
         }
         return /** @type {number} */ (await target.handler(args)) >>> 0;
     };
-    /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
-        .getUint32(0, true);
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
+    /** A DWORD answered through an out-parameter the caller may leave NULL. @param {number} address @param {number} value */
+    const answerOut = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(address), dword(value));
+            guest.set32(address, value);
         }
     };
-    /** @param {number} address */
-    const wide = address=>((address >>> 0) === 0 || !host.readWideString ? null
-        : host.readWideString(wholeAddress(address), 0x8000));
-    /** @param {number} address */
-    const narrow = address=>((address >>> 0) === 0 ? null
-        : host.readCString(wholeAddress(address), 0x8000));
 
     /**
      * A block of guest memory for the length of `body`; `failed` when there
@@ -218,7 +205,7 @@ export function createShellExtras(host, parts){
                 {
                     return room & 0xffff;
                 }
-                host.writeMemory(wholeAddress(buffer), host.readMemory(at, needed * unit).slice());
+                guest.copy(buffer, at, needed * unit);
                 return ((1 << 16) | (needed & 0xffff)) >>> 0;
             }, room & 0xffff);
         },
@@ -245,8 +232,8 @@ export function createShellExtras(host, parts){
             {
                 return status;
             }
-            const base = (isWide ? wide(path) : narrow(path)) ?? '';
-            const sub = (isWide ? wide(subDir) : narrow(subDir)) ?? '';
+            const base = guest.optionalText(path, isWide, 0x8000) ?? '';
+            const sub = guest.optionalText(subDir, isWide, 0x8000) ?? '';
             const full = sub === '' || sub === '\\' ? base : `${base}\\${sub.replace(/^\\+/, '')}`;
             if (full.length >= MAX_PATH)
             {
@@ -255,7 +242,7 @@ export function createShellExtras(host, parts){
             if ((csidl & CSIDL_FLAG_CREATE) !== 0 && !exists(full))
             {
                 const made = await scratch(utf16z(full).length, async at=>{
-                    host.writeMemory(at, utf16z(full));
+                    guest.writeWide(at, full);
                     return /** @type {number} */ (
                         await parts.table.SHCreateDirectoryExW.handler([0, at, 0])) >>> 0;
                 }, ERROR_NOT_ENOUGH_MEMORY);
@@ -268,7 +255,7 @@ export function createShellExtras(host, parts){
             {
                 return fromWin32(ERROR_PATH_NOT_FOUND);
             }
-            host.writeMemory(wholeAddress(path), isWide ? utf16z(full)
+            guest.setBytes(path, isWide ? utf16z(full)
                 : Uint8Array.from(`${full}\0`, c=>c.charCodeAt(0) & 0xff));
             return S_OK;
         },
@@ -298,8 +285,8 @@ export function createShellExtras(host, parts){
         /** HRESULT GetIconSize(int *cx, int *cy) */
         { name: 'GetIconSize', argBytes: 12,
             invoke: (/** @type {any} */ object, /** @type {number[]} */ [cx, cy])=>{
-                writeU32(cx, object.state.size);
-                writeU32(cy, object.state.size);
+                answerOut(cx, object.state.size);
+                answerOut(cy, object.state.size);
                 return S_OK;
             } },
         ...['SetIconSize', 'GetImageCount', 'SetImageCount', 'SetBkColor', 'GetBkColor',
@@ -350,7 +337,7 @@ export function createShellExtras(host, parts){
         const at = alloc ? /** @type {number} */ (await alloc.handler([bytes.length])) >>> 0 : 0;
         if (at)
         {
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
         }
         return at;
     };
@@ -369,7 +356,7 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, object.state.values.size);
+                answerOut(out, object.state.values.size);
                 return S_OK;
             } },
         /** HRESULT GetAt(DWORD iProp, PROPERTYKEY *pkey) */
@@ -381,7 +368,7 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(wholeAddress(key), found.key);
+                guest.setBytes(key, found.key);
                 return S_OK;
             } },
         /** HRESULT GetValue(REFPROPERTYKEY key, PROPVARIANT *pv) */
@@ -396,14 +383,14 @@ export function createShellExtras(host, parts){
                 const bytes = new Uint8Array(16);
                 if (found?.text !== undefined)
                 {
-                    bytes.set(dword(VT_LPWSTR), 0);
-                    bytes.set(dword(await taskString(found.text)), 8);
+                    bytes.set(dwordBytes(VT_LPWSTR), 0);
+                    bytes.set(dwordBytes(await taskString(found.text)), 8);
                 }
                 else if (found)
                 {
                     bytes.set(found.bytes);
                 }
-                host.writeMemory(wholeAddress(value), bytes);
+                guest.setBytes(value, bytes);
                 return S_OK;
             } },
         /** HRESULT SetValue(REFPROPERTYKEY key, REFPROPVARIANT propvar) */
@@ -414,13 +401,14 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                const bytes = host.readMemory(wholeAddress(value), 16).slice();
+                const bytes = guest.snapshot(value, 16);
                 const type = bytes[0] | bytes[1] << 8;
-                const stored = { key: host.readMemory(wholeAddress(key), 20).slice(), bytes };
+                const stored = { key: guest.snapshot(key, 20), bytes };
                 if (type === VT_LPWSTR)
                 {
                     object.state.values.set(keyOf(key),
-                        { ...stored, text: wide(readU32(value + 8)) ?? '' });
+                        { ...stored, text: guest.optionalText(guest.ptr(value + 8), true, 0x8000)
+                            ?? '' });
                     return S_OK;
                 }
                 if (!SCALAR_TYPES.has(type))
@@ -434,7 +422,7 @@ export function createShellExtras(host, parts){
         { name: 'Commit', argBytes: 4, invoke: ()=>S_OK },
     ]);
     /** @param {number} key  A PROPERTYKEY: its GUID and property id, as the store's own key. */
-    const keyOf = key=>`${readGuid(host, key >>> 0)}/${readU32(key + 16)}`;
+    const keyOf = key=>`${guest.guid(key)}/${guest.u32(key + 16)}`;
 
 
     /**
@@ -451,10 +439,10 @@ export function createShellExtras(host, parts){
         argBytes: 20,
         /** @param {number[]} args */
         handler: ([target, directory, out, mustCopy, flags])=>{
-            writeU32(mustCopy, 0);
+            answerOut(mustCopy, 0);
             const from = (flags & SHGNLI_PIDL) !== 0 ? null
-                : isWide ? wide(target) : narrow(target);
-            const into = isWide ? wide(directory) : narrow(directory);
+                : guest.optionalText(target, isWide, 0x8000);
+            const into = guest.optionalText(directory, isWide, 0x8000);
             if (from === null || into === null || (out >>> 0) === 0 || !exists(from))
             {
                 return 0;
@@ -462,7 +450,7 @@ export function createShellExtras(host, parts){
             const leaf = from.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? from;
             if (/\.lnk$/i.test(leaf))
             {
-                writeU32(mustCopy, 1);
+                answerOut(mustCopy, 1);
             }
             const stem = (flags & SHGNLI_PREFIXNAME) !== 0 ? `Shortcut to ${leaf}`
                 : `${leaf} - Shortcut`;
@@ -478,7 +466,7 @@ export function createShellExtras(host, parts){
                 }
                 name = `${base} (${n})${extension}`;
             }
-            host.writeMemory(wholeAddress(out), isWide ? utf16z(name)
+            guest.setBytes(out, isWide ? utf16z(name)
                 : Uint8Array.from(`${name}\0`, c=>c.charCodeAt(0) & 0xff));
             return 1;
         },
@@ -504,12 +492,12 @@ export function createShellExtras(host, parts){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([path])=>listForPath(narrow(path)),
+            handler: ([path])=>listForPath(guest.optionalText(path, false, 0x8000)),
         },
         ILCreateFromPathW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([path])=>listForPath(wide(path)),
+            handler: ([path])=>listForPath(guest.optionalText(path, true, 0x8000)),
         },
 
         /**
@@ -522,7 +510,7 @@ export function createShellExtras(host, parts){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([path])=>listForPath(wide(path)),
+            handler: ([path])=>listForPath(guest.optionalText(path, true, 0x8000)),
         },
 
         /**
@@ -536,17 +524,17 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                const found = parse(wide(path) ?? '');
-                writeU32(out, 0);
+                const found = parse(guest.optionalText(path, true, 0x8000) ?? '');
+                answerOut(out, 0);
                 if (found === null)
                 {
                     return fromWin32(2);
                 }
                 const list = listFor(found.text);
-                writeU32(out, list);
+                answerOut(out, list);
                 if (wholeAddress(attributes) !== 0)
                 {
-                    writeU32(attributes, readU32(attributes) & found.attributes);
+                    answerOut(attributes, guest.u32(attributes) & found.attributes);
                 }
                 return list === 0 ? E_OUTOFMEMORY : S_OK;
             },
@@ -567,9 +555,9 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
-                writeU32(attributesOut, 0);
-                const text = wide(name);
+                answerOut(out, 0);
+                answerOut(attributesOut, 0);
+                const text = guest.optionalText(name, true, 0x8000);
                 if (text === null)
                 {
                     return E_INVALIDARG;
@@ -580,8 +568,8 @@ export function createShellExtras(host, parts){
                     return fromWin32(2);
                 }
                 const list = listFor(found.text);
-                writeU32(out, list);
-                writeU32(attributesOut, (found.attributes & wanted) >>> 0);
+                answerOut(out, list);
+                answerOut(attributesOut, (found.attributes & wanted) >>> 0);
                 return list === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
@@ -602,10 +590,10 @@ export function createShellExtras(host, parts){
                     return E_INVALIDARG;
                 }
                 const csidl = KNOWN_FOLDERS[/** @type {keyof typeof KNOWN_FOLDERS} */ (
-                    readGuid(host, wholeAddress(id)))];
+                    guest.guid(id))];
                 if (csidl === undefined)
                 {
-                    writeU32(out, 0);
+                    answerOut(out, 0);
                     return E_INVALIDARG;
                 }
                 return parts.table.SHGetFolderLocation.handler([0, csidl, token, 0, out]);
@@ -627,10 +615,10 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                answerOut(out, 0);
                 const csidl = (id >>> 0) === 0 ? undefined
                     : KNOWN_FOLDERS[/** @type {keyof typeof KNOWN_FOLDERS} */ (
-                        readGuid(host, wholeAddress(id)))];
+                        guest.guid(id))];
                 if (csidl === undefined)
                 {
                     return E_INVALIDARG;
@@ -639,14 +627,15 @@ export function createShellExtras(host, parts){
                 const found = await scratch(MAX_PATH * 2, async at=>{
                     const hr = /** @type {number} */ (await parts.table.SHGetFolderPathW.handler(
                         [0, csidl | create, token, 0, at])) | 0;
-                    return hr < 0 ? { hr, path: null } : { hr: S_OK, path: wide(at) };
+                    return hr < 0 ? { hr, path: null } : { hr: S_OK, path: guest.optionalText(at,
+                        true, 0x8000) };
                 }, { hr: E_OUTOFMEMORY, path: null });
                 if (found.path === null)
                 {
                     return found.hr;
                 }
                 const at = await taskString(found.path);
-                writeU32(out, at);
+                answerOut(out, at);
                 return at ? S_OK : E_OUTOFMEMORY;
             },
         },
@@ -674,7 +663,7 @@ export function createShellExtras(host, parts){
                 // off, file names shown with their case.
                 view.setUint16(4, 0x0002 | 0x0004, true);
                 view.setUint32(8, 0, true);
-                host.writeMemory(wholeAddress(state), bytes);
+                guest.setBytes(state, bytes);
                 return 0;
             },
         },
@@ -698,7 +687,7 @@ export function createShellExtras(host, parts){
             /** @param {number[]} args */
             handler: ([id])=>{
                 const APP_USER_MODEL_ID_MAX = 128;
-                const text = wide(id);
+                const text = guest.optionalText(id, true, 0x8000);
                 if (text === null || text.length >= APP_USER_MODEL_ID_MAX)
                 {
                     return E_INVALIDARG;
@@ -718,13 +707,13 @@ export function createShellExtras(host, parts){
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([out])=>{
-                writeU32(out, 0);
+                answerOut(out, 0);
                 if (appUserModelId === null)
                 {
                     return E_FAIL;
                 }
                 const at = await taskString(appUserModelId);
-                writeU32(out, at);
+                answerOut(out, at);
                 return at ? S_OK : E_OUTOFMEMORY;
             },
         },
@@ -745,8 +734,8 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
-                const iid = (riid >>> 0) === 0 ? null : readGuid(host, wholeAddress(riid));
+                answerOut(out, 0);
+                const iid = (riid >>> 0) === 0 ? null : guest.guid(riid);
                 if (iid !== IID_IUNKNOWN && iid !== IID_IPROPERTYSTORE)
                 {
                     return E_NOINTERFACE;
@@ -758,7 +747,7 @@ export function createShellExtras(host, parts){
                 const adapter = createAdapter({ values: new Map() },
                     { [IID_IPROPERTYSTORE]: propertyStoreMethods });
                 const pointer = host.publish(adapter, IID_IPROPERTYSTORE);
-                writeU32(out, pointer);
+                answerOut(out, pointer);
                 return pointer ? S_OK : E_OUTOFMEMORY;
             },
         },
@@ -776,17 +765,17 @@ export function createShellExtras(host, parts){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([id, flags, info])=>{
-                if (wholeAddress(info) === 0 || readU32(info) !== SHSTOCKICONINFO_SIZE)
+                if (wholeAddress(info) === 0 || guest.u32(info) !== SHSTOCKICONINFO_SIZE)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(info + STOCK.icon, 0);
-                if (host.pointerSize === 8)
+                answerOut(info + STOCK.icon, 0);
+                if (guest.pointerSize === 8)
                 {
-                    writeU32(info + STOCK.icon + 4, 0);
+                    answerOut(info + STOCK.icon + 4, 0);
                 }
-                writeU32(info + STOCK.image, -1);
-                writeU32(info + STOCK.index, -1);
+                answerOut(info + STOCK.image, -1);
+                answerOut(info + STOCK.index, -1);
                 if ((id | 0) < 0 || (id | 0) >= SIID_MAX_ICONS)
                 {
                     return E_INVALIDARG;
@@ -798,11 +787,12 @@ export function createShellExtras(host, parts){
                 }
                 const system = await scratch(MAX_PATH * 2, async at=>{
                     const length = await kernel32('GetSystemDirectoryW', [at, MAX_PATH]);
-                    return length > 0 && length < MAX_PATH ? wide(at) : null;
+                    return length > 0 && length < MAX_PATH ? guest.optionalText(at, true,
+                        0x8000) : null;
                 }, null);
                 const path = system === null ? 'shell32.dll' : `${system}\\shell32.dll`;
-                host.writeMemory(info + STOCK.path, utf16z(path.slice(0, MAX_PATH - 1)));
-                writeU32(info + STOCK.index, id | 0);
+                guest.writeWide(info + STOCK.path, path.slice(0, MAX_PATH - 1));
+                answerOut(info + STOCK.index, id | 0);
                 return S_OK;
             },
         },
@@ -815,8 +805,8 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
-                const iid = (riid >>> 0) === 0 ? null : readGuid(host, wholeAddress(riid));
+                answerOut(out, 0);
+                const iid = (riid >>> 0) === 0 ? null : guest.guid(riid);
                 if ((index >>> 0) >= IMAGE_SIZES.length)
                 {
                     return E_INVALIDARG;
@@ -835,7 +825,7 @@ export function createShellExtras(host, parts){
                     toldImageLists = true;
                     host.divergence?.('SHGetImageList', 'the system image lists hold no icons');
                 }
-                writeU32(out, list);
+                answerOut(out, list);
                 return S_OK;
             },
         },
@@ -845,8 +835,8 @@ export function createShellExtras(host, parts){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([large, small])=>{
-                writeU32(large, imageList(0));
-                writeU32(small, imageList(1));
+                answerOut(large, imageList(0));
+                answerOut(small, imageList(1));
                 return imageList(0) && imageList(1) ? 1 : 0;
             },
         },
@@ -889,8 +879,8 @@ export function createShellExtras(host, parts){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([, , lists, event])=>{
-                writeU32(lists, 0);
-                writeU32(event, 0);
+                answerOut(lists, 0);
+                answerOut(event, 0);
                 return 0;
             },
         },
@@ -935,7 +925,7 @@ export function createShellExtras(host, parts){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([create, out])=>{
-                writeU32(out, 0);
+                answerOut(out, 0);
                 return wholeAddress(create) === 0 || wholeAddress(out) === 0
                     ? E_INVALIDARG : E_NOTIMPL;
             },

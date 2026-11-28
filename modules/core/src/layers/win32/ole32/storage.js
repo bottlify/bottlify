@@ -272,12 +272,8 @@ const readable = mode=>(mode & STGM_ACCESS_MASK) !== STGM_WRITE;
  * @param {StorageHost} host
  */
 export function createStorageFunctions(host){
-    const STATSTG = statstgLayout(host.pointerSize);
     const { guest } = host;
-    /** A vtable slot: a pointer of the process's width. */
-    const slotBytes = host.pointerSize === 8 ? 8 : WORD;
-    /** The entry of `pointer`'s method in `slot`. @param {number} pointer @param {number} slot */
-    const methodAt = (pointer, slot)=>guest.ptr(guest.ptr(pointer) + slot * slotBytes);
+    const STATSTG = statstgLayout(guest.pointerSize);
 
     /**
      * An OLESTR, read no further than a name of its kind can reach: null for
@@ -798,7 +794,7 @@ export function createStorageFunctions(host){
         }
         guest.setBytes(block, bytes);
         guest.set32(block + bytes.length, 0);
-        const entry = methodAt(pointer, SLOT_STREAM_WRITE);
+        const entry = guest.method(pointer, SLOT_STREAM_WRITE);
         return host.call(entry, [pointer, block, bytes.length, block + bytes.length], thread)
             .then(hr=>{
                 const written = (hr | 0) < 0 ? 0 : guest.u32(block + bytes.length);
@@ -834,7 +830,7 @@ export function createStorageFunctions(host){
             return new Uint8Array(0);
         }
         guest.set32(block + length, 0);
-        const entry = methodAt(pointer, SLOT_STREAM_READ);
+        const entry = guest.method(pointer, SLOT_STREAM_READ);
         return host.call(entry, [pointer, block, length, block + length]).then(hr=>{
             const read = (hr | 0) < 0 ? 0 : Math.min(length, guest.u32(block + length));
             const bytes = guest.snapshot(block, read);
@@ -1661,9 +1657,9 @@ export function createStorageFunctions(host){
      */
     const callGuest = async(pointer, slot, args, thread)=>(await
     /** @type {NonNullable<StorageHost['call']>} */ (host.call)(
-        methodAt(pointer, slot), [pointer, ...args], thread)) | 0;
+        guest.method(pointer, slot), [pointer, ...args], thread)) | 0;
     // A 64-bit program's ULARGE_INTEGER arguments are one slot each.
-    const quad = pointerWidth(slotBytes).quadword;
+    const quad = pointerWidth(guest.pointerSize).quadword;
 
     /**
      * A docfile in an ILockBytes the program implemented. The tree is read
@@ -2274,7 +2270,8 @@ export function createStorageFunctions(host){
                 }
                 const call = host.call;
                 const thread = host.callerThread?.();
-                return call(methodAt(object, SLOT_GETCLASSID), [object, slot], thread).then(hr=>{
+                const entry = guest.method(object, SLOT_GETCLASSID);
+                return call(entry, [object, slot], thread).then(hr=>{
                     if ((hr | 0) < 0)
                     {
                         host.heap.free(slot);
@@ -2283,7 +2280,7 @@ export function createStorageFunctions(host){
                     const written = writeToStream(stream, guest.snapshot(slot, GUID_SIZE), thread);
                     host.heap.free(slot);
                     return Promise.resolve(written).then(count=>(count === GUID_SIZE
-                        ? call(methodAt(object, SLOT_SAVE), [object, stream, 1], thread)
+                        ? call(guest.method(object, SLOT_SAVE), [object, stream, 1], thread)
                         : STG_E_ACCESSDENIED));
                 });
             },

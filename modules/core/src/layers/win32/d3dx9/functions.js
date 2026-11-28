@@ -326,12 +326,12 @@ export function createD3dxFunctions(host, options = {}){
     const macrosAt = at=>{
         /** @type {[string, string][]} */
         const macros = [];
-        for (let entry = wholeAddress(at); entry !== 0 && guest.u32(entry) !== 0
+        for (let entry = wholeAddress(at); entry !== 0 && guest.ptr(entry) !== 0
             && macros.length < 1024;
             entry += 2 * POINTER)
         {
-            const value = guest.u32(entry + POINTER);
-            macros.push([latinAt(guest.u32(entry)), value === 0 ? '' : latinAt(value)]);
+            const value = guest.ptr(entry + POINTER);
+            macros.push([latinAt(guest.ptr(entry)), value === 0 ? '' : latinAt(value)]);
         }
         return macros;
     };
@@ -374,17 +374,16 @@ export function createD3dxFunctions(host, options = {}){
             const bytesOut = dataOut + 8;
             guest.setPtr(dataOut, 0);
             guest.set32(bytesOut, 0);
-            const vtable = guest.u32(include);
-            const answer = await callGuest({ entry: guest.u32(vtable), args: [include,
+            const answer = await callGuest({ entry: guest.method(include, 0), args: [include,
                 system ? 1 : 0,
                 scratch, 0, dataOut, bytesOut], thread });
-            const data = guest.u32(dataOut);
+            const data = guest.ptr(dataOut);
             if ((answer | 0) < 0 || data === 0)
             {
                 return null;
             }
             const text = latin1(guest.snapshot(data, guest.u32(bytesOut)));
-            await callGuest({ entry: guest.u32(vtable + POINTER), args: [include, data], thread });
+            await callGuest({ entry: guest.method(include, 1), args: [include, data], thread });
             return text;
         }
         finally

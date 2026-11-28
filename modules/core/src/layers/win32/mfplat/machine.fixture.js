@@ -93,10 +93,6 @@ export function mfMachine(options = {}){
 
     const host = {
         guest: guestOver(memory),
-        /** @param {number} at @param {number} length */
-        readMemory: (at, length)=>memory.subarray(at, at + length),
-        /** @param {number} at @param {Uint8Array} bytes */
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
         heap,
         vtables,
         /** @param {number} pointer */

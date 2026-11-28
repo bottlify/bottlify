@@ -10,6 +10,7 @@ import { createShellFunctions } from './functions.js';
 import { IID_IENUMIDLIST, IID_ISHELLFOLDER, MY_COMPUTER, itemsOf } from './namespace.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { createComRegistry } from '../ole32/objects.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -33,7 +34,7 @@ const ENUM = { Next: 3, Skip: 4, Reset: 5 };
  * publisher that hands out a pointer per object and keeps the object so a
  * test can call its methods the way the vtable would.
  */
-function machine(){
+function machine(width = /** @type {4 | 8} */ (4)){
     const memory = new Uint8Array(0x4000);
     const view = new DataView(memory.buffer);
     let free = 0x2000;
@@ -52,8 +53,7 @@ function machine(){
     const host = {
         registerClass: (/** @type {string} */ clsid, /** @type {() => any} */ factory)=>
             classes.set(clsid, factory),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        guest: guestOver(memory, width),
         allocate: (/** @type {number} */ bytes)=>{
             const at = free;
             free += (bytes + 3) & ~3;
@@ -106,9 +106,8 @@ function machine(){
         }
         return at;
     };
-    const lists = { readMemory: host.readMemory, writeMemory: host.writeMemory };
     /** @param {number} list */
-    const texts = list=>itemsOf(lists, list);
+    const texts = list=>itemsOf(host.guest, list);
     return { memory, view, shell, call, u32, put, string, wide, texts, published, classes };
 }
 
@@ -276,7 +275,7 @@ test('without a volume there is no namespace, and the refusal is the loud one', 
     /** @type {string[]} */
     const diverged = [];
     const shell = /** @type {any} */ (createShellFunctions({
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        guest: guestOver(memory),
         /** @param {string} api */
         divergence: api=>diverged.push(api),
     }));
@@ -466,3 +465,27 @@ test('CoCreateInstance(CLSID_ShellDesktop) makes the desktop SHGetDesktopFolder 
     assert.equal(name.invoke(object, [m.u32(0x100), 0, 0x140]), S_OK);
     assert.equal(m.string(0x144), 'My Computer', 'the desktop\'s own answer for its child');
 });
+
+test('in a 64-bit process a folder\'s items, their attributes and its outs are pointers of eight',
+    ()=>{
+        const m = machine(8);
+        const at = (/** @type {number} */ address)=>Number(m.view.getBigUint64(address, true));
+        m.view.setBigUint64(0x100, 0xffff_ffff_ffff_ffffn, true);
+        assert.equal(m.shell.SHGetDesktopFolder.handler([0x100]), S_OK);
+        const desktop = at(0x100);
+        assert.equal(m.published.get(desktop)?.iid, IID_ISHELLFOLDER, 'the pointer whole');
+        assert.equal(m.call(desktop, FOLDER.ParseDisplayName,
+            [0, 0, m.wide('C:\\'), 0, 0x148, 0]), S_OK);
+        assert.equal(m.call(desktop, FOLDER.BindToObject,
+            [at(0x148), 0, guid(m, IID_ISHELLFOLDER), 0x124]), S_OK);
+        const drive = at(0x124);
+        m.call(drive, FOLDER.EnumObjects, [0, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS, 0x12c]);
+        const enumerator = at(0x12c);
+        assert.equal(m.call(enumerator, ENUM.Next, [2, 0x160, 0x170]), S_OK);
+        assert.equal(m.u32(0x170), 2);
+        assert.deepEqual([m.texts(at(0x160)), m.texts(at(0x168))],
+            [['C:\\Program Files'], ['C:\\readme.txt']], 'rgelt at a stride of eight');
+        m.put(0x150, SFGAO_FOLDER);
+        assert.equal(m.call(drive, FOLDER.GetAttributesOf, [2, 0x160, 0x150]), S_OK);
+        assert.equal(m.u32(0x150), 0, 'the folder and the file have no attribute in common');
+    });

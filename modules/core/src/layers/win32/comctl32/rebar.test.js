@@ -17,8 +17,9 @@ import {
     RBN_CHEVRONPUSHED, RBBIM_STYLE, RBBIM_COLORS, RBBIM_TEXT, RBBIM_CHILD, RBBIM_CHILDSIZE,
     RBBIM_SIZE, RBBIM_IDEALSIZE, RBBIM_HEADERSIZE, RBBS_CHILDEDGE, RBBS_HIDDEN,
     RBBS_VARIABLEHEIGHT, RBBS_USECHEVRON, RBBS_NOGRIPPER, RBS_BANDBORDERS, CCS_VERT,
-    CCS_NODIVIDER,
+    CCS_NODIVIDER, createRebarProcedure,
 } from './rebar.js';
+import { HIGH, wideControl } from './wide.fixture.js';
 import { TOOLBAR_CLASS } from './toolbar.js';
 
 const setupBars = ()=>setupWith({ createGdiDrawing, createScreen, ...surfaces });
@@ -281,4 +282,37 @@ test('RB_PUSHCHEVRON tells where the chevron is, empty when the child has its id
         await context.send([hwnd, RB_SETBANDINFOA, 0, info(context, RBBIM_SIZE,
             { [F.cx]: 132 })]);
         assert.deepEqual(await pushed(), [0, 0, 0, 0]);
+    });
+
+test('in a 64-bit process a band\'s text, child, bitmap and the bar\'s image list are whole',
+    async()=>{
+        const control = wideControl((host, tk)=>createRebarProcedure(host, tk), undefined,
+            { move: ()=>0, show: ()=>0 });
+        const { guest } = control;
+        const RBBIM_BACKGROUND = 0x0080;
+        const band = 0x1000;
+        const child = 0x1_0000_0042;
+        const bitmap = 0x2_0000_0099;
+        guest.writeAnsi(HIGH + 0x100, 'band');
+        guest.set32(band, 108);
+        guest.set32(band + 4, RBBIM_TEXT | RBBIM_CHILD | RBBIM_BACKGROUND);
+        guest.setPtr(band + 24, HIGH + 0x100);
+        guest.setPtr(band + 40, child);
+        guest.setPtr(band + 64, bitmap);
+        assert.equal(await control.send(RB_INSERTBANDA, -1, band), 1);
+        guest.fill(band + 8, 0, 100);
+        guest.setPtr(band + 24, HIGH + 0x200);
+        guest.set32(band + 32, 16);
+        assert.equal(await control.send(RB_GETBANDINFOA, 0, band), 1);
+        assert.equal(guest.cstr(HIGH + 0x200), 'band', 'into the buffer past 4 GiB');
+        assert.equal(guest.ptr(band + 40), child);
+        assert.equal(guest.ptr(band + 64), bitmap);
+        const bar = 0x1100;
+        const list = 0x5_0000_1000;
+        guest.set32s(bar, [16, 1]);
+        guest.setPtr(bar + 8, list);
+        assert.equal(await control.send(0x0404, 0, bar), 1);
+        guest.setPtr(bar + 8, 0);
+        assert.equal(await control.send(0x0403, 0, bar), 1);
+        assert.equal(guest.ptr(bar + 8), list);
     });

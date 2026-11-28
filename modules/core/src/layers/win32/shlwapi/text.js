@@ -16,7 +16,6 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { wholeAddress } from '../common/pointers.js';
 import { utf16, utf16z } from '../common/utf16.js';
 
 /**
@@ -43,8 +42,7 @@ const MAX_LENGTH = 0x7fffffff;
 
 /**
  * @typedef {Object} TextHost
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  */
 
 /**
@@ -52,12 +50,12 @@ const MAX_LENGTH = 0x7fffffff;
  * @returns {{ A: Width, W: Width }}
  */
 export function createWidths(host){
+    const { guest } = host;
     /** @type {Width} */
     const A = {
         wide: false,
         unit: 1,
-        read: (address, limit = MAX_LENGTH)=>
-            ((address >>> 0) === 0 ? null : host.readCString(wholeAddress(address), limit)),
+        read: (address, limit = MAX_LENGTH)=>guest.optionalText(address, false, limit),
         bytes: text=>encodeAnsi(text),
         sz: text=>encodeAnsi(`${text}\0`),
         char: code=>decodeAnsi(Uint8Array.of(code & 0xff)),
@@ -66,8 +64,7 @@ export function createWidths(host){
     const W = {
         wide: true,
         unit: 2,
-        read: (address, limit = MAX_LENGTH)=>((address >>> 0) === 0 || !host.readWideString
-            ? null : host.readWideString(wholeAddress(address), limit)),
+        read: (address, limit = MAX_LENGTH)=>guest.optionalText(address, true, limit),
         bytes: utf16,
         sz: text=>utf16z(text),
         char: code=>String.fromCharCode(code & 0xffff),
@@ -76,9 +73,9 @@ export function createWidths(host){
 }
 
 /** @param {number} value @returns {Uint8Array} a little-endian DWORD */
-export const dword = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff,
+export const dwordBytes = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff,
     value >>> 16 & 0xff, value >>> 24 & 0xff);
 
 /** @param {Uint8Array} bytes @param {number} [at] */
-export const u32 = (bytes, at = 0)=>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
+export const u32Of = (bytes, at = 0)=>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
     | bytes[at + 3] << 24) >>> 0;

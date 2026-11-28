@@ -140,7 +140,7 @@ export function createAttributes(kit, host){
             case TYPE.BLOB: {
                 const count = u32(at + 8);
                 const bytes = count === 0 ? new Uint8Array(0)
-                    : host.readMemory(u32(at + 12), count).slice();
+                    : host.guest.snapshot(u32(at + 12), count);
                 return { vt, value: bytes };
             }
             case TYPE.IUNKNOWN:
@@ -197,7 +197,7 @@ export function createAttributes(kit, host){
             default:
                 break;
         }
-        host.writeMemory(wholeAddress(at), bytes);
+        host.guest.setBytes(wholeAddress(at), bytes);
         const taken = item.vt === TYPE.IUNKNOWN ? kit.addRef(item.value, thread) : undefined;
         return taken ? taken.then(()=>S_OK) : S_OK;
     };
@@ -284,7 +284,7 @@ export function createAttributes(kit, host){
                 const count = u32(scratch);
                 for (let i = 0; i < count; i++)
                 {
-                    host.writeMemory(scratch + 20, new Uint8Array(PROPVARIANT_SIZE));
+                    host.guest.fill(scratch + 20, 0, PROPVARIANT_SIZE);
                     if ((yield kit.guest(thread, pointer, ATTRIBUTES_SLOT.GetItemByIndex,
                         [i, scratch + 4, scratch + 20])) !== 0)
                     {
@@ -473,7 +473,7 @@ export function createAttributes(kit, host){
             {
                 return E_NOT_SUFFICIENT_BUFFER;
             }
-            host.writeMemory(wholeAddress(buffer), utf16z(item.value));
+            host.guest.writeWide(wholeAddress(buffer), item.value);
             return S_OK;
         } },
         /** HRESULT GetAllocatedString(REFGUID key, LPWSTR *value, UINT32 *length) */
@@ -515,7 +515,7 @@ export function createAttributes(kit, host){
             }
             if (item.value.length > 0)
             {
-                host.writeMemory(wholeAddress(buffer), item.value);
+                host.guest.setBytes(wholeAddress(buffer), item.value);
             }
             if ((written >>> 0) !== 0)
             {
@@ -612,7 +612,7 @@ export function createAttributes(kit, host){
         /** HRESULT SetBlob(REFGUID key, const UINT8 *buffer, UINT32 size) */
         { name: 'SetBlob', argBytes: 16, invoke: setter(TYPE.BLOB, ([, buffer, size])=>
             ((size >>> 0) === 0 ? new Uint8Array(0)
-                : host.readMemory(wholeAddress(buffer), size >>> 0).slice())) },
+                : host.guest.snapshot(wholeAddress(buffer), size >>> 0))) },
         /** HRESULT SetUnknown(REFGUID key, IUnknown *value) */
         { name: 'SetUnknown', argBytes: 12,
             invoke: setter(TYPE.IUNKNOWN, ([, value])=>value >>> 0) },

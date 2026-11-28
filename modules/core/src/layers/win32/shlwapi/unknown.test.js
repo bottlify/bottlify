@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { UNKNOWN_ORDINALS, createUnknownFunctions } from './unknown.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const E_FAIL = 0x80004005 | 0;
 const E_NOINTERFACE = 0x80004002 | 0;
@@ -36,8 +37,7 @@ function machine({ provides = true } = {}){
     /** @type {number[]} */
     const freed = [];
     const fns = createUnknownFunctions({
-        readMemory: (address, length)=>memory.subarray(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         allocate: bytes=>{
             const at = next;
             next += bytes + 15 & ~15;
@@ -121,8 +121,7 @@ function counted(){
     /** @type {any[]} */
     const published = [];
     const fns = createUnknownFunctions({
-        readMemory: (address, length)=>memory.subarray(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         allocate: ()=>0x800,
         free: ()=>{},
         callerThread: ()=>thread,
@@ -225,8 +224,7 @@ function comObject(knows){
     const said = [];
     let next = 0x2000;
     const fns = createUnknownFunctions({
-        readMemory: (address, length)=>memory.subarray(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         allocate: bytes=>{
             const at = next;
             next += bytes + 15 & ~15;

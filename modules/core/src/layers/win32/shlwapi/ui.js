@@ -11,7 +11,7 @@
  * what these did.
  */
 
-import { dword, u32 } from './text.js';
+import { u32Of } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const MF_BYPOSITION = 0x400;
@@ -53,10 +53,7 @@ const OS_YES = new Map([[1, [0x400, Infinity]], [3, [0x400, 0x600]], [7, [0x500,
 
 /**
  * @typedef {Object} UiHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }> | undefined}
@@ -68,6 +65,7 @@ const OS_YES = new Map([[1, [0x400, Infinity]], [3, [0x400, 0x600]], [7, [0x500,
  * @param {{ A: import('./text.js').Width, W: import('./text.js').Width }} widths
  */
 export function createUiFunctions(host, { A, W }){
+    const { guest } = host;
     /**
      * One of another library's calls, or null without it.
      *
@@ -92,7 +90,7 @@ export function createUiFunctions(host, { A, W }){
      */
     const scratch = (size, body, without)=>{
         const at = host.allocate?.(size) ?? 0;
-        if (!at || !host.readMemory)
+        if (!at)
         {
             return without;
         }
@@ -126,13 +124,13 @@ export function createUiFunctions(host, { A, W }){
      * @param {number} handle
      */
     const counterValue = handle=>scratch(4, at=>{
-        host.writeMemory(at, dword(0));
+        guest.set32(at, 0);
         if (!kernel32('ReleaseSemaphore', [handle, 1, at]))
         {
             return 0;
         }
         kernel32('WaitForSingleObject', [handle, 0]);
-        return u32(/** @type {(a: number, l: number) => Uint8Array} */ (host.readMemory)(at, 4));
+        return guest.u32(at);
     }, 0);
 
     /**
@@ -145,7 +143,7 @@ export function createUiFunctions(host, { A, W }){
     const createCounter = (width, name, initial)=>scratch(((name?.length ?? 0) + 16) * 2, at=>{
         if (name !== null)
         {
-            host.writeMemory(at, W.sz(`shell.${name}`));
+            guest.setBytes(at, W.sz(`shell.${name}`));
         }
         return kernel32('CreateSemaphoreW', [0, initial >>> 0, SEMAPHORE_MOST,
             name === null ? 0 : at]);
@@ -223,12 +221,11 @@ export function createUiFunctions(host, { A, W }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([menu, id])=>scratch(MENUITEMINFO_SIZE, at=>{
-                host.writeMemory(at, new Uint8Array(MENUITEMINFO_SIZE));
-                host.writeMemory(at, dword(MENUITEMINFO_SIZE));
-                host.writeMemory(at + 4, dword(MIIM_SUBMENU));
+                guest.fill(at, 0, MENUITEMINFO_SIZE);
+                guest.set32(at, MENUITEMINFO_SIZE);
+                guest.set32(at + 4, MIIM_SUBMENU);
                 return user32('GetMenuItemInfoW', [menu, id, 0, at])
-                    ? u32(/** @type {(a: number, l: number) => Uint8Array} */ (host.readMemory)(
-                        at + 20, 4)) : 0;
+                    ? guest.u32(at + 20) : 0;
             }, 0),
         },
 
@@ -343,11 +340,10 @@ export function createUiFunctions(host, { A, W }){
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [message, wParam, lParam])=>scratch(8, at=>{
                 // A DWORD_PTR the call writes: eight bytes in a 64-bit process.
-                host.writeMemory(at, new Uint8Array(8));
+                guest.fill(at, 0, 8);
                 user32(`SendMessageTimeout${suffix}`, [HWND_BROADCAST, message, wParam, lParam,
                     SMTO_ABORTIFHUNG, 15000, at]);
-                return u32(/** @type {(a: number, l: number) => Uint8Array} */ (
-                    host.readMemory)(at, 4));
+                return guest.u32(at);
             }, 0),
         } }), {}),
 
@@ -361,14 +357,14 @@ export function createUiFunctions(host, { A, W }){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: (/** @type {number[]} */ [wndclass])=>{
-                    if ((wndclass >>> 0) === 0 || !host.readMemory)
+                    if ((wndclass >>> 0) === 0)
                     {
                         return 0;
                     }
                     // WNDCLASS: hInstance at 16, lpszClassName at 36.
-                    const fields = host.readMemory(wholeAddress(wndclass), 40);
+                    const fields = guest.snapshot(wndclass, 40);
                     const known = scratch(48, at=>user32(`GetClassInfo${suffix}`,
-                        [u32(fields, 16), u32(fields, 36), at]), 0);
+                        [u32Of(fields, 16), u32Of(fields, 36), at]), 0);
                     return known !== 0 ? 1 : user32(`RegisterClass${suffix}`, [wndclass]);
                 },
             } }), {}),
@@ -380,15 +376,14 @@ export function createUiFunctions(host, { A, W }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [instance, list, count])=>{
-                const read = host.readMemory;
-                if ((list >>> 0) === 0 || !read)
+                if ((list >>> 0) === 0)
                 {
                     return 0;
                 }
                 for (let at = 0; at < (count | 0); at++)
                 {
-                    user32(`UnregisterClass${suffix}`, [u32(read(wholeAddress(list) + at * 4, 4)),
-                        instance]);
+                    user32(`UnregisterClass${suffix}`, [guest.ptr(wholeAddress(list)
+                        + at * guest.pointerSize), instance]);
                 }
                 return 0;
             },
@@ -405,11 +400,10 @@ export function createUiFunctions(host, { A, W }){
         GetUIVersion: {
             argBytes: 0,
             handler: ()=>scratch(20, at=>{
-                host.writeMemory(at, new Uint8Array(20));
-                host.writeMemory(at, dword(20));
+                guest.fill(at, 0, 20);
+                guest.set32(at, 20);
                 call('SHELL32.dll', 'DllGetVersion', [at]);
-                return u32(/** @type {(a: number, l: number) => Uint8Array} */ (host.readMemory)(
-                    at + 4, 4));
+                return guest.u32(at + 4);
             }, 0),
         },
 
@@ -439,11 +433,11 @@ export function createUiFunctions(host, { A, W }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([guid])=>{
-                if ((guid >>> 0) === 0 || !host.readMemory)
+                if ((guid >>> 0) === 0)
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(wholeAddress(guid), 16);
+                const bytes = guest.snapshot(guid, 16);
                 const hex = [...bytes].map(byte=>byte.toString(16).padStart(2, '0')).join('');
                 return createCounter(W, hex, 0);
             },
@@ -473,10 +467,9 @@ export function createUiFunctions(host, { A, W }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>scratch(4, at=>{
-                host.writeMemory(at, dword(0));
+                guest.set32(at, 0);
                 kernel32('ReleaseSemaphore', [handle, 1, at]);
-                return u32(/** @type {(a: number, l: number) => Uint8Array} */ (
-                    host.readMemory)(at, 4)) + 1;
+                return guest.u32(at) + 1;
             }, 0),
         },
 
@@ -499,14 +492,14 @@ export function createUiFunctions(host, { A, W }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, exchange, compare])=>{
-                if (wholeAddress(destination) === 0 || !host.readMemory)
+                if (wholeAddress(destination) === 0)
                 {
                     return 0;
                 }
-                const before = u32(host.readMemory(wholeAddress(destination), 4));
+                const before = guest.u32(destination);
                 if (before === wholeAddress(compare))
                 {
-                    host.writeMemory(wholeAddress(destination), dword(wholeAddress(exchange)));
+                    guest.set32(destination, wholeAddress(exchange));
                 }
                 return before;
             },
@@ -588,7 +581,7 @@ export function createUiFunctions(host, { A, W }){
                     {
                         return E_INVALIDARG;
                     }
-                    host.writeMemory(wholeAddress(out), w.sz(url));
+                    guest.setBytes(out, w.sz(url));
                     return S_OK;
                 },
             } }), {}),

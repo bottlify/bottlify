@@ -14,7 +14,6 @@
  * alone, whatever is or is not on the disk.
  */
 
-import { dword, u32 } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 
 /** What a path may be, terminator included. */
@@ -364,8 +363,7 @@ const strippedRoot = path=>{
 
 /**
  * @typedef {Object} PathHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {{ stat(path: string): { exists: boolean, isDirectory: boolean } | null }} [files]
  * @property {(path: string) => string} [fullPath]
  * @property {(code: number) => void} [setLastError]
@@ -498,6 +496,7 @@ const UNEXPANDED = Object.freeze(['ALLUSERSPROFILE', 'APPDATA', 'USERPROFILE', '
  * @param {{ A: import('./text.js').Width, W: import('./text.js').Width }} widths
  */
 export function createPathFunctions(host, { A, W }){
+    const { guest } = host;
     /**
      * A path function for both spellings.
      *
@@ -513,20 +512,19 @@ export function createPathFunctions(host, { A, W }){
     });
 
     /** @param {number} address @param {import('./text.js').Width} width @param {string} text */
-    const write = (address, width, text)=>host.writeMemory(wholeAddress(address), width.sz(text));
+    const write = (address, width, text)=>guest.setBytes(address, width.sz(text));
 
     /**
      * The process's variables as kernel32 has them now, by upper-case name;
-     * null without kernel32 or memory to read them from.
+     * null without kernel32 to ask.
      *
      * @returns {Map<string, string> | null}
      */
     const environment = ()=>{
         const kernel32 = host.library?.('KERNEL32.dll');
-        const read = host.readMemory;
-        const block = kernel32 && read
+        const block = kernel32
             ? /** @type {number} */ (kernel32.GetEnvironmentStringsW?.handler([])) >>> 0 : 0;
-        if (!block || !read || !kernel32)
+        if (!block || !kernel32)
         {
             return null;
         }
@@ -557,8 +555,8 @@ export function createPathFunctions(host, { A, W }){
      *
      * @param {number} address
      */
-    const countAt = address=>((address >>> 0) === 0 || !host.readMemory
-        ? null : u32(host.readMemory(wholeAddress(address), 4)));
+    const countAt = address=>((address >>> 0) === 0
+        ? null : guest.u32(address));
 
     /**
      * An answer into a buffer whose room the caller counts: written with its
@@ -572,10 +570,10 @@ export function createPathFunctions(host, { A, W }){
         if (text.length < room)
         {
             write(buffer, width, text);
-            host.writeMemory(wholeAddress(count), dword(text.length));
+            guest.set32(count, text.length);
             return S_OK;
         }
-        host.writeMemory(wholeAddress(count), dword(text.length + 1));
+        guest.set32(count, text.length + 1);
         return E_POINTER;
     };
 
@@ -611,7 +609,7 @@ export function createPathFunctions(host, { A, W }){
             const dot = path === null ? 0 : extensionIndex(path);
             if (path !== null && dot < path.length)
             {
-                host.writeMemory(wholeAddress(pointer) + dot * width.unit, width.sz(''));
+                guest.setBytes(pointer + dot * width.unit, width.sz(''));
             }
             return 0;
         }),
@@ -633,7 +631,7 @@ export function createPathFunctions(host, { A, W }){
             const keep = strippedRoot(path);
             if ((keep ?? 0) < path.length)
             {
-                host.writeMemory(wholeAddress(pointer) + (keep ?? 0) * width.unit, width.sz(''));
+                guest.setBytes(pointer + (keep ?? 0) * width.unit, width.sz(''));
             }
             return keep === null ? 0 : 1;
         }),
@@ -656,7 +654,7 @@ export function createPathFunctions(host, { A, W }){
             {
                 return end;
             }
-            host.writeMemory(end, width.sz('\\'));
+            guest.setBytes(end, width.sz('\\'));
             return end + width.unit;
         }, { returns: 'pointer' }),
 
@@ -676,7 +674,7 @@ export function createPathFunctions(host, { A, W }){
             const last = (pointer >>> 0) + Math.max(path.length - 1, 0) * width.unit;
             if (path.endsWith('\\') && !isRoot(path))
             {
-                host.writeMemory(last, width.sz(''));
+                guest.setBytes(last, width.sz(''));
             }
             return last;
         }, { returns: 'pointer' }),
@@ -791,13 +789,13 @@ export function createPathFunctions(host, { A, W }){
             const bytes = W.sz(path);
             const alloc = host.library?.('KERNEL32.dll')?.LocalAlloc;
             const block = alloc ? /** @type {number} */ (alloc.handler([0, bytes.length])) >>> 0 : 0;
-            host.writeMemory(wholeAddress(out), Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
+            guest.setBytes(out, Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
                 block >>> 16 & 0xff, block >>> 24 & 0xff));
             if (!block)
             {
                 return E_OUTOFMEMORY;
             }
-            host.writeMemory(block, bytes);
+            guest.setBytes(block, bytes);
             return S_OK;
         } },
 
@@ -853,7 +851,7 @@ export function createPathFunctions(host, { A, W }){
             const at = argumentsAt(path);
             if (at > 0 && (at < path.length || path[at - 1] === ' '))
             {
-                host.writeMemory(wholeAddress(pointer) + (at - 1) * width.unit, width.sz(''));
+                guest.setBytes(pointer + (at - 1) * width.unit, width.sz(''));
             }
             return 0;
         }),
@@ -1017,7 +1015,7 @@ export function createPathFunctions(host, { A, W }){
             {
                 return 0;
             }
-            host.writeMemory(wholeAddress(pointer) + cut * width.unit, width.sz(''));
+            guest.setBytes(pointer + cut * width.unit, width.sz(''));
             return 1;
         }),
 
@@ -1077,7 +1075,7 @@ export function createPathFunctions(host, { A, W }){
             {
                 return 0;
             }
-            host.writeMemory(wholeAddress(pointer) + dot * width.unit, width.sz(added));
+            guest.setBytes(pointer + dot * width.unit, width.sz(added));
             return 1;
         }),
 
@@ -1099,7 +1097,7 @@ export function createPathFunctions(host, { A, W }){
             {
                 return 0;
             }
-            host.writeMemory(wholeAddress(pointer) + path.length * width.unit, width.sz(added));
+            guest.setBytes(pointer + path.length * width.unit, width.sz(added));
             return 1;
         }),
 
@@ -1168,7 +1166,7 @@ export function createPathFunctions(host, { A, W }){
             const answer = attributes ?? INVALID_FILE_ATTRIBUTES;
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(wholeAddress(out), dword(answer));
+                guest.set32(out, answer);
             }
             return answer === INVALID_FILE_ATTRIBUTES ? 0 : 1;
         }),
@@ -1228,13 +1226,13 @@ export function createPathFunctions(host, { A, W }){
          */
         ...both('PathFindSuffixArray', 12, (width, [pointer, list, count])=>{
             const path = width.read(pointer);
-            if (path === null || (list >>> 0) === 0 || !host.readMemory)
+            if (path === null || (list >>> 0) === 0)
             {
                 return 0;
             }
             for (let at = 0; at < (count | 0); at++)
             {
-                const entry = u32(host.readMemory(wholeAddress(list) + at * 4, 4));
+                const entry = guest.ptr(list + at * guest.pointerSize);
                 const suffix = width.read(entry);
                 if (suffix !== null && path.length >= suffix.length
                     && path.slice(path.length - suffix.length).toLowerCase()
@@ -1419,7 +1417,7 @@ export function createPathFunctions(host, { A, W }){
             if ((which & bit) !== 0 && path.length + extension.length < MAX_PATH
                 && stat(path + extension)?.exists)
             {
-                host.writeMemory(wholeAddress(buffer) + path.length * width.unit,
+                guest.setBytes(buffer + path.length * width.unit,
                     width.sz(extension));
                 return true;
             }
@@ -1437,7 +1435,7 @@ export function createPathFunctions(host, { A, W }){
      */
     function findOnPath(width, buffer, others, which){
         const file = width.read(buffer);
-        if (file === null || !host.readMemory)
+        if (file === null)
         {
             return 0;
         }
@@ -1445,7 +1443,7 @@ export function createPathFunctions(host, { A, W }){
         const directories = [];
         for (let at = wholeAddress(others); at !== 0 && directories.length < 0x400; at += 4)
         {
-            const entry = u32(host.readMemory(at, 4));
+            const entry = guest.u32(at);
             const directory = entry === 0 ? null : width.read(entry);
             if (directory === null)
             {
@@ -1473,7 +1471,7 @@ export function createPathFunctions(host, { A, W }){
             }
             try
             {
-                host.writeMemory(scratch, width.sz(candidate));
+                guest.setBytes(scratch, width.sz(candidate));
                 if (withDefaultExtension(width, scratch, candidate, which))
                 {
                     write(buffer, width, width.read(scratch) ?? candidate);
@@ -1517,16 +1515,16 @@ export function createPathFunctions(host, { A, W }){
      */
     function classesValue(key, value){
         const get = host.library?.('ADVAPI32.dll')?.RegGetValueW;
-        const scratch = get && host.readMemory ? host.allocate?.(0x400) ?? 0 : 0;
-        if (!get || !scratch || !host.readMemory)
+        const scratch = get ? host.allocate?.(0x400) ?? 0 : 0;
+        if (!get || !scratch)
         {
             return null;
         }
         try
         {
-            host.writeMemory(scratch, W.sz(key));
-            host.writeMemory(scratch + 0x80, W.sz(value));
-            host.writeMemory(scratch + 0x100, dword(0x200));
+            guest.setBytes(scratch, W.sz(key));
+            guest.setBytes(scratch + 0x80, W.sz(value));
+            guest.set32(scratch + 0x100, 0x200);
             const status = /** @type {number} */ (get.handler([HKEY_CLASSES_ROOT, scratch,
                 scratch + 0x80, RRF_RT_REG_SZ, 0, scratch + 0x104, scratch + 0x100])) >>> 0;
             return status === 0 ? W.read(scratch + 0x104) : null;
@@ -1569,20 +1567,20 @@ export function createPathFunctions(host, { A, W }){
         const path = width.read(pointer) ?? '';
         const item = user32?.GetDlgItem ? /** @type {number} */ (user32.GetDlgItem.handler([dialog,
             id])) >>> 0 : 0;
-        if (!user32 || item === 0 || !host.allocate || !host.readMemory)
+        if (!user32 || item === 0 || !host.allocate)
         {
             return;
         }
         const rect = host.allocate(16 + (MAX_PATH + 1) * width.unit);
         try
         {
-            host.writeMemory(rect, new Uint8Array(16));
+            guest.fill(rect, 0, 16);
             user32.GetClientRect?.handler([item, rect]);
-            const room = u32(host.readMemory(rect + 8, 4)) - u32(host.readMemory(rect, 4));
+            const room = guest.u32(rect + 8) - guest.u32(rect);
             const measure = host.textWidth;
             const text = measure && room > 0
                 ? compactPath(path, room, piece=>measure(0, piece)) : path;
-            host.writeMemory(rect + 16, width.sz(text));
+            guest.setBytes(rect + 16, width.sz(text));
             user32[`SetWindowText${width.wide ? 'W' : 'A'}`]?.handler([item, rect + 16]);
         }
         finally

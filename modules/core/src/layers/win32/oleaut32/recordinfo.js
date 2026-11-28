@@ -90,7 +90,7 @@ export function createRecordInfoObjects(host){
      * @param {unknown} thread
      */
     const callMethod = (object, slot, args, thread)=>
-        host.call(guest.u32(guest.u32(object) + slot * 4), [object, ...args], thread);
+        host.call(guest.method(object, slot), [object, ...args], thread);
 
     /**
      * The type a reference names within the library, or null for an import.
@@ -156,13 +156,13 @@ export function createRecordInfoObjects(host){
         switch (field.kind)
         {
             case 'bstr': return [()=>{
-                host.freeBstr(guest.u32(address));
-                guest.set32(address, 0);
+                host.freeBstr(guest.ptr(address));
+                guest.setPtr(address, 0);
             }];
             case 'variant': return [()=>host.clearVariant(address, thread)];
             case 'interface': return [()=>{
-                const pointer = guest.u32(address);
-                guest.set32(address, 0);
+                const pointer = guest.ptr(address);
+                guest.setPtr(address, 0);
                 return pointer === 0 ? 0 : callMethod(pointer, 2, [], thread);
             }];
             case 'record': return clearSteps(library, field.description, address, thread);
@@ -183,11 +183,11 @@ export function createRecordInfoObjects(host){
         const field = kindOf(library, variable.type);
         switch (field.kind)
         {
-            case 'bstr': return [()=>guest.set32(target, host.copyBstr(guest.u32(source)))];
+            case 'bstr': return [()=>guest.setPtr(target, host.copyBstr(guest.ptr(source)))];
             case 'variant': return [()=>host.copyVariant(target, source, thread)];
             case 'interface': return [()=>{
-                const pointer = guest.u32(source);
-                guest.set32(target, pointer);
+                const pointer = guest.ptr(source);
+                guest.setPtr(target, pointer);
                 return pointer === 0 ? 0 : callMethod(pointer, 1, [], thread);
             }];
             case 'record': return copySteps(library, field.description, source, target,
@@ -271,7 +271,7 @@ export function createRecordInfoObjects(host){
                     return E_INVALIDARG;
                 }
                 const bstr = host.allocateBstr(state.description.name);
-                guest.set32(wholeAddress(out), bstr);
+                guest.setPtr(wholeAddress(out), bstr);
                 return bstr === 0 ? E_OUTOFMEMORY : S_OK;
             } },
         { name: 'GetSize', argBytes: 8,
@@ -291,7 +291,7 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                guest.set32(wholeAddress(out), state.typeInfo);
+                guest.setPtr(wholeAddress(out), state.typeInfo);
                 return callMethod(state.typeInfo, 1, [], host.thread()).then(()=>S_OK);
             } },
         { name: 'GetField', argBytes: 16,
@@ -318,7 +318,7 @@ export function createRecordInfoObjects(host){
                     const bytes = new Uint8Array(16);
                     bytes[0] = VT_BSTR;
                     guest.setBytes(out, bytes);
-                    guest.set32(wholeAddress(out) + 8, host.copyBstr(guest.u32(at)));
+                    guest.setPtr(wholeAddress(out) + 8, host.copyBstr(guest.ptr(at)));
                     return S_OK;
                 }
                 if (size === undefined)
@@ -355,7 +355,7 @@ export function createRecordInfoObjects(host){
                 const room = Math.min(guest.u32(wholeAddress(count)), all.length);
                 for (let index = 0; index < room; index++)
                 {
-                    guest.set32(wholeAddress(names) + index * 4,
+                    guest.setPtr(wholeAddress(names) + index * guest.pointerSize,
                         host.allocateBstr(all[index].name ?? ''));
                 }
                 guest.set32(wholeAddress(count), room);
@@ -407,7 +407,7 @@ export function createRecordInfoObjects(host){
                     return E_OUTOFMEMORY;
                 }
                 guest.fill(record, 0, state.description.instanceSize);
-                guest.set32(wholeAddress(out), record);
+                guest.setPtr(wholeAddress(out), record);
                 return inOrder(copySteps(state.library, state.description, from >>> 0, record,
                     host.thread()));
             } },

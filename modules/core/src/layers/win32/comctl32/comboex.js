@@ -35,7 +35,7 @@
 
 import { WM_CREATE, WM_SETFOCUS, WM_KILLFOCUS, WM_SETFONT, WM_KEYDOWN, WM_GETTEXT, after }
     from '../user32/controls.js';
-import { notifyWindow } from './notify.js';
+import { NMHDR, notifyWindow, sendNotify } from './notify.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { readText as readString, writeText as writeString } from './strings.js';
 import { wholeAddress } from '../common/pointers.js';
@@ -120,7 +120,6 @@ const WM_PAINT = 0x000f;
 const WM_DRAWITEM = 0x002b;
 const WM_MEASUREITEM = 0x002c;
 const WM_WINDOWPOSCHANGING = 0x0046;
-const WM_NOTIFY = 0x004e;
 const WM_NOTIFYFORMAT = 0x0055;
 const WM_COMMAND = 0x0111;
 const WM_NCDESTROY = 0x0082;
@@ -202,11 +201,16 @@ const itemLayout = pointer=>(pointer === 8
 export function createComboBoxExProcedure(host, tk, images, subclassing){
     const { guest } = host;
     const pointer = guest.pointerSize;
-    const HEADER = pointer === 8 ? 24 : 12;
+    const HEADER = NMHDR.sizeOf(pointer);
     const ITEM = itemLayout(pointer);
-    /** A pointer-wide signed field (an index, a handle): its sign carried into the high half. */
-    const setIntPtr = (/** @type {number} */ address, /** @type {number} */ value)=>(pointer === 8
-        ? guest.set64(address, value | 0) : guest.set32(address, value));
+    /**
+     * pszText as an item holds it: CALLBACK for LPSTR_TEXTCALLBACK, all ones
+     * at the width, else the address, NULL for none.
+     *
+     * @param {number} at
+     */
+    const textPointer = at=>(guest.iptr(at + ITEM.pszText) === CALLBACK ? CALLBACK
+        : guest.ptr(at + ITEM.pszText));
 
     /** @param {number} address @param {boolean} wide */
     const readText = (address, wide)=>readString(host, address, wide, 0x10000);
@@ -255,24 +259,8 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
      * @param {(block: number) => void} fill @param {unknown} thread
      * @param {(block: number) => void} [read]
      */
-    const notify = (record, code, size, fill, thread, read)=>{
-        const to = notifyWindow(record);
-        const block = to !== 0 ? host.allocate?.(size) ?? 0 : 0;
-        if (block === 0)
-        {
-            return 0;
-        }
-        guest.fill(block, 0, size);
-        setIntPtr(block, record.hwnd);
-        setIntPtr(block + pointer, record.id);
-        guest.set32(block + 2 * pointer, code);
-        fill(block);
-        return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
-            read?.(block);
-            host.release?.(block);
-            return answer;
-        });
-    };
+    const notify = (record, code, size, fill, thread, read)=>sendNotify(host, record,
+        notifyWindow(record), code, size, thread, fill, read);
 
     /**
      * An item as COMBOBOXEXITEM holds it, every field there, at an address.
@@ -282,13 +270,13 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
      */
     const fillItem = (at, mask, index, item, text)=>{
         guest.set32(at + ITEM.mask, mask);
-        setIntPtr(at + ITEM.iItem, index);
-        setIntPtr(at + ITEM.pszText, text);
+        guest.setIptr(at + ITEM.iItem, index);
+        guest.setPtr(at + ITEM.pszText, text);
         guest.set32(at + ITEM.iImage, item.image ?? 0);
         guest.set32(at + ITEM.iSelectedImage, item.selectedImage ?? 0);
         guest.set32(at + ITEM.iOverlay, item.overlay ?? 0);
         guest.set32(at + ITEM.iIndent, item.indent === CALLBACK ? 0 : item.indent ?? 0);
-        setIntPtr(at + ITEM.lParam, item.lParam);
+        guest.setIptr(at + ITEM.lParam, item.lParam);
     };
 
     /**
@@ -311,7 +299,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         const mask = guest.i32(address + ITEM.mask);
         if ((mask & CBEIF_TEXT) !== 0)
         {
-            const text = guest.i32(address + ITEM.pszText);
+            const text = textPointer(address);
             item.text = text === CALLBACK ? CALLBACK : text === 0 ? null : readText(text, wide);
         }
         if ((mask & CBEIF_IMAGE) !== 0)
@@ -332,7 +320,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         }
         if ((mask & CBEIF_LPARAM) !== 0)
         {
-            item.lParam = guest.i32(address + ITEM.lParam);
+            item.lParam = guest.iptr(address + ITEM.lParam);
         }
         return mask;
     };
@@ -368,7 +356,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         {
             return CB_ERR;
         }
-        const asked = guest.i32(address + ITEM.iItem);
+        const asked = guest.iptr(address + ITEM.iItem);
         const index = asked === -1 ? held.items.length : asked;
         if (index < 0 || index > held.items.length)
         {
@@ -433,7 +421,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         {
             return 0;
         }
-        const index = guest.i32(address + ITEM.iItem);
+        const index = guest.iptr(address + ITEM.iItem);
         const item = index === -1 ? held.editItem : held.items[index];
         if (!item)
         {
@@ -456,15 +444,15 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
                 if ((mask & CBEIF_TEXT) !== 0 && typeof answer.text === 'string'
                     && answer.text !== '')
                 {
-                    writeText(guest.i32(address + ITEM.pszText),
+                    writeText(guest.ptr(address + ITEM.pszText),
                         guest.i32(address + ITEM.cchTextMax),
                         answer.text, wide);
                 }
-                else if ((mask & CBEIF_TEXT) !== 0 && guest.i32(address + ITEM.pszText) !== 0)
+                else if ((mask & CBEIF_TEXT) !== 0 && guest.ptr(address + ITEM.pszText) !== 0)
                 {
                     // No text is an empty string where the caller gave room
                     // for one (Wine's test_comboex_CB_GETLBTEXT).
-                    writeText(guest.i32(address + ITEM.pszText),
+                    writeText(guest.ptr(address + ITEM.pszText),
                         guest.i32(address + ITEM.cchTextMax),
                         '', wide);
                 }
@@ -486,7 +474,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
                 }
                 if ((mask & CBEIF_LPARAM) !== 0)
                 {
-                    setIntPtr(address + ITEM.lParam, answer.lParam);
+                    guest.setIptr(address + ITEM.lParam, answer.lParam);
                 }
                 return 1;
             }));
@@ -516,7 +504,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
             const given = { ...item };
             if ((asked & CBEIF_TEXT) !== 0)
             {
-                const text = guest.i32(at + ITEM.pszText);
+                const text = textPointer(at);
                 given.text = text === 0 || text === CALLBACK ? null : readText(text, wide);
             }
             if ((asked & CBEIF_IMAGE) !== 0)
@@ -555,7 +543,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         {
             return 0;
         }
-        const index = guest.i32(address + ITEM.iItem);
+        const index = guest.iptr(address + ITEM.iItem);
         const item = index === -1 ? held.editItem : held.items[index];
         if (!item)
         {

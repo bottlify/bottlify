@@ -18,8 +18,9 @@ import {
     TB_ADDBUTTONSA, TB_INSERTBUTTONA, TB_DELETEBUTTON, TB_BUTTONCOUNT, TB_GETBUTTON,
     TB_GETITEMRECT, TB_COMMANDTOINDEX, TB_ISBUTTONENABLED, TB_ISBUTTONCHECKED,
     TB_ISBUTTONPRESSED, TB_CHECKBUTTON, TB_ENABLEBUTTON, TB_SETPARENT, TB_GETSTATE,
-    TB_HITTEST, TB_REPLACEBITMAP, TB_GETBUTTONINFOA, TB_SETBUTTONINFOA,
+    TB_HITTEST, TB_REPLACEBITMAP, TB_GETBUTTONINFOA, TB_SETBUTTONINFOA, createToolbarProcedure,
 } from './toolbar.js';
+import { wideControl } from './wide.fixture.js';
 
 /** The fixture over the graphics layer's drawing engine. */
 const setupBars = ()=>setupWith({ createGdiDrawing, createScreen, ...surfaces });
@@ -329,4 +330,33 @@ test('TB_LOADIMAGES takes a standard strip by its IDB_ number, as TB_ADDBITMAP d
     // The 24-pixel strip makes the list 24 pixels square again: the twelve
     // 16-pixel images are eight at that width, and its own five follow.
     assert.equal(context.lists.ImageList_GetImageCount.handler([list]), 8 + 5);
+});
+
+test('in a 64-bit process TBADDBITMAP and TBREPLACEBITMAP are read block the width, a module '
+    + 'past 4 GiB whole and HINST_COMMCTRL all ones', async()=>{
+    const MODULE = 0x1_4000_0000;
+    /** @type {number[][]} */
+    const loaded = [];
+    const control = wideControl((host, tk)=>createToolbarProcedure(host, tk, undefined, {
+        loadBitmap: (/** @type {number} */ instance, /** @type {number} */ id)=>{
+            loaded.push([instance, id]);
+            return 0x2000 + id;
+        },
+    }));
+    const { guest } = control;
+    const block = 0x1000;
+    guest.setPtr(block, MODULE);
+    guest.setPtr(block + 8, 0x65);
+    assert.equal(await control.send(TB_ADDBITMAP, 4, block), 0);
+    assert.deepEqual(loaded, [[MODULE, 0x65]]);
+    guest.setIptr(block, -1);
+    guest.setPtr(block + 8, 0);
+    assert.equal(await control.send(TB_ADDBITMAP, 0, block), 4, 'a standard strip after the four');
+    guest.setPtr(block, MODULE);
+    guest.setPtr(block + 8, 0x65);
+    guest.setPtr(block + 16, MODULE);
+    guest.setPtr(block + 24, 0x66);
+    guest.set32(block + 32, 4);
+    await control.send(TB_REPLACEBITMAP, 0, block);
+    assert.deepEqual(loaded.at(-1), [MODULE, 0x66], 'the old bitmap found, the new one loaded');
 });

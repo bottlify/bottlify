@@ -259,18 +259,18 @@ export function createMfObjects(kit, host){
                 host.heap.free(block);
                 return E_OUTOFMEMORY;
             }
-            /** @param {string} key */
-            const word = key=>{
+            /** A UINT32 attribute's value, or null. @param {string} key */
+            const number = key=>{
                 const item = object.state.items.get(key);
                 return item?.vt === TYPE.UINT32 ? item.value : null;
             };
             const blockAlign = new DataView(format.buffer).getUint16(12, true);
-            host.writeMemory(record, new Uint8Array(AM_MEDIA_TYPE_SIZE));
+            host.guest.fill(record, 0, AM_MEDIA_TYPE_SIZE);
             putGuid(record, MAJOR.AUDIO);
             putGuid(record + 16, subtype.value);
-            putU32s(record + 32, [word(KEY.FIXED_SIZE_SAMPLES) ?? 1,
-                word(KEY.ALL_SAMPLES_INDEPENDENT) ? 0 : 1,
-                word(KEY.SAMPLE_SIZE) ?? blockAlign]);
+            putU32s(record + 32, [number(KEY.FIXED_SIZE_SAMPLES) ?? 1,
+                number(KEY.ALL_SAMPLES_INDEPENDENT) ? 0 : 1,
+                number(KEY.SAMPLE_SIZE) ?? blockAlign]);
             putGuid(record + 44, REPRESENTATION.WAVE_FORMAT_EX);
             putU32s(record + 60, [0, format.length, block]);
             return record;
@@ -512,15 +512,19 @@ export function createMfObjects(kit, host){
                 },
             };
         }
-        /** @param {number} slot */
-        const word = slot=>drive((function* (){
-            const scratch = wholeAddress(host.heap.allocate(4));
+        /**
+         * What a method answers through its one out-parameter: a length, or Lock's data.
+         *
+         * @param {number} slot
+         */
+        const answer = slot=>drive((function* (){
+            const scratch = wholeAddress(host.heap.allocate(8));
             try
             {
-                putU32s(scratch, [0]);
+                host.guest.setPtr(scratch, 0);
                 yield kit.guest(thread, pointer, slot, slot === BUFFER_SLOT.Lock
                     ? [scratch, 0, 0] : [scratch]);
-                return u32(scratch);
+                return slot === BUFFER_SLOT.Lock ? host.guest.ptr(scratch) : u32(scratch);
             }
             finally
             {
@@ -528,9 +532,9 @@ export function createMfObjects(kit, host){
             }
         })());
         return {
-            current: ()=>word(BUFFER_SLOT.GetCurrentLength),
-            max: ()=>word(BUFFER_SLOT.GetMaxLength),
-            lock: ()=>word(BUFFER_SLOT.Lock),
+            current: ()=>answer(BUFFER_SLOT.GetCurrentLength),
+            max: ()=>answer(BUFFER_SLOT.GetMaxLength),
+            lock: ()=>answer(BUFFER_SLOT.Lock),
             unlock: ()=>kit.guest(thread, pointer, BUFFER_SLOT.Unlock, []),
             /** @param {number} n */
             setCurrent: (/** @type {number} */ n)=>kit.guest(thread, pointer,
@@ -568,7 +572,7 @@ export function createMfObjects(kit, host){
             const data = yield ops.lock();
             if (length > 0)
             {
-                host.writeMemory(at, host.readMemory(data, length).slice());
+                host.guest.copy(at, data, length);
             }
             yield ops.unlock();
             at += length;
@@ -811,7 +815,7 @@ export function createMfObjects(kit, host){
             }
             if (!host.propVariant)
             {
-                host.writeMemory(wholeAddress(out), new Uint8Array(16));
+                host.guest.fill(wholeAddress(out), 0, 16);
                 return S_OK;
             }
             return host.propVariant.copy(out >>> 0, object.state.value);
@@ -832,7 +836,7 @@ export function createMfObjects(kit, host){
         {
             return null;
         }
-        host.writeMemory(held, new Uint8Array(16));
+        host.guest.fill(held, 0, 16);
         const copied = (value >>> 0) !== 0 && host.propVariant
             ? host.propVariant.copy(held, value >>> 0) : S_OK;
         const state = storeState({ type: type >>> 0, extended, status: status >>> 0, value: held });

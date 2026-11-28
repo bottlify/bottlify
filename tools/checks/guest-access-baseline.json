@@ -246,11 +246,6 @@
   "win32/comdlg32/functions.js": {
    "accessor u32": 1
   },
-  "win32/comdlg32/itemdialog.js": {
-   "accessor read32": 1,
-   "accessor write32": 1,
-   "string wide": 1
-  },
   "win32/common/compound-writer.js": {
    "accessor putWords": 1
   },
@@ -447,29 +442,6 @@
    "accessor dword": 1,
    "copy readMemory().slice()": 5
   },
-  "win32/mfplat/attributes.js": {
-   "copy readMemory().slice()": 2
-  },
-  "win32/mfplat/bytestream.js": {
-   "accessor writeQword": 1
-  },
-  "win32/mfplat/functions.js": {
-   "accessor putU32": 1
-  },
-  "win32/mfplat/kit.js": {
-   "accessor f64": 1,
-   "accessor putF64": 1,
-   "accessor putU64": 1,
-   "accessor u64": 1
-  },
-  "win32/mfplat/objects.js": {
-   "accessor word": 2,
-   "copy readMemory().slice()": 1
-  },
-  "win32/mfreadwrite/functions.js": {
-   "accessor putU32": 1,
-   "string wide": 1
-  },
   "win32/module.js": {
    "accessor setPointer": 1,
    "copy readMemory().slice()": 9,
@@ -539,15 +511,6 @@
   },
   "win32/offline/functions.js": {
    "accessor u32": 1
-  },
-  "win32/oleaut32/marshal.js": {
-   "accessor pointer": 1,
-   "accessor put32": 1,
-   "accessor u16": 1,
-   "accessor u32": 1,
-   "accessor word": 1,
-   "copy readMemory().slice()": 2,
-   "string readString": 1
   },
   "win32/oledlg/functions.js": {
    "accessor readU32": 1,
@@ -657,91 +620,6 @@
    "accessor readU32": 1,
    "accessor writeU32": 1,
    "copy readMemory().slice()": 6
-  },
-  "win32/shell32/associations.js": {
-   "accessor u32": 1
-  },
-  "win32/shell32/desktop.js": {
-   "accessor dword": 1,
-   "accessor readInt": 1,
-   "string wide": 1
-  },
-  "win32/shell32/extras.js": {
-   "accessor dword": 1,
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 4,
-   "string wide": 1
-  },
-  "win32/shell32/functions.js": {
-   "accessor dword": 1,
-   "accessor u32": 1
-  },
-  "win32/shell32/icons.js": {
-   "accessor u16": 1,
-   "accessor u32": 1
-  },
-  "win32/shell32/idlist.js": {
-   "copy readMemory().slice()": 2
-  },
-  "win32/shell32/internet-shortcut.js": {
-   "accessor dword": 1
-  },
-  "win32/shell32/namespace.js": {
-   "accessor dword": 1,
-   "string readWide": 1
-  },
-  "win32/shell32/shellitem.js": {
-   "accessor dword": 1,
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 2
-  },
-  "win32/shell32/shelllink.js": {
-   "accessor dword": 1,
-   "copy readMemory().slice()": 2
-  },
-  "win32/shlwapi/characters.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/shlwapi/datablocks.js": {
-   "accessor readU32": 1,
-   "accessor u32": 1,
-   "copy readMemory().slice()": 1
-  },
-  "win32/shlwapi/functions.js": {
-   "accessor writeWord": 1,
-   "copy readMemory().slice()": 3
-  },
-  "win32/shlwapi/ordinals.js": {
-   "accessor readBytes": 1,
-   "accessor readU32": 1,
-   "accessor word": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 6,
-   "string wideAt": 1
-  },
-  "win32/shlwapi/registry.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/shlwapi/stream.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
-  "win32/shlwapi/strings.js": {
-   "copy readMemory().slice()": 1,
-   "string readString": 1,
-   "string readWideString": 1
-  },
-  "win32/shlwapi/text.js": {
-   "accessor dword": 1,
-   "accessor u32": 1
-  },
-  "win32/shlwapi/unknown.js": {
-   "accessor dword": 1,
-   "accessor readLong": 1,
-   "accessor u32": 1,
-   "copy readMemory().slice()": 2
   },
   "win32/steamclient/functions.js": {
    "accessor dword": 1,

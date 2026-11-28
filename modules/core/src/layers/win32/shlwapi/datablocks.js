@@ -20,10 +20,9 @@
  * as the guest calls them, one step at a time.
  */
 
-import { dword } from './text.js';
+import { dwordBytes } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
-import { formatGuid } from '../../../system/guid.js';
 
 /** Each is [ordinal, name]. @type {readonly (readonly [number, string])[]} */
 export const DATABLOCK_ORDINALS = Object.freeze([
@@ -57,8 +56,7 @@ const STREAM_SEEK_CUR = 1;
 
 /**
  * @typedef {Object} DataBlockHost
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
@@ -68,7 +66,7 @@ const STREAM_SEEK_CUR = 1;
  */
 
 /** @param {Uint8Array} bytes @param {number} [at] */
-const u32 = (bytes, at = 0)=>new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+const u32Of = (bytes, at = 0)=>new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     .getUint32(at, true);
 
 /**
@@ -84,8 +82,8 @@ export function stored(block){
     }
     const size = HEADER + ((block.length + 3) & ~3);
     const container = new Uint8Array(size);
-    container.set(dword(size), 0);
-    container.set(dword(CONTAINER), 4);
+    container.set(dwordBytes(size), 0);
+    container.set(dwordBytes(CONTAINER), 4);
     container.set(block, HEADER);
     return container;
 }
@@ -101,14 +99,14 @@ export function blocksOf(bytes){
     const out = [];
     for (let at = 0; at + 4 <= bytes.length;)
     {
-        const size = u32(bytes, at);
+        const size = u32Of(bytes, at);
         if (size < HEADER || at + size > bytes.length)
         {
             break;
         }
-        const inner = u32(bytes, at + 4) === CONTAINER
+        const inner = u32Of(bytes, at + 4) === CONTAINER
             ? at + HEADER : at;
-        const blockSize = inner === at ? size : u32(bytes, inner);
+        const blockSize = inner === at ? size : u32Of(bytes, inner);
         out.push({ at: inner, block: bytes.slice(inner, inner + blockSize), entry: at, size });
         at += size;
     }
@@ -119,12 +117,8 @@ export function blocksOf(bytes){
  * @param {DataBlockHost} host
  */
 export function createDataBlockFunctions(host){
-    const STATSTG = statstgLayout(host.pointerSize);
-    /** @param {number} address @param {number} length */
-    const read = (address, length)=>(host.readMemory
-        ? host.readMemory(wholeAddress(address), length).slice() : new Uint8Array(length));
-    /** @param {number} address */
-    const readU32 = address=>u32(read(address, 4));
+    const { guest } = host;
+    const STATSTG = statstgLayout(guest.pointerSize);
     /**
      * kernel32's own call, made at once: the heap's are not ones that wait.
      *
@@ -138,11 +132,11 @@ export function createDataBlockFunctions(host){
     /** A list's bytes, read to its terminator. @param {number} list */
     const listBytes = list=>{
         let at = wholeAddress(list);
-        for (let size = readU32(at); size >= HEADER; size = readU32(at))
+        for (let size = guest.u32(at); size >= HEADER; size = guest.u32(at))
         {
             at += size;
         }
-        return read(list, at - (list >>> 0) + 4);
+        return guest.snapshot(list, at - (list >>> 0) + 4);
     };
 
     /**
@@ -152,14 +146,14 @@ export function createDataBlockFunctions(host){
      * @param {Uint8Array[]} blocks
      */
     const replaceList = (slot, blocks)=>{
-        const old = readU32(slot);
+        const old = guest.ptr(slot);
         if (blocks.length === 0)
         {
             if (old)
             {
                 kernel32('LocalFree', [old]);
             }
-            host.writeMemory(wholeAddress(slot), dword(0));
+            guest.setPtr(slot, 0);
             return true;
         }
         const entries = blocks.map(stored);
@@ -172,20 +166,20 @@ export function createDataBlockFunctions(host){
         let at = made;
         for (const entry of entries)
         {
-            host.writeMemory(at, entry);
+            guest.setBytes(at, entry);
             at += entry.length;
         }
-        host.writeMemory(at, dword(0));
+        guest.set32(at, 0);
         if (old)
         {
             kernel32('LocalFree', [old]);
         }
-        host.writeMemory(wholeAddress(slot), dword(made));
+        guest.setPtr(slot, made);
         return true;
     };
     /** @param {number} slot */
     const blocksIn = slot=>{
-        const list = readU32(slot);
+        const list = guest.ptr(slot);
         return list ? blocksOf(listBytes(list)).map(found=>found.block) : [];
     };
 
@@ -196,7 +190,7 @@ export function createDataBlockFunctions(host){
      * @returns {Generator<{ entry: number, args: number[] }, number, number>}
      */
     function* method(stream, slot, ...args){
-        return yield { entry: readU32(readU32(stream) + slot * 4), args: [stream >>> 0, ...args] };
+        return yield { entry: guest.method(stream, slot), args: [stream, ...args] };
     }
 
     /**
@@ -215,7 +209,7 @@ export function createDataBlockFunctions(host){
         {
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(at, new Uint8Array(size));
+        guest.fill(at, 0, size);
         function* steps(){
             try
             {
@@ -240,7 +234,7 @@ export function createDataBlockFunctions(host){
         {
             return status;
         }
-        return readU32(count) === size ? S_OK : E_FAIL;
+        return guest.u32(count) === size ? S_OK : E_FAIL;
     }
 
     /** @param {boolean} wide */
@@ -252,12 +246,12 @@ export function createDataBlockFunctions(host){
             {
                 return E_FAIL;
             }
-            const text = formatGuid(read(guid, 16));
+            const text = guest.guid(guid);
             const out = new Uint8Array((text.length + 1) * (wide ? 2 : 1));
             Array.from(text).forEach((c, i)=>{
                 out[wide ? i * 2 : i] = c.charCodeAt(0);
             });
-            host.writeMemory(wholeAddress(buffer), out);
+            guest.setBytes(buffer, out);
             return S_OK;
         },
     });
@@ -277,13 +271,13 @@ export function createDataBlockFunctions(host){
                 {
                     return 0;
                 }
-                const head = read(item, HEADER);
-                const size = u32(head);
-                if (size < HEADER || u32(head, 4) === CONTAINER)
+                const head = guest.snapshot(item, HEADER);
+                const size = u32Of(head);
+                if (size < HEADER || u32Of(head, 4) === CONTAINER)
                 {
                     return 0;
                 }
-                return replaceList(slot, [...blocksIn(slot), read(item, size)]) ? 1 : 0;
+                return replaceList(slot, [...blocksIn(slot), guest.snapshot(item, size)]) ? 1 : 0;
             },
         },
 
@@ -297,7 +291,7 @@ export function createDataBlockFunctions(host){
                     return 0;
                 }
                 const blocks = blocksIn(slot);
-                const at = blocks.findIndex(block=>u32(block, 4) === signature >>> 0);
+                const at = blocks.findIndex(block=>u32Of(block, 4) === signature >>> 0);
                 if (at < 0)
                 {
                     return 0;
@@ -323,7 +317,7 @@ export function createDataBlockFunctions(host){
                     return 0;
                 }
                 const found = blocksOf(listBytes(list))
-                    .find(entry=>u32(entry.block, 4) === signature >>> 0);
+                    .find(entry=>u32Of(entry.block, 4) === signature >>> 0);
                 return found ? wholeAddress(list) + found.at : 0;
             },
         },
@@ -360,7 +354,7 @@ export function createDataBlockFunctions(host){
                     : blocksOf(listBytes(list)).map(found=>({ at: wholeAddress(list) + found.entry,
                         size: found.size }));
                 return withScratch(8, function* (count){
-                    host.writeMemory(count + 4, dword(0));
+                    guest.set32(count + 4, 0);
                     for (const { at, size } of [...entries, { at: count + 4, size: 4 }])
                     {
                         const status = yield* method(stream, WRITE, at, size, count);
@@ -368,7 +362,7 @@ export function createDataBlockFunctions(host){
                         {
                             return status;
                         }
-                        if (readU32(count) !== size)
+                        if (guest.u32(count) !== size)
                         {
                             return STG_E_MEDIUMFULL;
                         }
@@ -406,7 +400,7 @@ export function createDataBlockFunctions(host){
                         {
                             return status;
                         }
-                        const size = readU32(block);
+                        const size = guest.u32(block);
                         if (size === 0)
                         {
                             break;
@@ -416,7 +410,7 @@ export function createDataBlockFunctions(host){
                             status = yield* method(stream, SEEK, 0, 0, STREAM_SEEK_CUR, position);
                             if (status >= 0)
                             {
-                                const next = readU32(position) + size - 4;
+                                const next = guest.u32(position) + size - 4;
                                 yield* method(stream, SEEK, next >>> 0, 0, STREAM_SEEK_SET, 0);
                             }
                             break;
@@ -426,9 +420,9 @@ export function createDataBlockFunctions(host){
                         {
                             return status;
                         }
-                        blocks.push(read(block, size));
+                        blocks.push(guest.snapshot(block, size));
                     }
-                    host.writeMemory(wholeAddress(slot), dword(0));
+                    guest.setPtr(slot, 0);
                     return replaceList(slot, blocks) ? S_OK : E_OUTOFMEMORY;
                 });
             },
@@ -456,8 +450,8 @@ export function createDataBlockFunctions(host){
                 return withScratch(STATSTG.SIZE_OF + 8, function* (at){
                     if ((yield* method(stream, STAT, at, STATFLAG_NONAME)) >= 0)
                     {
-                        return readU32(at + STATSTG.SIZE) === 0
-                            && readU32(at + STATSTG.SIZE + 4) === 0 ? 1 : 0;
+                        return guest.u32(at + STATSTG.SIZE) === 0
+                            && guest.u32(at + STATSTG.SIZE + 4) === 0 ? 1 : 0;
                     }
                     const count = at + STATSTG.SIZE_OF;
                     if ((yield* method(stream, READ, count + 4, 4, count)) < 0)
@@ -485,7 +479,7 @@ export function createDataBlockFunctions(host){
             /** @param {number[]} args */
             handler: ([stream, buffer, size])=>withScratch(4, function* (count){
                 const status = yield* method(stream, WRITE, buffer, size, count);
-                return status < 0 ? status : readU32(count) === (size >>> 0) ? S_OK : E_FAIL;
+                return status < 0 ? status : guest.u32(count) === (size >>> 0) ? S_OK : E_FAIL;
             }),
         },
 
@@ -506,7 +500,7 @@ export function createDataBlockFunctions(host){
                 const status = yield* method(stream, STAT, at, STATFLAG_NONAME);
                 if (status >= 0 && wholeAddress(out) !== 0)
                 {
-                    host.writeMemory(wholeAddress(out), read(at + STATSTG.SIZE, 8));
+                    guest.setBytes(out, guest.snapshot(at + STATSTG.SIZE, 8));
                 }
                 return status;
             }),

@@ -5,7 +5,6 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 /**
  * A drop's HDROP: the global block WM_DROPFILES hands a window, a DROPFILES
@@ -26,8 +25,7 @@ const MOST_LIST = 0x10000;
 
 /**
  * @typedef {Object} DropHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
  *     | undefined} [library]
  */
@@ -65,6 +63,7 @@ export function dropPaths(bytes, wide){
  * @param {(text: string) => Uint8Array} encode   The ANSI page, no terminator.
  */
 export function createDropFunctions(host, decode, encode){
+    const { guest } = host;
     /** @param {string} name @param {number[]} args */
     const kernel32 = async(name, args)=>{
         const target = host.library?.('KERNEL32.dll')?.[name];
@@ -85,13 +84,13 @@ export function createDropFunctions(host, decode, encode){
         }
         try
         {
-            const header = host.readMemory(at, 20);
+            const header = guest.snapshot(at, 20);
             const view = new DataView(header.slice().buffer);
             const wide = view.getUint32(DROPFILES.fWide, true) !== 0;
             const size = await kernel32('GlobalSize', [drop]);
             const start = view.getUint32(DROPFILES.pFiles, true);
             const length = Math.max(0, Math.min(size || MOST_LIST, MOST_LIST) - start);
-            const raw = dropPaths(host.readMemory(at + start, length), wide);
+            const raw = dropPaths(guest.snapshot(at + start, length), wide);
             return {
                 paths: wide ? raw
                     : raw.map(path=>decode(Uint8Array.from(path, c=>c.charCodeAt(0)))),
@@ -138,11 +137,11 @@ export function createDropFunctions(host, decode, encode){
             const cut = path.slice(0, (room >>> 0) - 1);
             if (wide)
             {
-                host.writeMemory(wholeAddress(buffer), utf16z(cut));
+                guest.writeWide(buffer, cut);
                 return cut.length;
             }
             const bytes = encode(cut);
-            host.writeMemory(wholeAddress(buffer), Uint8Array.of(...bytes, 0));
+            guest.setBytes(buffer, Uint8Array.of(...bytes, 0));
             return bytes.length;
         },
     });
@@ -172,7 +171,7 @@ export function createDropFunctions(host, decode, encode){
                     const view = new DataView(bytes.buffer);
                     view.setInt32(0, read.x, true);
                     view.setInt32(4, read.y, true);
-                    host.writeMemory(wholeAddress(point), bytes);
+                    guest.setBytes(point, bytes);
                 }
                 return read.client ? 1 : 0;
             },

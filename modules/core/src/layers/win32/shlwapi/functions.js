@@ -111,35 +111,27 @@ const leadingInteger = (text, flags)=>{
  * DLLVERSIONINFO2, 32, which adds flags and the whole version as one 64-bit
  * number -- and any other size is an invalid argument, as is no structure.
  *
- * @param {{ readMemory?: (address: number, length: number) => Uint8Array,
- *     writeMemory: (address: number, bytes: Uint8Array) => void }} memory
+ * @param {import('../common/guest.js').Guest} guest
  * @param {number} info
  * @param {[number, number, number, number]} version  major, minor, build, QFE
  * @returns {number} an HRESULT
  */
-function answerDllVersion(memory, info, [major, minor, build, qfe]){
-    if (info === 0 || !memory.readMemory)
+function answerDllVersion(guest, info, [major, minor, build, qfe]){
+    if (info === 0)
     {
         return E_INVALIDARG;
     }
-    const head = memory.readMemory(info, 4);
-    const size = (head[0] | head[1] << 8 | head[2] << 16 | head[3] << 24) >>> 0;
+    const size = guest.u32(info);
     if (size !== 20 && size !== 32)
     {
         return E_INVALIDARG;
     }
     const DLLVER_PLATFORM_NT = 2;
-    const fields = new DataView(new ArrayBuffer(size - 4));
-    fields.setUint32(0, major, true);
-    fields.setUint32(4, minor, true);
-    fields.setUint32(8, build, true);
-    fields.setUint32(12, DLLVER_PLATFORM_NT, true);
-    if (size === 32)
-    {
-        fields.setUint32(20, (build << 16 | qfe) >>> 0, true);
-        fields.setUint32(24, (major << 16 | minor) >>> 0, true);
-    }
-    memory.writeMemory(info + 4, new Uint8Array(fields.buffer));
+    // With DLLVERSIONINFO2's dwFlags zero and its ullVersion after.
+    guest.set32s(info + 4, size === 32
+        ? [major, minor, build, DLLVER_PLATFORM_NT, 0, (build << 16 | qfe) >>> 0,
+            (major << 16 | minor) >>> 0]
+        : [major, minor, build, DLLVER_PLATFORM_NT]);
     return S_OK;
 }
 
@@ -148,13 +140,8 @@ const SHLWAPI_VERSION = /** @type {[number, number, number, number]} */ ([6, 0, 
 
 /**
  * @typedef {Object} ShlwapiHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its STATSTG is wider.
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} [readWideString]
- *           Reads a UTF-16 argument. Absent in a build that cannot, and the
- *           W spellings then fail as they would for an argument they could
- *           not read.
  * @property {{ stat(path: string): { exists: boolean, isDirectory: boolean } | null,
  *     list?(path: string): unknown[] }} [files]
  *           The volume, for the functions that ask what a path names. Absent,
@@ -162,8 +149,6 @@ const SHLWAPI_VERSION = /** @type {[number, number, number, number]} */ ([6, 0, 
  * @property {(path: string) => string} [fullPath]
  *           A path made absolute against the current directory, as the file
  *           functions make it.
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- *           For the counts a caller passes by pointer.
  * @property {() => Record<string, { handler: (args: number[]) => any }>} [advapi32]
  *           advapi32's exports, for the registry helpers -- read when called, so
  *           an HKEY the program holds names the key it does there. Absent, those
@@ -332,13 +317,14 @@ const hueToChannel = (low, high, hue)=>{
  *     from a stem and a spelling, which no narrower type can list.
  */
 export function createShlwapiFunctions(host){
+    const { guest } = host;
     /** @param {number} address */
     const pathAt = address=>
-        (address >>> 0) === 0 ? null : host.readCString(wholeAddress(address), MAX_LENGTH);
+        (address >>> 0) === 0 ? null : guest.cstr(address, MAX_LENGTH);
 
     /** @param {number} address */
-    const widePathAt = address=>((address >>> 0) === 0 || !host.readWideString
-        ? null : host.readWideString(wholeAddress(address), MAX_LENGTH * 2));
+    const widePathAt = address=>((address >>> 0) === 0
+        ? null : guest.wstr(address, MAX_LENGTH * 2));
 
     /** In the ANSI page a path is read in. @param {string} text */
     const narrow = text=>encodeAnsi(`${text}\0`);
@@ -360,7 +346,7 @@ export function createShlwapiFunctions(host){
                 return 0;
             }
             const result = combine(read(directory), read(file));
-            host.writeMemory(wholeAddress(destination), encode(result ?? ''));
+            guest.setBytes(destination, encode(result ?? ''));
             return result === null ? 0 : wholeAddress(destination);
         },
     });
@@ -406,7 +392,7 @@ export function createShlwapiFunctions(host){
             const text = compactPath(path, limit >>> 0, part=>measure(hdc >>> 0, part));
             if (text !== path)
             {
-                host.writeMemory(wholeAddress(pointer), encode(text));
+                guest.setBytes(pointer, encode(text));
             }
             return 1;
         },
@@ -447,7 +433,7 @@ export function createShlwapiFunctions(host){
             const start = path === null ? 0 : fileNameStart(path);
             if (path !== null && start > 0)
             {
-                host.writeMemory(wholeAddress(pointer), encode(path.slice(start)));
+                guest.setBytes(pointer, encode(path.slice(start)));
             }
             return 0;
         },
@@ -476,7 +462,7 @@ export function createShlwapiFunctions(host){
             {
                 return 0;
             }
-            host.writeMemory(wholeAddress(pointer), encode(result));
+            guest.setBytes(pointer, encode(result));
             return 1;
         },
     });
@@ -555,12 +541,11 @@ export function createShlwapiFunctions(host){
         },
     });
 
-    /** @param {number} address @param {number} value */
-    const writeWord = (address, value)=>{
+    /** A WORD answered through an out-parameter the caller may leave NULL. @param {number} address @param {number} value */
+    const answerOutWord = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(address), new Uint8Array([value & 0xff,
-                value >>> 8 & 0xff]));
+            guest.set16(address, value);
         }
     };
 
@@ -583,7 +568,7 @@ export function createShlwapiFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([key, subKey])=>{
-            if (!host.advapi32 || !host.allocate || !host.readMemory)
+            if (!host.advapi32 || !host.allocate)
             {
                 return ERROR_CALL_NOT_IMPLEMENTED;
             }
@@ -599,8 +584,7 @@ export function createShlwapiFunctions(host){
                 {
                     return opened;
                 }
-                const counts = new DataView(host.readMemory(out, 4).slice().buffer);
-                const handle = counts.getUint32(0, true);
+                const handle = guest.u32(out);
                 const queried = registry(`RegQueryInfoKey${width}`,
                     [handle, 0, 0, 0, out + 4, 0, 0, out + 8, 0, 0, 0, 0]);
                 registry('RegCloseKey', [handle]);
@@ -608,8 +592,7 @@ export function createShlwapiFunctions(host){
                 {
                     return queried;
                 }
-                const found = new DataView(host.readMemory(out + 4, 8).slice().buffer);
-                if (found.getUint32(0, true) !== 0 || found.getUint32(4, true) !== 0)
+                if (guest.u32(out + 4) !== 0 || guest.u32(out + 4 + 4) !== 0)
                 {
                     return ERROR_KEY_HAS_CHILDREN;
                 }
@@ -653,7 +636,7 @@ export function createShlwapiFunctions(host){
             }
             const answer = new DataView(new ArrayBuffer(8));
             answer.setBigInt64(0, value, true);
-            host.writeMemory(wholeAddress(out), new Uint8Array(answer.buffer, 0, bytes));
+            guest.setBytes(out, new Uint8Array(answer.buffer, 0, bytes));
             return 1;
         },
     });
@@ -713,7 +696,7 @@ export function createShlwapiFunctions(host){
                 written += piece.length / unit;
             }
             bytes.push(...new Array(unit).fill(0));
-            host.writeMemory(wholeAddress(destination), Uint8Array.from(bytes));
+            guest.setBytes(destination, Uint8Array.from(bytes));
             return written + 1;
         },
     });
@@ -734,7 +717,7 @@ export function createShlwapiFunctions(host){
             try
             {
                 const bytes = MAX_PATH * (width === 'W' ? 2 : 1);
-                host.writeMemory(size, Uint8Array.of(bytes & 0xff, bytes >>> 8, 0, 0));
+                guest.setBytes(size, Uint8Array.of(bytes & 0xff, bytes >>> 8, 0, 0));
                 return /** @type {number} */ (await host.advapi32()[`RegGetValue${width}`]
                     .handler([key, subKey, value, RRF_RT_REG_SZ, 0, path, size])) >>> 0;
             }
@@ -863,7 +846,7 @@ export function createShlwapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([key])=>{
-                if (!host.advapi32 || !host.allocate || !host.readMemory)
+                if (!host.advapi32 || !host.allocate)
                 {
                     return 0;
                 }
@@ -873,7 +856,7 @@ export function createShlwapiFunctions(host){
                     const status = /** @type {number} */ (await host.advapi32().RegOpenKeyExW
                         .handler([key, 0, 0, MAXIMUM_ALLOWED, out])) >>> 0;
                     return status === ERROR_SUCCESS
-                        ? new DataView(host.readMemory(out, 4).slice().buffer).getUint32(0, true)
+                        ? guest.u32(out)
                         : 0;
                 }
                 finally
@@ -887,7 +870,7 @@ export function createShlwapiFunctions(host){
         DllGetVersion: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([info])=>answerDllVersion(host, wholeAddress(info), SHLWAPI_VERSION),
+            handler: ([info])=>answerDllVersion(guest, wholeAddress(info), SHLWAPI_VERSION),
         },
 
         /**
@@ -1026,9 +1009,9 @@ export function createShlwapiFunctions(host){
                             : HLSMAX * 2 / 3 + delta(green) - delta(red);
                     hue = hue < 0 ? hue + HLSMAX : hue > HLSMAX ? hue - HLSMAX : hue;
                 }
-                writeWord(hueOut, hue);
-                writeWord(luminanceOut, luminance);
-                writeWord(saturationOut, saturation);
+                answerOutWord(hueOut, hue);
+                answerOutWord(luminanceOut, luminance);
+                answerOutWord(saturationOut, saturation);
                 return 0;
             },
         },
@@ -1091,7 +1074,7 @@ export function createShlwapiFunctions(host){
             {
                 const unexpanded = table[`PathUnExpandEnvStrings${suffix}`].handler([path, scratch,
                     MAX_PATH]) ? width.read(scratch) ?? text : text;
-                host.writeMemory(scratch, width.sz(unexpanded));
+                guest.setBytes(scratch, width.sz(unexpanded));
                 return table[`SHSetValue${suffix}`].handler([key, subKey, value, REG_EXPAND_SZ,
                     scratch, (unexpanded.length + 1) * width.unit]);
             }
@@ -1124,14 +1107,14 @@ export function createShlwapiFunctions(host){
             /** @param {number[]} args */
             handler: ([rgb, amount, scale])=>{
                 const scratch = (amount | 0) === 0 ? 0 : host.allocate?.(8) ?? 0;
-                if (!scratch || !host.readMemory)
+                if (!scratch)
                 {
                     return wholeAddress(rgb);
                 }
                 try
                 {
                     table.ColorRGBToHLS.handler([rgb, scratch, scratch + 2, scratch + 4]);
-                    const words = host.readMemory(scratch, 6);
+                    const words = guest.snapshot(scratch, 6);
                     const hue = words[0] | words[1] << 8;
                     const luminance = words[2] | words[3] << 8;
                     const saturation = words[4] | words[5] << 8;

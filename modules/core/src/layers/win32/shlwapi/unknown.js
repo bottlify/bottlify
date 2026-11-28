@@ -69,8 +69,7 @@ export const UNKNOWN_ORDINALS = Object.freeze({ 169: 'IUnknown_AtomicRelease',
 
 /**
  * @typedef {Object} UnknownHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => void} free
  * @property {(entry: number, args: number[], thread: unknown) => Promise<number> | number} call
@@ -90,30 +89,19 @@ const CTF_THREAD_REF = 0x2;
 const CTF_PROCESS_REF = 0x4;
 const CTF_COINIT = 0x8;
 
-/** @param {Uint8Array} bytes */
-const u32 = bytes=>(bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-
-/** @param {number} value */
-const dword = value=>{
-    const bytes = new Uint8Array(4);
-    new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-    return bytes;
-};
 
 /** @param {UnknownHost} host */
 export function createUnknownFunctions(host){
+    const { guest } = host;
     /**
      * A method of an object, `this` first, as a COM method takes it.
      *
      * @param {number} object @param {number} slot @param {number[]} args @param {unknown} thread
      */
     const callMethod = async(object, slot, args, thread)=>{
-        const entry = u32(host.readMemory(u32(host.readMemory(object, 4)) + slot * 4, 4));
-        return (await host.call(entry, [object, ...args], thread)) | 0;
+        return (await host.call(guest.method(object, slot), [object, ...args], thread)) | 0;
     };
 
-    /** @param {number} at */
-    const readLong = at=>new DataView(host.readMemory(at, 4).slice().buffer).getInt32(0, true);
 
     /** The reference each thread was given to hold (SHSetThreadRef). @type {Map<unknown, number>} */
     const threadReferences = new Map();
@@ -133,7 +121,7 @@ export function createUnknownFunctions(host){
         {
             return E_INVALIDARG;
         }
-        host.writeMemory(wholeAddress(out), dword(held));
+        guest.set32(out, held);
         if (held === 0)
         {
             return absent;
@@ -155,10 +143,10 @@ export function createUnknownFunctions(host){
             /** @param {number[]} args */
             handler: async([slot])=>{
                 const object =
-                    wholeAddress(slot) === 0 ? 0 : u32(host.readMemory(wholeAddress(slot), 4));
+                    wholeAddress(slot) === 0 ? 0 : guest.u32(slot);
                 if (object !== 0)
                 {
-                    host.writeMemory(wholeAddress(slot), dword(0));
+                    guest.set32(slot, 0);
                     await callMethod(object, SLOT_RELEASE, [], host.callerThread());
                 }
                 return 0;
@@ -176,7 +164,7 @@ export function createUnknownFunctions(host){
             /** @param {number[]} args */
             handler: async([slot, object])=>{
                 const thread = host.callerThread();
-                const old = u32(host.readMemory(wholeAddress(slot), 4));
+                const old = guest.u32(slot);
                 if (old === wholeAddress(object))
                 {
                     return 0;
@@ -185,7 +173,7 @@ export function createUnknownFunctions(host){
                 {
                     await callMethod(wholeAddress(object), SLOT_ADD_REF, [], thread);
                 }
-                host.writeMemory(wholeAddress(slot), dword(wholeAddress(object)));
+                guest.set32(slot, wholeAddress(object));
                 if (old !== 0)
                 {
                     await callMethod(old, SLOT_RELEASE, [], thread);
@@ -209,16 +197,16 @@ export function createUnknownFunctions(host){
                 {
                     if (wholeAddress(out) !== 0)
                     {
-                        host.writeMemory(wholeAddress(out), dword(0));
+                        guest.set32(out, 0);
                     }
                     return E_INVALIDARG;
                 }
                 if (!host.publish)
                 {
-                    host.writeMemory(wholeAddress(out), dword(0));
+                    guest.set32(out, 0);
                     return E_OUTOFMEMORY;
                 }
-                host.writeMemory(wholeAddress(count), dword(1));
+                guest.set32(count, 1);
                 const at = wholeAddress(count);
                 const object = {
                     state: null,
@@ -226,24 +214,24 @@ export function createUnknownFunctions(host){
                     interfaceFor: asked=>(asked === IID_IUNKNOWN
                         ? { id: asked, methods: IUNKNOWN_METHODS } : null),
                     addRef(){
-                        const next = readLong(at) + 1;
-                        host.writeMemory(at, dword(next));
+                        const next = guest.i32(at) + 1;
+                        guest.set32(at, next);
                         return next;
                     },
                     release(){
-                        const next = readLong(at) - 1;
-                        host.writeMemory(at, dword(next));
+                        const next = guest.i32(at) - 1;
+                        guest.set32(at, next);
                         return Math.max(next, 0);
                     },
                     get refCount(){
-                        return readLong(at);
+                        return guest.i32(at);
                     },
                     get destroyed(){
-                        return readLong(at) <= 0;
+                        return guest.i32(at) <= 0;
                     },
                 };
                 const pointer = host.publish(object, IID_IUNKNOWN);
-                host.writeMemory(wholeAddress(out), dword(pointer));
+                guest.set32(out, pointer);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
@@ -343,7 +331,7 @@ export function createUnknownFunctions(host){
                 {
                     return E_FAIL;
                 }
-                host.writeMemory(wholeAddress(out), dword(0));
+                guest.set32(out, 0);
                 if (wholeAddress(object) === 0)
                 {
                     return E_FAIL;
@@ -356,12 +344,12 @@ export function createUnknownFunctions(host){
                 }
                 try
                 {
-                    host.writeMemory(block, IID_ISERVICEPROVIDER);
+                    guest.setBytes(block, IID_ISERVICEPROVIDER);
                     const slot = block + IID_ISERVICEPROVIDER.length;
-                    host.writeMemory(slot, dword(0));
+                    guest.set32(slot, 0);
                     const asked = await callMethod(wholeAddress(object), SLOT_QUERY_INTERFACE,
                         [block, slot], thread);
-                    const provider = u32(host.readMemory(slot, 4));
+                    const provider = guest.u32(slot);
                     if (asked !== S_OK || provider === 0)
                     {
                         return asked;
@@ -545,7 +533,7 @@ export function createUnknownFunctions(host){
                 }
                 try
                 {
-                    host.writeMemory(block, SID_SWEBBROWSERAPP);
+                    guest.setBytes(block, SID_SWEBBROWSERAPP);
                     return await queryService(object, block, iid, out);
                 }
                 finally
@@ -604,24 +592,24 @@ export function createUnknownFunctions(host){
                 {
                     return E_POINTER;
                 }
-                host.writeMemory(wholeAddress(out), dword(0));
+                guest.set32(out, 0);
                 if ((iid >>> 0) === 0 || wholeAddress(entries) === 0)
                 {
                     return E_NOINTERFACE;
                 }
-                const wanted = host.readMemory(wholeAddress(iid), 16).slice();
+                const wanted = guest.snapshot(iid, 16);
                 const isUnknown = sameBytes(wanted, IID_IUNKNOWN_BYTES);
                 for (let at = wholeAddress(entries); ; at += 8)
                 {
-                    const entry = u32(host.readMemory(at, 4));
+                    const entry = guest.u32(at);
                     if (entry === 0)
                     {
                         return E_NOINTERFACE;
                     }
-                    if (isUnknown || sameBytes(host.readMemory(entry, 16), wanted))
+                    if (isUnknown || sameBytes(guest.snapshot(entry, 16), wanted))
                     {
-                        const found = (wholeAddress(base) + u32(host.readMemory(at + 4, 4))) >>> 0;
-                        host.writeMemory(wholeAddress(out), dword(found));
+                        const found = (wholeAddress(base) + guest.u32(at + 4)) >>> 0;
+                        guest.set32(out, found);
                         await callMethod(found, SLOT_ADD_REF, [], host.callerThread());
                         return S_OK;
                     }
@@ -665,14 +653,13 @@ export function createUnknownFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: async([outer, slot])=>{
-                const held = wholeAddress(slot) === 0 ? 0 : u32(host.readMemory(wholeAddress(slot),
-                    4));
+                const held = wholeAddress(slot) === 0 ? 0 : guest.u32(slot);
                 if (held !== 0 && wholeAddress(outer) !== 0)
                 {
                     const thread = host.callerThread();
                     await callMethod(wholeAddress(outer), SLOT_ADD_REF, [], thread);
                     await callMethod(held, SLOT_RELEASE, [], thread);
-                    host.writeMemory(wholeAddress(slot), dword(0));
+                    guest.set32(slot, 0);
                 }
                 return 0;
             },
@@ -704,25 +691,25 @@ export function createUnknownFunctions(host){
                     const out = block + name.length;
                     const iid = out + 8;
                     const got = iid + 16;
-                    host.writeMemory(block, Uint8Array.from(name));
-                    host.writeMemory(out, dword(0));
+                    guest.setBytes(block, Uint8Array.from(name));
+                    guest.set32(out, 0);
                     if (await callMethod(wholeAddress(context), SLOT_GET_OBJECT_PARAM, [block,
                         out], thread)
-                        < 0 || u32(host.readMemory(out, 4)) === 0)
+                        < 0 || guest.u32(out) === 0)
                     {
                         return 0;
                     }
-                    const object = u32(host.readMemory(out, 4));
-                    host.writeMemory(iid, IID_IPERSIST);
-                    host.writeMemory(out + 4, dword(0));
+                    const object = guest.u32(out);
+                    guest.setBytes(iid, IID_IPERSIST);
+                    guest.set32(out + 4, 0);
                     const persist = await callMethod(object, SLOT_QUERY_INTERFACE, [iid, out + 4],
-                        thread) >= 0 ? u32(host.readMemory(out + 4, 4)) : 0;
+                        thread) >= 0 ? guest.u32(out + 4) : 0;
                     let same = false;
                     if (persist !== 0)
                     {
                         same = await callMethod(persist, SLOT_GET_CLASS_ID, [got], thread) >= 0
-                            && sameBytes(host.readMemory(got, 16),
-                                host.readMemory(wholeAddress(clsid), 16));
+                            && sameBytes(guest.snapshot(got, 16),
+                                guest.snapshot(clsid, 16));
                         await callMethod(persist, SLOT_RELEASE, [], thread);
                     }
                     await callMethod(object, SLOT_RELEASE, [], thread);
@@ -753,7 +740,7 @@ export function createUnknownFunctions(host){
             handler: async(/** @type {number[]} */ args)=>{
                 if (clears !== undefined && (args[clears] >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(args[clears]), dword(0));
+                    guest.set32(args[clears], 0);
                 }
                 const object = wholeAddress(args[0]);
                 if (object === 0)
@@ -790,11 +777,11 @@ export function createUnknownFunctions(host){
         }
         try
         {
-            host.writeMemory(block, iid);
-            host.writeMemory(block + 16, dword(0));
+            guest.setBytes(block, iid);
+            guest.set32(block + 16, 0);
             const answer = await callMethod(object, SLOT_QUERY_INTERFACE, [block, block + 16],
                 thread);
-            return answer >= 0 ? u32(host.readMemory(block + 16, 4)) : 0;
+            return answer >= 0 ? guest.u32(block + 16) : 0;
         }
         finally
         {

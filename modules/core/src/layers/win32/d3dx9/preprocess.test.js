@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { freshSpace } from '../../cache/testing.fixture.js';
 import { evaluate, preprocess } from './preprocess.js';
 import { createD3dxFunctions } from './functions.js';
-import { guestOver } from '../common/guest.fixture.js';
+import { guestOver, recordingGuest } from '../common/guest.fixture.js';
 
 test('macros expand, with and without parameters, and the program\'s own are defined', async()=>{
     const result = await preprocess([
@@ -187,3 +187,56 @@ test('an include is closed once it and what it includes are read, its own includ
     assert.deepEqual(events, ['open outer.h from memory', 'open inner.h from outer.h',
         'close inner.h', 'close outer.h']);
 });
+
+test('in a 64-bit process D3DXMACRO\'s pointers and ID3DXInclude\'s methods and data are whole',
+    async()=>{
+        const HIGH = 0x2_0000_0000;
+        const { guest, use } = recordingGuest({ pointerSize: 8 });
+        const memory = new Uint8Array(0x8000);
+        use(memory);
+        let free = 0x4000;
+        /** @type {number[]} */
+        const calls = [];
+        /** @type {any[]} */
+        const published = [];
+        const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'),
+            images: freshSpace('d3dx-images'),
+            guest,
+            heap: { allocate: bytes=>{
+                const at = free;
+                free += bytes + 15 & ~15;
+                return at;
+            }, free: ()=>{} },
+            vtables: { publish: object=>{
+                published.push(object);
+                return 0x100 + published.length * 0x10;
+            } },
+            currentThread: ()=>'main',
+            callGuest: ({ entry, args })=>{
+                calls.push(entry);
+                if (entry === HIGH + 0x900)
+                {
+                    guest.writeAnsi(HIGH + 0x3000, '#define N 5\n');
+                    guest.setPtr(args[4], HIGH + 0x3000);
+                    guest.set32(args[5], 12);
+                }
+                return Promise.resolve(0);
+            },
+        }));
+        guest.writeAnsi(HIGH + 0x1100, 'LIGHTS');
+        guest.writeAnsi(HIGH + 0x1107, '4');
+        guest.setPtr(0x1200, HIGH + 0x1100);
+        guest.setPtr(0x1208, HIGH + 0x1107);
+        guest.setPtr(0x1210, 0);
+        guest.setPtr(0x2000, 0x2100);
+        guest.setPtr(0x2100, HIGH + 0x900);
+        guest.setPtr(0x2108, HIGH + 0x904);
+        const source = new TextEncoder().encode('#include "n.fxh"\nfloat n = N * LIGHTS;');
+        memory.set(source, 0x1000);
+        assert.equal(await fns.D3DXPreprocessShader.handler([0x1000, source.length, 0x1200,
+            0x2000, 0x50, 0]), 0);
+        assert.deepEqual(calls, [HIGH + 0x900, HIGH + 0x904], 'Open, then Close');
+        const text = published[0].state;
+        assert.match(new TextDecoder().decode(guest.view(text.data, text.size)),
+            /float n = 5 \* 4;/);
+    });

@@ -17,9 +17,8 @@
  * which every caller handles, and there is no result to get.
  */
 
-import { canonicalGuid, formatGuid, readGuid } from '../../../system/guid.js';
+import { canonicalGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;
@@ -71,16 +70,12 @@ export const SAVE_OPTIONS = FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_PAT
 const UNDEFINED_OPTIONS = 0x00000001 | 0x00000010 | 0x00000400 | 0x00080000 | 0x00400000
     | 0x00800000 | 0x01000000 | 0x04000000 | 0x08000000;
 
-/** COMDLG_FILTERSPEC: a name and a pattern, two wide strings. */
-const FILTERSPEC_SIZE = 8;
 /** How long a dialog's strings may be, in characters. */
 const MAX_TEXT = 32767;
 
 /**
  * @typedef {Object} ItemDialogHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} allocate  CoTaskMemAlloc: what the caller frees.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(object: any, interfaceId: string) => number} [publish]
@@ -95,20 +90,10 @@ const MAX_TEXT = 32767;
  * @param {ItemDialogHost} host
  */
 export function registerFileDialogClasses(registry, host){
+    const { guest } = host;
     let told = false;
-    /** @param {number} at */
-    const read32 = at=>{
-        const b = host.readMemory(wholeAddress(at), 4);
-        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
-    };
-    /** @param {number} at @param {number} value */
-    const write32 = (at, value)=>{
-        const v = value >>> 0;
-        host.writeMemory(wholeAddress(at),
-            Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
-    };
-    /** @param {number} at */
-    const wide = at=>(at >>> 0 === 0 ? null : host.readWideString?.(at >>> 0, MAX_TEXT * 2) ?? '');
+    /** COMDLG_FILTERSPEC: a name and a pattern, two wide strings' pointers. */
+    const FILTERSPEC_SIZE = 2 * guest.pointerSize;
     /**
      * A wide string in memory the caller frees with CoTaskMemFree.
      *
@@ -120,7 +105,7 @@ export function registerFileDialogClasses(registry, host){
         {
             return 0;
         }
-        host.writeMemory(at, utf16z(text));
+        guest.writeWide(at, text);
         return at;
     };
 
@@ -161,8 +146,10 @@ export function registerFileDialogClasses(registry, host){
                     return S_OK;
                 }
                 state.types = Array.from({ length: types >>> 0 }, (_, i)=>({
-                    name: wide(read32(specs + i * FILTERSPEC_SIZE)) ?? '',
-                    spec: wide(read32(specs + i * FILTERSPEC_SIZE + 4)) ?? '',
+                    name: guest.optionalText(guest.ptr(specs + i * FILTERSPEC_SIZE), true,
+                        MAX_TEXT * 2) ?? '',
+                    spec: guest.optionalText(guest.ptr(specs + i * FILTERSPEC_SIZE
+                        + guest.pointerSize), true, MAX_TEXT * 2) ?? '',
                 }));
                 return S_OK;
             }],
@@ -181,7 +168,7 @@ export function registerFileDialogClasses(registry, host){
                     return E_INVALIDARG;
                 }
                 // One-based; 0 until one is chosen, types set or not.
-                write32(out, state.typeIndex);
+                guest.set32(out, state.typeIndex);
                 return S_OK;
             }],
             ['Advise', 2, (state, [sink, cookie])=>{
@@ -191,7 +178,7 @@ export function registerFileDialogClasses(registry, host){
                 }
                 const next = ++state.cookies;
                 state.sinks.set(next, sink >>> 0);
-                write32(cookie, next);
+                guest.set32(cookie, next);
                 return S_OK;
             }],
             ['Unadvise', 1, (state, [cookie])=>(state.sinks.delete(cookie >>> 0)
@@ -211,7 +198,7 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_INVALIDARG;
                 }
-                write32(out, state.options);
+                guest.set32(out, state.options);
                 return S_OK;
             }],
             ['SetDefaultFolder', 1, (_state, [item])=>(item >>> 0 === 0 ? E_INVALIDARG : S_OK)],
@@ -221,7 +208,7 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_INVALIDARG;
                 }
-                write32(out, 0);
+                guest.setPtr(out, 0);
                 return E_FAIL;
             }],
             ['GetCurrentSelection', 1, (_state, [out])=>{
@@ -229,11 +216,11 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_INVALIDARG;
                 }
-                write32(out, 0);
+                guest.setPtr(out, 0);
                 return E_FAIL;
             }],
             ['SetFileName', 1, (state, [name])=>{
-                state.fileName = wide(name) ?? '';
+                state.fileName = guest.optionalText(name, true, MAX_TEXT * 2) ?? '';
                 return S_OK;
             }],
             ['GetFileName', 1, (state, [out])=>{
@@ -243,23 +230,23 @@ export function registerFileDialogClasses(registry, host){
                 }
                 if (state.fileName === null)
                 {
-                    write32(out, 0);
+                    guest.setPtr(out, 0);
                     return E_FAIL;
                 }
                 const at = taskString(state.fileName);
-                write32(out, at);
+                guest.setPtr(out, at);
                 return at === 0 ? E_OUTOFMEMORY : S_OK;
             }],
             ['SetTitle', 1, (state, [text])=>{
-                state.title = wide(text) ?? '';
+                state.title = guest.optionalText(text, true, MAX_TEXT * 2) ?? '';
                 return S_OK;
             }],
             ['SetOkButtonLabel', 1, (state, [text])=>{
-                state.okLabel = wide(text) ?? '';
+                state.okLabel = guest.optionalText(text, true, MAX_TEXT * 2) ?? '';
                 return S_OK;
             }],
             ['SetFileNameLabel', 1, (state, [text])=>{
-                state.nameLabel = wide(text) ?? '';
+                state.nameLabel = guest.optionalText(text, true, MAX_TEXT * 2) ?? '';
                 return S_OK;
             }],
             ['GetResult', 1, (_state, [out])=>(out >>> 0 === 0 ? E_INVALIDARG
@@ -268,7 +255,7 @@ export function registerFileDialogClasses(registry, host){
                 : E_UNEXPECTED)],
             ['AddPlace', 2, (_state, [item])=>(item >>> 0 === 0 ? E_INVALIDARG : S_OK)],
             ['SetDefaultExtension', 1, (state, [text])=>{
-                state.extension = wide(text) ?? '';
+                state.extension = guest.optionalText(text, true, MAX_TEXT * 2) ?? '';
                 return S_OK;
             }],
             ['Close', 1, ()=>S_OK],
@@ -277,7 +264,7 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_INVALIDARG;
                 }
-                state.client = readGuid(host, guid);
+                state.client = guest.guid(guid);
                 return S_OK;
             }],
             ['ClearClientData', 0, state=>(state.client !== null ? S_OK : E_FAIL)],
@@ -291,7 +278,7 @@ export function registerFileDialogClasses(registry, host){
                 ['GetProperties', 1, (_state, [out])=>{
                     if (out >>> 0 !== 0)
                     {
-                        write32(out, 0);
+                        guest.setPtr(out, 0);
                     }
                     return E_UNEXPECTED;
                 }],
@@ -303,7 +290,7 @@ export function registerFileDialogClasses(registry, host){
                     {
                         return E_POINTER;
                     }
-                    write32(out, 0);
+                    guest.setPtr(out, 0);
                     return E_UNEXPECTED;
                 }],
                 ['GetSelectedItems', 1, (_state, [out])=>{
@@ -311,7 +298,7 @@ export function registerFileDialogClasses(registry, host){
                     {
                         return E_POINTER;
                     }
-                    write32(out, 0);
+                    guest.setPtr(out, 0);
                     return E_FAIL;
                 }],
             ]);
@@ -341,8 +328,9 @@ export function registerFileDialogClasses(registry, host){
             {
                 return E_UNEXPECTED;
             }
-            controls.set(id >>> 0, { kind, state: 3, text: words > 1 ? wide(label) ?? '' : '',
-                items: new Map(), selected: -1, checked: 0 });
+            controls.set(id >>> 0, { kind, state: 3, text: words > 1 ? guest.optionalText(label,
+                true, MAX_TEXT * 2) ?? '' : '',
+            items: new Map(), selected: -1, checked: 0 });
             return S_OK;
         };
         /** @param {(control: any, args: number[]) => number} act */
@@ -368,11 +356,11 @@ export function registerFileDialogClasses(registry, host){
             slot('AddSeparator', 1, add('separator', 1)),
             slot('AddText', 2, add('text', 2)),
             slot('SetControlLabel', 2, on((control, [, label])=>{
-                control.text = wide(label) ?? '';
+                control.text = guest.optionalText(label, true, MAX_TEXT * 2) ?? '';
                 return S_OK;
             })),
             slot('GetControlState', 2, on((control, [, out])=>{
-                write32(out, control.state);
+                guest.set32(out, control.state);
                 return S_OK;
             })),
             slot('SetControlState', 2, on((control, [, value])=>{
@@ -381,15 +369,15 @@ export function registerFileDialogClasses(registry, host){
             })),
             slot('GetEditBoxText', 2, on((control, [, out])=>{
                 const at = taskString(control.text);
-                write32(out, at);
+                guest.setPtr(out, at);
                 return at === 0 ? E_OUTOFMEMORY : S_OK;
             })),
             slot('SetEditBoxText', 2, on((control, [, text])=>{
-                control.text = wide(text) ?? '';
+                control.text = guest.optionalText(text, true, MAX_TEXT * 2) ?? '';
                 return S_OK;
             })),
             slot('GetCheckButtonState', 2, on((control, [, out])=>{
-                write32(out, control.checked);
+                guest.set32(out, control.checked);
                 return S_OK;
             })),
             slot('SetCheckButtonState', 2, on((control, [, value])=>{
@@ -401,7 +389,8 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_INVALIDARG;
                 }
-                control.items.set(item >>> 0, { text: wide(label) ?? '', state: 3 });
+                control.items.set(item >>> 0, { text: guest.optionalText(label, true,
+                    MAX_TEXT * 2) ?? '', state: 3 });
                 return S_OK;
             })),
             slot('RemoveControlItem', 2, on((control, [, item])=>
@@ -416,7 +405,7 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_INVALIDARG;
                 }
-                write32(out, entry.state);
+                guest.set32(out, entry.state);
                 return S_OK;
             })),
             slot('SetControlItemState', 3, on((control, [, item, value])=>{
@@ -433,7 +422,7 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_FAIL;
                 }
-                write32(out, control.selected);
+                guest.set32(out, control.selected);
                 return S_OK;
             })),
             slot('SetSelectedControlItem', 2, on((control, [, item])=>{
@@ -453,7 +442,7 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_INVALIDARG;
                 }
-                entry.text = wide(label) ?? '';
+                entry.text = guest.optionalText(label, true, MAX_TEXT * 2) ?? '';
                 return S_OK;
             })),
         ];
@@ -467,7 +456,7 @@ export function registerFileDialogClasses(registry, host){
             {
                 return E_INVALIDARG;
             }
-            write32(out, 0);
+            guest.setPtr(out, 0);
             return S_OK;
         } },
         { name: 'ContextSensitiveHelp', argBytes: 8, invoke: ()=>S_OK },
@@ -485,7 +474,7 @@ export function registerFileDialogClasses(registry, host){
         {
             if (out >>> 0 !== 0)
             {
-                write32(out, 0);
+                guest.setPtr(out, 0);
             }
             return E_FAIL;
         } },
@@ -504,7 +493,7 @@ export function registerFileDialogClasses(registry, host){
             {
                 return E_POINTER;
             }
-            write32(out, 0);
+            guest.setPtr(out, 0);
             if (guidAt(service) !== canonicalGuid(SID_SEXPLORERBROWSERFRAME))
             {
                 return E_NOTIMPL;
@@ -514,13 +503,12 @@ export function registerFileDialogClasses(registry, host){
             {
                 return E_NOINTERFACE;
             }
-            write32(out, host.publish(object, asked));
+            guest.set32(out, host.publish(object, asked));
             return S_OK;
         } },
     ];
     /** @param {number} at @returns {string | null} */
-    const guidAt = at=>(at >>> 0 === 0 ? null
-        : canonicalGuid(formatGuid(host.readMemory(wholeAddress(at), 16))));
+    const guidAt = at=>(at >>> 0 === 0 ? null : canonicalGuid(guest.guid(at)));
     /**
      * IExplorerBrowserEvents: the dialog hears its browser's navigation; with
      * no browser shown, nothing is to be done about it.
@@ -545,7 +533,7 @@ export function registerFileDialogClasses(registry, host){
             {
                 return E_POINTER;
             }
-            write32(flags, 0);
+            guest.set32(flags, 0);
             return S_OK;
         } },
         { name: 'OnColumnClicked', argBytes: 12, invoke: ()=>S_OK },
@@ -554,7 +542,7 @@ export function registerFileDialogClasses(registry, host){
         {
             if (buffer >>> 0 !== 0 && (length | 0) > 0)
             {
-                host.writeMemory(wholeAddress(buffer), new Uint8Array(2));
+                guest.set16(buffer, 0);
             }
             return S_OK;
         } },

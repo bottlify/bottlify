@@ -13,8 +13,7 @@
  * reads its names itself.
  */
 
-import { dword, u32 } from './text.js';
-import { formatGuid } from '../../../system/guid.js';
+import { u32Of } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
@@ -65,16 +64,13 @@ const BOOL_VALUE_LIMIT = 0x100;
 
 /**
  * @typedef {Object} RegistryHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {import('../common/guest.js').Guest} guest
  * @property {() => Record<string, { handler: (args: number[]) => any }>} [advapi32]
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }> | undefined}
  *     [library]  ole32, whose stream over a block of memory is the stream handed out.
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {(address: number, maxLength: number) => string} [readCString]
- * @property {(address: number, maxLength: number) => string} [readWideString]
  */
 
 /**
@@ -104,7 +100,7 @@ export const booleanOf = (type, data, wide)=>{
     }
     if (type === REG_DWORD && data.length >= 4)
     {
-        return u32(data) !== 0;
+        return u32Of(data) !== 0;
     }
     if (type === REG_BINARY && data.length === 1)
     {
@@ -117,6 +113,7 @@ export const booleanOf = (type, data, wide)=>{
  * @param {RegistryHost} host
  */
 export function createRegistryHelpers(host){
+    const { guest } = host;
     /** @param {string} name @param {number[]} args @returns {number} */
     const registry = (name, args)=>
         /** @type {number} */ (host.advapi32?.()[name].handler(args)) >>> 0;
@@ -132,7 +129,7 @@ export function createRegistryHelpers(host){
      *     null when the key is not there; found false when only the value is not
      */
     const readValue = (width, key, subKey, value, limit = 0x100000)=>{
-        if (!host.advapi32 || !host.allocate || !host.readMemory)
+        if (!host.advapi32 || !host.allocate)
         {
             return null;
         }
@@ -141,8 +138,6 @@ export function createRegistryHelpers(host){
         {
             return null;
         }
-        const read = /** @type {(address: number, length: number) => Uint8Array} */ (
-            host.readMemory);
         try
         {
             if (registry(`RegOpenKeyEx${width}`, [key, subKey, 0, KEY_READ, scratch])
@@ -150,16 +145,16 @@ export function createRegistryHelpers(host){
             {
                 return null;
             }
-            const handle = u32(read(scratch, 4));
+            const handle = guest.u32(scratch);
             try
             {
-                host.writeMemory(scratch + 8, dword(0));
+                guest.set32(scratch + 8, 0);
                 if (registry(`RegQueryValueEx${width}`, [handle, value, 0, scratch + 4, 0,
                     scratch + 8]) !== ERROR_SUCCESS)
                 {
                     return { found: false, type: 0, data: new Uint8Array(0) };
                 }
-                const size = Math.min(u32(read(scratch + 8, 4)), limit);
+                const size = Math.min(guest.u32(scratch + 8), limit);
                 const block = size > 0 ? host.allocate(size) : 0;
                 if (size > 0 && !block)
                 {
@@ -167,7 +162,7 @@ export function createRegistryHelpers(host){
                 }
                 try
                 {
-                    host.writeMemory(scratch + 8, dword(size));
+                    guest.set32(scratch + 8, size);
                     const status = size > 0 ? registry(`RegQueryValueEx${width}`,
                         [handle, value, 0, scratch + 4, block, scratch + 8]) : ERROR_SUCCESS;
                     if (status !== ERROR_SUCCESS)
@@ -176,8 +171,8 @@ export function createRegistryHelpers(host){
                     }
                     return {
                         found: true,
-                        type: u32(read(scratch + 4, 4)),
-                        data: size > 0 ? read(block, u32(read(scratch + 8, 4))).slice()
+                        type: guest.u32(scratch + 4),
+                        data: size > 0 ? guest.snapshot(block, guest.u32(scratch + 8))
                             : new Uint8Array(0),
                     };
                 }
@@ -259,7 +254,7 @@ export function createRegistryHelpers(host){
             const create = (host.library?.('ole32.dll') ?? host.library?.('OLE32.dll'))
                 ?.CreateStreamOnHGlobal;
             const read = create ? readValue(width, key, subKey, value) : null;
-            if (!create || !read || !host.allocate || !host.readMemory)
+            if (!create || !read || !host.allocate)
             {
                 if (!create)
                 {
@@ -276,11 +271,11 @@ export function createRegistryHelpers(host){
             }
             if (block)
             {
-                host.writeMemory(block, read.data);
+                guest.setBytes(block, read.data);
             }
-            host.writeMemory(out, dword(0));
+            guest.set32(out, 0);
             const status = /** @type {number} */ (create.handler([block, 1, out])) | 0;
-            const stream = status < 0 ? 0 : u32(host.readMemory(out, 4));
+            const stream = status < 0 ? 0 : guest.u32(out);
             host.free?.(out);
             if (stream === 0 && block)
             {
@@ -301,13 +296,11 @@ export function createRegistryHelpers(host){
         const unit = width === 'W' ? 2 : 1;
         const call = async(/** @type {string} */ name, /** @type {number[]} */ args)=>
             /** @type {number} */ (await host.advapi32?.()[name].handler(args)) >>> 0;
-        if (!host.allocate || !host.readMemory)
+        if (!host.allocate)
         {
             return ERROR_CALL_NOT_IMPLEMENTED;
         }
-        const read = /** @type {(address: number, length: number) => Uint8Array} */ (
-            host.readMemory);
-        const room = (sizeOut >>> 0) === 0 ? 0 : u32(read(wholeAddress(sizeOut), 4));
+        const room = (sizeOut >>> 0) === 0 ? 0 : guest.u32(wholeAddress(sizeOut));
         const scratch = host.allocate(8);
         if (!scratch)
         {
@@ -315,12 +308,12 @@ export function createRegistryHelpers(host){
         }
         try
         {
-            host.writeMemory(scratch, dword(0));
-            host.writeMemory(scratch + 4, dword(0));
+            guest.set32(scratch, 0);
+            guest.set32(scratch + 4, 0);
             let status = await call(`RegQueryValueEx${width}`, [key, value, 0, scratch, 0,
                 scratch + 4]);
-            const type = u32(read(scratch, 4));
-            const stored = u32(read(scratch + 4, 4));
+            const type = guest.u32(scratch);
+            const stored = guest.u32(scratch + 4);
             if (status !== ERROR_SUCCESS || type !== REG_EXPAND_SZ)
             {
                 return await call(`RegQueryValueEx${width}`, [key, value, 0, typeOut, data,
@@ -334,7 +327,7 @@ export function createRegistryHelpers(host){
                 {
                     return ERROR_OUTOFMEMORY;
                 }
-                host.writeMemory(raw + stored, new Uint8Array(unit));
+                guest.fill(raw + stored, 0, unit);
                 status = await call(`RegQueryValueEx${width}`, [key, value, 0, scratch, raw,
                     scratch + 4]);
                 const expand = host.library?.('KERNEL32.dll')?.[`ExpandEnvironmentStrings${width}`];
@@ -349,11 +342,11 @@ export function createRegistryHelpers(host){
                 const needed = Math.max(stored, length * unit);
                 if ((typeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(typeOut), dword(REG_SZ));
+                    guest.set32(typeOut, REG_SZ);
                 }
                 if ((sizeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(sizeOut), dword(needed));
+                    guest.set32(sizeOut, needed);
                 }
                 if ((data >>> 0) === 0)
                 {
@@ -365,11 +358,11 @@ export function createRegistryHelpers(host){
                     // was read is taken back, an empty string left.
                     if (room >= stored)
                     {
-                        host.writeMemory(wholeAddress(data), new Uint8Array(unit));
+                        guest.fill(data, 0, unit);
                     }
                     return ERROR_MORE_DATA;
                 }
-                host.writeMemory(wholeAddress(data), read(expanded, length * unit).slice());
+                guest.setBytes(data, guest.snapshot(expanded, length * unit));
                 return ERROR_SUCCESS;
             }
             finally
@@ -398,9 +391,7 @@ export function createRegistryHelpers(host){
         argBytes: 32,
         /** @param {number[]} args */
         handler: ([subKey, value, typeOut, data, sizeOut, ignoreUser, fallback, fallbackSize])=>{
-            const read = /** @type {(address: number, length: number) => Uint8Array} */ (
-                host.readMemory);
-            const room = (sizeOut >>> 0) !== 0 ? u32(read(wholeAddress(sizeOut), 4)) : 0;
+            const room = (sizeOut >>> 0) !== 0 ? guest.u32(wholeAddress(sizeOut)) : 0;
             const roots = (ignoreUser | 0) !== 0
                 ? [HKEY_LOCAL_MACHINE] : [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE];
             for (const root of roots)
@@ -412,11 +403,11 @@ export function createRegistryHelpers(host){
                 }
                 if ((typeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(typeOut), dword(found.type));
+                    guest.set32(typeOut, found.type);
                 }
                 if ((sizeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(sizeOut), dword(found.data.length));
+                    guest.set32(sizeOut, found.data.length);
                 }
                 if ((data >>> 0) === 0)
                 {
@@ -426,14 +417,14 @@ export function createRegistryHelpers(host){
                 {
                     return ERROR_MORE_DATA;
                 }
-                host.writeMemory(wholeAddress(data), found.data);
+                guest.setBytes(data, found.data);
                 return ERROR_SUCCESS;
             }
             if ((fallback >>> 0) !== 0 && (fallbackSize >>> 0) !== 0 && (sizeOut >>> 0) !== 0
                 && (data >>> 0) !== 0)
             {
-                host.writeMemory(wholeAddress(data),
-                    read(wholeAddress(fallback), Math.min(fallbackSize >>> 0, room)).slice());
+                guest.setBytes(data,
+                    guest.snapshot(wholeAddress(fallback), Math.min(fallbackSize >>> 0, room)));
                 return ERROR_SUCCESS;
             }
             return ERROR_FILE_NOT_FOUND;
@@ -450,7 +441,7 @@ export function createRegistryHelpers(host){
         argBytes: 24,
         /** @param {number[]} args */
         handler: async([key, subKey, value, typeOut, data, sizeOut])=>{
-            if (!host.allocate || !host.readMemory || !host.advapi32)
+            if (!host.allocate || !host.advapi32)
             {
                 return ERROR_CALL_NOT_IMPLEMENTED;
             }
@@ -468,7 +459,7 @@ export function createRegistryHelpers(host){
                 {
                     return status;
                 }
-                const handle = u32(host.readMemory(out, 4));
+                const handle = guest.u32(out);
                 try
                 {
                     return await queryValue(width, [handle, value, 0, typeOut, data, sizeOut]);
@@ -504,22 +495,22 @@ export function createRegistryHelpers(host){
      * @param {number} root @param {string} path @param {boolean} create
      */
     const keyAt = (root, path, create)=>{
-        if (!host.advapi32 || !host.allocate || !host.readMemory)
+        if (!host.advapi32 || !host.allocate)
         {
             return 0;
         }
         const units = [...path, '\0'];
         const name = host.allocate(units.length * 2 + 4);
         const out = name + units.length * 2;
-        host.writeMemory(name, Uint8Array.from(units.flatMap(unit=>[unit.charCodeAt(0) & 0xff,
+        guest.setBytes(name, Uint8Array.from(units.flatMap(unit=>[unit.charCodeAt(0) & 0xff,
             unit.charCodeAt(0) >>> 8])));
-        host.writeMemory(out, dword(0));
+        guest.set32(out, 0);
         try
         {
             const status = create
                 ? registry('RegCreateKeyExW', [root, name, 0, 0, 0, KEY_ALL_ACCESS, 0, out, 0])
                 : registry('RegOpenKeyExW', [root, name, 0, KEY_ALL_ACCESS, out]);
-            return status === ERROR_SUCCESS ? u32(host.readMemory(out, 4)) : 0;
+            return status === ERROR_SUCCESS ? guest.u32(out) : 0;
         }
         finally
         {
@@ -537,23 +528,23 @@ export function createRegistryHelpers(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([key, subKey])=>{
-            if (!host.advapi32 || !host.allocate || !host.readMemory)
+            if (!host.advapi32 || !host.allocate)
             {
                 return ERROR_CALL_NOT_IMPLEMENTED;
             }
             const out = host.allocate(8);
             try
             {
-                host.writeMemory(out, dword(0));
+                guest.set32(out, 0);
                 const status = registry(`RegOpenKeyEx${width}`, [key, subKey, 0, KEY_READ, out]);
                 if (status !== ERROR_SUCCESS)
                 {
                     return status;
                 }
-                const child = u32(host.readMemory(out, 4));
-                host.writeMemory(out + 4, dword(0));
+                const child = guest.u32(out);
+                guest.set32(out + 4, 0);
                 registry('RegQueryInfoKeyW', [child, 0, 0, 0, out + 4, 0, 0, 0, 0, 0, 0, 0]);
-                const subKeys = u32(host.readMemory(out + 4, 4));
+                const subKeys = guest.u32(out + 4);
                 const hasDefault = registry(`RegQueryValueEx${width}`, [child, 0, 0, 0, 0, 0])
                     === ERROR_SUCCESS;
                 registry('RegCloseKey', [child]);
@@ -578,17 +569,17 @@ export function createRegistryHelpers(host){
         argBytes: 20,
         /** @param {number[]} args */
         handler: ([guid, value, user, create, out])=>{
-            if ((guid >>> 0) === 0 || (out >>> 0) === 0 || !host.readMemory)
+            if ((guid >>> 0) === 0 || (out >>> 0) === 0)
             {
                 return E_INVALIDARG;
             }
-            const read = width === 'W' ? host.readWideString : host.readCString;
-            const sub = (value >>> 0) !== 0 && read ? read(wholeAddress(value), 0x1000) : '';
-            const named = formatGuid(host.readMemory(wholeAddress(guid), 16).slice());
+            const sub = (value >>> 0) !== 0 ? guest.text(wholeAddress(value), width === 'W', 0x1000)
+                : '';
+            const named = guest.guid(guid);
             const path = `${CLSID_SETTINGS}${named}` + (sub ? `\\${sub}` : '');
             const key = keyAt((user | 0) !== 0 ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE, path,
                 (create | 0) !== 0);
-            host.writeMemory(wholeAddress(out), dword(key));
+            guest.set32(out, key);
             return key === 0 ? E_FAIL : S_OK;
         },
     });
@@ -640,13 +631,13 @@ export function createRegistryHelpers(host){
             const create = (host.library?.('ole32.dll') ?? host.library?.('OLE32.dll'))
                 ?.CreateStreamOnHGlobal;
             const out = host.allocate?.(4) ?? 0;
-            if (!create || !out || !host.readMemory)
+            if (!create || !out)
             {
                 return 0;
             }
-            host.writeMemory(out, dword(0));
+            guest.set32(out, 0);
             const status = /** @type {number} */ (create.handler([0, 1, out])) | 0;
-            const empty = status < 0 ? 0 : u32(host.readMemory(out, 4));
+            const empty = status < 0 ? 0 : guest.u32(out);
             host.free?.(out);
             return empty;
         },
@@ -728,7 +719,7 @@ export function createRegistryHelpers(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out, dword(0));
+                guest.set32(out, 0);
                 if (CLSID_QUERY_ASSOCIATIONS.some((word, at)=>(args[at] >>> 0) !== word))
                 {
                     return CLASS_E_CLASSNOTAVAILABLE;
@@ -754,7 +745,7 @@ export function createRegistryHelpers(host){
             /** @param {number[]} args */
             handler: ([pointer])=>{
                 const text = wholeAddress(pointer) === 0 ? null
-                    : host.readWideString?.(wholeAddress(pointer), 0x100 * 2) ?? null;
+                    : guest.wstr(wholeAddress(pointer), 0x100 * 2) ?? null;
                 if (text === null || text === '')
                 {
                     return 0;

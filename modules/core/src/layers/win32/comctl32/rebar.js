@@ -39,7 +39,7 @@ import {
     COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT,
     after,
 } from '../user32/controls.js';
-import { notifyWindow } from './notify.js';
+import { NMHDR, notifyWindow, sendNotify } from './notify.js';
 import { readText, writeText } from './strings.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
 
@@ -598,24 +598,9 @@ export function createRebarProcedure(host, tk, images){
      * @param {number} [rest] @param {(address: number) => void} [fill]
      * @returns {number | Promise<number>}
      */
-    const notify = (record, code, thread, rest = 0, fill)=>{
-        const target = ownerOf(record);
-        const size = 3 * pointer + rest;
-        const address = target !== 0 && host.allocate ? host.allocate(size) : 0;
-        if (address === 0)
-        {
-            return 0;
-        }
-        guest.fill(address, 0, size);
-        guest.setPtr(address, record.hwnd);
-        guest.setPtr(address + pointer, record.id);
-        guest.set32(address + 2 * pointer, code);
-        fill?.(address + 3 * pointer);
-        return after(host.send(target, WM_NOTIFY, record.id, address, thread), answer=>{
-            host.release?.(address);
-            return answer;
-        });
-    };
+    const notify = (record, code, thread, rest = 0, fill)=>sendNotify(host, record,
+        ownerOf(record), code, NMHDR.sizeOf(pointer) + rest, thread,
+        fill && (block=>fill(block + NMHDR.sizeOf(pointer))));
 
     /**
      * Lays the bands out again and puts the bar and the children where the

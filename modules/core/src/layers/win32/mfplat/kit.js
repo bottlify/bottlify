@@ -23,7 +23,7 @@
  */
 
 import { createDeviceCalls } from '../d3dx9/device.js';
-import { canonicalGuid, formatGuid, parseGuid } from '../../../system/guid.js';
+import { canonicalGuid, formatGuid } from '../../../system/guid.js';
 import { IID_IUNKNOWN, createComObject } from '../ole32/objects.js';
 import { wholeAddress } from '../common/pointers.js';
 
@@ -45,8 +45,6 @@ const SLOT = Object.freeze({ QueryInterface: 0, AddRef: 1, Release: 2 });
 /**
  * @typedef {Object} MfHost
  * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} heap
  *     The process heap, which is the task allocator too: what CoTaskMemFree
  *     takes back.
@@ -113,32 +111,6 @@ export function createMfKit(host){
     /** What has been said once. */
     const said = new Set();
 
-    /** @param {number} at */
-    const guidAt = at=>formatGuid(host.readMemory(wholeAddress(at), 16));
-    /** @param {number} at @param {string} guid */
-    const putGuid = (at, guid)=>host.writeMemory(wholeAddress(at), /** @type {Uint8Array} */ (parseGuid(guid)));
-    /** @param {number} at */
-    const u64 = at=>{
-        const bytes = host.readMemory(wholeAddress(at), 8);
-        return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
-    };
-    /** @param {number} at @param {bigint} value */
-    const putU64 = (at, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
-        host.writeMemory(wholeAddress(at), bytes);
-    };
-    /** @param {number} at */
-    const f64 = at=>{
-        const bytes = host.readMemory(wholeAddress(at), 8);
-        return new DataView(bytes.buffer, bytes.byteOffset, 8).getFloat64(0, true);
-    };
-    /** @param {number} at @param {number} value */
-    const putF64 = (at, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setFloat64(0, value, true);
-        host.writeMemory(wholeAddress(at), bytes);
-    };
     /** Two stack words as the 64-bit value they are. @param {number} low @param {number} high */
     const wide = (low, high)=>BigInt(high >>> 0) << 32n | BigInt(low >>> 0);
     /** Two stack words as the double they are. @param {number} low @param {number} high */
@@ -163,7 +135,7 @@ export function createMfKit(host){
         const at = wholeAddress(host.heap.allocate(Math.max(bytes.length, 1)));
         if (at !== 0 && bytes.length > 0)
         {
-            host.writeMemory(at, bytes);
+            port.setBytes(at, bytes);
         }
         return at;
     };
@@ -184,11 +156,12 @@ export function createMfKit(host){
      * @returns {Promise<number>}
      */
     const guest = (thread, pointer, slot, args)=>Promise.resolve().then(()=>
-        method(thread, pointer >>> 0, slot, args));
+        method(thread, wholeAddress(pointer), slot, args));
 
     /** This library's object behind a pointer, or null. @param {number} pointer */
     const ownAt = pointer=>{
-        const object = (pointer >>> 0) === 0 ? null : host.objectAt?.(pointer >>> 0);
+        const at = wholeAddress(pointer);
+        const object = at === 0 ? null : host.objectAt?.(at);
         return object && mine.has(object) ? object : null;
     };
 
@@ -218,7 +191,7 @@ export function createMfKit(host){
      * @returns {void | Promise<number>}
      */
     const addRef = (pointer, thread)=>{
-        if ((pointer >>> 0) === 0)
+        if (wholeAddress(pointer) === 0)
         {
             return;
         }
@@ -239,7 +212,7 @@ export function createMfKit(host){
      * @returns {void | Promise<number>}
      */
     const release = (pointer, thread)=>{
-        if ((pointer >>> 0) === 0)
+        if (wholeAddress(pointer) === 0)
         {
             return;
         }
@@ -251,7 +224,7 @@ export function createMfKit(host){
         }
         if (thread === undefined)
         {
-            owed.push(pointer >>> 0);
+            owed.push(wholeAddress(pointer));
             return;
         }
         return guest(thread, pointer, SLOT.Release, []);
@@ -284,22 +257,23 @@ export function createMfKit(host){
         const object = ownAt(pointer);
         if (!object)
         {
-            return guest(thread, pointer, SLOT.QueryInterface, [iid >>> 0, out >>> 0]);
+            return guest(thread, pointer, SLOT.QueryInterface,
+                [wholeAddress(iid), wholeAddress(out)]);
         }
-        const id = guidAt(iid);
+        const id = port.guid(iid);
         if (!object.interfaceFor(id))
         {
-            port.set32s(out, [0]);
+            port.setPtr(out, 0);
             return E_NOINTERFACE;
         }
         const at = host.vtables?.publish(object, id) ?? 0;
         if (at === 0)
         {
-            port.set32s(out, [0]);
+            port.setPtr(out, 0);
             return E_OUTOFMEMORY;
         }
         object.addRef();
-        port.set32s(out, [at]);
+        port.setPtr(out, at);
         return S_OK;
     };
 
@@ -359,14 +333,15 @@ export function createMfKit(host){
         if (pointer === 0)
         {
             object.release();
-            port.set32s(out, [0]);
+            port.setPtr(out, 0);
             return E_OUTOFMEMORY;
         }
-        port.set32s(out, [pointer]);
+        port.setPtr(out, pointer);
         return S_OK;
     };
 
-    return { u32: port.u32, putU32s: port.set32s, u64, putU64, f64, putF64, guidAt, putGuid, wide,
+    return { u32: port.u32, putU32s: port.set32s, u64: port.u64, putU64: port.set64, f64: port.f64,
+        putF64: port.setF64, guidAt: port.guid, putGuid: port.setGuid, wide,
         double, guidOf,
         wideString, taskCopy, sayOnce, guest, ownAt, releaseOwn, addRef, release,
         settle, query, make, give, mine };

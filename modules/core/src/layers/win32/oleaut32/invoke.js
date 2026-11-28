@@ -25,7 +25,7 @@
 import {
     TKIND_ALIAS, TKIND_DISPATCH, TKIND_ENUM, TKIND_INTERFACE,
     VT_BOOL, VT_BSTR, VT_I2, VT_PTR, VT_R4, VT_R8, VT_SAFEARRAY, VT_UI2, VT_USERDEFINED,
-    isImport, resolveReference,
+    isImport, resolveReference, slotOf,
 } from './typelib.js';
 
 /** Variant types this file lays out or reads back. */
@@ -478,8 +478,7 @@ export function createInvoker(host){
             words.push(...laid);
         }
 
-        const vtable = guest.u32(instance);
-        const entry = guest.u32(vtable + fn.vtableOffset);
+        const entry = guest.method(instance, slotOf(library, fn));
         return host.call(entry, [instance, ...words]).then(returned=>{
             const hr = returned | 0;
             for (const bstr of temporaryStrings)

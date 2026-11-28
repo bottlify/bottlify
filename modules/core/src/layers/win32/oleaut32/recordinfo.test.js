@@ -23,7 +23,7 @@ const LIBRARY = /** @type {any} */ ({
     imports: [],
 });
 
-function fixture(){
+function fixture(width = /** @type {4 | 8} */ (4)){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     /** @type {[number, number[]][]} */
@@ -34,7 +34,7 @@ function fixture(){
     /** @type {any} */
     let published = null;
     const objects = createRecordInfoObjects({
-        guest: guestOver(bytes),
+        guest: guestOver(bytes, width),
         heap: { allocate: size=>{
             const at = next;
             next += size + 16;
@@ -95,4 +95,26 @@ test('a record is copied over an emptied one: a string duplicated, an interface 
     view.setUint32(TO, 0xdead, true);
     assert.equal(methodOf(adapter, 'RecordInit').invoke(adapter, [TO]), 0);
     assert.equal(view.getUint32(TO, true), 0);
+});
+
+test('in a 64-bit process a record\'s interface and string are whole, its methods at a slot '
+    + 'of eight', async()=>{
+    const { bytes, calls, freed, objects, published } = fixture(8);
+    const guest = guestOver(bytes, 8);
+    const wide = /** @type {any} */ ({ ...LIBRARY, typeInfos: [{ ...LIBRARY.typeInfos[0],
+        instanceSize: 24, variables: [
+            { name: 'hr', type: plain(25), offset: 0 },
+            { name: 'disp', type: plain(9), offset: 8 },
+            { name: 'bstr', type: plain(8), offset: 16 }] }] });
+    guest.setPtr(0x500, 0x600);
+    guest.setPtr(0x600 + 2 * 8, 0x1_0000_9002);
+    assert.equal(await objects.create(wide, wide.typeInfos[0], 0x100), 0x7000);
+    const adapter = published();
+    const TO = 0x1100;
+    guest.setPtr(TO + 8, 0x500);
+    guest.setPtr(TO + 16, 0x1_0000_3000);
+    assert.equal(await methodOf(adapter, 'RecordClear').invoke(adapter, [TO]), 0);
+    assert.deepEqual(freed, [0x1_0000_3000], 'the string freed whole');
+    assert.deepEqual(calls.map(([entry])=>entry), [0x1_0000_9002], 'Release, at slot 2 of 8');
+    assert.equal(guest.ptr(TO + 8), 0);
 });

@@ -19,7 +19,6 @@
  * and hands these back, which is what lets the content be ours to choose.
  */
 
-import { readGuid } from '../../../system/guid.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { createAdapter } from '../oleaut32/objects.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
@@ -77,11 +76,6 @@ const MAX_PATH = 260;
  */
 const sz = text=>encodeAnsi(`${text}\0`);
 
-/** @param {number} value */
-const dword = value=>new Uint8Array([
-    value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-]);
-
 /**
  * The bytes of a list of one item whose data is the text, then the empty item
  * that ends every list: `cb` is a WORD counting itself.
@@ -99,34 +93,29 @@ export function listBytes(text){
     return bytes;
 }
 
-/**
- * @typedef {Object} NamespaceMemory
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- */
+/** @typedef {import('../common/guest.js').Guest} NamespaceMemory */
 
 /**
  * The texts of a list's items, first to last: a list the program combined
  * from several of ours reads as the texts of each.
  *
- * @param {NamespaceMemory} memory
+ * @param {NamespaceMemory} guest
  * @param {number} list
  * @returns {string[]}
  */
-export function itemsOf(memory, list){
+export function itemsOf(guest, list){
     const texts = [];
     let at = wholeAddress(list);
     // A list is short, but a pointer to something else is not, and walking it
     // by its own `cb` fields would run until a zero word turned up.
     for (let n = 0; at !== 0 && n < 64; n++)
     {
-        const header = memory.readMemory(at, 2);
-        const item = header[0] | header[1] << 8;
+        const item = guest.u16(at);
         if (item < 3)
         {
             break;
         }
-        const data = memory.readMemory(at + 2, item - 2);
+        const data = guest.view(at + 2, item - 2);
         const end = data.indexOf(0);
         texts.push(decodeAnsi(data.subarray(0, end < 0 ? data.length : end)));
         at += item;
@@ -138,12 +127,12 @@ export function itemsOf(memory, list){
  * The path a list names, or null for one that names no place on a volume:
  * the computer itself, or a list this build did not make.
  *
- * @param {NamespaceMemory} memory
+ * @param {NamespaceMemory} guest
  * @param {number} list
  * @returns {string | null}
  */
-export function pathOfList(memory, list){
-    const last = itemsOf(memory, list).at(-1) ?? null;
+export function pathOfList(guest, list){
+    const last = itemsOf(guest, list).at(-1) ?? null;
     return last === null || last.startsWith('::') ? null : last;
 }
 
@@ -152,17 +141,16 @@ export function pathOfList(memory, list){
  * empty: what SHBindToParent hands back as the child, a pointer into the
  * caller's own list rather than a copy.
  *
- * @param {NamespaceMemory} memory
+ * @param {NamespaceMemory} guest
  * @param {number} list
  * @returns {number}
  */
-function lastItemOf(memory, list){
+function lastItemOf(guest, list){
     let last = wholeAddress(list);
     let at = wholeAddress(list);
     for (let n = 0; at !== 0 && n < 64; n++)
     {
-        const header = memory.readMemory(at, 2);
-        const item = header[0] | header[1] << 8;
+        const item = guest.u16(at);
         if (item < 3)
         {
             break;
@@ -224,7 +212,7 @@ export function parentOf(text){
  *           Puts an interface into guest memory and answers with its pointer.
  * @property {(bytes: number) => number} allocate
  *           The task allocator's heap: a list handed out is freed with IMalloc.
- * @property {NamespaceMemory} memory
+ * @property {NamespaceMemory} guest
  * @property {NamespaceVolume} volume
  * @property {() => string | null} [documents]
  *           Where the user's documents are on the volume: the folder the
@@ -244,7 +232,7 @@ const MY_DOCUMENTS = '::{450D8FBA-AD25-11D0-98A8-0800361B1103}';
 /**
  * @param {NamespaceDeps} deps
  */
-export function createShellNamespace({ publish, allocate, memory, volume, documents }){
+export function createShellNamespace({ publish, allocate, guest, volume, documents }){
     /** @param {string} path @param {string} name */
     const join = (path, name)=>(path.endsWith('\\') ? path + name : `${path}\\${name}`);
 
@@ -361,7 +349,7 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
         const at = allocate(bytes.length);
         if (at !== 0)
         {
-            memory.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
         }
         return at;
     };
@@ -375,7 +363,7 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
      */
     const handOut = (object, iid, out)=>{
         const pointer = publish(object, iid);
-        memory.writeMemory(out, dword(pointer));
+        guest.setPtr(out, pointer);
         if (pointer !== 0 && iid === IID_ISHELLFOLDER)
         {
             folders.set(pointer, object);
@@ -415,21 +403,6 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
     const enumeratorObject = (items, at)=>createAdapter(
         /** @type {EnumeratorState} */ ({ items, at }), enumeratorInterfaces);
 
-    /** @param {number} at */
-    const readWide = at=>{
-        let text = '';
-        for (let n = 0; n < MAX_PATH; n++)
-        {
-            const pair = memory.readMemory(at + n * 2, 2);
-            const code = pair[0] | pair[1] << 8;
-            if (code === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(code);
-        }
-        return text;
-    };
 
     /** @type {readonly NamespaceMethod<FolderState>[]} */
     const folderMethods = Object.freeze([
@@ -450,12 +423,12 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                 {
                     if ((out >>> 0) !== 0)
                     {
-                        memory.writeMemory(wholeAddress(out), dword(0));
+                        guest.setPtr(out, 0);
                     }
                     return E_INVALIDARG;
                 }
-                const text = readWide(wholeAddress(name));
-                memory.writeMemory(wholeAddress(out), dword(0));
+                const text = guest.wstr(name, MAX_PATH * 2);
+                guest.setPtr(out, 0);
                 // A path in the `\\?\` form is no display name.
                 const item = text.startsWith('\\\\?\\') ? null : itemFor(parsingName(text));
                 if (!item)
@@ -463,17 +436,14 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                     return E_INVALIDARG;
                 }
                 const list = listFor(item.text);
-                memory.writeMemory(wholeAddress(out), dword(list));
+                guest.setPtr(out, list);
                 // Windows leaves the count it was given as it was
                 // (Wine's shfldr_special, against Windows).
                 void eaten;
                 if ((attributes >>> 0) !== 0)
                 {
-                    const asked = memory.readMemory(wholeAddress(attributes), 4);
-                    const mask = (asked[0] | asked[1] << 8 | asked[2] << 16
-                                | asked[3] << 24) >>> 0;
-                    memory.writeMemory(wholeAddress(attributes),
-                        dword((item.attributes & mask) >>> 0));
+                    const mask = guest.u32(attributes);
+                    guest.set32(attributes, (item.attributes & mask) >>> 0);
                 }
                 return list === 0 ? E_OUTOFMEMORY : S_OK;
             } },
@@ -490,16 +460,16 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                  */
         { name: 'BindToObject', argBytes: 20,
             invoke: (object, [pidl, , riid, out])=>{
-                const iid = readGuid(memory, riid >>> 0);
-                const item = itemFor(itemsOf(memory, pidl >>> 0).at(-1) ?? '');
+                const iid = guest.guid(riid);
+                const item = itemFor(itemsOf(guest, pidl >>> 0).at(-1) ?? '');
                 if (!item || (item.attributes & SFGAO_FOLDER) === 0)
                 {
-                    memory.writeMemory(wholeAddress(out), dword(0));
+                    guest.setPtr(out, 0);
                     return E_INVALIDARG;
                 }
                 if (iid !== IID_ISHELLFOLDER && iid !== IID_IUNKNOWN)
                 {
-                    memory.writeMemory(wholeAddress(out), dword(0));
+                    guest.setPtr(out, 0);
                     return E_NOINTERFACE;
                 }
                 return handOut(folderObject(item.text), IID_ISHELLFOLDER, out >>> 0);
@@ -514,8 +484,8 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                  */
         { name: 'CompareIDs', argBytes: 16,
             invoke: (object, [, first, second])=>{
-                const a = itemsOf(memory, first >>> 0).at(-1) ?? '';
-                const b = itemsOf(memory, second >>> 0).at(-1) ?? '';
+                const a = itemsOf(guest, first >>> 0).at(-1) ?? '';
+                const b = itemsOf(guest, second >>> 0).at(-1) ?? '';
                 const rank = (/** @type {string} */ text)=>
                     (text.startsWith('::') ? '\0' : '') + text.toLowerCase();
                 const order = rank(a) < rank(b) ? -1 : rank(a) > rank(b) ? 1 : 0;
@@ -531,23 +501,21 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                  */
         { name: 'GetAttributesOf', argBytes: 16,
             invoke: (object, [count, lists, inOut])=>{
-                const asked = memory.readMemory(wholeAddress(inOut), 4);
-                let mask = (asked[0] | asked[1] << 8 | asked[2] << 16 | asked[3] << 24) >>> 0;
+                let mask = guest.u32(inOut);
                 let shared = 0xffffffff;
                 for (let n = 0; n < (count >>> 0); n++)
                 {
-                    const slot = memory.readMemory(wholeAddress(lists) + n * 4, 4);
-                    const list = (slot[0] | slot[1] << 8 | slot[2] << 16 | slot[3] << 24) >>> 0;
-                    const item = itemFor(itemsOf(memory, list).at(-1) ?? '');
+                    const list = guest.ptr(wholeAddress(lists) + n * guest.pointerSize);
+                    const item = itemFor(itemsOf(guest, list).at(-1) ?? '');
                     if (!item)
                     {
-                        memory.writeMemory(wholeAddress(inOut), dword(0));
+                        guest.set32(inOut, 0);
                         return E_INVALIDARG;
                     }
                     shared = (shared & item.attributes) >>> 0;
                 }
                 mask = (mask & shared) >>> 0;
-                memory.writeMemory(wholeAddress(inOut), dword(mask));
+                guest.set32(inOut, mask);
                 return S_OK;
             } },
         { name: 'GetUIObjectOf', argBytes: 28, invoke: ()=>E_NOTIMPL },
@@ -561,7 +529,7 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                  */
         { name: 'GetDisplayNameOf', argBytes: 16,
             invoke: (object, [pidl, flags, out])=>{
-                const item = itemFor(itemsOf(memory, pidl >>> 0).at(-1) ?? '');
+                const item = itemFor(itemsOf(guest, pidl >>> 0).at(-1) ?? '');
                 if (!item)
                 {
                     return E_INVALIDARG;
@@ -570,8 +538,8 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                 const parsing = ((flags >>> 0) & SHGDN_FORPARSING) !== 0
                     && !(((flags >>> 0) & SHGDN_FORADDRESSBAR) !== 0 && item.text.startsWith('::'));
                 const text = parsing ? item.text : item.name;
-                memory.writeMemory(wholeAddress(out), dword(STRRET_CSTR));
-                memory.writeMemory(wholeAddress(out) + STRRET_TEXT,
+                guest.set32(out, STRRET_CSTR);
+                guest.setBytes(wholeAddress(out) + STRRET_TEXT,
                     sz(text.slice(0, STRRET_CAPACITY - 1)));
                 return S_OK;
             } },
@@ -598,13 +566,13 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                     {
                         return E_OUTOFMEMORY;
                     }
-                    memory.writeMemory(wholeAddress(out) + n * 4, dword(list));
+                    guest.setPtr(wholeAddress(out) + n * guest.pointerSize, list);
                     object.state.at++;
                     n++;
                 }
                 if ((fetched >>> 0) !== 0)
                 {
-                    memory.writeMemory(wholeAddress(fetched), dword(n));
+                    guest.set32(fetched, n);
                 }
                 return n === (count >>> 0) ? S_OK : S_FALSE;
             } },
@@ -647,7 +615,7 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                 folderMethods.slice(IUNKNOWN_METHODS.length)) }],
         }),
         /**
-         * The folder a list's last item is in, into guest memory, and where
+         * The folder a list's last item is in, into guest guest, and where
          * that item starts: SHBindToParent. An empty list is the desktop,
          * bound to itself.
          *
@@ -655,13 +623,13 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
          * @returns {{ hr: number, last: number }}
          */
         parent: (list, riid, out)=>{
-            const last = lastItemOf(memory, list);
-            const text = itemsOf(memory, list).at(-1);
+            const last = lastItemOf(guest, list);
+            const text = itemsOf(guest, list).at(-1);
             const folder = text === undefined ? null : parentOf(text);
-            const iid = readGuid(memory, riid >>> 0);
+            const iid = guest.guid(riid);
             if (folder === undefined || (iid !== IID_ISHELLFOLDER && iid !== IID_IUNKNOWN))
             {
-                memory.writeMemory(out, dword(0));
+                guest.setPtr(out, 0);
                 return { hr: folder === undefined ? E_INVALIDARG : E_NOINTERFACE, last };
             }
             return { hr: handOut(folderObject(folder), IID_ISHELLFOLDER, out), last };
@@ -694,17 +662,17 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
          * @param {number} list @param {number} riid @param {number} out
          */
         bind: (list, riid, out)=>{
-            const iid = readGuid(memory, riid >>> 0);
-            const text = itemsOf(memory, list >>> 0).at(-1);
+            const iid = guest.guid(riid);
+            const text = itemsOf(guest, list >>> 0).at(-1);
             const item = text === undefined ? null : itemFor(text);
             if (text !== undefined && (!item || (item.attributes & SFGAO_FOLDER) === 0))
             {
-                memory.writeMemory(wholeAddress(out), dword(0));
+                guest.setPtr(out, 0);
                 return E_INVALIDARG;
             }
             if (iid !== IID_ISHELLFOLDER && iid !== IID_IUNKNOWN)
             {
-                memory.writeMemory(wholeAddress(out), dword(0));
+                guest.setPtr(out, 0);
                 return E_NOINTERFACE;
             }
             return handOut(folderObject(item ? item.text : null), IID_ISHELLFOLDER, out >>> 0);
@@ -745,6 +713,6 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                 ? /** @type {FolderState} */ (object.state).folder : undefined;
         },
         /** @param {number} list */
-        pathOf: list=>pathOfList(memory, list),
+        pathOf: list=>pathOfList(guest, list),
     };
 }
