@@ -21,6 +21,7 @@ import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createMsvcrtFunctions } from './functions.js';
 import { guestThrough } from './guest-window.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const TRAPS = 0x8f00;
@@ -110,7 +111,7 @@ function caseOf(rng){
 }
 
 test('sprintf and _snprintf in the guest write and answer as their handlers', ()=>{
-    const machine = createCorkHost({
+    const machine = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

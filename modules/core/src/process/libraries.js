@@ -15,7 +15,7 @@
 import { mangledCall } from '../layers/loader/internal/mangling.js';
 import { parsePe, rvaToFileOffset } from '../layers/loader/internal/pe.js';
 import { findResource, listResources } from '../layers/loader/internal/resources.js';
-import { BLOCK_CACHE_BYTES } from './bundle-mount.js';
+import { BLOCK_CACHE_BYTES } from '../layers/cache/account.js';
 
 /**
  * One event's payload as a line.

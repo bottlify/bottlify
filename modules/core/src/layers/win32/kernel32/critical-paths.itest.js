@@ -23,6 +23,7 @@ import { COUNTERS, CS, createCriticalSections, criticalLayout, enterCode, leaveC
     tryEnterCode } from './critical.js';
 import { createSyncFunctions } from './sync.js';
 import { kernelLayerAnswers } from '../kernel.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x10000;
 const ENTER = 0x8100;
@@ -121,7 +122,7 @@ const strangerFields = step=>(step === 'taken' ? [0, 1, STRANGER] : [-1, 0, 0]);
  * @returns {Seen[]}
  */
 function throughGuest(steps){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: cork, memorySize: 64 * 1024 * 1024, trapPort: 0xb077,
         entryVector: 0x7000, initialStack: 0x300000, cork: { sliceMs: Infinity },
     });

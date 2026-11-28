@@ -14,6 +14,7 @@ import { roomy } from '../cache/testing.fixture.js';
 import { cpuModule } from './module.js';
 import { testLog } from '../log/testing.fixture.js';
 import { openTable } from '@bottlify/cellar';
+import { testAccount } from './testing.fixture.js';
 
 const GUEST_CODE = 0x8000;
 const CORK = new URL('../../../../cork/src/index.js', import.meta.url).href;
@@ -35,7 +36,8 @@ async function booted(code, at, config = {}){
         requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api : log),
         provide: ()=>{},
     });
-    const api = await cpuModule.create({ engineUrl: CORK, ...config }, moduleHost);
+    const api = await cpuModule.create({ engineUrl: CORK, memoryBudget: testAccount(), ...config },
+        moduleHost);
     await api.boot();
     api.writePhysical(at, code);
     api.writePhysical(0x7000, new Uint8Array(u32(at)));
@@ -56,7 +58,7 @@ test('the translator keeps what it emits in the run\'s cache it is handed', asyn
 test('the frame counters carry what the host wrote into guest memory', async()=>{
     const log = await testLog();
     const metrics = log.metrics;
-    const api = await cpuModule.create({
+    const api = await cpuModule.create({ memoryBudget: testAccount(),
         engineUrl: CORK,
     }, /** @type {any} */ ({
         requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api : log), provide: ()=>{},
@@ -153,7 +155,7 @@ test('a second instance in one realm boots on its own, never seeing the first on
         const { api: first } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
 
         const log = await testLog();
-        const second = await cpuModule.create({ engineUrl: CORK },
+        const second = await cpuModule.create({ engineUrl: CORK, memoryBudget: testAccount() },
             /** @type {any} */ ({
                 requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api : log),
                 provide: ()=>{},

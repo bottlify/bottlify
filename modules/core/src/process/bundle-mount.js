@@ -15,6 +15,7 @@ import { openBundle } from '../layers/filesystem/internal/bundle/format.js';
 import { createBlockCache, resolveBlockStore } from '../layers/filesystem/internal/bundle/cache.js';
 import { blockCacheName } from '../layers/filesystem/internal/bundle/saved.js';
 import { NOT_MEASURED } from '../memory-zones.js';
+import { BLOCKS } from '../layers/cache/account.js';
 import { BLOCK_MISS, createBundleSource } from '../layers/filesystem/internal/bundle/source.js';
 import { decompressZstd } from '../zstd.js';
 import { inflateRaw } from '../storage.js';
@@ -106,14 +107,6 @@ export function retryingFetch({ fetch, events, retry }){
             + `attempts: ${reason}`);
     };
 }
-
-/**
- * The bytes of shared memory a bundle's fetched blocks are held hot in, at
- * most, where no durable store takes them: what a start reads before its
- * first frame fits. The bundle's keeper's own, no kind of the run's account
- * yet: its pool is named among what no account counts (`held`).
- */
-export const BLOCK_CACHE_BYTES = 64 << 20;
 
 /**
  * How much one range request may ask for.
@@ -468,7 +461,7 @@ function expectIndex(expected){
  * @param {any} deps
  * @returns {Promise<MountedBundle | null>}
  */
-export async function mountBundle({ options, events, translationStore }){
+export async function mountBundle({ options, events, translationStore, roomFrom }){
     // A run with no bundle of its own - an installer writing its whole
     // volume - may still stand on layers (`layers`): a setup whose wizard is
     // a managed program needs the Framework while it installs.
@@ -525,7 +518,7 @@ export async function mountBundle({ options, events, translationStore }){
     // One bundle that fails fails the run: the others stop waiting for its
     // cache's name, and those already mounted stop fetching and close theirs.
     const outcomes = await Promise.allSettled(specs.map(one=>mountOneBundle({ ...one, held,
-        opened,
+        opened, account: options.memoryBudget, roomFrom,
         // A layer's events say whose they are.
         events: one.layer ? { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             events.emit(name, { ...payload, layer: one.id }) } : events,
@@ -669,14 +662,18 @@ function missesNamed(source, layer){
  * are: `prefix` is null for it, and nothing seeds the translator from it.
  *
  * @param {{ spec: any, id: string, layer: boolean, events: any, translationStore?: any,
- *     held: string[], opened: (name: string) => Promise<void> }} deps
+ *     held: string[], opened: (name: string) => Promise<void>,
+ *     account: import('@bottlify/cellar').AccountMemory,
+ *     roomFrom: (make: (bytes: number) => boolean) => () => void }} deps
  *     `spec`: the bundle's options. `held`: the names of every block cache the
  *     run reads, this one's among them. `opened`: told this bundle's cache's
  *     name once its index is read, and waited on before the cache is opened.
+ *     `account`: the run's, its blocks a kind of it; `roomFrom`: the run's
+ *     cache's (`RunCache.roomFrom`), its cold blocks let go for room there.
  * @returns {Promise<MountedBundle>}
  */
 async function mountOneBundle(deps){
-    const { spec, id, layer, events, translationStore, held, opened } = deps;
+    const { spec, id, layer, events, translationStore, held, opened, account, roomFrom } = deps;
     // Everything below fetches through this, the index included: the first
     // range of the run is as exposed to a dropped connection as the last.
     const retrying = retryingFetch({
@@ -754,8 +751,9 @@ async function mountOneBundle(deps){
         name: blockCacheName(id, bundle.fingerprint),
         blockSize: bundle.blockSize,
         blockCount: bundle.blockCount,
-        // What is hot past it goes to the disk, or, with none, away.
-        budget: BLOCK_CACHE_BYTES,
+        // The run's account, its kind `blocks`: what is hot past its ceiling
+        // goes to the disk, or, with none, away.
+        account, kind: BLOCKS,
         // The person is told there is no room, once, and the other bottles'
         // caches go, the oldest first, for the blocks that come next; the
         // run's own are named in `held` and stay.
@@ -768,6 +766,9 @@ async function mountOneBundle(deps){
             }
         },
     });
+    // Its cold blocks let go for another kind's take that does not fit, as the
+    // run's cache's are (`RunCache.roomFrom`).
+    const leaveRoom = roomFrom(cache.makeRoom);
 
     const source = createBundleSource({
         bundle,
@@ -1238,14 +1239,18 @@ async function mountOneBundle(deps){
          *  that has to stay at zero. */
         refetched: ()=>({ ...refetched }),
         decoded: ()=>({ ...decoded }),
-        /** What the bundle's pools hold of the tab's heaps, no account's (`memory-zones.js`). */
+        /**
+         * What the bundle holds that no account counts: its keeper's index (its
+         * blocks are the run's account's, kind `blocks`, `memory-zones.js`).
+         */
         held: ()=>({
-            blockCache: cache.diagnostics().heapBytes ?? NOT_MEASURED,
+            blockIndex: cache.diagnostics().cellar?.indexBytes ?? NOT_MEASURED,
         }),
         /** Range requests made and bytes asked for, ever. */
         ranges: ()=>({ ...ranges }),
         stop(){
             stopped = true;
+            leaveRoom();
             cache.close();
         },
     };

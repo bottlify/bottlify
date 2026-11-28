@@ -19,6 +19,7 @@ import { createCorkHost } from './cork-host.js';
 import { createBell, createRemoteExecutor } from './executor.js';
 import { unbrokenTable } from './unbroken.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { testAccount, testAccountCalls } from '../testing.fixture.js';
 
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 const MEMORY = 4 << 20;
@@ -26,6 +27,7 @@ const CODE = 0x20000;
 const DATA = 0x30000;
 const TRAP_PORT = 0xb077;
 const CONFIG = {
+    memoryBudget: testAccount(),
     memorySize: MEMORY, trapPort: TRAP_PORT, entryVector: 0x7000, initialStack: 0x300000,
     closedBelow: 0x10000, cork: { hotThreshold: 4, wasmInterpreter: true,
         // Slices end by their instruction count alone, not by the time a busy
@@ -136,7 +138,8 @@ test('programs run on another executor in a worker leave what they leave on the 
         const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
         handle(local);
         handle(process);
-        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        const remote = await createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1, engineUrl: ENGINE_URL,
             config: { ...CONFIG, executors: 2 } });
         try
         {
@@ -194,7 +197,8 @@ test('an answer to another executor leaves the process\'s own count where it is'
     // the process's count -- a frame presented inside another executor's call --
     // reads what the process's executor retired, not the other's.
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, executors: 2 } });
     try
     {
@@ -265,7 +269,8 @@ test('another executor\'s translator keeps its regions in the run\'s store throu
     const run = async()=>{
         const process = createCorkHost({ ...config, engine });
         handle(process);
-        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        const remote = await createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1, engineUrl: ENGINE_URL,
             config, store });
         try
         {
@@ -309,7 +314,8 @@ test('a store on one executor into code another translated reaches the other\'s 
     async()=>{
         const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
         handle(process);
-        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        const remote = await createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1, engineUrl: ENGINE_URL,
             config: { ...CONFIG, executors: 2 } });
         const LOOP = 0x40000;
         const WRITER = 0x41000;
@@ -390,7 +396,8 @@ test('what one executor learns of the process reaches the others: the stacks the
     + ' was told of, code translated on one of them, a read that faulted', async()=>{
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
     handle(process);
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, executors: 2 } });
     // A thread's stack, told to the process's executor alone, as the kernel tells it.
     const STACK = 0x50000;
@@ -451,8 +458,8 @@ test('two executors at once: interlocked counters, a spin lock and a compare-and
         return false;
     });
     const bell = createBell();
-    const remotes = await Promise.all([1, 2].map(index=>createRemoteExecutor({ host: process,
-        index, engineUrl: ENGINE_URL, config, bell })));
+    const remotes = await Promise.all([1, 2].map(index=>createRemoteExecutor({
+        account: testAccountCalls, host: process, index, engineUrl: ENGINE_URL, config, bell })));
     const COUNTER = DATA;
     const GUARDED = DATA + 8;
     const LOCK = DATA + 16;
@@ -550,7 +557,8 @@ for (const told of [true, false])
         {
             table.add(ROUTINE, routine.length);
         }
-        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        const remote = await createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1, engineUrl: ENGINE_URL,
             config: { ...CONFIG, executors: 2 }, unbroken: table.buffer });
         try
         {
@@ -594,7 +602,8 @@ test('an executor whose worker is lost before it is ready fails its start, and d
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
     for (const body of ['throw new Error("broken at load")', 'process.exit(3)'])
     {
-        await assert.rejects(createRemoteExecutor({ host: process, index: 1,
+        await assert.rejects(createRemoteExecutor({ account: testAccountCalls,
+            host: process, index: 1,
             engineUrl: ENGINE_URL, config: { ...CONFIG, executors: 2 },
             workerUrl: new URL(`data:text/javascript,${encodeURIComponent(body)}`) }),
         /executor 1: .*(broken at load|exited \(3\))/);
@@ -606,7 +615,8 @@ test('an executor whose worker goes after it is ready ends the slice out on it, 
     // A worker gone after its `ready` said nothing: the slice out on it never
     // ended, and the process waited on the bell for good with its thread.
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, executors: 2 },
         workerUrl: new URL('./executor-lost.fixture.js', import.meta.url) });
     /** @type {string[]} */

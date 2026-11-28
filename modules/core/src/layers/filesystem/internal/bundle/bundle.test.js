@@ -23,6 +23,7 @@ import { createBlockCache } from './cache.js';
 import { cachedBundle } from './saved.js';
 import { fakeOpfs } from '../opfs.fixture.js';
 import { INDEX_FILES, grainsOf, readSaved } from '@bottlify/cellar';
+import { testBlocks } from '../../../cpu/testing.fixture.js';
 
 const BLOCK_SIZE = 1024;
 
@@ -131,7 +132,8 @@ async function cacheOf(bundle, { resident = null, budget, store = null,
     bytes = bundleBytes } = {})
 {
     const cache = await createBlockCache({ store, name: `game-${bundle.fingerprint}`,
-        blockSize: bundle.blockSize, blockCount: bundle.blockCount, budget });
+        blockSize: bundle.blockSize, blockCount: bundle.blockCount,
+        ...testBlocks(budget) });
     for (let index = 0; index < bundle.blockCount; index++)
     {
         if (resident === null || resident.includes(index))

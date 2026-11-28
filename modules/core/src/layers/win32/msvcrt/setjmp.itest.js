@@ -19,6 +19,7 @@ import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { SETJMP_CODE, createCrtSeh } from './seh.js';
 import { guestThrough } from './guest-window.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const SETJMP = 0x9000;
@@ -50,7 +51,7 @@ function random(seed){
 }
 
 test('setjmp and _setjmp3 in the guest leave the buffer their handlers leave', ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

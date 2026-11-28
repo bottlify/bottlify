@@ -24,6 +24,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../../core/src/layers/cpu/internal/cork-host.js';
+import { testAccount } from '../../../core/src/layers/cpu/testing.fixture.js';
 import * as engine from '../index.js';
 import { random } from '../testing/sequences.js';
 
@@ -69,7 +70,7 @@ function program(turns){
 }
 
 /** @param {Record<string, unknown>} cork */
-const hostOf = cork=>createCorkHost({
+const hostOf = cork=>createCorkHost({ memoryBudget: testAccount(),
     engine, memorySize: 1 << 20, trapPort: 0x1234, entryVector: ENTRY_VECTOR,
     initialStack: 0x80000, cork: { sliceMs: Infinity, ...cork },
 });

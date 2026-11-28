@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createCorkHost } from './cork-host.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { testAccount } from '../testing.fixture.js';
 
 const IMAGES = new URL('../../../../../cork/bench/micro/images/', import.meta.url);
 const IMAGE_BASE = 0x401000;
@@ -32,7 +33,7 @@ const ENTRY_VECTOR = 0x7000;
  * @param {string} name @param {'host' | 'virtual'} clock @param {number} iterations
  */
 async function runOf(name, clock, iterations){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000,
         // The default slice, 8 ms: on the machine's clock it is what the clock decides.

@@ -35,6 +35,7 @@ import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import * as D3D9_COMMANDS from '../d3d9/commands.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import { createDirect3D9 } from '../d3d9/device.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const LOCK = 0x9000;
@@ -217,7 +218,7 @@ const VERSIONS = [
  * @param {Version} version @param {boolean} [lent]
  */
 function machine(version, lent = false){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

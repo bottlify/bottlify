@@ -106,8 +106,7 @@ event, an error. Neither stops the program.
   and the function's name.
 - The run's memory is one account, bounded by `machineMemory` where it is named
   ([configuration.md](../configuration.md#memory-zones)). Not every pool of the engine's own heaps
-  is in it yet: the zones' table names each, by its bytes or `not measured`, under `notAccounted`,
-  and a bundle's block cache (64 MiB) is one of them.
+  is in it yet: the zones' table names each, by its bytes or `not measured`, under `notAccounted`.
 
 ## Sound
 

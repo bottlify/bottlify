@@ -354,7 +354,8 @@ export function engineContractProblem(engineModule, url){
  *     let go and brought back from the store when asked for (0: never). Default 60000. A module
  *     whose mark is half that old is parked first (off the entry hash, its instance kept) and
  *     taken back at its first touch; its diagnostics count both (`parkedModules`, `unparked`).
- * @property {{ take(bytes: number): boolean, give(bytes: number): void } | null} [charge]
+ * @property {{ take(bytes: number): boolean, overdraw(bytes: number): void,
+ *     give(bytes: number): void } | null} [charge]
  *     Where the host bounds what its runtimes hold together (the tab's memory): each
  *     module held is taken by its wasm bytes and given back as it is let go.
  * @property {{ take(bytes: number): boolean, give(bytes: number): void } | null} [sharedCharge]

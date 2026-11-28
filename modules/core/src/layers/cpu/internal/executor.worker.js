@@ -139,7 +139,22 @@ async function serve(
     const engine = await import(engineUrl);
     // The run's cache the translator keeps its functions in, read here in place.
     const kept = storeRelay?.kept() ?? null;
+    // Its takes of the run's account ask the process across the link, which
+    // asks the run's cache for room and says a refusal (`createRemoteExecutor`).
+    /** @type {import('@bottlify/cellar').Link | null} */
+    let link = null;
+    const across = (/** @type {string} */ method, /** @type {any[]} */ args)=>{
+        if (link === null)
+        {
+            throw new Error('cpu: an executor asked of the account before its link opened');
+        }
+        return link.ask('executor', method, args);
+    };
     const host = createCorkHost({ ...config, engine, memory,
+        memoryRoom: (/** @type {number} */ bytes)=>across('room', [bytes]) === true,
+        onMemoryRefused: (/** @type {any} */ refusal)=>{
+            across('refused', [refusal]);
+        },
         cork: { ...config.cork,
             ...store === true && storeRelay !== null ? { store: storeRelay.store } : {},
             ...kept === null ? {} : { kept } } });
@@ -159,7 +174,7 @@ async function serve(
     // to spare, which the slices out say (`Bell.RUNNING`).
     const look = lookFor(bellWords, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency);
     // Each send interrupts the process's own slice too: it answers between its own turns.
-    const link = openLink(linked, {}, { spinMs: look, afterSend: ()=>host.interruptProcess() });
+    link = openLink(linked, {}, { spinMs: look, afterSend: ()=>host.interruptProcess() });
     const words = new Int32Array(stateBuffer);
     waits = link;
     /**

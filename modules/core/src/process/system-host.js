@@ -236,13 +236,16 @@ const CALLS_OFF = Object.freeze({
  *     now: () => number,
  *     across: () => { image: string, id: number,
  *         link: ReturnType<typeof import('@bottlify/cellar').openLink> }[],
- *     libraries: () => string[] }} deps
+ *     libraries: () => string[],
+ *     roomFrom: (make: (bytes: number) => boolean) => () => void }} deps
  *     `across`: the processes standing in workers, oldest first; `libraries`:
  *     the system libraries the run's own program knew, once it is over; `reader`:
- *     the run's cache, which the session's pieces are kept in
+ *     the run's cache, which the session's pieces are kept in; `roomFrom`: its
+ *     keeper's, the bundles' blocks let go for room after its own bodies
  */
 export async function buildSystemHost(deps){
-    const { options, events, system, translationStore, reader, now, across, libraries } = deps;
+    const { options, events, system, translationStore, reader, now, across, libraries,
+        roomFrom } = deps;
     const core = await assembleModules({
         ...Object.fromEntries(defaultModules().map(module=>[module.name, false])),
         log: { categories: { ...CALLS_OFF, ...options.log?.categories },
@@ -270,7 +273,7 @@ export async function buildSystemHost(deps){
         filesystem, registry: system.registry, inherited: false, system });
     // Cork's own decoder reads the bundle's blocks: no processor is asked.
     const blocks = await furnishVolume({ options, events, filesystem,
-        blocks: await mountBundle({ options, events, translationStore }), seeded, reader,
+        blocks: await mountBundle({ options, events, translationStore, roomFrom }), seeded, reader,
         registry: system.registry });
     system.bundle = blocks;
     // The output every process plays into, each in a span of its arena lent

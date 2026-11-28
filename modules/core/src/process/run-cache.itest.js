@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../app.js';
-import { RUN_CACHE_BYTES } from './run-cache.js';
+import { RUN_CACHE_BYTES } from '../layers/cache/account.js';
 import { TABLE_BYTES } from '../layers/audio/output/mix.js';
 import { buildExe } from '../../../../tools/fixtures/make-pe.mjs';
 

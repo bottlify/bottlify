@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { openAccount } from '@bottlify/cellar';
-import { createRunAccount } from './process/run-cache.js';
+import { createRunAccount } from './layers/cache/account.js';
 import { fakeOpfs } from './layers/filesystem/internal/opfs.fixture.js';
 
 /** @param {number} value */

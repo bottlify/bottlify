@@ -52,6 +52,7 @@ import { createDirect3D8 } from '../d3d8/device.js';
 import { commandObjects as commandObjects9 } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 export const PROGRAM = 0x8000;
 export const STACK = 0x300000;
@@ -321,7 +322,7 @@ export function machine(version, guestCode, options = {}){
     const long = options.bits === 64;
     /** A pointer's bytes: out-parameters and an interface's block word are that far apart. */
     const word = long ? 8 : 4;
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
         ...long ? { bits: /** @type {64} */ (64) } : {},

@@ -19,6 +19,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { COUNTERS, CS, enterCode, leaveCode, tryEnterCode } from './critical.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const ENTER = 0x8100;
@@ -69,7 +70,7 @@ function program(){
 }
 
 test('enter, leave and try run on the processor and keep the structure Windows keeps', async()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: cork,
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,

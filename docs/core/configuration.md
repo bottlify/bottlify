@@ -51,7 +51,7 @@ process whose threads run on more than one executor.
 
 ## Memory zones
 
-A run holds its memory in one account, Cellar's (`createRunAccount`, `src/process/run-cache.js`),
+A run holds its memory in one account, Cellar's (`createRunAccount`, `src/layers/cache/account.js`),
 which every process of the run takes from, on a holder of its own given back whole as it ends, by
 kind:
 
@@ -59,13 +59,15 @@ kind:
 | --- | --- |
 | guest | What the program took of its RAM: its images, its threads' stacks and its heap up to the highest address the heap ever handed out (a page touched once is the tab's for good: a browser cannot give it back, and zeroing it frees nothing), counted by what it was given (V8) or by its memory's length (JavaScriptCore, `cpu.guestCharge`). The RAM (`memorySize`) is a limit on that, not memory made: a page the program never touched costs the tab nothing. |
 | engine | The engine's own parts, measured costs (`roadmap/decisions.md` A245): the tab before any program, in a browser; each process; each executor's worker; a process's tables. |
-| translation | The translator's modules, by their wasm bytes weighed for what holding them costs. Past the account a runtime lets the modules gone longest without running go, and brings one back from the translation store when it is reached again. |
+| translation | The translator's modules, by their wasm bytes weighed for what holding them costs (an estimate: a factor, not the engine's measured code). Past the account a runtime lets the modules gone longest without running go, and brings one back from the translation store when it is reached again; where none is left to let go, the module it runs is taken past the limit, said as a loss (`the translator holds ... past the machine's memory`). |
+| blocks | The bundles' blocks decoded, in shared memory read in place, every bundle of the run together at most 64 MiB: idle 30 s or pushed out for room, a block goes to OPFS and is read back from there, or, with no storage, is let go. |
 | cache | The run's cache's shared segments (`cache` in [api.md](api.md)): the ranges of files a process read twice, one range up to 128 MiB in parts of 8 MiB, the shaders D3DX compiled, the images D3DX's texture loaders decoded, the glyphs GDI draws, the pieces of what the program wrote (8 MiB of them being written; see `pageFile` in [api.md](api.md)), the host's copy of each Direct3D 10 and 11 resource's bytes, each Direct3D 8 and 9 frame's uniform arena, the RGBA an OpenGL context drawn on the processor samples, the scratches graphics keep between calls (held for as long as they live, never let go for room), and the sound output's table (20 MiB: its rings, 4 MiB, and the copy arena, 16 MiB); at most `cache.budget`, 160 MiB unless said. |
 
 Its limit is the machine's memory, `machineMemory`; unset, it has none. A take that does not fit
 asks the run's cache for room: empty segments go, then the bodies no one reads, the least
 recently read first, to the run's folder where they are the only copy for the run and out where
-they can be made again. Only where that makes no room is the take refused: the program's
+they can be made again, then the bundles' cold blocks. A take on an executor's worker asks the
+same, across its link to the process. Only where that makes no room is the take refused: the program's
 allocation answers as Windows' out of memory, said once a time as a loss in the journal
 (`cpu`: `the machine's memory has no room for ...`).
 
@@ -73,9 +75,9 @@ Each layer says what it holds in its diagnostics as `bytesHeld`, by zone and poo
 measures says `not measured`. The last table of a run's diagnostics, `zones`, is the account
 (`limit`, `account`: what is used, by kind, its peak, the takes refused and the room asked and
 made) and, by name, what no account counts (`notAccounted`: the pools of the engine's other heaps
-- a bundle's blocks decoded, 64 MiB at most a bundle, mirrors of guest memory behind a played
-device, kept texels, the translation store's index - and a layer that says nothing, `not
-measured`), with `total` the sum of both. The guest's and translator's pools are listed beside
+- a bundle's index of its blocks, mirrors of guest memory behind a played device, kept texels,
+the translation store's index - and a layer that says nothing, `not measured`), with `total` the
+sum of both. The guest's and translator's pools are listed beside
 their kind's sum, which holds them (`zones`). The device's buffers and textures are apart
 (`outside.device`), held by the GPU's process rather than the tab unless the device is one in
 JavaScript, and so are the page file's bytes on the disk (`outside.disk`). Its status is `over`

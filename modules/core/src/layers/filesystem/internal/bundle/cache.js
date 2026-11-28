@@ -12,8 +12,8 @@
  * A body is the block as a read hands it out -- decoded, a deflate block
  * inflated and a zstd one unpacked as it is fetched -- so a read copies a
  * block once, from where the keeper holds it into what the program asked for,
- * and decodes nothing. Hot, it is in the keeper's shared memory, under its
- * budget; idle 30 s, or pushed out for room, it goes cold, into the keeper's
+ * and decodes nothing. Hot, it is in the keeper's shared memory, its kind of
+ * the run's account; idle 30 s, or pushed out for room, it goes cold, into the keeper's
  * packs on the origin's file system (`opfs-disk.js`, one directory a bundle,
  * `blocks/<name>`), and a read brings it back from there at once, as it
  * waits for nothing but the disk. What the disk holds is the next run's too:
@@ -37,7 +37,7 @@
  * read within one go oldest-made first.
  */
 
-import { createReader, openKeeper } from '@bottlify/cellar';
+import { createReader, openAccount, openKeeper } from '@bottlify/cellar';
 import { opfsDisk } from '../opfs-disk.js';
 import { BLOCK_DIRECTORY, fileNameOf } from './saved.js';
 
@@ -105,6 +105,7 @@ const SWEEP_MS = 1000;
  */
 const SAVE_MS = 2000;
 
+
 /** A segment's bytes: a power of two a block fits in, at most 16 MiB, within the budget. */
 const segmentFor = (/** @type {number} */ blockSize, /** @type {number} */ budget)=>Math.max(
     2 ** Math.ceil(Math.log2(blockSize)),
@@ -152,16 +153,19 @@ async function directoryOf(store, file){
  *                                    not share one, so this is its identity.
  * @param {number} options.blockSize
  * @param {number} options.blockCount
- * @param {number} [options.budget]  Bytes of shared memory the blocks are held
- *     hot in, at most: 64 MiB or 32 blocks, whichever is more, by default.
+ * @param {import('@bottlify/cellar').AccountMemory} options.account  The run's
+ *     account: the blocks hot in shared memory are its `kind`, at most its
+ *     ceiling, and go cold for another kind's take that does not fit
+ *     (`makeRoom`).
+ * @param {string} options.kind
  * @param {(reason: string) => void} [options.onFull]  Told, once a run, that the
  *     disk refused a block for lack of room.
  * @param {() => number} [options.now]  The keeper's clock, for a test.
  * @returns {Promise<BlockCache>}
  */
 export async function createBlockCache(options){
-    const { store, name, blockSize, blockCount, now } = options;
-    const budget = options.budget ?? Math.max(64 << 20, 32 * blockSize);
+    const { store, name, blockSize, blockCount, now, account, kind } = options;
+    const budget = openAccount(account).bound(kind);
     /** Why the disk last refused for room, once it has. @type {string | null} */
     let full = null;
     const onQuota = (/** @type {string} */ reason)=>{
@@ -175,7 +179,7 @@ export async function createBlockCache(options){
     let reader = null;
     /** @param {Disk | null} disk */
     const open = disk=>openKeeper({
-        budget, segmentBytes: segmentFor(blockSize, budget), disk,
+        account, kind, segmentBytes: segmentFor(blockSize, budget), disk,
         coldAfterMs: disk === null ? NEVER_MS : IDLE_MS,
         announce: message=>reader?.adopt(message),
         ...now ? { now } : {},
@@ -342,6 +346,9 @@ export async function createBlockCache(options){
         /** Why the disk refused a block for room, once it has: the store is full. */
         full: ()=>full,
 
+        /** Room in the account for `bytes` more of another kind, cold blocks let go for it. */
+        makeRoom: (/** @type {number} */ bytes)=>opened.makeRoom(bytes),
+
         diagnostics(){
             const figures = opened.figures();
             const order = blocks.look(ORDER) === null ? 0 : 1;
@@ -382,6 +389,7 @@ export async function createBlockCache(options){
  * @property {() => number[]} order
  * @property {() => Promise<void>} persist
  * @property {() => string | null} full
+ * @property {(bytes: number) => boolean} makeRoom
  * @property {() => Record<string, any>} diagnostics
  * @property {() => void} close
  */

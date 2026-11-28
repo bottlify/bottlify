@@ -24,6 +24,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createCorkHost } from '../../core/src/layers/cpu/internal/cork-host.js';
+import { testAccount } from '../../core/src/layers/cpu/testing.fixture.js';
 import * as engine from './index.js';
 import { allowMemory64, ifRoom } from './testing/memory64.js';
 
@@ -44,7 +45,7 @@ const WORKLOADS = ['vcall', 'calls8-order', 'calls8-scatter'];
  * @returns {Promise<Map<number, number[]>>}
  */
 async function predictionOf(bits, name, slice, { iterations = ITERATIONS, window } = {}){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, cork: { clock: 'virtual', worker: false, sliceMs: Infinity },
         ...(bits === 64 ? { bits } : {}), ...(window === undefined ? {} : { window }),

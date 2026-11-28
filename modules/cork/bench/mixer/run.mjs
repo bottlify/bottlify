@@ -26,6 +26,7 @@
 import { performance } from 'node:perf_hooks';
 import { arch, cpus, platform } from 'node:os';
 import { createCorkHost } from '../../../core/src/layers/cpu/internal/cork-host.js';
+import { testAccount } from '../../../core/src/layers/cpu/testing.fixture.js';
 import * as engine from '../../src/index.js';
 import { assemble, initialData, reference, DATA, DATA_SIZE, IMAGE_BASE, KERNELS, SAMPLES }
     from './program.js';
@@ -54,7 +55,7 @@ const ENTRY_VECTOR = 0x7000;
 
 /** @param {Uint8Array} image */
 function makeHost(image){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine, memorySize: ram << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, cork, ...(cores > 1 ? { executors: cores } : {}),
     });

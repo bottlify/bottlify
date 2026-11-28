@@ -41,6 +41,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../../core/src/layers/cpu/internal/cork-host.js';
+import { testAccount } from '../../../core/src/layers/cpu/testing.fixture.js';
 import * as engine from '../index.js';
 import { PageFlag } from '../runtime/pages.js';
 import { features as hostFeatures } from '../wasm/features.js';
@@ -81,7 +82,7 @@ const MEMORY = 4 << 20;
  * @returns {CorkHost}
  */
 const hostOf = (cork, where = {}, features = undefined)=>/** @type {CorkHost} */ (
-    createCorkHost({
+    createCorkHost({ memoryBudget: testAccount(),
         engine, memorySize: MEMORY, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: REGISTERS.esp, cork, ...where, ...(features ? { features } : {}),
     }));

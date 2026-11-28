@@ -296,7 +296,8 @@
  *           join?: ((post: (message: any) => void) => any) | null,
  *           serve?: import('./layers/cache/module.js').Serve | null,
  *           own?: import('./layers/cache/module.js').Own | null,
- *           room?: ((bytes: number) => boolean) | null }} [cache]  The run's
+ *           room?: ((bytes: number) => boolean) | null,
+ *           roomFrom?: (make: (bytes: number) => boolean) => () => void }} [cache]  The run's
  *           cache (Cellar): `budget`, the bytes of shared memory it holds bodies in at most,
  *           its kind's ceiling in the run's account (`RUN_CACHE_BYTES` by default);
  *           `reader`, the reader a process reads it through,

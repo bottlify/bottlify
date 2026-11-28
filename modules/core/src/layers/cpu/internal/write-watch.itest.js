@@ -25,9 +25,11 @@ import { createCorkHost } from './cork-host.js';
 import { createRemoteExecutor } from './executor.js';
 import { createWriteClock } from './write-clock.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { testAccount, testAccountCalls } from '../testing.fixture.js';
 
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 const CONFIG = {
+    memoryBudget: testAccount(),
     memorySize: 4 << 20, trapPort: 0xb077, entryVector: 0x7000, initialStack: 0x300000,
     closedBelow: 0x10000, cork: { hotThreshold: 4, wasmInterpreter: true,
         // Slices end by their instruction count alone, not by the time a busy
@@ -247,7 +249,8 @@ test('every store to a watched page marks it, on every path and on another execu
 
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
     process.onTrap(()=>{});
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, executors: 2 } });
     try
     {
@@ -310,7 +313,8 @@ test('a copy kept by what the watch takes while another executor stores is the m
     const next = random(0x51ce);
     const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
     process.onTrap(()=>{});
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, executors: 2 } });
     const clock = clockOf(process, remote);
     process.writePhysical(CODE, new Uint8Array(ROUNDS));

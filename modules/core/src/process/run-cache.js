@@ -31,35 +31,14 @@
  * cache layer's default), and the next run finds nothing in it.
  */
 
-import { answerKeeper, createAccountMemory, createChannel, createReader, keeperWords, linkCarrier,
+import { answerKeeper, createChannel, createReader, keeperWords, linkCarrier,
     openKeeper, openKeeperClient, openServer, serveKeeperChannel } from '@bottlify/cellar';
+import { createRunAccount } from '../layers/cache/account.js';
 import { ownedSpace } from '../layers/cache/module.js';
 import { createScratches } from '../layers/cache/scratch.js';
 import { opfsDisk } from '../layers/filesystem/internal/opfs-disk.js';
 
 const MIB = 1024 * 1024;
-
-/**
- * The bytes of shared memory the run's cache holds bodies in, at most, unless
- * the run names its own (`AppOptions.cache.budget`): the reads it kept before,
- * 32 MiB for ranges read again and one range alone up to 128 MiB, fit.
- */
-export const RUN_CACHE_BYTES = 160 * MIB;
-
-/**
- * The run's account (Cellar's): the machine's memory, `machineMemory` bytes
- * (none: no limit), and what it is held for, by kind - the guests' memories,
- * the engine's own parts, the translator's modules, and the run's cache's
- * segments, at most `cacheBytes` of it. Every process of the run is handed
- * it and takes from it on its own holder (`roadmap/decisions.md` A243).
- *
- * @param {{ machineMemory?: number, cacheBytes?: number }} [sizes]
- */
-export function createRunAccount({ machineMemory, cacheBytes = RUN_CACHE_BYTES } = {}){
-    const limit = machineMemory !== undefined && machineMemory > 0 ? machineMemory : Infinity;
-    return createAccountMemory({ limit,
-        kinds: { cache: cacheBytes, guest: Infinity, engine: Infinity, translation: Infinity } });
-}
 
 /**
  * The shared memory the keeper adds and lets go of at a time, bodies shared
@@ -194,8 +173,17 @@ export async function openRunCache(opened = {}){
     const numbered = name=>`${name}/${++owners}/`;
     /** What owners that went left behind them, summed. */
     const tails = { owners: 0, bodies: 0, bytes: 0 };
+    /**
+     * The keepers whose cold bodies go for a take of the account's that does
+     * not fit: this one first, then those of the bundles' blocks (`roomFrom`).
+     *
+     * @type {((bytes: number) => boolean)[]}
+     */
+    const roomMakers = [keeper.makeRoom];
+    /** @param {number} bytes */
+    const makeRoom = bytes=>roomMakers.some(make=>make(bytes));
     /** The keeper as a remote keeper's readers call it: each reserve weighed by space. */
-    const remote = { reserve, raise: keeper.raise, drop: keeper.drop, makeRoom: keeper.makeRoom };
+    const remote = { reserve, raise: keeper.raise, drop: keeper.drop, makeRoom };
     /** @param {import('../layers/cache/module.js').OwnerTail} tail */
     const tailed = tail=>{
         tails.owners++;
@@ -352,7 +340,21 @@ export async function openRunCache(opened = {}){
          *
          * @param {number} bytes
          */
-        room: (/** @type {number} */ bytes)=>keeper.makeRoom(bytes),
+        room: makeRoom,
+
+        /**
+         * Another keeper of the run's account on this thread (a bundle's
+         * blocks), its cold bodies let go for room after this one's: what
+         * takes it back out, as that keeper closes.
+         *
+         * @param {(bytes: number) => boolean} make  its `makeRoom`
+         */
+        roomFrom(make){
+            roomMakers.push(make);
+            return ()=>{
+                roomMakers.splice(roomMakers.indexOf(make) >>> 0, 1);
+            };
+        },
 
         /**
          * A scratch of the run's own (its presenter's), held under names of

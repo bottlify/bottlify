@@ -30,6 +30,7 @@
 import '../../../tools/lib/chromium-v8.mjs';
 import { readFileSync, readdirSync } from 'node:fs';
 import { createCorkHost } from '../../core/src/layers/cpu/internal/cork-host.js';
+import { testAccount } from '../../core/src/layers/cpu/testing.fixture.js';
 import { createReader, openKeeper } from '@bottlify/cellar';
 import * as engine from '../src/index.js';
 import { createEmitCache } from '../src/runtime/emit-built.js';
@@ -107,7 +108,7 @@ const keepers = {
 
 /** @param {Uint8Array} image @param {import('../src/runtime/kept.js').KeptStore} kept */
 function makeHost(image, kept){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, ...(bits === 64 ? { bits } : {}),
         cork: { kept, relinkAfter: 2, relinkQuiet: 100_000 },

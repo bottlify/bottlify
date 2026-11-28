@@ -159,17 +159,22 @@ export function createBell(){
  *     unbroken?: SharedArrayBuffer | ArrayBuffer,
  *     store?: import('../engine.js').TranslationStore | null,
  *     cache?: { join: import('../../cache/module.js').Join,
- *         space: import('../../cache/module.js').CacheSpace } | null }} options
+ *         space: import('../../cache/module.js').CacheSpace } | null,
+ *     account: { room: ((bytes: number) => boolean) | null,
+ *         refused: (refusal: any) => void } }} options
  *     host: the process's cork host, made for `config.executors`; config: the configuration
  *     it was made with; bell: the one its executors share, when it waits on several;
  *     unbroken: the routines no slice ends inside (`unbroken.js`), the process's table;
  *     store: the run's translation store, which the executor's translator asks through here;
  *     cache: the run's cache as this process reaches it (`join`, and its `STORE_SPACE`
- *     space), where a record of the store the executor asks for is put once and read in place
+ *     space), where a record of the store the executor asks for is put once and read in place;
+ *     account: what the executor's takes of the run's account ask across its link, as the
+ *     process's own host does here (`memoryRoom`, `onMemoryRefused`): functions cross no
+ *     worker, the link's calls do
  */
 export async function createRemoteExecutor({ host, index, engineUrl, config,
     workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell(),
-    unbroken = undefined, store = null, cache = null })
+    unbroken = undefined, store = null, cache = null, account })
 {
     // Its pages zeroed first where a gone process left its engine's state there.
     if (host.makeRoomFor?.(index) === false)
@@ -392,6 +397,10 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     };
     const link = openLink(linked.a, { executor: {
         fault: (/** @type {any} */ record)=>answerAround(()=>(host.offerFault(record) ? Said.CLAIMED : 0)),
+        room: (/** @type {number} */ bytes)=>account.room?.(bytes) ?? false,
+        refused: (/** @type {any} */ refusal)=>{
+            account.refused(refusal);
+        },
         ended: (/** @type {any} */ record)=>{
             endFault = record;
         },

@@ -10,6 +10,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { fpuSetupCode } from './fpu.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const ROUTINE = 0x8800;
@@ -22,7 +23,7 @@ const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value
 
 test('CreateDevice\'s slot sets the thread\'s x87 as Direct3D does, unless FPU_PRESERVE, and'
     + ' reaches its trap with the call as it came', ()=>{
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

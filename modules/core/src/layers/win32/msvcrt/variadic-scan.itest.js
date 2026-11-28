@@ -23,6 +23,7 @@ import { guestThrough } from './guest-window.fixture.js';
 import { KEPT_64, QUADS, callLong, longMachine } from '../../../../scripts/guest-code/long.mjs';
 import { random } from '../../../../scripts/guest-code/equivalence.mjs';
 import { caseOf } from './scan-cases.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const TRAPS = 0x8f00;
@@ -100,7 +101,7 @@ const placesOf = next=>Array.from({ length: SLOTS }, (_, i)=>
 
 test('sscanf\'s i386 in the guest answers and stores as its handler', ()=>{
     const CODE = 0x10000;
-    const machine = createCorkHost({
+    const machine = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

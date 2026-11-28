@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openAccount } from '@bottlify/cellar';
 import { NOT_MEASURED, withZones, zonesTable } from './memory-zones.js';
-import { createRunAccount } from './process/run-cache.js';
+import { createRunAccount } from './layers/cache/account.js';
 
 const MIB = 1024 * 1024;
 
@@ -40,8 +40,8 @@ test('the account is the sum, each accounted zone\'s pools beside it; what no ac
     assert.equal(table.status, 'ready');
     const { account, zones, total, outside, notAccounted, limit } = table.metrics;
     assert.equal(limit, 1024 * MIB);
-    assert.deepEqual(account.kinds, { cache: 16 * MIB, guest: 512 * MIB, engine: 32 * MIB,
-        translation: 16 * MIB });
+    assert.deepEqual(account.kinds, { cache: 16 * MIB, blocks: 0, guest: 512 * MIB,
+        engine: 32 * MIB, translation: 16 * MIB });
     assert.equal(Object.values(account.kinds).reduce((/** @type {number} */ sum, bytes)=>sum
         + /** @type {number} */ (bytes), 0), account.used, 'the report sums to the account');
     assert.equal(zones.guest.accounted, 512 * MIB);

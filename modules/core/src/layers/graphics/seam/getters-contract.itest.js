@@ -52,6 +52,7 @@ import { createDirect3D8 } from '../d3d8/device.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { loopbackDirect3D } from '../remote/loopback.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const ENTRY = 0x7000;
 const PROGRAM = 0x8000;
@@ -161,7 +162,7 @@ const D3D8 = {
  * @param {Version} version @param {Options} options
  */
 function machine(version, options){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: ENTRY,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

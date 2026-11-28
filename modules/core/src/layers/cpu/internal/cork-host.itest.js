@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
 import * as engine from '../../../../../cork/src/index.js';
 import { allowMemory64 } from '../../../../../cork/src/testing/memory64.js';
+import { testAccount } from '../testing.fixture.js';
 
 const ENTRY_VECTOR = 0x7000;
 
@@ -26,7 +27,7 @@ const ENTRY_VECTOR = 0x7000;
  * trap, short of the hlt after it.
  */
 function host(){
-    return createCorkHost({
+    return createCorkHost({ memoryBudget: testAccount(),
         engine,
         memorySize: 1 << 20,
         trapPort: 0x1234,
@@ -199,7 +200,8 @@ test('eight bytes copied through the x87 arrive whole however the slices cut the
 
 test('long mode on the shared runtime steps a self-patching routine an instruction at a time',
     ()=>{
-        const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
+        const h = createCorkHost({ memoryBudget: testAccount(),
+            engine, memorySize: 16 << 20, trapPort: 0x1234,
             entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
             cork: { sliceMs: Infinity } });
         // At 0x11000: for ebx in 0..2999, r12d += scale(edi = ebx, esi = ebx & 3); hlt.
@@ -228,7 +230,8 @@ test('long mode on the shared runtime steps a self-patching routine an instructi
     });
 
 test('long mode\'s writes to the trap port run translated on the shared runtime', async()=>{
-    const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
+    const h = createCorkHost({ memoryBudget: testAccount(),
+        engine, memorySize: 16 << 20, trapPort: 0x1234,
         entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
         cork: { sliceMs: Infinity } });
     // For ebx in 0..1999: mov edx, port; mov eax, ebx; out dx, eax; add r12, rax; hlt.
@@ -255,7 +258,8 @@ test('long mode\'s writes to the trap port run translated on the shared runtime'
 test('long mode over a 4 GiB memory that grows: RAM past 2 GiB held when given, used translated,'
     + ' the window\'s last page the engine\'s', async()=>{
     const MIB = 1 << 20;
-    const h = createCorkHost({ engine, memorySize: 2 ** 32, trapPort: 0x1234,
+    const h = createCorkHost({ memoryBudget: testAccount(),
+        engine, memorySize: 2 ** 32, trapPort: 0x1234,
         entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
         engineArea: { at: 0x08000000 - 28 * MIB, span: 28 * MIB },
         cork: { sliceMs: Infinity } });
@@ -280,7 +284,8 @@ test('long mode over a 4 GiB memory that grows: RAM past 2 GiB held when given, 
     assert.ok(interpreted < 1000, `${interpreted} instructions interpreted`);
 
     // mov eax, 0xfffff000; mov dword [rax], 1; hlt: the window's last page faults.
-    const last = createCorkHost({ engine, memorySize: 2 ** 32, trapPort: 0x1234,
+    const last = createCorkHost({ memoryBudget: testAccount(),
+        engine, memorySize: 2 ** 32, trapPort: 0x1234,
         entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
         engineArea: { at: 0x08000000 - 28 * MIB, span: 28 * MIB },
         cork: { sliceMs: Infinity } });
@@ -303,7 +308,8 @@ test('long mode over an 8 GiB window: an image at 0x140000000 runs translated, i
     async()=>{
         allowMemory64();
         const code = 0x140001000;
-        const h = createCorkHost({ engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
+        const h = createCorkHost({ memoryBudget: testAccount(),
+            engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
             entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64, window: 2 ** 33,
             codeBase: 2 ** 32, cork: { sliceMs: Infinity } });
         // 1: add qword ptr [rip + data], 3; dec ecx; jnz 1b; mov rax, [rip + data]; hlt -- the
@@ -332,7 +338,8 @@ test('long mode over an 8 GiB window: an image at 0x140000000 runs translated, i
 test('over a wide window the host reaches the image through its low dword', ()=>{
     allowMemory64();
     const image = 0x140000000;
-    const h = createCorkHost({ engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
+    const h = createCorkHost({ memoryBudget: testAccount(),
+        engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
         entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64, window: 2 ** 33,
         codeBase: 2 ** 32, hostAlias: { at: 0x40000000, size: 0x20000 } });
     // A string in the image, where a handler handed `args[i] >>> 0` reads it.

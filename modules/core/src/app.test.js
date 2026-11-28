@@ -34,13 +34,14 @@ import { journalEvents } from './process/system-host.js';
 import { liveDumpOf } from './process/live-dump.js';
 import {
     groupBlocks, inParallel, withReadAhead, withWindow, refetchedIn, windowFor,
-    BLOCK_CACHE_BYTES, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES, retryingFetch,
+    NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES, retryingFetch,
 } from './process/bundle-mount.js';
 import {
     fixedLibraryPath, searchedDirectories, startDirectoryOf, libraryCandidates,
     withLibraryExtension, pathDirectories, moduleKeyOf, createMissingImports, describeEvent,
     placeLibrary, missingImportCall, readWholeFile, WHOLE_READ_BYTES,
 } from './process/libraries.js';
+import { BLOCK_CACHE_BYTES } from './layers/cache/account.js';
 import { createHeapAllocator } from './layers/win32/kernel32/heap.js';
 import { writeBundle } from './bundle-node.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
@@ -57,6 +58,7 @@ import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { findResource, RT_STRING } from './layers/loader/internal/resources.js';
 import { buildImage, buildResources } from './layers/loader/internal/resources.test.js';
 import { logHost } from './layers/log/testing.fixture.js';
+import { testBlocks } from './layers/cpu/testing.fixture.js';
 
 /** Fast enough that a test does not pay for the backoff it is checking. */
 const QUICK = { attempts: 4, baseDelayMs: 1, maxDelayMs: 4 };
@@ -2164,7 +2166,7 @@ test('a whole file larger than the heap\'s pool of fetched blocks is read whole,
          * image (a block takes 4 KiB of it at least).
          */
         const cache = await createBlockCache({ store: null, name: 'b', blockSize: BLOCK,
-            blockCount: bundle.blockCount, budget: 8 * 4096 });
+            blockCount: bundle.blockCount, ...testBlocks(8 * 4096) });
         const source = createBundleSource({ bundle, blocks: cache });
         // The volume's handle reads, which move only by what they answer.
         const filesystem = {

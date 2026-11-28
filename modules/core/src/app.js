@@ -72,7 +72,8 @@ import { mobileOrSafari, tailCallsFault, withoutFaultingTailCalls } from './tail
 import { createModuleTable, pathKey } from './process/module-table.js';
 import { createSystemModules, shapeOf } from './process/system-modules.js';
 import { bindSidecar } from './process/sidecar.js';
-import { createRunAccount, openRunCache } from './process/run-cache.js';
+import { openRunCache } from './process/run-cache.js';
+import { createRunAccount } from './layers/cache/account.js';
 import { cacheSpace } from './layers/cache/module.js';
 import { processesBeside } from './process/beside.js';
 import { processMemories } from './process/memories.js';
@@ -2323,7 +2324,8 @@ async function buildApp(options){
     // first.
     mountedBlocks = !options.system?.bundle;
     blocks = options.system?.bundle
-        ?? await mountBundle({ options, events, translationStore });
+        ?? await mountBundle({ options, events, translationStore,
+            roomFrom: /** @type {any} */ (options.cache).roomFrom });
     if (options.system && blocks)
     {
         options.system.bundle = blocks;
@@ -4149,7 +4151,7 @@ export async function createApp(options){
         ...runCache === null ? {}
             : { cache: { reader: runCache.reader, figures: runCache.figures,
                 join: runCache.join, serve: runCache.serve, own: runCache.own,
-                room: runCache.room } },
+                room: runCache.room, roomFrom: runCache.roomFrom } },
         cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
             ...lentConfig } },
         events,
@@ -4368,6 +4370,7 @@ export async function createApp(options){
     let current = rootAcross
         ? await buildSystemHost({ options, events, system, translationStore, now: journalClock,
             reader: runCache?.reader ?? null,
+            roomFrom: /** @type {NonNullable<typeof runCache>} */ (runCache).roomFrom,
             across: ()=>[...standingAcross], libraries: ()=>rootLibraries.value })
         : await build();
     // What every process's devices present comes back from the run's

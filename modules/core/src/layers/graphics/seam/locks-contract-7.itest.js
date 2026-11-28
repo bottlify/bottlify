@@ -38,6 +38,7 @@ import { createShadow, settledAfter } from './shadow.js';
 import { BUFFER, SHADOW, VERTEX_BUFFER7 } from './block.js';
 import { commandCode } from './routines/command.js';
 import { lock7Code, unlockCode } from './routines/locks.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const LOCK = 0x9000;
@@ -160,7 +161,7 @@ function generate(seed, count){
  * guest memory at each unlock -- of the whole buffer, as this version locks.
  */
 function machine(){
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });

@@ -65,12 +65,12 @@ const EXECUTOR_BYTES = 12 << 20;
  * on the process's holder where it has: without it the process runs its
  * threads on the executors it has.
  *
- * @param {{ memoryBudget?: import('@bottlify/cellar').AccountMemory,
+ * @param {{ memoryBudget: import('@bottlify/cellar').AccountMemory,
  *     memoryHolder?: number }} settings
+ * @param {((bytes: number) => boolean) | null} room  the run's cache's (`cache.room`)
  */
-const executorRoom = settings=>settings.memoryBudget === undefined
-    || openAccount(settings.memoryBudget, { holder: settings.memoryHolder })
-        .take(EXECUTOR_BYTES, 'engine');
+const executorRoom = (settings, room)=>openAccount(settings.memoryBudget,
+    { holder: settings.memoryHolder, room }).take(EXECUTOR_BYTES, 'engine');
 
 /** The most executors a process has: an x86 affinity mask has 32 bits, a processor each. */
 export const MAX_EXECUTORS = 32;
@@ -317,6 +317,31 @@ export function createCpuModule(){
             // The run's cache, where a translation another executor of the process
             // asks for is put once and read there in place (`createRemoteExecutor`).
             const cache = moduleHost.requireApi('cache');
+            /** @param {string} detail  something the program made that did not happen */
+            const loss = detail=>{
+                if (config?.divergence)
+                {
+                    config.divergence('cpu', detail, 'loss');
+                }
+                else
+                {
+                    log.error('cpu', detail);
+                }
+            };
+            /**
+             * A take the run's account refused once its cache made what room it
+             * could, or the translator's taken past it (`past`): a loss either way.
+             *
+             * @param {{ kind: string, bytes: number, used: number, limit: number | null,
+             *     past?: boolean }} refusal
+             */
+            const memoryRefused = refusal=>loss(refusal.past
+                ? `the translator holds ${refusal.bytes} bytes past the machine's memory`
+                    + ` (${refusal.used} of ${refusal.limit} held): nothing was left to let go`
+                    + ' for code the program runs'
+                : `the machine's memory has no room for ${refusal.bytes} bytes of`
+                    + ` ${refusal.kind} (${refusal.used} of ${refusal.limit} held): refused, as a`
+                    + ' machine out of memory refuses it');
 
             /**
              * Who is told the guest's memory grew (`onGrow`), kept from before
@@ -640,16 +665,8 @@ export function createCpuModule(){
                         state.lostRemotes.push(remote);
                         state.unopened.add(index);
                         state.executorsLost.push(`executor ${index}: ${reason}`);
-                        const detail = `executor ${index}'s worker went (${reason}): its threads`
-                            + ' run on the others, the one it ran from its last state';
-                        if (config?.divergence)
-                        {
-                            config.divergence('cpu', detail, 'loss');
-                        }
-                        else
-                        {
-                            log.error('cpu', detail);
-                        }
+                        loss(`executor ${index}'s worker went (${reason}): its threads`
+                            + ' run on the others, the one it ran from its last state');
                     });
                     const learned = state.learned;
                     if (learned !== null && state.remotes.length > learned.opened)
@@ -828,9 +845,9 @@ export function createCpuModule(){
                         translationZone: TRANSLATION_ZONE_BYTES,
                         // The machine's memory: each executor's translations held on
                         // the process's holder, given back with it.
-                        ...settings.memoryBudget ? { memoryBudget: settings.memoryBudget,
-                            memoryHolder: settings.memoryHolder,
-                            guestCharge: settings.guestCharge } : {},
+                        memoryBudget: settings.memoryBudget,
+                        memoryHolder: settings.memoryHolder,
+                        guestCharge: settings.guestCharge,
                         bits: settings.bits,
                         ...(settings.window ? { window: settings.window,
                             codeBase: settings.codeBase ?? 0,
@@ -841,25 +858,11 @@ export function createCpuModule(){
                     };
                     state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                         reused: settings.reused,
-                        ...settings.memoryBudget ? { memoryCredit: settings.memoryCredit,
-                            // The process's own host grows the guest's memory: cold
-                            // bodies of the run's cache let go for a take that does
-                            // not fit, and one refused even so is a loss.
-                            memoryRoom: cache.room,
-                            onMemoryRefused: (/** @type {any} */ refusal)=>{
-                                const detail = 'the machine\'s memory has no room for'
-                                    + ` ${refusal.bytes} bytes of ${refusal.kind} (${refusal.used}`
-                                    + ` of ${refusal.limit} held): refused, as a machine out of`
-                                    + ' memory refuses it';
-                                if (config?.divergence)
-                                {
-                                    config.divergence('cpu', detail, 'loss');
-                                }
-                                else
-                                {
-                                    log?.error?.('cpu', detail);
-                                }
-                            } } : {} });
+                        memoryCredit: settings.memoryCredit,
+                        // Cold bodies of the run's cache let go for a take that
+                        // does not fit; one refused even so is a loss. An
+                        // executor asks both across its link (`createRemoteExecutor`).
+                        memoryRoom: cache.room, onMemoryRefused: memoryRefused });
                     for (const listener of growListeners)
                     {
                         state.host.onGrow?.(listener);
@@ -903,6 +906,7 @@ export function createCpuModule(){
                             unbroken: state.unbroken.buffer,
                             store: hostConfig.cork?.store ?? null,
                             cache: { join: cache.join, space: cache.space(STORE_SPACE) },
+                            account: { room: cache.room, refused: memoryRefused },
                             config: { ...hostConfig, cork } }).then(remote=>{
                             if (lending === null)
                             {
@@ -921,7 +925,8 @@ export function createCpuModule(){
                             };
                             return remote;
                         });
-                        state.openExecutor = index=>(executorRoom(settings) ? openOne(index)
+                        state.openExecutor = index=>(executorRoom(settings, cache.room)
+                            ? openOne(index)
                             : Promise.reject(new Error('the machine\'s memory has no room'
                                 + ' for its worker')));
                         const store = hostConfig.cork?.store ?? null;

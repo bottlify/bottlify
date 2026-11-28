@@ -19,6 +19,7 @@ import { EVENT_TAG, MIRROR, MUTEX_TAG } from '../../kernel/internal/event-mirror
 import { EVENT_WORD } from '../../kernel/internal/event-words.js';
 import { MUTEX_WORD } from '../../kernel/internal/mutex-words.js';
 import { EVENT_SLOTS, eventStateCode, releaseMutexCode, waitOneCode } from './wait-one.js';
+import { testAccount } from '../../cpu/testing.fixture.js';
 
 const PROGRAM = 0x8000;
 const POLL = 0x8200;
@@ -37,7 +38,7 @@ const u32 = value=>[
 
 test('the guest poll times out an unsignalled event and leaves every other wait to the host',
     async()=>{
-        const host = createCorkHost({
+        const host = createCorkHost({ memoryBudget: testAccount(),
             engine: cork,
             memorySize: 64 * 1024 * 1024,
             trapPort: 0xb077,
@@ -119,7 +120,7 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
     const MUTEX = 0x110000;
     const HANDLE = 0x160;
     const ME = 0x2c;
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: cork,
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,
@@ -233,7 +234,7 @@ test('the guest answers SetEvent of a signalled event and ResetEvent of a clear 
     + ' every change to the host', async()=>{
     const SET = 0x8600;
     const RESET = 0x8700;
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: cork,
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,
@@ -301,7 +302,7 @@ test('the guest takes, sets and resets an event by its own word, and answers wha
     const RELEASE = 0x8800;
     const EVENT = 0x120000;
     const HANDLE = 0x170;
-    const host = createCorkHost({
+    const host = createCorkHost({ memoryBudget: testAccount(),
         engine: cork,
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,

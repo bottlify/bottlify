@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { processMemories } from './memories.js';
-import { createRunAccount } from './run-cache.js';
+import { createRunAccount } from '../layers/cache/account.js';
 
 const MIB = 1 << 20;
 

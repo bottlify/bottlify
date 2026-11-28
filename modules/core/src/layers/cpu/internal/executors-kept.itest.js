@@ -20,6 +20,7 @@ import { createBell, createRemoteExecutor } from './executor.js';
 import { KEPT_OPTIONS, KEPT_SPACE, STORE_SPACE } from './store-relay.js';
 import { testCache } from '../../cache/testing.fixture.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { testAccount, testAccountCalls } from '../testing.fixture.js';
 
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 const MEMORY = 4 << 20;
@@ -31,7 +32,8 @@ const TRAP_PORT = 0xb077;
 /** One region a module, relinked soon: a relink emits running regions again into one module. */
 const CORK = { hotThreshold: 4, wasmInterpreter: true, sliceMs: Infinity, leafBytes: 1,
     batchRegions: 1, maxBatchRegions: 1, relinkAfter: 2, relinkQuiet: 0, bundleId: 'test' };
-const CONFIG = { memorySize: MEMORY, trapPort: TRAP_PORT, entryVector: 0x7000,
+const CONFIG = {
+    memoryBudget: testAccount(), memorySize: MEMORY, trapPort: TRAP_PORT, entryVector: 0x7000,
     initialStack: STACKS[0], closedBelow: 0x10000, executors: 2 };
 
 /** @param {number} value */
@@ -95,7 +97,8 @@ test('two executors keep their functions in the run\'s cache, the worker\'s sent
     const process = createCorkHost({ ...CONFIG, engine, cork: { ...CORK, kept } });
     process.onTrap(()=>{});
     // The worker's configuration is data: the store stays here, as the cpu layer leaves it.
-    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+    const remote = await createRemoteExecutor({ account: testAccountCalls,
+        host: process, index: 1, engineUrl: ENGINE_URL,
         config: { ...CONFIG, cork: CORK }, bell: createBell(),
         cache: { join: cache.join, space: cache.space(STORE_SPACE) } });
     try
