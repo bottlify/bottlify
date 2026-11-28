@@ -14,14 +14,15 @@
  * (`config.reader`). A layer asks for a space by name and keeps its keys
  * inside it, so two layers' names never meet.
  *
- * Without a reader -- a layer built alone in a tool -- there is no cache and
- * nothing stands in for one: every space answers a miss and keeps nothing,
- * and every room (`scratch`, `hold`) is refused (`scratch.js` `NoRoom`). A
- * test builds a layer over a real cache in memory (`testing.fixture.js`).
+ * A process always has a cache: built without a reader, the layer is an
+ * error that names the cause, and nothing stands in for one. A test or a tool
+ * that builds a layer alone builds it over a real cache in memory
+ * (`testing.fixture.js`).
  */
 
-import { ChannelClosed, createReader, openClient, openKeeperClient } from '@bottlify/cellar';
-import { createScratches, noScratches } from './scratch.js';
+import { ChannelClosed, createReader, openClient, openKeeperClient, reserveFlags }
+    from '@bottlify/cellar';
+import { createScratches } from './scratch.js';
 
 /** @typedef {import('./scratch.js').Scratch} Scratch */
 /** @typedef {import('./scratch.js').Held} Held */
@@ -57,29 +58,6 @@ import { createScratches, noScratches } from './scratch.js';
  * @typedef {(post: (message: any) => void) => (Joined & { leave: () => void }) | null} Join
  */
 
-/** What a space is with no cache under it. @type {CacheSpace} */
-const NOTHING = Object.freeze({
-    look: ()=>null,
-    with: ()=>undefined,
-    put: ()=>false,
-    drop: ()=>{},
-    hold: ()=>null,
-});
-
-/**
- * The cache's api with no cache under it, as `create` answers without a
- * reader: for a tool that builds a layer alone. It keeps nothing and refuses
- * every room.
- */
-export const noCache = Object.freeze({
-    space: /** @type {(name: string, options?: object) => CacheSpace} */ (()=>NOTHING),
-    join: /** @type {Join} */ (()=>null),
-    serve: /** @type {Serve} */ (()=>null), owner: /** @type {Owner} */ (()=>null),
-    scratch: /** @type {(name: string) => Scratch} */ (name=>noScratches.scratch(name)),
-    hold: /** @type {(name: string, length: number) => Held} */ ((name, length)=>
-        noScratches.hold(name, length)),
-    room: /** @type {((bytes: number) => boolean) | null} */ (null) });
-
 /**
  * Names of the run's cache an owner on this thread holds alone (`ownedSpace`),
  * or null where the run serves none.
@@ -88,7 +66,6 @@ export const noCache = Object.freeze({
  */
 
 /** @typedef {import('@bottlify/cellar').Reader} Reader */
-/** @typedef {import('@bottlify/cellar').Place} Place */
 
 /**
  * A channel one owner on a worker calls the run's keeper through, and the
@@ -98,16 +75,23 @@ export const noCache = Object.freeze({
  * @typedef {(name: string) => { channel: SharedArrayBuffer, prefix: string } | null} Serve
  */
 
+/**
+ * What an owner's bodies ask for (`channelSpace`): texels a GPU was given,
+ * which nothing can make again while the run lasts and the next run cannot use.
+ */
+const OWNED = reserveFlags({ onlyCopy: true, disk: 'run' });
+
 /** Whole names a space keeps made, at most: past it it makes them again. */
 const NAMES_KEPT = 1 << 16;
 
 /**
- * The names `name/...` of the run's cache as a space, read through `reader`;
- * without one, a space that keeps nothing. Whoever holds the run's reader
- * outside a layer (the bundle's mount) takes its space here, as the layer
- * hands its own.
+ * The names `name/...` of the run's cache as a space, read through `reader`.
+ * Whoever holds the run's reader outside a layer (the bundle's mount) takes
+ * its space here, as the layer hands its own.
  *
- * @param {Reader | null | undefined} reader @param {string} name
+ * @param {Reader | null | undefined} reader  the run's, which every process has: a space
+ *     without one is an error
+ * @param {string} name
  * @param {{ onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never', idle?: 'go' | 'stay' }} [options]
  *     `onlyCopy`: bodies that cannot be made again, which never go away; `disk`:
  *     where a body may go on the disk (Cellar's `DiskPolicy`), never by default:
@@ -119,8 +103,11 @@ const NAMES_KEPT = 1 << 16;
 export function cacheSpace(reader, name, { onlyCopy = false, disk = 'never', idle = 'go' } = {}){
     if (!reader)
     {
-        return NOTHING;
+        throw new Error(`cache: the space ${name} has no reader - a process always reads the`
+            + ' run\'s cache');
     }
+    /** What every put of the space asks for, as the word Cellar reads. */
+    const flags = reserveFlags({ onlyCopy, disk, idle });
     /**
      * Each key's whole name, made once: a hit is then a lookup by the same
      * string, whose hash the engine keeps (a key is a caller's own string
@@ -146,7 +133,7 @@ export function cacheSpace(reader, name, { onlyCopy = false, disk = 'never', idl
     return {
         look: key=>reader.look(named(key)),
         with: (key, read, options)=>reader.with(named(key), read, options),
-        put: (key, bytes)=>reader.put(named(key), bytes, { onlyCopy, disk, idle }),
+        put: (key, bytes)=>reader.put(named(key), bytes, flags),
         drop: key=>reader.drop(named(key)),
         hold: (key, length)=>{
             const whole = `${name}/${key}`;
@@ -170,7 +157,7 @@ export function joinedSpace(joined, name){
     const reader = createReader({
         shared: joined.shared, segments: joined.segments,
         keeper: {
-            reserve: ()=>null,
+            reserve: ()=>false,
             raise: ()=>false,
             raiseLater: ()=>{},
             drop: ()=>{},
@@ -272,7 +259,12 @@ export function channelSpace(joined, { channel, prefix }){
     const client = openKeeperClient(carrier);
     /** The segments this side's reader has views of: room is asked for below them. */
     let known = joined.segments.length;
-    /** Room the keeper granted, by whole name, for the next reserve of it. @type {Map<string, Place>} */
+    /**
+     * Room the keeper granted, by whole name, for the next reserve of it: the
+     * place's words (Cellar's `PLACE_WORDS`).
+     *
+     * @type {Map<string, Int32Array>}
+     */
     const granted = new Map();
     /** Room asked for and not answered yet, a reservation the keeper may be holding. */
     let asking = 0;
@@ -280,10 +272,15 @@ export function channelSpace(joined, { channel, prefix }){
     const reader = createReader({
         shared: joined.shared, segments: joined.segments,
         keeper: { ...client.keeper,
-            reserve: (whole, length, options)=>{
-                const place = granted.get(whole);
+            reserve: (whole, length, flags, heard, place)=>{
+                const given = granted.get(whole);
+                if (given === undefined)
+                {
+                    return client.keeper.reserve(whole, length, flags, heard, place);
+                }
                 granted.delete(whole);
-                return place ?? client.keeper.reserve(whole, length, options);
+                place.set(given);
+                return true;
             } },
     });
     const { space, held, holds } = ownerNames(reader, prefix, ()=>!closed);
@@ -305,8 +302,7 @@ export function channelSpace(joined, { channel, prefix }){
         ask: async(key, length)=>{
             const whole = `${prefix}${key}`;
             asking++;
-            const place = await client.reserveLater(whole, length,
-                { known, onlyCopy: true, disk: 'run' })
+            const place = await client.reserveLater(whole, length, OWNED, known)
                 .finally(()=>{
                     asking--;
                 });
@@ -329,8 +325,7 @@ export function channelSpace(joined, { channel, prefix }){
          */
         forgo: (key, length)=>{
             const whole = `${prefix}${key}`;
-            if (granted.has(whole) && reader.reserve(whole, length,
-                { onlyCopy: true, disk: 'run' }) !== null)
+            if (granted.has(whole) && reader.reserve(whole, length, OWNED) !== null)
             {
                 reader.abandon(whole);
             }
@@ -562,13 +557,14 @@ export function createCacheModule(){
          *     life, likewise
          */
         async create(config){
-            reader = config?.reader ?? null;
-            made = true;
-            const given = reader;
+            const given = config?.reader ?? null;
             if (given === null)
             {
-                return noCache;
+                throw new Error('cache: built without a reader - a process always reads the'
+                    + ' run\'s cache; a test or a tool builds it over one in memory (testCache)');
             }
+            reader = given;
+            made = true;
             let owners = 0;
             /** @type {Own} */
             const own = config?.own ?? (name=>({ prefix: `${name}/${++owners}/`, release: ()=>null }));
@@ -606,10 +602,10 @@ export function createCacheModule(){
                     // The bodies are the run's, held by its keeper and counted
                     // there; this process holds none of its own.
                     bytesHeld: {},
-                    reader: reader?.figures() ?? 'no cache: every read is a miss',
+                    reader: reader?.figures() ?? 'not built',
                     // What the layers keep between calls and for an object's life,
                     // held in the run's cache; the rooms it refused counted.
-                    scratch: scratches?.figures() ?? 'no cache: every room is refused',
+                    scratch: scratches?.figures() ?? 'not built',
                 },
                 issues: [],
             };

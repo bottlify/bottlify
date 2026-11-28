@@ -21,7 +21,7 @@ import { win32Module } from './module.js';
 import { filesystemModule } from '../filesystem/module.js';
 import { createMemoryModule } from '../memory/module.js';
 import { certificates, NOW, signedCabinet } from './wintrust/fixtures.test.js';
-import { noCache } from '../cache/module.js';
+import { roomy } from '../cache/testing.fixture.js';
 import { createHandleTable, FIRST_HANDLE } from '../kernel/internal/handles.js';
 import { createProcessTable } from '../kernel/internal/processes.js';
 import { memoryLayerAnswers } from './memory.fixture.js';
@@ -130,8 +130,7 @@ function hostOver(replace = {}){
             callbackCaller: ()=>null,
         },
         filesystem: replace.filesystem ?? { drives: ()=>[], stat: ()=>null },
-        // No run's cache: every read is a miss.
-        cache: noCache,
+        cache: roomy.api,
     };
     if (replace.memory)
     {

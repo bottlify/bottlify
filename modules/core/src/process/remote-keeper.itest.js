@@ -17,7 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { createLinkMemory, openLink } from '@bottlify/cellar';
+import { createLinkMemory, openLink, reserveFlags } from '@bottlify/cellar';
 import { CACHE_CALLS, openRunCache } from './run-cache.js';
 
 const NAMES = 48;
@@ -44,6 +44,9 @@ function sequenceOf(seed, count){
         `m/${Math.floor(next() * NAMES)}`, 1 + Math.floor(next() * (4 << 20)),
         Math.floor(next() * 256)]);
 }
+
+/** What an owner's bodies ask for: the only copy, on the disk for this run. */
+const OWNED = reserveFlags({ onlyCopy: true, disk: 'run' });
 
 /**
  * Runs `ops` over `reader` and `own` (a process's, wherever it is): what each
@@ -109,8 +112,7 @@ const RUN = `(reader, own, ops)=>{
         }
         if (op === 'ownPut')
         {
-            const kept = reader.put(owner.owned.prefix + name, bodyOf(length, byte),
-                { onlyCopy: true, disk: 'run' });
+            const kept = reader.put(owner.owned.prefix + name, bodyOf(length, byte), ${OWNED});
             owner.held += kept ? 1 : 0;
             return kept;
         }

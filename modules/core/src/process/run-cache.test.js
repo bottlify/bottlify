@@ -6,8 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLinkMemory, createReader, grainsOf, linkCarrier, openKeeperClient, openLink }
-    from '@bottlify/cellar';
+import {
+    PLACE_WORDS, createLinkMemory, createReader, grainsOf, linkCarrier, openKeeperClient, openLink,
+    reserveFlags,
+} from '@bottlify/cellar';
 import { openAccount } from '@bottlify/cellar';
 import { CACHE_CALLS, openRunCache } from './run-cache.js';
 import { createRunAccount } from '../layers/cache/account.js';
@@ -31,7 +33,7 @@ const joinedReader = (/** @type {{ join: (post: (message: any) => void) => any }
     let reader = null;
     const joined = run.join(message=>reader?.adopt(message));
     reader = createReader({ shared: joined.shared, segments: joined.segments,
-        keeper: { reserve: ()=>null, raise: ()=>false, raiseLater: ()=>{}, drop: ()=>{} } });
+        keeper: { reserve: ()=>false, raise: ()=>false, raiseLater: ()=>{}, drop: ()=>{} } });
     return reader;
 };
 
@@ -81,9 +83,8 @@ test('the figures weigh each space on its own: its bodies, those in memory, the 
             assert.ok(run.reader.put('reads/a', new Uint8Array(256)));
             assert.ok(run.reader.put('reads/b', new Uint8Array(4096)));
             // Through the handlers a process in a worker of its own calls.
-            const place = acrossOf(run).keeper.reserve('translations/m', 5000,
-                { onlyCopy: false, known: 1 });
-            assert.ok(place !== null);
+            assert.ok(acrossOf(run).keeper.reserve('translations/m', 5000, 0, 1,
+                new Int32Array(PLACE_WORDS)));
             const standing = {
                 reads: { bodies: 2, bytes: 4352, hotBytes: 4352,
                     placedBytes: grainsOf(256) + grainsOf(4096) },
@@ -124,7 +125,7 @@ async()=>{
     const MIB = 1 << 20;
     // Bodies of a quarter of it, four to the segment.
     const texels = new Uint8Array(4 * MIB).map((_, i)=>i * 7);
-    assert.ok(run.reader.put('texels/1', texels, { onlyCopy: true, disk: 'run' }));
+    assert.ok(run.reader.put('texels/1', texels, reserveFlags({ onlyCopy: true, disk: 'run' })));
     const reads = cacheSpace(run.reader, 'reads');
     for (const key of ['a', 'b', 'c'])
     {

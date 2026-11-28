@@ -27,7 +27,6 @@ import {
 } from './dsound/seam.js';
 import { withPointers } from '../memory/pointers.fixture.js';
 import { testCache } from '../cache/testing.fixture.js';
-import { noCache } from '../cache/module.js';
 import { testWin32 } from './win32.fixture.js';
 
 /**
@@ -285,7 +284,7 @@ test('the sound output is memory held in the run\'s cache: counted there, writte
 
 test('with no room for the sound output in the run\'s cache the machine does not start: no '
     + 'buffer of its own stands in', async()=>{
-    await assert.rejects(playing({ cache: noCache }), /no room in the run's cache/);
+    await assert.rejects(playing({ cache: (await testCache({ budget: 0 })).api }), /no room in the run's cache/);
 });
 
 test('a process that replaces another mixes into the same sound output', async()=>{

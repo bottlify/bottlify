@@ -31,7 +31,7 @@ import '../../../tools/lib/chromium-v8.mjs';
 import { readFileSync, readdirSync } from 'node:fs';
 import { createCorkHost } from '../../core/src/layers/cpu/internal/cork-host.js';
 import { testAccount } from '../../core/src/layers/cpu/testing.fixture.js';
-import { createReader, openKeeper } from '@bottlify/cellar';
+import { createReader, openKeeper, reserveFlags } from '@bottlify/cellar';
 import * as engine from '../src/index.js';
 import { createEmitCache } from '../src/runtime/emit-built.js';
 import { keptEmitCache, readEntry } from '../src/runtime/kept.js';
@@ -45,6 +45,8 @@ const only = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.star
 const WARM_REPS = 3;
 const IMAGE_BASE = 0x401000;
 const ENTRY_VECTOR = 0x7000;
+/** What the translator's functions ask of the cache, as a run's do (`kept.js`). */
+const KEPT = reserveFlags({ disk: 'never', idle: 'stay' });
 const images = new URL(bits === 64 ? 'micro/images64/' : 'micro/images/', import.meta.url);
 const names = readdirSync(images).filter(file=>file.endsWith('.bin'))
     .map(file=>file.slice(0, -4)).filter(name=>only.length === 0
@@ -64,7 +66,7 @@ async function runCacheOf(budget, onPut = ()=>{}){
         announce: message=>told.forEach(tell=>tell(message)) });
     const reader = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
-            reserve: (name, length, options)=>keeper.reserve(name, length, options),
+            reserve: keeper.reserve,
             raise: (name, options)=>keeper.raise(name, options),
             raiseLater: name=>{
                 keeper.raise(name);
@@ -76,13 +78,13 @@ async function runCacheOf(budget, onPut = ()=>{}){
     told.push(message=>reader.adopt(message));
     // Its first segment and the spare it keeps made now, before it is timed:
     // a run's keeper makes them once.
-    reader.put('warm', new Uint8Array(8), { disk: 'never' });
+    reader.put('warm', new Uint8Array(8), reserveFlags({ disk: 'never' }));
     /** @type {import('../src/runtime/kept.js').KeptSpace} */
     const space = {
         with: (name, read)=>reader.with(`cork/${name}`, read),
         put(name, bytes){
             onPut(name, bytes);
-            return reader.put(`cork/${name}`, bytes, { disk: 'never', idle: 'stay' });
+            return reader.put(`cork/${name}`, bytes, KEPT);
         },
     };
     return {

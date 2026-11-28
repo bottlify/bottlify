@@ -27,7 +27,6 @@ import { OPAQUE, TRANSPARENT } from './brush.js';
 import { createPainter } from './shapes.js';
 import { clearSurface, createSurface } from './surface.js';
 import { testCache, testScratch } from '../../cache/testing.fixture.js';
-import { noCache } from '../../cache/module.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -174,7 +173,7 @@ async function run(seed, where, { mutate = false } = {}){
     const next = random(seed);
     const cache = where === 'none' ? null
         : await testCache(where === 'small' ? { budget: 8 << 10, segmentBytes: 4 << 10 } : {});
-    let space = cache ? cache.space('glyphs') : noCache.space('glyphs');
+    let space = cache ? cache.space('glyphs') : (await testCache({ budget: 0 })).space('glyphs');
     if (cache && mutate)
     {
         const inner = space;
