@@ -37,7 +37,6 @@ import { createSecurityFunctions } from './security.js';
 import { createLsaFunctions } from './lsa.js';
 import { isTextUnicode } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
-import { writeZeros } from '../../../system/port.js';
 import { utf16 } from '../common/utf16.js';
 import { foldName, utf8 } from '../../../system/text.js';
 
@@ -177,15 +176,11 @@ export { USER_NAME };
 
 /**
  * @typedef {Object} RegistryHost
- * @property {import('../common/guest.js').Guest} guest
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {import('./wow64-registry.js').ProcessRegistry<
  *     ReturnType<typeof import('./registry-service.js').createRegistryService>>} hive
  *           The run's registry as this process reaches it: its width's view on a
  *           64-bit Windows, whose open, create and remove take a REGSAM.
- * @property {4 | 8} [pointerSize]  The process's: a trustee's pointers are its width.
  * @property {(bytes: number) => number} [allocate]
  *           Guest memory for the objects this library hands out by pointer -- a
  *           SID. Without it those calls fail as an out-of-memory would, which
@@ -222,6 +217,11 @@ const largest = numbers=>numbers.reduce((most, number)=>Math.max(most, number), 
  * @param {RegistryHost} host
  */
 export function createRegistryFunctions(host){
+    const { guest } = host;
+    /** A name the guest passed, or null for NULL, which is legal almost everywhere here. */
+    const readText = (/** @type {number} */ pointer)=>guest.optionalText(pointer, false, MAX_NAME);
+    const readWideText = (/** @type {number} */ pointer)=>guest.optionalText(pointer, true,
+        MAX_NAME * 2);
     /**
      * The changes RegNotifyChangeKeyValue is waiting for, each answered once:
      * the key a handle named, whether its subkeys count, the kinds of change,
@@ -362,11 +362,6 @@ export function createRegistryFunctions(host){
      */
     const keyOf = handle=>hive.root(handle >>> 0) ?? handles.get(handle >>> 0) ?? null;
 
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-    };
 
     /** The consumer line's answer to a security call: FALSE, and it says why. */
     const notImplemented = ()=>{
@@ -374,12 +369,6 @@ export function createRegistryFunctions(host){
         return 0;
     };
 
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(address, new Uint8Array([
-            value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
-        ]));
-    };
 
     /**
      * Most out-parameters here are optional, and a NULL one is not an error.
@@ -389,16 +378,10 @@ export function createRegistryFunctions(host){
     const writeDwordIf = (address, value)=>{
         if (address !== 0)
         {
-            writeDword(address, value);
+            guest.set32(address, value);
         }
     };
 
-    /**
-     * @param {number} pointer
-     * @returns {string | null} null when the guest passed NULL, which is legal
-     *                          almost everywhere in this surface
-     */
-    const readText = pointer=>(pointer === 0 ? null : host.readCString(pointer, MAX_NAME));
 
     /**
      * The narrow form of UTF-16 bytes: the hive holds every string as the
@@ -427,29 +410,10 @@ export function createRegistryFunctions(host){
         return utf16(text);
     };
 
-    /** @param {number} pointer @returns {string | null} */
-    const readWideText = pointer=>{
-        if (pointer === 0)
-        {
-            return null;
-        }
-        let text = '';
-        for (let at = 0; at < MAX_NAME; at++)
-        {
-            const pair = host.readMemory(pointer + at * 2, 2);
-            const code = pair[0] | pair[1] << 8;
-            if (code === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(code);
-        }
-        return text;
-    };
 
     /** In the ANSI page. @param {number} pointer @param {string} text */
     const writeText = (pointer, text)=>{
-        host.writeMemory(pointer, encodeAnsi(`${text}\0`));
+        guest.setBytes(pointer, encodeAnsi(`${text}\0`));
     };
 
     /**
@@ -460,7 +424,7 @@ export function createRegistryFunctions(host){
     const writeFileTime = pointer=>{
         if (pointer !== 0)
         {
-            host.writeMemory(pointer, new Uint8Array(8));
+            guest.setBytes(pointer, new Uint8Array(8));
         }
     };
 
@@ -529,9 +493,9 @@ export function createRegistryFunctions(host){
             {
                 return '';
             }
-            const length = readDword(address) & 0xffff;
-            const buffer = readDword(address + 4);
-            const units = buffer === 0 ? new Uint8Array(0) : host.readMemory(buffer, length & ~1);
+            const length = guest.u32(address) & 0xffff;
+            const buffer = guest.u32(address + 4);
+            const units = buffer === 0 ? new Uint8Array(0) : guest.snapshot(buffer, length & ~1);
             let text = '';
             for (let at = 0; at + 1 < units.length; at += 2)
             {
@@ -688,7 +652,7 @@ export function createRegistryFunctions(host){
             {
                 return STATUS.ACCESS_VIOLATION;
             }
-            host.writeMemory(wholeAddress(buffer),
+            guest.setBytes(buffer,
                 answer.bytes.subarray(0, Math.min(length >>> 0, answer.bytes.length)));
             return (length >>> 0) < answer.bytes.length ? STATUS.BUFFER_OVERFLOW : STATUS.SUCCESS;
         };
@@ -735,7 +699,7 @@ export function createRegistryFunctions(host){
             }
             const made = found ? { key: found, created: false }
                 : hive.create(named.base, named.path);
-            writeDword(wholeAddress(out), allocate(made.key));
+            guest.set32(out, allocate(made.key));
             writeDwordIf(disposition >>> 0,
                 made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
             return STATUS.SUCCESS;
@@ -787,7 +751,7 @@ export function createRegistryFunctions(host){
                     argBytes: 24,
                     handler: onHeld((key, [, name, , type, data, size])=>{
                         const bytes = (size >>> 0) === 0 ? new Uint8Array(0)
-                            : host.readMemory(wholeAddress(data), size >>> 0).slice();
+                            : guest.snapshot(data, size >>> 0);
                         // The hive keeps a string in the ANSI page, as a W call stores it.
                         hive.setValue(key, counted(name >>> 0), type >>> 0,
                             STRING_TYPES.has(type >>> 0) ? narrowed(bytes) : bytes);
@@ -907,7 +871,7 @@ export function createRegistryFunctions(host){
         // The REGSAM's KEY_WOW64_* names the view on a 64-bit Windows
         // (`wow64-registry.js`); the run's own hive takes no fourth argument.
         const made = hive.create(key, subKey, keyClass, sam);
-        writeDword(result, allocate(made.key));
+        guest.set32(result, allocate(made.key));
         writeDwordIf(disposition,
             made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
         return ERROR_SUCCESS;
@@ -915,8 +879,8 @@ export function createRegistryFunctions(host){
     const createKeyEx = {
         argBytes: 36,
         handler: onKey((key, [, subKey, , keyClass, , sam, , result, disposition])=>
-            createKey(key, readText(subKey), result, disposition, readText(keyClass) ?? '',
-                ERROR_BADKEY, sam)),
+            createKey(key, readText(subKey), result, disposition,
+                readText(keyClass) ?? '', ERROR_BADKEY, sam)),
     };
 
     /**
@@ -939,7 +903,7 @@ export function createRegistryFunctions(host){
                 // The wide form clears the handle it was given room for.
                 if (read === readWideText)
                 {
-                    writeDword(result, 0);
+                    guest.set32(result, 0);
                 }
                 return ERROR_INVALID_HANDLE;
             }
@@ -947,7 +911,7 @@ export function createRegistryFunctions(host){
             // No name under a predefined root is the root itself, no new handle.
             if ((name ?? '') === '' && hive.root(handle >>> 0))
             {
-                writeDword(result, handle);
+                guest.set32(result, handle);
                 return ERROR_SUCCESS;
             }
             if (name?.startsWith('\\'))
@@ -965,10 +929,10 @@ export function createRegistryFunctions(host){
             {
                 // Windows leaves *phkResult undefined here; zeroing it keeps a
                 // caller that skips the check from using a stale handle.
-                writeDword(result, 0);
+                guest.set32(result, 0);
                 return ERROR_FILE_NOT_FOUND;
             }
-            writeDword(result, allocate(found));
+            guest.set32(result, allocate(found));
             return ERROR_SUCCESS;
         },
     });
@@ -997,7 +961,7 @@ export function createRegistryFunctions(host){
             const name = read(subKey);
             if ((name ?? '') === '')
             {
-                writeDword(result, handle);
+                guest.set32(result, handle);
                 return ERROR_SUCCESS;
             }
             if (!keyOf(handle))
@@ -1048,7 +1012,7 @@ export function createRegistryFunctions(host){
         view.setUint32(80, name.length, true);       // SystemNameLength
         view.setUint32(84, PERF_BLOCK_SIZE, true);   // SystemNameOffset
         block.set(name, PERF_BLOCK_SIZE);
-        host.writeMemory(data, block);
+        guest.setBytes(data, block);
         // The three clocks and the time as the program reads them: the QPC
         // value at +56, its frequency at +64, a file time at +72, and the
         // SYSTEMTIME at +36 made from that file time.
@@ -1087,31 +1051,31 @@ export function createRegistryFunctions(host){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const read = wide ? readWideText(namePointer) : readText(namePointer);
+        const read = guest.optionalText(namePointer, wide, wide ? MAX_NAME * 2 : MAX_NAME);
         const name = (read ?? '').toLowerCase();
         if (name.startsWith('counter') || name.startsWith('help'))
         {
             const bytes = perfIndexList(name.startsWith('help'));
             const answer = wide ? widened(bytes) : bytes;
             writeDwordIf(type, REG_MULTI_SZ);
-            if (data !== 0 && readDword(size) < answer.length)
+            if (data !== 0 && guest.u32(size) < answer.length)
             {
-                writeDword(size, answer.length);
+                guest.set32(size, answer.length);
                 return ERROR_MORE_DATA;
             }
             if (data !== 0)
             {
-                host.writeMemory(data, answer);
+                guest.setBytes(data, answer);
             }
-            writeDword(size, answer.length);
+            guest.set32(size, answer.length);
             return ERROR_SUCCESS;
         }
         writeDwordIf(type, REG_BINARY);
-        if (data === 0 || readDword(size) < perfDataLength())
+        if (data === 0 || guest.u32(size) < perfDataLength())
         {
             return ERROR_MORE_DATA;
         }
-        writeDword(size, writePerfData(data));
+        guest.set32(size, writePerfData(data));
         return ERROR_SUCCESS;
     };
 
@@ -1123,7 +1087,7 @@ export function createRegistryFunctions(host){
             ? queryPerformance(wide, args[1], args[3], args[4], args[5])
             : onKey((key, [, name, , type, data, size])=>{
                 const value = hive.getValue(key,
-                    (wide ? readWideText(name) : readText(name)) ?? '');
+                    guest.optionalText(name, wide, wide ? MAX_NAME * 2 : MAX_NAME) ?? '');
                 if (!value)
                 {
                     return ERROR_FILE_NOT_FOUND;
@@ -1140,18 +1104,18 @@ export function createRegistryFunctions(host){
                 const required = bytes.length;
                 if (data === 0)
                 {
-                    writeDword(size, required);
+                    guest.set32(size, required);
                     return ERROR_SUCCESS;
                 }
-                const room = readDword(size);
+                const room = guest.u32(size);
                 if (room < required)
                 {
-                    writeDword(size, required);
+                    guest.set32(size, required);
                     return ERROR_MORE_DATA;
                 }
-                host.writeMemory(data, bytes);
+                guest.setBytes(data, bytes);
                 terminateIfRoom(value.type, data, bytes, room, wide ? 2 : 1);
-                writeDword(size, required);
+                guest.set32(size, required);
                 return ERROR_SUCCESS;
             })(args)),
     });
@@ -1168,7 +1132,7 @@ export function createRegistryFunctions(host){
         const ended = last >= 0 && bytes[last] === 0 && bytes[bytes.length - 1] === 0;
         if (STRING_TYPES.has(type) && !ended && room >= bytes.length + unit)
         {
-            host.writeMemory(data + bytes.length, new Uint8Array(unit));
+            guest.setBytes(data + bytes.length, new Uint8Array(unit));
         }
     }
 
@@ -1196,7 +1160,7 @@ export function createRegistryFunctions(host){
     /** @type {TextForm} */
     const WIDE = {
         read: readWideText,
-        write: (pointer, text)=>host.writeMemory(pointer, widened(encodeAnsi(`${text}\0`))),
+        write: (pointer, text)=>guest.setBytes(pointer, widened(encodeAnsi(`${text}\0`))),
         answer: value=>(STRING_TYPES.has(value.type) ? widened(value.data) : value.data),
         store: (type, bytes)=>(STRING_TYPES.has(type) ? narrowed(bytes) : bytes),
         unit: 2,
@@ -1210,7 +1174,7 @@ export function createRegistryFunctions(host){
      * @param {string} name
      */
     const fitsName = (buffer, sizePointer, name)=>
-        buffer !== 0 && sizePointer !== 0 && name.length + 1 <= readDword(sizePointer);
+        buffer !== 0 && sizePointer !== 0 && name.length + 1 <= guest.u32(sizePointer);
 
     /**
      * RegEnumValue in either width. Nothing is written unless everything
@@ -1236,7 +1200,7 @@ export function createRegistryFunctions(host){
             const value = values[at];
             const bytes = text.answer(value);
             const nameFits = fitsName(name, nameSize, value.name);
-            const room = size === 0 ? 0 : readDword(size);
+            const room = size === 0 ? 0 : guest.u32(size);
             const dataFits = data === 0 || room >= bytes.length;
             writeDwordIf(type, value.type);
             writeDwordIf(size, bytes.length);
@@ -1245,10 +1209,10 @@ export function createRegistryFunctions(host){
                 return ERROR_MORE_DATA;
             }
             text.write(name, value.name);
-            writeDword(nameSize, value.name.length);
+            guest.set32(nameSize, value.name.length);
             if (data !== 0)
             {
-                host.writeMemory(data, bytes);
+                guest.setBytes(data, bytes);
                 terminateIfRoom(value.type, data, bytes, room, text.unit);
             }
             return ERROR_SUCCESS;
@@ -1278,7 +1242,7 @@ export function createRegistryFunctions(host){
                 return ERROR_MORE_DATA;
             }
             text.write(name, names[at]);
-            writeDword(nameSize, names[at].length);
+            guest.set32(nameSize, names[at].length);
             if (keyClass !== 0)
             {
                 text.write(keyClass, '');
@@ -1330,26 +1294,26 @@ export function createRegistryFunctions(host){
             writeDwordIf(sizePointer, className.length);
             return ERROR_SUCCESS;
         }
-        const room = readDword(sizePointer);
+        const room = guest.u32(sizePointer);
         if (room === 0)
         {
-            writeDword(sizePointer, 0);
+            guest.set32(sizePointer, 0);
             return ERROR_SUCCESS;
         }
         if (room <= className.length)
         {
             if (text.unit === 2)
             {
-                writeDword(sizePointer, className.length);
+                guest.set32(sizePointer, className.length);
                 return ERROR_INSUFFICIENT_BUFFER;
             }
             const fit = room - 1;
             text.write(buffer, className.slice(0, fit));
-            writeDword(sizePointer, fit);
+            guest.set32(sizePointer, fit);
             return ERROR_MORE_DATA;
         }
         text.write(buffer, className);
-        writeDword(sizePointer, className.length);
+        guest.set32(sizePointer, className.length);
         return ERROR_SUCCESS;
     };
 
@@ -1534,19 +1498,19 @@ export function createRegistryFunctions(host){
             writeDwordIf(typeOut, type);
             if (data !== 0)
             {
-                const room = readDword(size);
+                const room = guest.u32(size);
                 if (room < bytes.length)
                 {
-                    writeDword(size, bytes.length);
+                    guest.set32(size, bytes.length);
                     return status === ERROR_SUCCESS ? ERROR_MORE_DATA : status;
                 }
                 if (status === ERROR_UNSUPPORTED_TYPE && (flags & RRF_ZEROONFAILURE) !== 0)
                 {
-                    writeZeros(host.writeMemory, data, room);
+                    guest.fill(data, 0, room);
                 }
                 else
                 {
-                    host.writeMemory(data, bytes);
+                    guest.setBytes(data, bytes);
                 }
             }
             writeDwordIf(size, bytes.length);
@@ -1588,7 +1552,7 @@ export function createRegistryFunctions(host){
             let edge = null;
             try
             {
-                edge = host.readMemory(data + length - text.unit, text.unit * 2);
+                edge = guest.snapshot(data + length - text.unit, text.unit * 2);
             }
             catch {
                 // The count reaches the end of what is mapped: nothing follows.
@@ -1602,7 +1566,7 @@ export function createRegistryFunctions(host){
         }
         // The memory layer may hand back a view onto guest memory, and what is
         // stored here outlives the call.
-        const bytes = counted === 0 ? new Uint8Array(0) : host.readMemory(data, counted).slice();
+        const bytes = counted === 0 ? new Uint8Array(0) : guest.snapshot(data, counted);
         hive.setValue(key, name ?? '', type >>> 0, text.store(type >>> 0, bytes), true);
         return ERROR_SUCCESS;
     };
@@ -1666,7 +1630,7 @@ export function createRegistryFunctions(host){
         {
             return ERROR_INVALID_HANDLE;
         }
-        writeDword(result, handle);
+        guest.set32(result, handle);
         return ERROR_SUCCESS;
     };
 
@@ -1925,7 +1889,7 @@ export function createRegistryFunctions(host){
             importTree(key, tree);
             const handle = allocate(key);
             appKeys.set(handle, path);
-            writeDword(out, handle);
+            guest.set32(out, handle);
             return ERROR_SUCCESS;
         };
         const tree = readHive(path);
@@ -2035,16 +1999,16 @@ export function createRegistryFunctions(host){
                 }
                 if (buffer === 0)
                 {
-                    writeDword(sizePointer, required);
+                    guest.set32(sizePointer, required);
                     return ERROR_SUCCESS;
                 }
-                if (readDword(sizePointer) < required)
+                if (guest.u32(sizePointer) < required)
                 {
-                    writeDword(sizePointer, required);
+                    guest.set32(sizePointer, required);
                     return ERROR_MORE_DATA;
                 }
-                host.writeMemory(buffer, value.data);
-                writeDword(sizePointer, required);
+                guest.setBytes(buffer, value.data);
+                guest.set32(sizePointer, required);
                 return ERROR_SUCCESS;
             }),
         },
@@ -2086,7 +2050,7 @@ export function createRegistryFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                writeDword(out, 1);
+                guest.set32(out, 1);
                 return ERROR_SUCCESS;
             }),
         },
@@ -2119,14 +2083,14 @@ export function createRegistryFunctions(host){
                     return 0;
                 }
                 const needed = USER_NAME.length + 1;
-                if (wholeAddress(buffer) === 0 || readDword(wholeAddress(size)) < needed)
+                if (wholeAddress(buffer) === 0 || guest.u32(size) < needed)
                 {
-                    writeDword(wholeAddress(size), needed);
+                    guest.set32(size, needed);
                     host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
                 writeText(wholeAddress(buffer), USER_NAME);
-                writeDword(wholeAddress(size), needed);
+                guest.set32(size, needed);
                 return 1;
             },
         },
@@ -2141,14 +2105,14 @@ export function createRegistryFunctions(host){
                     return 0;
                 }
                 const needed = USER_NAME.length + 1;
-                if (wholeAddress(buffer) === 0 || readDword(wholeAddress(size)) < needed)
+                if (wholeAddress(buffer) === 0 || guest.u32(size) < needed)
                 {
-                    writeDword(wholeAddress(size), needed);
+                    guest.set32(size, needed);
                     host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(buffer), widened(encodeAnsi(`${USER_NAME}\0`)));
-                writeDword(wholeAddress(size), needed);
+                guest.setBytes(buffer, widened(encodeAnsi(`${USER_NAME}\0`)));
+                guest.set32(size, needed);
                 return 1;
             },
         },
@@ -2169,16 +2133,15 @@ export function createRegistryFunctions(host){
             handler: ([buffer, size, result])=>{
                 const length = Math.max(size | 0, 0);
                 const asked = wholeAddress(result) === 0 ? undefined
-                    : new DataView(host.readMemory(wholeAddress(result), 4).slice().buffer)
-                        .getUint32(0, true);
+                    : guest.u32(result);
                 const answer = wholeAddress(buffer) === 0
                     ? { unicode: false, passed: 0 }
-                    : isTextUnicode(host.readMemory(wholeAddress(buffer), length).slice(), asked);
+                    : isTextUnicode(guest.snapshot(buffer, length), asked);
                 if (wholeAddress(result) !== 0)
                 {
                     const out = new Uint8Array(4);
                     new DataView(out.buffer).setUint32(0, answer.passed, true);
-                    host.writeMemory(wholeAddress(result), out);
+                    guest.setBytes(result, out);
                 }
                 return answer.unicode ? 1 : 0;
             },
@@ -2234,15 +2197,15 @@ export function createRegistryFunctions(host){
                 const bytes = new Uint8Array(size);
                 bytes[0] = 1;
                 bytes[1] = wanted;
-                bytes.set(host.readMemory(wholeAddress(authority), 6), 2);
+                bytes.set(guest.snapshot(authority, 6), 2);
                 for (let at = 0; at < wanted; at++)
                 {
                     const value = rest[at] >>> 0;
                     bytes.set([value & 0xff, value >>> 8 & 0xff,
                         value >>> 16 & 0xff, value >>> 24 & 0xff], 8 + at * 4);
                 }
-                host.writeMemory(sid, bytes);
-                writeDword(wholeAddress(out), sid);
+                guest.setBytes(sid, bytes);
+                guest.set32(out, sid);
                 return 1;
             },
         },
@@ -2383,16 +2346,16 @@ export function createRegistryFunctions(host){
                 {
                     return buffer === 0 ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER;
                 }
-                if (buffer !== 0 && readDword(sizePointer) < bytes.length)
+                if (buffer !== 0 && guest.u32(sizePointer) < bytes.length)
                 {
-                    writeDword(sizePointer, bytes.length);
+                    guest.set32(sizePointer, bytes.length);
                     return ERROR_MORE_DATA;
                 }
                 if (buffer !== 0)
                 {
-                    host.writeMemory(buffer, bytes);
+                    guest.setBytes(buffer, bytes);
                 }
-                writeDword(sizePointer, bytes.length);
+                guest.set32(sizePointer, bytes.length);
                 return ERROR_SUCCESS;
             }),
         },
@@ -2472,7 +2435,7 @@ export function createRegistryFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                writeDword(wholeAddress(result), HKEY_CURRENT_USER);
+                guest.set32(result, HKEY_CURRENT_USER);
                 return ERROR_SUCCESS;
             },
         },
@@ -2622,12 +2585,12 @@ export function createRegistryFunctions(host){
                     return ERROR_INVALID_HANDLE;
                 }
                 const named = wholeAddress(subKey) === 0 ? key
-                    : hive.open(key, readWideText(wholeAddress(subKey)) ?? '');
+                    : hive.open(key, readWideText(subKey) ?? '');
                 if (!named)
                 {
                     return ERROR_FILE_NOT_FOUND;
                 }
-                const to = wholeAddress(newName) === 0 ? null : readWideText(wholeAddress(newName));
+                const to = readWideText(newName);
                 if (!to || to.includes('\\'))
                 {
                     return ERROR_INVALID_PARAMETER;

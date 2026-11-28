@@ -24,9 +24,9 @@ import {
 } from './descriptors.js';
 import {
     PRIVILEGES, SDDL_ACE_FLAGS, SDDL_RIGHTS, SDDL_SIDS, USER_SID_TEXT, accountNamed, encodeText,
-    isThisMachine, isTokenMember, parseSid, sidBytes, sidText, wideTextAt,
+    isThisMachine, isTokenMember, parseSid, sidBytes, sidText,
 } from './tokens.js';
-import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_NOACCESS = 998;
@@ -233,13 +233,9 @@ const domainOf = sid=>{
 
 /**
  * @typedef {Object} SecurityHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(code: number) => void} setLastError
  * @property {(bytes: number) => number} allocate  LocalFree-compatible.
- * @property {4 | 8} [pointerSize]  The process's: a trustee's name and an
- *     out-pointer are its width.
  */
 
 /**
@@ -248,10 +244,10 @@ const domainOf = sid=>{
  * @param {SecurityHost} host
  */
 export function createSecurityFunctions(host){
+    const { guest } = host;
     // A trustee and the structures around it at the process's width, and the
     // pointers it and the out-parameters hold, read and written whole.
-    const width = pointerWidth(host.pointerSize === 8 ? 8 : 4);
-    const pointers = pointerIo(host, width.size);
+    const width = pointerWidth(host.guest.pointerSize);
     const ONE = TRUSTEE.at(width.size);
     const ENTRY = EXPLICIT_ACCESS.at(width.size);
     const BY_SID = OBJECTS_AND_SID.at(width.size);
@@ -261,30 +257,15 @@ export function createSecurityFunctions(host){
         host.setLastError(code);
         return result;
     };
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address */
-    const readWord = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 2);
-        return bytes[0] | bytes[1] << 8;
-    };
     /** @param {number} value */
     const dwordBytes = value=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         return bytes;
     };
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>host.writeMemory(wholeAddress(address), dwordBytes(value));
-    /** @param {number} address @param {number} value */
-    const writeWord = (address, value)=>host.writeMemory(wholeAddress(address),
-        new Uint8Array([value & 0xff, value >>> 8 & 0xff]));
 
     const { sidAt, aclAt, acesIn, partsOf, selfRelative, partsAskedFor } =
-        createDescriptorCodec(host.readMemory);
+        createDescriptorCodec(guest);
 
     /**
      * An ACL as SDDL writes it: the control flags that belong to it, then each
@@ -390,11 +371,11 @@ export function createSecurityFunctions(host){
             }
             const bytes = encodeText(text, wide);
             const block = host.allocate(bytes.length);
-            host.writeMemory(block, bytes);
-            pointers.write(wholeAddress(out), block);
+            guest.setBytes(block, bytes);
+            guest.setPtr(wholeAddress(out), block);
             if ((length >>> 0) !== 0)
             {
-                writeDword(wholeAddress(length), text.length + 1);
+                guest.set32(length, text.length + 1);
             }
             host.setLastError(ERROR_SUCCESS);
             return 1;
@@ -427,7 +408,7 @@ export function createSecurityFunctions(host){
         view.setUint32(ONE.FORM, form, true);
         view.setUint32(ONE.TYPE, TRUSTEE_IS_UNKNOWN, true);
         width.set(view, ONE.NAME, wholeAddress(name));
-        host.writeMemory(wholeAddress(trustee), bytes);
+        guest.setBytes(trustee, bytes);
     };
 
     /**
@@ -445,18 +426,18 @@ export function createSecurityFunctions(host){
             let present = 0;
             if (wholeAddress(objectType) !== 0)
             {
-                bytes.set(host.readMemory(wholeAddress(objectType), 16), BY_SID.OBJECT_TYPE);
+                bytes.set(guest.snapshot(objectType, 16), BY_SID.OBJECT_TYPE);
                 present |= ACE_OBJECT_TYPE_PRESENT;
             }
             if (wholeAddress(inheritedType) !== 0)
             {
-                bytes.set(host.readMemory(wholeAddress(inheritedType), 16), BY_SID.INHERITED_TYPE);
+                bytes.set(guest.snapshot(inheritedType, 16), BY_SID.INHERITED_TYPE);
                 present |= ACE_INHERITED_OBJECT_TYPE_PRESENT;
             }
             const view = new DataView(bytes.buffer);
             view.setUint32(BY_SID.PRESENT, present, true);
             width.set(view, BY_SID.SID, wholeAddress(sid));
-            host.writeMemory(wholeAddress(objects), bytes);
+            guest.setBytes(objects, bytes);
             writeTrustee(trustee, TRUSTEE_IS_OBJECTS_AND_SID, objects);
             return 0;
         },
@@ -484,7 +465,7 @@ export function createSecurityFunctions(host){
             width.set(view, BY_NAME.TYPE_NAME, wholeAddress(typeName));
             width.set(view, BY_NAME.INHERITED_NAME, wholeAddress(inheritedName));
             width.set(view, BY_NAME.NAME, wholeAddress(name));
-            host.writeMemory(wholeAddress(objects), bytes);
+            guest.setBytes(objects, bytes);
             writeTrustee(trustee, TRUSTEE_IS_OBJECTS_AND_NAME, objects);
             return 0;
         },
@@ -504,8 +485,7 @@ export function createSecurityFunctions(host){
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [system, luid, name, size])=>{
             const machine = (system >>> 0) === 0 ? null
-                : wide ? wideTextAt(host.readMemory, system, 256)
-                    : host.readCString(wholeAddress(system), 256);
+                : guest.text(system, wide, wide ? 512 : 256);
             if (!isThisMachine(machine))
             {
                 return fail(RPC_S_SERVER_UNAVAILABLE);
@@ -514,21 +494,21 @@ export function createSecurityFunctions(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            const low = readDword(luid);
-            const high = readDword(wholeAddress(luid) + 4);
+            const low = guest.u32(luid);
+            const high = guest.u32(luid + 4);
             const found = high === 0
                 ? [...PRIVILEGES].find(([, value])=>value === low)?.[0] : undefined;
             if (found === undefined)
             {
                 return fail(ERROR_NO_SUCH_PRIVILEGE);
             }
-            if (readDword(size) <= found.length || (name >>> 0) === 0)
+            if (guest.u32(size) <= found.length || (name >>> 0) === 0)
             {
-                writeDword(size, found.length + 1);
+                guest.set32(size, found.length + 1);
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory(wholeAddress(name), encodeText(found, wide));
-            writeDword(size, found.length);
+            guest.setBytes(name, encodeText(found, wide));
+            guest.set32(size, found.length);
             host.setLastError(ERROR_SUCCESS);
             return 1;
         },
@@ -558,10 +538,10 @@ export function createSecurityFunctions(host){
                 [ACCESS_DENIED_ACE_TYPE, DENY_ACCESS]]);
             const entries = aces.filter(ace=>ace.sid !== null
                 && (modes.has(ace.type) || ace.type === SYSTEM_AUDIT_ACE_TYPE));
-            writeDword(count, entries.length);
+            guest.set32(count, entries.length);
             if (entries.length === 0)
             {
-                pointers.write(wholeAddress(out), 0);
+                guest.setPtr(wholeAddress(out), 0);
                 return ERROR_SUCCESS;
             }
             const sidsAt = entries.length * ENTRY.SIZE;
@@ -586,8 +566,8 @@ export function createSecurityFunctions(host){
                 bytes.set(sid, sidAtOffset);
                 sidAtOffset += sid.length;
             });
-            host.writeMemory(block, bytes);
-            pointers.write(wholeAddress(out), block);
+            guest.setBytes(block, bytes);
+            guest.setPtr(wholeAddress(out), block);
             return ERROR_SUCCESS;
         },
     });
@@ -601,11 +581,11 @@ export function createSecurityFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [descriptor, present, acl, defaulted])=>{
-            if ((descriptor >>> 0) === 0 || host.readMemory(wholeAddress(descriptor), 1)[0] !== 1)
+            if ((descriptor >>> 0) === 0 || guest.snapshot(descriptor, 1)[0] !== 1)
             {
                 return fail(ERROR_INVALID_SECURITY_DESCR);
             }
-            let control = readWord(wholeAddress(descriptor) + SD.CONTROL);
+            let control = guest.u16(descriptor + SD.CONTROL);
             if ((control & SE_SELF_RELATIVE) !== 0)
             {
                 return fail(ERROR_INVALID_SECURITY_DESCR);
@@ -614,9 +594,9 @@ export function createSecurityFunctions(host){
             if (present !== 0)
             {
                 control |= SE_SACL_PRESENT | (defaulted !== 0 ? SE_SACL_DEFAULTED : 0);
-                writeDword(wholeAddress(descriptor) + SD.SACL, acl);
+                guest.set32(descriptor + SD.SACL, acl);
             }
-            writeWord(wholeAddress(descriptor) + SD.CONTROL, control);
+            guest.set16(descriptor + SD.CONTROL, control);
             return 1;
         },
     };
@@ -640,8 +620,8 @@ export function createSecurityFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const form = readDword(wholeAddress(trustee) + ONE.FORM);
-            const named = pointers.read(wholeAddress(trustee) + ONE.NAME);
+            const form = guest.u32(trustee + ONE.FORM);
+            const named = guest.ptr(wholeAddress(trustee) + ONE.NAME);
             /** @type {Uint8Array | null} */
             let sid = null;
             if (form === TRUSTEE_IS_SID)
@@ -650,8 +630,7 @@ export function createSecurityFunctions(host){
             }
             else if (form === TRUSTEE_IS_NAME && named !== 0)
             {
-                const account = accountNamed(wide ? wideTextAt(host.readMemory, named, 256)
-                    : host.readCString(named, 256));
+                const account = accountNamed(guest.text(named, wide, wide ? 512 : 256));
                 sid = account ? sidBytes(account.sid) : null;
                 if (!account)
                 {
@@ -664,7 +643,7 @@ export function createSecurityFunctions(host){
             }
             if ((acl >>> 0) === 0)
             {
-                writeDword(out, ALL_RIGHTS);
+                guest.set32(out, ALL_RIGHTS);
                 return ERROR_SUCCESS;
             }
             const aces = acesIn(aclAt(acl) ?? new Uint8Array(0));
@@ -691,7 +670,7 @@ export function createSecurityFunctions(host){
                     denied = (denied | ace.mask & ~granted) >>> 0;
                 }
             }
-            writeDword(out, granted);
+            guest.set32(out, granted);
             return ERROR_SUCCESS;
         },
     });
@@ -705,7 +684,7 @@ export function createSecurityFunctions(host){
         argBytes: 4,
         addresses: [0],
         /** @param {number[]} args */
-        handler: ([trustee])=>readDword(wholeAddress(trustee) + ONE[field]),
+        handler: ([trustee])=>guest.u32(trustee + ONE[field]),
     });
 
     /** LPTSTR GetTrusteeNameA/GetTrusteeNameW(PTRUSTEE pTrustee): the name as it is. */
@@ -713,7 +692,7 @@ export function createSecurityFunctions(host){
         returns: 'pointer',
         argBytes: 4,
         /** @param {number[]} args */
-        handler: (/** @type {number[]} */ [trustee])=>pointers.read(wholeAddress(trustee) + ONE.NAME),
+        handler: (/** @type {number[]} */ [trustee])=>guest.ptr(wholeAddress(trustee) + ONE.NAME),
     };
 
     /** The next LUID AllocateLocallyUniqueId hands out: above every privilege's. */
@@ -743,8 +722,8 @@ export function createSecurityFunctions(host){
                 const head = new Uint8Array(8);
                 head[0] = 1;
                 head[1] = count & 0xff;
-                head.set(host.readMemory(wholeAddress(authority), 6), 2);
-                host.writeMemory(wholeAddress(sid), head);
+                head.set(guest.snapshot(authority, 6), 2);
+                guest.setBytes(sid, head);
                 return 1;
             },
         },
@@ -798,7 +777,7 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_NON_DOMAIN_SID);
                 }
-                writeDword(out, sameBytes(leftDomain, rightDomain) ? 1 : 0);
+                guest.set32(out, sameBytes(leftDomain, rightDomain) ? 1 : 0);
                 host.setLastError(ERROR_SUCCESS);
                 return 1;
             },
@@ -828,8 +807,8 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_NON_ACCOUNT_SID);
                 }
-                const room = readDword(size);
-                writeDword(size, domain.length);
+                const room = guest.u32(size);
+                guest.set32(size, domain.length);
                 if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -838,7 +817,7 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(wholeAddress(out), domain);
+                guest.setBytes(out, domain);
                 return 1;
             },
         },
@@ -865,18 +844,18 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const room = readDword(size);
+                const room = guest.u32(size);
                 if (room < sid.length)
                 {
-                    writeDword(size, sid.length);
+                    guest.set32(size, sid.length);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
                 if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                host.writeMemory(wholeAddress(out), sid);
-                writeDword(size, sid.length);
+                guest.setBytes(out, sid);
+                guest.set32(size, sid.length);
                 return 1;
             },
         },
@@ -930,8 +909,8 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_NOACCESS);
                 }
-                writeDword(out, nextLuid++);
-                writeDword(wholeAddress(out) + 4, 0);
+                guest.set32(out, nextLuid++);
+                guest.set32(out + 4, 0);
                 return 1;
             },
         },
@@ -981,7 +960,7 @@ export function createSecurityFunctions(host){
                     {
                         return fail(ERROR_INSUFFICIENT_BUFFER);
                     }
-                    writeDword(out, bytes[0]);
+                    guest.set32(out, bytes[0]);
                     return 1;
                 }
                 if ((kind >>> 0) === AclSizeInformation)
@@ -991,7 +970,7 @@ export function createSecurityFunctions(host){
                         return fail(ERROR_INSUFFICIENT_BUFFER);
                     }
                     const used = aces.reduce((sum, ace)=>sum + ace.bytes.length, ACL_HEADER);
-                    host.writeMemory(wholeAddress(out), new Uint8Array([...dwordBytes(aces.length),
+                    guest.setBytes(out, new Uint8Array([...dwordBytes(aces.length),
                         ...dwordBytes(used), ...dwordBytes(bytes.length - used)]));
                     return 1;
                 }
@@ -1021,7 +1000,7 @@ export function createSecurityFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([descriptor, interest, set])=>{
-                if (wholeAddress(descriptor) === 0 || host.readMemory(wholeAddress(descriptor),
+                if (wholeAddress(descriptor) === 0 || guest.snapshot(descriptor,
                     1)[0] !== 1)
                 {
                     return fail(ERROR_INVALID_SECURITY_DESCR);
@@ -1030,8 +1009,8 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const control = readWord(wholeAddress(descriptor) + SD.CONTROL);
-                writeWord(wholeAddress(descriptor) + SD.CONTROL,
+                const control = guest.u16(descriptor + SD.CONTROL);
+                guest.set16(descriptor + SD.CONTROL,
                     (control & ~interest | set & interest) & 0xffff);
                 return 1;
             },
@@ -1065,12 +1044,12 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if (readDword(size) < bytes.length || wholeAddress(out) === 0)
+                if (guest.u32(size) < bytes.length || wholeAddress(out) === 0)
                 {
-                    writeDword(size, bytes.length);
+                    guest.set32(size, bytes.length);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(wholeAddress(out), bytes);
+                guest.setBytes(out, bytes);
                 return 1;
             },
         },
@@ -1109,12 +1088,12 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if (wanted.some(([size, need])=>readDword(size) < need)
+                if (wanted.some(([size, need])=>guest.u32(size) < need)
                     || wholeAddress(absolute) === 0)
                 {
                     for (const [size, need] of wanted)
                     {
-                        writeDword(size, need);
+                        guest.set32(size, need);
                     }
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
@@ -1124,7 +1103,7 @@ export function createSecurityFunctions(host){
                     {
                         return 0;
                     }
-                    host.writeMemory(wholeAddress(at), part);
+                    guest.setBytes(at, part);
                     return wholeAddress(at);
                 };
                 const header = new Uint8Array(SD.SIZE);
@@ -1135,7 +1114,7 @@ export function createSecurityFunctions(host){
                 view.setUint32(SD.GROUP, place(parts.group, group), true);
                 view.setUint32(SD.SACL, place(parts.sacl, sacl), true);
                 view.setUint32(SD.DACL, place(parts.dacl, dacl), true);
-                host.writeMemory(wholeAddress(absolute), header);
+                guest.setBytes(absolute, header);
                 return 1;
             },
         },
@@ -1160,13 +1139,13 @@ export function createSecurityFunctions(host){
                 const bytes = selfRelative(partsAskedFor(parts, wanted));
                 if (wholeAddress(needed) !== 0)
                 {
-                    writeDword(needed, bytes.length);
+                    guest.set32(needed, bytes.length);
                 }
                 if ((length >>> 0) < bytes.length || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(wholeAddress(out), bytes);
+                guest.setBytes(out, bytes);
                 return 1;
             },
         },
@@ -1215,8 +1194,8 @@ export function createSecurityFunctions(host){
                     {
                         continue;
                     }
-                    const sid = readDword(wholeAddress(trustee) + ONE.FORM) === TRUSTEE_IS_SID
-                        ? sidAt(pointers.read(wholeAddress(trustee) + ONE.NAME)) : null;
+                    const sid = guest.u32(trustee + ONE.FORM) === TRUSTEE_IS_SID
+                        ? sidAt(guest.ptr(wholeAddress(trustee) + ONE.NAME)) : null;
                     if (sid === null)
                     {
                         return ERROR_INVALID_PARAMETER;
@@ -1225,9 +1204,9 @@ export function createSecurityFunctions(host){
                 }
                 const bytes = selfRelative(parts);
                 const block = host.allocate(bytes.length);
-                host.writeMemory(block, bytes);
-                writeDword(size, bytes.length);
-                pointers.write(wholeAddress(out), block);
+                guest.setBytes(block, bytes);
+                guest.set32(size, bytes.length);
+                guest.setPtr(wholeAddress(out), block);
                 return ERROR_SUCCESS;
             },
         };

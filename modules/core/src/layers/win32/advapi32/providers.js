@@ -16,7 +16,6 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ } from './registry.js';
-import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
 const ERROR_INVALID_PARAMETER = 87;
@@ -44,9 +43,7 @@ const typeKeyName = type=>`Type ${String(type).padStart(3, '0')}`;
 
 /**
  * @typedef {Object} ProviderHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(code: number) => void} [setLastError]
  * @property {ReturnType<typeof import('./registry-service.js').createRegistryService>} hive
  */
@@ -58,6 +55,7 @@ const typeKeyName = type=>`Type ${String(type).padStart(3, '0')}`;
  * @param {ProviderHost} host
  */
 export function createProviderRegistry(host){
+    const { guest } = host;
     const { hive } = host;
 
     /** @param {number} root @param {string} path */
@@ -128,40 +126,10 @@ export function createProviderRegistry(host){
         host.setLastError?.(code);
         return 0;
     };
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
     /** @param {string} name @param {boolean} wide @returns {Uint8Array} */
     const encode = (name, wide)=>(wide
         ? utf16z(name)
         : encodeAnsi(`${name}\0`));
-    /** @param {number} address @param {boolean} wide */
-    const readName = (address, wide)=>{
-        if (!wide)
-        {
-            return host.readCString(wholeAddress(address), MAX_NAME);
-        }
-        let name = '';
-        for (let at = wholeAddress(address); name.length < MAX_NAME; at += 2)
-        {
-            const unit = host.readMemory(at, 2);
-            const code = unit[0] | unit[1] << 8;
-            if (code === 0)
-            {
-                break;
-            }
-            name += String.fromCharCode(code);
-        }
-        return name;
-    };
 
     /**
      * A name into the caller's buffer, by the size convention: no buffer is
@@ -172,8 +140,8 @@ export function createProviderRegistry(host){
      */
     const nameOut = (name, wide, buffer, size)=>{
         const bytes = encode(name, wide);
-        const room = readDword(size);
-        writeDword(size, bytes.length);
+        const room = guest.u32(size);
+        guest.set32(size, bytes.length);
         if ((buffer >>> 0) === 0)
         {
             return 1;
@@ -182,7 +150,7 @@ export function createProviderRegistry(host){
         {
             return fail(ERROR_MORE_DATA);
         }
-        host.writeMemory(wholeAddress(buffer), bytes);
+        guest.setBytes(buffer, bytes);
         return 1;
     };
 
@@ -212,7 +180,7 @@ export function createProviderRegistry(host){
             }
             if ((typeOut >>> 0) !== 0)
             {
-                writeDword(typeOut, entry.type);
+                guest.set32(typeOut, entry.type);
             }
             return nameOut(entry.name, wide, buffer, size);
         },
@@ -292,7 +260,8 @@ export function createProviderRegistry(host){
                 }
                 return 1;
             }
-            const provider = providerNamed(readName(nameAddress, wide));
+            const provider = providerNamed(
+                guest.text(nameAddress, wide, wide ? MAX_NAME * 2 : MAX_NAME));
             if (provider === null || provider.type !== (type >>> 0))
             {
                 return fail(NTE_PROV_TYPE_NOT_DEF);

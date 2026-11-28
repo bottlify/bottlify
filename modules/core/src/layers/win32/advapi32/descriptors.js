@@ -72,19 +72,9 @@ const TRUSTEE_ACE_TYPES = new Set([0, 1, 2, 3, 0x11]);
  */
 
 /**
- * @param {(address: number, length: number) => Uint8Array} readMemory
+ * @param {import('../common/guest.js').Guest} guest
  */
-export function createDescriptorCodec(readMemory){
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address */
-    const readWord = address=>{
-        const bytes = readMemory(wholeAddress(address), 2);
-        return bytes[0] | bytes[1] << 8;
-    };
+export function createDescriptorCodec(guest){
 
     /** A SID in guest memory, laid out, or null when it is not one. @param {number} sid */
     const sidAt = sid=>{
@@ -92,14 +82,14 @@ export function createDescriptorCodec(readMemory){
         {
             return null;
         }
-        const head = readMemory(wholeAddress(sid), 2);
+        const head = guest.snapshot(sid, 2);
         return head[0] === 1 && head[1] <= 15
-            ? readMemory(wholeAddress(sid), 8 + 4 * head[1]).slice() : null;
+            ? guest.snapshot(sid, 8 + 4 * head[1]) : null;
     };
 
     /** An ACL in guest memory, its whole size as its header gives it. @param {number} acl */
     const aclAt = acl=>((acl >>> 0) === 0 ? null
-        : readMemory(wholeAddress(acl), readWord(wholeAddress(acl) + 2)).slice());
+        : guest.snapshot(acl, guest.u16(acl + 2)));
 
     /**
      * Each ACE of an ACL, walked by its sizes, or null when the ACL is not one.
@@ -149,16 +139,16 @@ export function createDescriptorCodec(readMemory){
      * @param {number} descriptor @returns {DescriptorParts | null}
      */
     const partsOf = descriptor=>{
-        if ((descriptor >>> 0) === 0 || readMemory(wholeAddress(descriptor), 1)[0] !== 1)
+        if ((descriptor >>> 0) === 0 || guest.snapshot(descriptor, 1)[0] !== 1)
         {
             return null;
         }
         const at = wholeAddress(descriptor);
-        const control = readWord(at + SD.CONTROL);
+        const control = guest.u16(at + SD.CONTROL);
         const relative = (control & SE_SELF_RELATIVE) !== 0;
         /** @param {number} slot */
         const part = slot=>{
-            const value = readDword(at + slot);
+            const value = guest.u32(at + slot);
             return relative && value !== 0 ? (at + value) >>> 0 : value;
         };
         /** @type {DescriptorParts} */

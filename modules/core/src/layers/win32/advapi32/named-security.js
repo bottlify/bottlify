@@ -35,7 +35,7 @@ import {
     HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS,
 } from './registry.js';
 import {
-    WELL_KNOWN_SIDS, aceBytes, aclBytes, selfRelativeDescriptor, sidBytes, wideTextAt,
+    WELL_KNOWN_SIDS, aceBytes, aclBytes, selfRelativeDescriptor, sidBytes,
 } from './tokens.js';
 import { createDescriptorCodec } from './descriptors.js';
 import { wholeAddress } from '../common/pointers.js';
@@ -198,9 +198,7 @@ const parentOf = path=>{
 
 /**
  * @typedef {Object} NamedSecurityHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(bytes: number) => number} [allocate]  LocalFree-compatible: where a
  *           descriptor is handed out. Without it a read fails as out of memory.
  * @property {{ stat: (path: string) => { exists: boolean, isDirectory: boolean } | null }}
@@ -228,18 +226,13 @@ const parentOf = path=>{
  * @param {NamedSecurityHost} host
  */
 export function createNamedSecurityFunctions(host){
-    const codec = createDescriptorCodec(host.readMemory);
+    const { guest } = host;
+    const codec = createDescriptorCodec(guest);
     const store = host.security;
 
     /** @param {string} path */
     const pathKey = path=>keyForPath(host.resolvePath?.(path) ?? path);
 
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
 
     /**
      * Whether a path names something on the volume, and if not, why: the
@@ -294,8 +287,7 @@ export function createNamedSecurityFunctions(host){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const name = wide ? wideTextAt(host.readMemory, pointer, MAX_NAME)
-            : host.readCString(wholeAddress(pointer), MAX_NAME);
+        const name = guest.text(pointer, wide, wide ? MAX_NAME * 2 : MAX_NAME);
         switch (type >>> 0)
         {
             case SE_FILE_OBJECT:
@@ -428,9 +420,9 @@ export function createNamedSecurityFunctions(host){
             }
             else
             {
-                const head = host.readMemory(wholeAddress(dacl), 4);
+                const head = guest.snapshot(dacl, 4);
                 const size = head[2] | head[3] << 8;
-                held.dacl = host.readMemory(wholeAddress(dacl), size).slice();
+                held.dacl = guest.snapshot(dacl, size);
             }
         }
         return held;
@@ -502,18 +494,18 @@ export function createNamedSecurityFunctions(host){
             }
             const { bytes, offsets } = descriptorOf(object.kind, object.name, wanted >>> 0);
             const block = host.allocate(bytes.length);
-            host.writeMemory(block, bytes);
+            guest.setBytes(block, bytes);
             for (const [out, offset] of [[owner, offsets.owner], [group, offsets.group],
                 [dacl, offsets.dacl], [sacl, offsets.sacl]])
             {
                 if ((out >>> 0) !== 0)
                 {
-                    writeDword(out, offset === 0 ? 0 : block + offset);
+                    guest.set32(out, offset === 0 ? 0 : block + offset);
                 }
             }
             if ((descriptor >>> 0) !== 0)
             {
-                writeDword(descriptor, block);
+                guest.set32(descriptor, block);
             }
             return ERROR_SUCCESS;
         },
@@ -532,7 +524,7 @@ export function createNamedSecurityFunctions(host){
         {
             return false;
         }
-        const head = host.readMemory(wholeAddress(sid), 2);
+        const head = guest.snapshot(sid, 2);
         return head[0] !== 1 || head[1] > 15;
     };
     /** @param {number} acl */
@@ -541,7 +533,7 @@ export function createNamedSecurityFunctions(host){
         {
             return false;
         }
-        const head = host.readMemory(wholeAddress(acl), 4);
+        const head = guest.snapshot(acl, 4);
         return !ACL_REVISIONS.has(head[0]) || (head[2] | head[3] << 8) < ACL_HEADER;
     };
 
@@ -608,13 +600,13 @@ export function createNamedSecurityFunctions(host){
             const { bytes } = descriptorOf('file', object.name, wanted >>> 0);
             if ((needed >>> 0) !== 0)
             {
-                writeDword(needed, bytes.length);
+                guest.set32(needed, bytes.length);
             }
             if ((length >>> 0) < bytes.length || (descriptor >>> 0) === 0)
             {
                 return setError(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory(wholeAddress(descriptor), bytes);
+            guest.setBytes(descriptor, bytes);
             return 1;
         },
     });
@@ -669,14 +661,13 @@ export function createNamedSecurityFunctions(host){
                 return ERROR_INVALID_PARAMETER;
             }
             const { bytes } = descriptorOf('key', '', wanted >>> 0);
-            const room = new DataView(host.readMemory(wholeAddress(size), 4).slice().buffer)
-                .getUint32(0, true);
-            writeDword(size, bytes.length);
+            const room = guest.u32(size);
+            guest.set32(size, bytes.length);
             if (room < bytes.length || (descriptor >>> 0) === 0)
             {
                 return ERROR_INSUFFICIENT_BUFFER;
             }
-            host.writeMemory(wholeAddress(descriptor), bytes);
+            guest.setBytes(descriptor, bytes);
             return ERROR_SUCCESS;
         },
     };

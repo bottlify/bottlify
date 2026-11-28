@@ -45,8 +45,7 @@ const PERF_ATTRIB_BY_REFERENCE = 1;
 
 /**
  * @typedef {Object} PerfHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => void} [release]
  * @property {(code: number) => void} [setLastError]
@@ -69,6 +68,7 @@ const guidKey = bytes=>[...bytes].map(byte=>byte.toString(16).padStart(2, '0')).
  * @param {PerfHost} host
  */
 export function createPerfFunctions(host){
+    const { guest } = host;
     /**
      * Each provider, by the address its handle is: its counter sets by GUID.
      *
@@ -80,36 +80,6 @@ export function createPerfFunctions(host){
     /** The queries open. */
     const queries = new Set();
 
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
-    /** @param {number} address @returns {string | null} */
-    const wideAt = address=>{
-        if ((address >>> 0) === 0)
-        {
-            return null;
-        }
-        let text = '';
-        for (let at = wholeAddress(address); text.length < 0x400; at += 2)
-        {
-            const unit = host.readMemory(at, 2);
-            const code = unit[0] | unit[1] << 8;
-            if (code === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(code);
-        }
-        return text;
-    };
 
     /** @param {number} guid @param {number} out */
     const startProvider = (guid, out)=>{
@@ -119,9 +89,9 @@ export function createPerfFunctions(host){
         }
         // A pointer to memory of the provider's, not a kernel handle.
         const handle = host.allocate(16);
-        host.writeMemory(handle, host.readMemory(wholeAddress(guid), 16).slice());
+        guest.setBytes(handle, guest.snapshot(guid, 16));
         providers.set(handle >>> 0, new Map());
-        writeDword(out, handle);
+        guest.set32(out, handle);
         return ERROR_SUCCESS;
     };
 
@@ -164,10 +134,10 @@ export function createPerfFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            writeDword(found.at, low);
+            guest.set32(found.at, low);
             if (large)
             {
-                writeDword(found.at + 4, high);
+                guest.set32(found.at + 4, high);
             }
             return ERROR_SUCCESS;
         },
@@ -194,7 +164,7 @@ export function createPerfFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([guid, context, out])=>(wholeAddress(context) === 0
-                || readDword(context) < PROVIDER_CONTEXT_SIZE ? ERROR_INVALID_PARAMETER
+                || guest.u32(context) < PROVIDER_CONTEXT_SIZE ? ERROR_INVALID_PARAMETER
                 : startProvider(guid, out)),
         },
 
@@ -228,12 +198,12 @@ export function createPerfFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const count = readDword(wholeAddress(template) + 32);
+                const count = guest.u32(template + 32);
                 if (count === 0 || (size >>> 0) < COUNTERSET_INFO_SIZE + count * COUNTER_INFO_SIZE)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const key = guidKey(host.readMemory(wholeAddress(template), 16));
+                const key = guidKey(guest.snapshot(template, 16));
                 if (sets.has(key))
                 {
                     return ERROR_ALREADY_EXISTS;
@@ -243,8 +213,8 @@ export function createPerfFunctions(host){
                 {
                     const at =
                         wholeAddress(template) + COUNTERSET_INFO_SIZE + index * COUNTER_INFO_SIZE;
-                    counters.push({ id: readDword(at), type: readDword(at + 4),
-                        byReference: (readDword(at + 8) & PERF_ATTRIB_BY_REFERENCE) !== 0 });
+                    counters.push({ id: guest.u32(at), type: guest.u32(at + 4),
+                        byReference: (guest.u32(at + 8) & PERF_ATTRIB_BY_REFERENCE) !== 0 });
                 }
                 sets.set(key, { counters });
                 return ERROR_SUCCESS;
@@ -264,13 +234,13 @@ export function createPerfFunctions(host){
             /** @param {number[]} args */
             handler: ([provider, guid, namePointer, id])=>{
                 const sets = providers.get(provider >>> 0);
-                const name = wideAt(namePointer);
+                const name = guest.optionalText(namePointer, true, 0x400 * 2);
                 if (!sets || wholeAddress(guid) === 0 || name === null)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const set = sets.get(guidKey(host.readMemory(wholeAddress(guid), 16)));
+                const set = sets.get(guidKey(guest.snapshot(guid, 16)));
                 if (!set)
                 {
                     host.setLastError?.(ERROR_NOT_FOUND);
@@ -281,7 +251,7 @@ export function createPerfFunctions(host){
                 const size = nameAt + nameSize + 7 & ~7;
                 const bytes = new Uint8Array(size);
                 const view = new DataView(bytes.buffer);
-                bytes.set(host.readMemory(wholeAddress(guid), 16), 0);
+                bytes.set(guest.snapshot(guid, 16), 0);
                 view.setUint32(16, size, true);
                 view.setUint32(20, id >>> 0, true);
                 view.setUint32(24, nameAt, true);
@@ -289,7 +259,7 @@ export function createPerfFunctions(host){
                 [...name].forEach((char, at)=>view.setUint16(nameAt + at * 2, char.charCodeAt(0),
                     true));
                 const instance = host.allocate(size);
-                host.writeMemory(instance, bytes);
+                guest.setBytes(instance, bytes);
                 instances.set(instance >>> 0, set);
                 return instance;
             },
@@ -328,8 +298,8 @@ export function createPerfFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                writeDword(found.at, address);
-                writeDword(found.at + 4, 0);
+                guest.set32(found.at, address);
+                guest.set32(found.at + 4, 0);
                 return ERROR_SUCCESS;
             },
         },
@@ -348,7 +318,7 @@ export function createPerfFunctions(host){
                 }
                 const query = host.allocate(8);
                 queries.add(query >>> 0);
-                writeDword(out, query);
+                guest.set32(out, query);
                 return ERROR_SUCCESS;
             },
         },
@@ -385,12 +355,12 @@ export function createPerfFunctions(host){
                 }
                 for (let at = 0; at < (size >>> 0);)
                 {
-                    const length = readDword(wholeAddress(counters) + at + 20);
+                    const length = guest.u32(counters + at + 20);
                     if (length < COUNTER_IDENTIFIER_SIZE || at + length > (size >>> 0))
                     {
                         return ERROR_INVALID_PARAMETER;
                     }
-                    writeDword(wholeAddress(counters) + at + 16, ERROR_WMI_GUID_NOT_FOUND);
+                    guest.set32(counters + at + 16, ERROR_WMI_GUID_NOT_FOUND);
                     at += length;
                 }
                 return ERROR_SUCCESS;
@@ -413,14 +383,14 @@ export function createPerfFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                writeDword(actual, DATA_HEADER_SIZE);
+                guest.set32(actual, DATA_HEADER_SIZE);
                 if (wholeAddress(block) === 0 || (size >>> 0) < DATA_HEADER_SIZE)
                 {
                     return ERROR_NOT_ENOUGH_MEMORY;
                 }
                 const at = wholeAddress(block);
-                host.writeMemory(at, new Uint8Array(DATA_HEADER_SIZE));
-                writeDword(at, DATA_HEADER_SIZE);
+                guest.setBytes(at, new Uint8Array(DATA_HEADER_SIZE));
+                guest.set32(at, DATA_HEADER_SIZE);
                 host.system?.('KERNEL32.dll', 'QueryPerformanceCounter', [at + 8]);
                 host.system?.('KERNEL32.dll', 'GetSystemTimeAsFileTime', [at + 16]);
                 host.system?.('KERNEL32.dll', 'QueryPerformanceFrequency', [at + 24]);

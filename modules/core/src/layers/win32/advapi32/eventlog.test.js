@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createEventLogFunctions } from './eventlog.js';
@@ -11,8 +12,11 @@ import { createEventLogFunctions } from './eventlog.js';
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 
-/** @param {Partial<import('./eventlog.js').EventLogHost>} [more] */
-function setup(more = {}){
+/**
+ * @param {Partial<import('./eventlog.js').EventLogHost> & { pointerSize?: 4 | 8 }} [more]
+ *     What a test adds to the host, and the process's width, which its guest is.
+ */
+function setup({ pointerSize = 4, ...more } = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -20,30 +24,8 @@ function setup(more = {}){
     const table = new Map();
     let next = 4;
     const fns = /** @type {Record<string, any>} */ (createEventLogFunctions({
-        readCString: (address, maxLength)=>{
-            let text = '';
-            for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[address + at]);
-            }
-            return text;
-        },
-        readWideString: (address, maxLength)=>{
-            let text = '';
-            for (let at = 0; at < maxLength; at += 2)
-            {
-                const code = bytes[address + at] | bytes[address + at + 1] << 8;
-                if (code === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(code);
-            }
-            return text;
-        },
+        guest: guestOver(bytes, pointerSize),
         setLastError: code=>errors.push(code),
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
         now: ()=>1000,
         computerName: 'HOST',
         handles: {

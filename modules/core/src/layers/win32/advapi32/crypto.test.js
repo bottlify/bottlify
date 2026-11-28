@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCryptoFunctions } from './crypto.js';
@@ -117,19 +118,7 @@ function setup(/** @type {Record<string, any>} */ extra = {}){
     /** @type {{ lastError: number, divergences: { api: string, detail: string }[] }} */
     const state = { lastError: 0, divergences: [] };
     const fns = createCryptoFunctions({
-        /** @param {number} a @param {number} l */
-        readMemory: (a, l)=>bytes.subarray(a, a + l),
-        /** @param {number} a @param {Uint8Array} d */
-        writeMemory: (a, d)=>bytes.set(d, a),
-        /** @param {number} a @param {number} max */
-        readCString(a, max){
-            let text = '';
-            for (let i = 0; i < max && bytes[a + i] !== 0; i++)
-            {
-                text += String.fromCharCode(bytes[a + i]);
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         /** @param {number} code */
         setLastError: code=>{
             state.lastError = code;

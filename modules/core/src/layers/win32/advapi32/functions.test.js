@@ -10,7 +10,6 @@ import assert from 'node:assert/strict';
 import {
     KEY_OF_HANDLE, REGISTRY_NATIVES, UNLOAD_KEY, USER_NAME, createRegistryFunctions,
 } from './functions.js';
-import { decodeAnsi } from '../kernel32/locale.js';
 import {
     createHive,
     HKEY_CLASSES_ROOT,
@@ -49,31 +48,12 @@ const OUT_DATA = 0x500;
 const OUT_NAME = 0x600;
 const OUT_INFO = 0x700;
 
-/**
- * Guest memory as a flat array. `readMemory` hands back a view rather than a
- * copy, exactly as the real memory layer may, so anything that stores what it
- * read has to say so.
- */
+/** Guest memory as a flat array, read and written through its guest. */
 function fakeMemory(size = 0x11000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
         guest: guestOver(bytes),
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-        /** @param {number} address @param {number} maxLength */
-        readCString(address, maxLength){
-            // As the memory layer reads an ANSI string: in Windows-1252, which
-            // is what the Encoding standard calls latin1.
-            let end = address;
-            while (end - address < maxLength && bytes[end] !== 0)
-            {
-                end++;
-            }
-            return decodeAnsi(bytes.subarray(address, end));
-        },
         /** @param {number} address @param {string} text */
         putString(address, text){
             for (let i = 0; i < text.length; i++)
@@ -96,7 +76,7 @@ function fakeMemory(size = 0x11000){
         },
         /** @param {number} address */
         string(address){
-            return this.readCString(address, 0x100);
+            return this.guest.cstr(address, 0x100);
         },
     };
 }
@@ -108,9 +88,6 @@ function setup(extra = {}){
     const fns = createRegistryFunctions({
         security: new Map(),
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive,
         ...extra,
     });
@@ -374,9 +351,6 @@ test('a performance key answers a PERF_DATA_BLOCK, stamped with the clocks it re
     const memory = fakeMemory(0x200000);
     const fns = createRegistryFunctions({
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
         security: new Map(),
         system: perfClockStub(memory),
@@ -427,9 +401,6 @@ test('a performance key answers the Counter and Help index lists as REG_MULTI_SZ
     const memory = fakeMemory(0x10000);
     const fns = createRegistryFunctions({
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
         security: new Map(),
         computerName: 'BOTTLIFY',
@@ -861,9 +832,6 @@ test('the refusal says ERROR_INSUFFICIENT_BUFFER, as a caller sizing its buffer 
     const errors = [];
     const fns = createRegistryFunctions({
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
         security: new Map(),
         setLastError: code=>errors.push(code),
@@ -885,9 +853,6 @@ test('a SID is built in guest memory in the layout a program compares byte by by
     const errors = [];
     const fns = createRegistryFunctions({
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
         security: new Map(),
         allocate: bytes=>{
@@ -923,8 +888,6 @@ test('GetFileSecurity and SetFileSecurity are the file-security calls, stdcall-s
     const memory = fakeMemory();
     const fns = createRegistryFunctions({
         guest: memory.guest,
-        readMemory: memory.readMemory, writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()), setLastError: ()=>{},
         security: new Map(),
     });
@@ -943,9 +906,6 @@ test('the file security calls are named-security\'s, wired into the table', ()=>
     const errors = [];
     const fns = createRegistryFunctions({
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
         security: new Map(),
         setLastError: code=>errors.push(code),
@@ -971,9 +931,6 @@ test('a restart is not implemented, as the consumer line answered, and says so',
     const diverged = [];
     const fns = /** @type {Record<string, any>} */ (/** @type {unknown} */ (createRegistryFunctions({
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
         security: new Map(),
         setLastError: code=>errors.push(code),
@@ -999,9 +956,9 @@ test('RegEnumKeyA is the enumeration with a buffer and a size and nothing else',
     const key = memory.dword(OUT_HANDLE);
 
     assert.equal(fns.RegEnumKeyA.handler([key, 0, OUT_NAME, 64]), ERROR_SUCCESS);
-    const first = memory.readCString(OUT_NAME, 64);
+    const first = memory.guest.cstr(OUT_NAME, 64);
     assert.equal(fns.RegEnumKeyA.handler([key, 1, OUT_NAME, 64]), ERROR_SUCCESS);
-    assert.deepEqual([first, memory.readCString(OUT_NAME, 64)].sort(), ['A', 'B']);
+    assert.deepEqual([first, memory.guest.cstr(OUT_NAME, 64)].sort(), ['A', 'B']);
     assert.equal(fns.RegEnumKeyA.handler([key, 2, OUT_NAME, 64]), ERROR_NO_MORE_ITEMS);
     assert.equal(fns.RegEnumKeyA.handler([key, 0, OUT_NAME, 1]), ERROR_MORE_DATA,
         'no room for the terminator');
@@ -1046,7 +1003,7 @@ function classes(machine){
         const names = [];
         for (let index = 0; fns.RegEnumKeyA.handler([key, index, OUT_NAME, 64]) === 0; index++)
         {
-            names.push(memory.readCString(OUT_NAME, 64));
+            names.push(memory.guest.cstr(OUT_NAME, 64));
         }
         return names;
     };
@@ -1364,9 +1321,6 @@ test('an object\'s security by name is read through the volume and the hive this
         let heap = 0x800;
         const fns = /** @type {any} */ (createRegistryFunctions({
             guest: memory.guest,
-            readMemory: memory.readMemory,
-            writeMemory: memory.writeMemory,
-            readCString: (address, maxLength)=>memory.readCString(address, maxLength),
             hive: createRegistryService(createHive()),
             security: new Map(),
             // The drive's root, which the stand-in volume of files alone lacks.
@@ -1402,9 +1356,6 @@ test('a key saved to a file loads under a root, writes its changes back as it un
     const fns = /** @type {any} */ (createRegistryFunctions({
         security: new Map(),
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive,
         files,
     }));
@@ -1493,9 +1444,6 @@ test('RegNotifyChangeKeyValue answers one change to the key or under it, and a c
     const told = [];
     const fns = /** @type {any} */ (createRegistryFunctions({
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
         security: new Map(),
         events: {
@@ -1689,9 +1637,6 @@ test('IsTextUnicode reads the buffer, the tests asked for, and writes back which
     const memory = fakeMemory();
     const fns = createRegistryFunctions({
         guest: memory.guest,
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive: createRegistryService(createHive()),
         security: new Map(),
         setLastError: ()=>{},
@@ -1699,15 +1644,16 @@ test('IsTextUnicode reads the buffer, the tests asked for, and writes back which
     const text = new Uint8Array(Uint16Array.from('Hi there', c=>c.charCodeAt(0)).buffer);
     const BUFFER = 0x400;
     const RESULT = 0x500;
-    memory.writeMemory(BUFFER, text);
+    memory.guest.setBytes(BUFFER, text);
     assert.equal(fns.IsTextUnicode.handler([BUFFER, text.length, 0]), 1);
-    memory.writeMemory(RESULT, new Uint8Array([1, 0, 0, 0]));
+    memory.guest.setBytes(RESULT, new Uint8Array([1, 0, 0, 0]));
     assert.equal(fns.IsTextUnicode.handler([BUFFER, text.length, RESULT]), 1);
-    assert.deepEqual([...memory.readMemory(RESULT, 4)], [1, 0, 0, 0], 'IS_TEXT_UNICODE_ASCII16');
-    memory.writeMemory(RESULT, new Uint8Array([8, 0, 0, 0]));
+    assert.deepEqual([...memory.guest.snapshot(RESULT, 4)], [1, 0, 0, 0],
+        'IS_TEXT_UNICODE_ASCII16');
+    memory.guest.setBytes(RESULT, new Uint8Array([8, 0, 0, 0]));
     assert.equal(fns.IsTextUnicode.handler([BUFFER, text.length, RESULT]), 0,
         'asked only for a signature, which it has not');
-    assert.deepEqual([...memory.readMemory(RESULT, 4)], [0, 0, 0, 0]);
+    assert.deepEqual([...memory.guest.snapshot(RESULT, 4)], [0, 0, 0, 0]);
     assert.equal(fns.IsTextUnicode.handler([BUFFER, 1, 0]), 0, 'less than a character');
     assert.equal(fns.IsTextUnicode.argBytes, 12);
 });

@@ -30,7 +30,6 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_LOCAL_MACHINE } from './registry.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
-import { formatGuid } from '../../../system/guid.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -111,16 +110,11 @@ const MAX_NAME = 0x8000;
 
 /**
  * @typedef {Object} EventLogHost
- * @property {Reader} readCString
- * @property {Reader} readWideString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(code: number) => void} setLastError
- * @property {number} [pointerSize]  8 in a 64-bit process, whose TRACE_GUID_REGISTRATION
- *           is two quadwords.
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any }} handles
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  * @property {(source: string, id: number, strings: string[]) => void} [reportError]
  *           An error a program reported, told to whoever looks at the run as
  *           Event Viewer shows it: a runtime's account of why it is stopping.
@@ -249,6 +243,7 @@ const parseRecord = bytes=>{
  * @param {EventLogHost} host
  */
 export function createEventLogFunctions(host){
+    const { guest } = host;
     /** @type {Map<string, { name: string, records: EventRecord[], next: number }>} */
     const logs = new Map();
     const computer = host.computerName ?? 'COMPUTER';
@@ -331,21 +326,9 @@ export function createEventLogFunctions(host){
         return result;
     };
 
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory?.(wholeAddress(address), 4);
-        return bytes ? (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0 : 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory?.(wholeAddress(address), bytes);
-    };
 
     /** @param {boolean} wide @returns {Reader} */
-    const readerOf = wide=>(wide ? (address, length)=>host.readWideString(address, length * 2)
-        : host.readCString);
+    const readerOf = wide=>(address, length)=>guest.text(address, wide, wide ? length * 2 : length);
 
     /** @param {string | null} server */
     const isLocal = server=>server === null || server === ''
@@ -388,12 +371,12 @@ export function createEventLogFunctions(host){
             const texts = [];
             for (let at = 0; at < (count & 0xffff); at++)
             {
-                const pointer = readDword(wholeAddress(strings) + at * 4);
+                const pointer = guest.u32(strings + at * 4);
                 texts.push(pointer === 0 ? '' : read(pointer, MAX_NAME));
             }
-            const sidBytes = (sid >>> 0) === 0 || !host.readMemory ? null
-                : host.readMemory(wholeAddress(sid), 8 + 4 * host.readMemory(wholeAddress(sid),
-                    2)[1]).slice();
+            const sidBytes = (sid >>> 0) === 0 ? null
+                : guest.snapshot(sid, 8 + 4 * guest.snapshot(sid,
+                    2)[1]);
             if ((type & 0xffff) === EVENTLOG_ERROR_TYPE)
             {
                 host.reportError?.(object.source, id >>> 0, texts);
@@ -401,9 +384,9 @@ export function createEventLogFunctions(host){
             append(object.log, {
                 id: id >>> 0, type: type & 0xffff, category: category & 0xffff,
                 source: object.source, sid: sidBytes, strings: texts,
-                data: (data >>> 0) === 0 || (dataSize >>> 0) === 0 || !host.readMemory
-                    ? new Uint8Array(0) : host.readMemory(wholeAddress(data),
-                        dataSize >>> 0).slice(),
+                data: (data >>> 0) === 0 || (dataSize >>> 0) === 0
+                    ? new Uint8Array(0) : guest.snapshot(data,
+                        dataSize >>> 0),
             });
             return 1;
         },
@@ -459,8 +442,8 @@ export function createEventLogFunctions(host){
             }
             if (index < 0 || index >= records.length)
             {
-                writeDword(read, 0);
-                writeDword(needed, 0);
+                guest.set32(read, 0);
+                guest.set32(needed, 0);
                 return fail(ERROR_HANDLE_EOF);
             }
             const out = [];
@@ -472,8 +455,8 @@ export function createEventLogFunctions(host){
                 {
                     if (out.length === 0)
                     {
-                        writeDword(read, 0);
-                        writeDword(needed, bytes.length);
+                        guest.set32(read, 0);
+                        guest.set32(needed, bytes.length);
                         return fail(ERROR_INSUFFICIENT_BUFFER);
                     }
                     break;
@@ -485,11 +468,11 @@ export function createEventLogFunctions(host){
             let at = wholeAddress(buffer);
             for (const bytes of out)
             {
-                host.writeMemory?.(at, bytes);
+                guest.setBytes(at, bytes);
                 at += bytes.length;
             }
-            writeDword(read, used);
-            writeDword(needed, 0);
+            guest.set32(read, used);
+            guest.set32(needed, 0);
             return 1;
         },
     });
@@ -685,31 +668,30 @@ export function createEventLogFunctions(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: ([out, nameAddress, properties])=>{
-            if ((out >>> 0) === 0 || (properties >>> 0) === 0 || (nameAddress >>> 0) === 0
-                || !host.readMemory)
+            if ((out >>> 0) === 0 || (properties >>> 0) === 0 || (nameAddress >>> 0) === 0)
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const size = readDword(properties);
+            const size = guest.u32(properties);
             if (size < TRACE_PROPERTIES)
             {
                 return ERROR_BAD_LENGTH;
             }
             const name = readerOf(wide)(wholeAddress(nameAddress), MAX_NAME);
-            const nameAt = readDword(properties + TRACE.LOGGER_NAME);
-            const fileAt = readDword(properties + TRACE.LOG_FILE_NAME);
+            const nameAt = guest.u32(properties + TRACE.LOGGER_NAME);
+            const fileAt = guest.u32(properties + TRACE.LOG_FILE_NAME);
             if (nameAt + (name.length + 1) * (wide ? 2 : 1) > size)
             {
                 return ERROR_BAD_LENGTH;
             }
-            const mode = readDword(properties + TRACE.LOG_FILE_MODE);
+            const mode = guest.u32(properties + TRACE.LOG_FILE_MODE);
             if (nameAt < TRACE_PROPERTIES || (fileAt !== 0 && fileAt < TRACE_PROPERTIES)
                 || (mode & EVENT_TRACE_FILE_MODE_SEQUENTIAL) !== 0
                     && (mode & EVENT_TRACE_FILE_MODE_CIRCULAR) !== 0)
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const guid = formatGuid(host.readMemory(properties + TRACE.GUID, 16));
+            const guid = guest.guid(properties + TRACE.GUID);
             if (guid === SYSTEM_TRACE_CONTROL_GUID
                 && name.toUpperCase() !== KERNEL_LOGGER_NAME)
             {
@@ -725,8 +707,8 @@ export function createEventLogFunctions(host){
             }
             const handle = nextSession++;
             sessions.set(name.toUpperCase(), handle);
-            writeDword(out, handle);
-            writeDword(wholeAddress(out) + 4, 0);
+            guest.set32(out, handle);
+            guest.set32(out + 4, 0);
             return ERROR_SUCCESS;
         },
     });
@@ -841,18 +823,18 @@ export function createEventLogFunctions(host){
             traceRegistrations.add(handle);
             // TRACE_GUID_REGISTRATION: the GUID's pointer, then the handle Windows
             // fills in, each a pointer wide.
-            const word = host.pointerSize === 8 ? 8 : 4;
+            const word = host.guest.pointerSize;
             for (let at = 0; at < (count >>> 0); at++)
             {
                 const slot = wholeAddress(guids) + at * 2 * word + word;
-                writeDword(slot, handle);
+                guest.set32(slot, handle);
                 if (word === 8)
                 {
-                    writeDword(slot + 4, 0);
+                    guest.set32(slot + 4, 0);
                 }
             }
-            writeDword(out, handle);
-            writeDword(wholeAddress(out) + 4, 0);
+            guest.set32(out, handle);
+            guest.set32(out + 4, 0);
             return ERROR_SUCCESS;
         },
     };
@@ -1029,27 +1011,27 @@ export function createEventLogFunctions(host){
                     id[8] = (id[8] & 0x3f) | 0x80;
                     return id;
                 };
-                const given = ()=>host.readMemory?.(wholeAddress(pointer), 16).slice()
+                const given = ()=>guest.snapshot(pointer, 16).slice()
                     ?? new Uint8Array(16);
                 switch (code >>> 0)
                 {
                     case 1:
-                        host.writeMemory?.(wholeAddress(pointer), current);
+                        guest.setBytes(pointer, current);
                         break;
                     case 2:
                         activities.set(thread, given());
                         break;
                     case 3:
-                        host.writeMemory?.(wholeAddress(pointer), fresh());
+                        guest.setBytes(pointer, fresh());
                         break;
                     case 4: {
                         const incoming = given();
-                        host.writeMemory?.(wholeAddress(pointer), current);
+                        guest.setBytes(pointer, current);
                         activities.set(thread, incoming);
                         break;
                     }
                     default:
-                        host.writeMemory?.(wholeAddress(pointer), current);
+                        guest.setBytes(pointer, current);
                         activities.set(thread, fresh());
                 }
                 return ERROR_SUCCESS;
@@ -1116,7 +1098,7 @@ export function createEventLogFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeDword(out, records.length);
+                guest.set32(out, records.length);
                 return 1;
             },
         },
@@ -1135,7 +1117,7 @@ export function createEventLogFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeDword(out, records[0]?.number ?? 0);
+                guest.set32(out, records[0]?.number ?? 0);
                 return 1;
             },
         },
@@ -1162,12 +1144,12 @@ export function createEventLogFunctions(host){
                 {
                     return fail(RPC_X_NULL_REF_POINTER);
                 }
-                writeDword(needed, 4);
+                guest.set32(needed, 4);
                 if ((size >>> 0) < 4)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                writeDword(buffer, 0);
+                guest.set32(buffer, 0);
                 return 1;
             },
         },
@@ -1205,7 +1187,7 @@ export function createEventLogFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                writeDword(count, 0);
+                guest.set32(count, 0);
                 return 0;
             },
         },
@@ -1224,8 +1206,8 @@ export function createEventLogFunctions(host){
                 }
                 const handle = nextProvider++;
                 providers.add(handle);
-                writeDword(out, handle);
-                writeDword(wholeAddress(out) + 4, 0);
+                guest.set32(out, handle);
+                guest.set32(out + 4, 0);
                 return ERROR_SUCCESS;
             },
         },

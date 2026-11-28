@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCredFunctions, unmarshal } from './cred.js';
@@ -26,19 +27,7 @@ function setup(){
     /** @type {number[]} */
     const errors = [];
     const host = {
-        /** @param {number} at @param {number} length */
-        readMemory: (at, length)=>memory.subarray(at, at + length),
-        /** @param {number} at @param {Uint8Array} bytes */
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
-        /** @param {number} at @param {number} max */
-        readCString: (at, max)=>{
-            let text = '';
-            for (let i = 0; i < max && memory[at + i] !== 0; i++)
-            {
-                text += String.fromCharCode(memory[at + i]);
-            }
-            return text;
-        },
+        guest: guestOver(memory),
         /** @param {number} code */
         setLastError: code=>{
             errors.push(code);
@@ -64,7 +53,7 @@ function setup(){
     const putWide = (at, text)=>[...text, '\0'].forEach((c, i)=>view.setUint16(at + i * 2,
         c.charCodeAt(0), true));
     return { memory, call, u32, put32, putText, putWide, text: (/** @type {number} */ at)=>
-        host.readCString(at, 256), errors };
+        host.guest.cstr(at, 256), errors };
 }
 
 const CRED = 0x100;

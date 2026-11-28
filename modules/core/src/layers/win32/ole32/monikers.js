@@ -434,7 +434,7 @@ export function createMonikerFunctions(env){
      * @param {number} address
      * @returns {string | null}
      */
-    const oleString = address=>((address >>> 0) === 0 ? null : guest.wstr(address, MAX_STRING * 2));
+    const oleString = address=>guest.optionalText(address, true, MAX_STRING * 2);
 
     /** @param {string} api @param {string} detail */
     const diverge = (api, detail)=>env.divergence?.(api, detail);

@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { declaredTable, longCall } from '../common/long-call.fixture.js';
@@ -30,7 +31,7 @@ const SID = 0x600;
  * @param {{ currentThread?: () => any, pipeClient?: (handle: number) => any,
  *     pointerSize?: 4 | 8 }} [extra]
  */
-function setup(extra = {}){
+function setup({ pointerSize = 4, ...extra } = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -39,16 +40,7 @@ function setup(extra = {}){
     let next = 4;
     let heap = 0x800;
     const fns = createTokenFunctions({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: (address, maxLength)=>{
-            let text = '';
-            for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[address + at]);
-            }
-            return text;
-        },
+        guest: guestOver(bytes, pointerSize),
         setLastError: code=>errors.push(code),
         allocate: size=>{
             const at = heap;

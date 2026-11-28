@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createNamedSecurityFunctions } from './named-security.js';
@@ -51,19 +52,7 @@ function setup(){
     const divergences = [];
     let heap = 0x1000;
     const host = {
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-        /** @param {number} address @param {number} maxLength */
-        readCString(address, maxLength){
-            let text = '';
-            for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
-            {
-                text += String.fromCharCode(bytes[address + at]);
-            }
-            return text;
-        },
+        guest: guestOver(bytes),
         /** @param {number} size */
         allocate: size=>{
             const at = heap;
@@ -220,8 +209,7 @@ test('a service by name has the service manager\'s security, and what is set is 
     // An installer's secure-objects step (WiX's ExecSecureObjects) reads a
     // service's DACL by its name, merges an entry and sets it back.
     const { bytes, host, fns, dword, narrow, wide } = setup();
-    const services = createServiceFunctions({ readCString: host.readCString,
-        readMemory: host.readMemory, writeMemory: host.writeMemory, hive: host.hive });
+    const services = createServiceFunctions({ guest: host.guest, hive: host.hive });
     const manager = /** @type {any} */ (services)[SERVICE_BY_NAME];
     /** @type {any} */ (host).services = ()=>manager;
     const hklm = /** @type {number} */ (host.hive.root(HKEY_LOCAL_MACHINE));

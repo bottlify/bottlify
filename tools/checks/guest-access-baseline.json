@@ -217,77 +217,8 @@
    "accessor u16": 1,
    "accessor u32": 1
   },
-  "win32/advapi32/cred.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "copy readMemory().slice()": 1,
-   "string wideAt": 1
-  },
-  "win32/advapi32/crypto.js": {
-   "accessor readBytes": 1,
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "copy readMemory().slice()": 1,
-   "string readAnsi": 1,
-   "string readWide": 1
-  },
-  "win32/advapi32/descriptors.js": {
-   "accessor readDword": 1,
-   "accessor readWord": 1,
-   "copy readMemory().slice()": 2
-  },
-  "win32/advapi32/eventlog.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "copy readMemory().slice()": 2
-  },
-  "win32/advapi32/functions.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "copy readMemory().slice()": 4
-  },
-  "win32/advapi32/lsa.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "copy readMemory().slice()": 2
-  },
-  "win32/advapi32/named-security.js": {
-   "accessor writeDword": 1,
-   "copy readMemory().slice()": 2
-  },
-  "win32/advapi32/perf.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "copy readMemory().slice()": 1,
-   "string wideAt": 1
-  },
-  "win32/advapi32/providers.js": {
-   "accessor readDword": 1,
-   "accessor writeDword": 1
-  },
   "win32/advapi32/registry.js": {
    "accessor dword": 1
-  },
-  "win32/advapi32/security.js": {
-   "accessor readDword": 1,
-   "accessor readWord": 1,
-   "accessor writeDword": 1,
-   "accessor writeWord": 1
-  },
-  "win32/advapi32/services.js": {
-   "accessor dword": 1,
-   "accessor readDword": 1,
-   "accessor writeDword": 1,
-   "copy readMemory().slice()": 2,
-   "string ansiAt": 1,
-   "string wideAt": 1
-  },
-  "win32/advapi32/tokens.js": {
-   "accessor readDword": 1,
-   "accessor readWord": 1,
-   "accessor writeDword": 1,
-   "accessor writeWord": 1,
-   "copy readMemory().slice()": 12
   },
   "win32/advpack/functions.js": {
    "copy readMemory().slice()": 3

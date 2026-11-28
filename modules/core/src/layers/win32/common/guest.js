@@ -46,6 +46,9 @@ import { createPort } from '../../../system/port.js';
  *     or `limit` bytes (not units), whichever comes first; `counted`, the
  *     `limit` bytes whole, as a counted string's length says, a terminator
  *     in them included, none read for a length of 0.
+ * @property {(address: number, wide: boolean, limit?: number) => string | null} optionalText
+ *     `text` for a string a call may be passed as NULL: null for a NULL
+ *     pointer, which a caller tells from an empty string.
  * @property {(address: number, text: string, wide: boolean, room?: number) => number} setText
  *     The text in the ANSI page or, `wide`, in UTF-16, and a terminator of
  *     its width, cut to `room` with the terminator (bytes, or units `wide`,
@@ -191,6 +194,7 @@ export function createGuest(memory, pointerSize = 4){
         ...createPort(memory, pointerSize),
         stringBytes,
         text,
+        optionalText: (address, wide, limit)=>(address === 0 ? null : text(address, wide, limit)),
         setText,
         cstr: (address, limit)=>text(address, false, limit),
         wstr: (address, limit)=>text(address, true, limit),

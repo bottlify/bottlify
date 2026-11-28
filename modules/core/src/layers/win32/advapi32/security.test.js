@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSecurityFunctions } from './security.js';
@@ -43,19 +44,7 @@ function setup(extra = {}){
     let next = 0x20000;
     let error = 0;
     const host = {
-        /** @param {number} at @param {number} length */
-        readMemory: (at, length)=>memory.subarray(at, at + length),
-        /** @param {number} at @param {Uint8Array} bytes */
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
-        /** @param {number} at @param {number} max */
-        readCString: (at, max)=>{
-            let text = '';
-            for (let i = 0; i < max && memory[at + i] !== 0; i++)
-            {
-                text += String.fromCharCode(memory[at + i]);
-            }
-            return text;
-        },
+        guest: guestOver(memory),
         /** @param {number} code */
         setLastError: code=>{
             error = code;
@@ -77,7 +66,7 @@ function setup(extra = {}){
     /** @param {number} at @param {number} value */
     const put32 = (at, value)=>view.setUint32(at, value >>> 0, true);
     /** @param {number} at */
-    const text = at=>host.readCString(at, 4096);
+    const text = at=>host.guest.cstr(at, 4096);
     /** @param {number} at  An LSA_UNICODE_STRING. */
     const unicode = at=>{
         let out = '';
@@ -445,10 +434,7 @@ test('at 64 bits past 4 GiB: a trustee and its objects are laid out a pointer wi
     const memory = new Uint8Array(0x1000);
     const view = new DataView(memory.buffer);
     const fns = declaredTable(/** @type {Record<string, any>} */ (createSecurityFunctions({
-        pointerSize: 8,
-        readMemory: (at, length)=>memory.subarray(at - base, at - base + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at - base),
-        readCString: ()=>'',
+        guest: guestOver(memory, 8, [], base, base),
         setLastError: ()=>{},
         allocate: ()=>base + 0x800,
     })));

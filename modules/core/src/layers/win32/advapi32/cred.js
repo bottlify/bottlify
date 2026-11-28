@@ -158,9 +158,7 @@ export const unmarshal = text=>{
 
 /**
  * @typedef {Object} CredHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(code: number) => void} setLastError
  * @property {(bytes: number) => number} allocate  What CredFree gives back.
  * @property {(address: number) => void} [release]
@@ -173,6 +171,7 @@ export const unmarshal = text=>{
  * @param {CredHost} host
  */
 export function createCredFunctions(host){
+    const { guest } = host;
     /** @type {Credential[]} */
     const store = [];
 
@@ -180,39 +179,6 @@ export function createCredFunctions(host){
     const fail = code=>{
         host.setLastError(code);
         return 0;
-    };
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
-    /** @param {number} address @returns {string | null} */
-    const textAt = address=>((address >>> 0) === 0 ? null
-        : host.readCString(wholeAddress(address), 0x8000));
-    /** @param {number} address @returns {string | null} */
-    const wideAt = address=>{
-        if ((address >>> 0) === 0)
-        {
-            return null;
-        }
-        let text = '';
-        for (let at = wholeAddress(address); text.length < 0x8000; at += 2)
-        {
-            const unit = host.readMemory(at, 2);
-            const code = unit[0] | unit[1] << 8;
-            if (code === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(code);
-        }
-        return text;
     };
     /** @param {string} text */
     const ansi = text=>new Uint8Array([...text].map(char=>char.charCodeAt(0) & 0xff).concat(0));
@@ -273,7 +239,7 @@ export function createCredFunctions(host){
     const handOut = entry=>{
         const size = layout(entry, 0, 0).size;
         const base = host.allocate(size);
-        host.writeMemory(base, layout(entry, base, 0).bytes);
+        guest.setBytes(base, layout(entry, base, 0).bytes);
         return base;
     };
 
@@ -294,7 +260,7 @@ export function createCredFunctions(host){
             bytes.set(layout(entry, base, at).bytes, at);
             at += sizes[index];
         });
-        host.writeMemory(base, bytes);
+        guest.setBytes(base, bytes);
         return base;
     };
 
@@ -319,16 +285,16 @@ export function createCredFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 /** @param {number} slot */
-                const field = slot=>readDword(credential + slot);
+                const field = slot=>guest.u32(credential + slot);
                 const type = field(CREDENTIAL.TYPE);
-                const target = textAt(field(CREDENTIAL.TARGET));
+                const target = guest.optionalText(field(CREDENTIAL.TARGET), false, 0x8000);
                 const persist = field(CREDENTIAL.PERSIST);
                 if (!validType(type) || target === null || persist < CRED_PERSIST_SESSION
                     || persist > CRED_PERSIST_ENTERPRISE)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const user = textAt(field(CREDENTIAL.USER));
+                const user = guest.optionalText(field(CREDENTIAL.USER), false, 0x8000);
                 if (type !== CRED_TYPE_GENERIC && !user)
                 {
                     return fail(ERROR_BAD_USERNAME);
@@ -337,10 +303,11 @@ export function createCredFunctions(host){
                 /** @type {Credential} */
                 const entry = {
                     flags: field(CREDENTIAL.FLAGS), type, target,
-                    comment: textAt(field(CREDENTIAL.COMMENT)),
+                    comment: guest.optionalText(field(CREDENTIAL.COMMENT), false, 0x8000),
                     blob: blobSize === 0 || field(CREDENTIAL.BLOB) === 0 ? new Uint8Array(0)
-                        : host.readMemory(field(CREDENTIAL.BLOB), blobSize).slice(),
-                    persist, alias: textAt(field(CREDENTIAL.ALIAS)), user,
+                        : guest.snapshot(field(CREDENTIAL.BLOB), blobSize),
+                    persist, user,
+                    alias: guest.optionalText(field(CREDENTIAL.ALIAS), false, 0x8000),
                     written: host.now?.() ?? [0, 0],
                 };
                 const at = find(target, type);
@@ -371,12 +338,12 @@ export function createCredFunctions(host){
                 {
                     return fail(ERROR_INVALID_FLAGS);
                 }
-                const at = find(/** @type {string} */ (textAt(targetName)), type >>> 0);
+                const at = find(guest.cstr(targetName, 0x8000), type >>> 0);
                 if (at < 0)
                 {
                     return fail(ERROR_NOT_FOUND);
                 }
-                writeDword(out, handOut(store[at]));
+                guest.set32(out, handOut(store[at]));
                 return 1;
             },
         },
@@ -394,7 +361,7 @@ export function createCredFunctions(host){
                 {
                     return fail(ERROR_INVALID_FLAGS);
                 }
-                const at = find(/** @type {string} */ (textAt(targetName)), type >>> 0);
+                const at = find(guest.cstr(targetName, 0x8000), type >>> 0);
                 if (at < 0)
                 {
                     return fail(ERROR_NOT_FOUND);
@@ -423,14 +390,14 @@ export function createCredFunctions(host){
                 {
                     return fail(ERROR_INVALID_FLAGS);
                 }
-                const filter = textAt(filterName);
+                const filter = guest.optionalText(filterName, false, 0x8000);
                 const found = store.filter(entry=>filter === null || matches(filter, entry.target));
                 if (found.length === 0)
                 {
                     return fail(ERROR_NOT_FOUND);
                 }
-                writeDword(count, found.length);
-                writeDword(out, handOutAll(found));
+                guest.set32(count, found.length);
+                guest.set32(out, handOutAll(found));
                 return 1;
             },
         },
@@ -455,10 +422,11 @@ export function createCredFunctions(host){
                 {
                     return fail(ERROR_INVALID_FLAGS);
                 }
-                writeDword(count, 0);
-                writeDword(out, 0);
+                guest.set32(count, 0);
+                guest.set32(out, 0);
                 // TargetName, NetbiosServerName, DnsServerName: the first three names.
-                const names = [0, 4, 8].map(slot=>textAt(readDword(info + slot)))
+                const names = [0, 4, 8]
+                    .map(slot=>guest.optionalText(guest.u32(info + slot), false, 0x8000))
                     .filter(name=>name !== null).map(name=>/** @type {string} */ (name)
                         .toUpperCase());
                 const found = store.filter(entry=>entry.type !== CRED_TYPE_GENERIC
@@ -467,8 +435,8 @@ export function createCredFunctions(host){
                 {
                     return fail(ERROR_NOT_FOUND);
                 }
-                writeDword(count, found.length);
-                writeDword(out, handOutAll(found));
+                guest.set32(count, found.length);
+                guest.set32(out, handOutAll(found));
                 return 1;
             },
         },
@@ -502,7 +470,7 @@ export function createCredFunctions(host){
                 }
                 for (let type = 0; type < (count >>> 0); type++)
                 {
-                    writeDword(wholeAddress(out) + type * 4,
+                    guest.set32(out + type * 4,
                         validType(type) ? CRED_PERSIST_SESSION : 0);
                 }
                 return 1;
@@ -527,15 +495,15 @@ export function createCredFunctions(host){
                 let body;
                 if ((kind >>> 0) === CertCredential)
                 {
-                    if (readDword(credential) < CERT_INFO_SIZE)
+                    if (guest.u32(credential) < CERT_INFO_SIZE)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
-                    body = encode(host.readMemory(wholeAddress(credential) + 4, CERT_HASH_LENGTH));
+                    body = encode(guest.snapshot(credential + 4, CERT_HASH_LENGTH));
                 }
                 else if ((kind >>> 0) === UsernameTargetCredential)
                 {
-                    const user = wideAt(readDword(credential));
+                    const user = guest.optionalText(guest.u32(credential), true, 0x8000 * 2);
                     if (!user)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
@@ -551,8 +519,8 @@ export function createCredFunctions(host){
                 }
                 const text = ansi(`@@${ALPHABET[kind >>> 0]}${body}`);
                 const block = host.allocate(text.length);
-                host.writeMemory(block, text);
-                writeDword(out, block);
+                guest.setBytes(block, text);
+                guest.set32(out, block);
                 return 1;
             },
         },
@@ -573,17 +541,17 @@ export function createCredFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const read = unmarshal(/** @type {string} */ (textAt(marshaled)));
-                writeDword(kindOut, read.kind);
-                writeDword(out, 0);
+                const read = unmarshal(guest.cstr(marshaled, 0x8000));
+                guest.set32(kindOut, read.kind);
+                guest.set32(out, 0);
                 if (read.cert)
                 {
                     const block = host.allocate(CERT_INFO_SIZE);
                     const bytes = new Uint8Array(CERT_INFO_SIZE);
                     bytes[0] = CERT_INFO_SIZE;
                     bytes.set(read.cert, 4);
-                    host.writeMemory(block, bytes);
-                    writeDword(out, block);
+                    guest.setBytes(block, bytes);
+                    guest.set32(out, block);
                     return 1;
                 }
                 if (read.user !== undefined)
@@ -593,8 +561,8 @@ export function createCredFunctions(host){
                     const bytes = new Uint8Array(4 + name.length);
                     new DataView(bytes.buffer).setUint32(0, block + 4, true);
                     bytes.set(name, 4);
-                    host.writeMemory(block, bytes);
-                    writeDword(out, block);
+                    guest.setBytes(block, bytes);
+                    guest.set32(out, block);
                     return 1;
                 }
                 return fail(ERROR_INVALID_PARAMETER);
@@ -606,7 +574,7 @@ export function createCredFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([marshaled])=>{
-                const read = unmarshal(textAt(marshaled) ?? '');
+                const read = unmarshal(guest.optionalText(marshaled, false, 0x8000) ?? '');
                 return read.cert || read.user !== undefined ? 1 : fail(ERROR_INVALID_PARAMETER);
             },
         },

@@ -95,8 +95,7 @@ const WORKGROUP = 'WORKGROUP';
 
 /**
  * @typedef {Object} LsaHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(bytes: number) => number} allocate  What LsaFreeMemory gives back.
  * @property {(address: number) => void} [release]
  * @property {any} [hive]  The registry service, where the secrets are kept.
@@ -173,7 +172,7 @@ class Block {
                 view.setUint32(at, width < 0 ? base + value : value, true);
             }
         }
-        host.writeMemory(base, bytes);
+        host.guest.setBytes(base, bytes);
         return base;
     }
 }
@@ -195,31 +194,21 @@ const domainSidOf = sid=>{
  * @param {LsaHost} host
  */
 export function createLsaFunctions(host){
+    const { guest } = host;
     const secrets = secretStore(host.hive);
     /** The policy handles open, by the address that names each. */
     const policies = new Set();
 
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
     /** @param {number} at  An LSA_UNICODE_STRING's address. @returns {string | null} */
     const unicodeAt = at=>{
         if ((at >>> 0) === 0)
         {
             return null;
         }
-        const head = host.readMemory(wholeAddress(at), 8);
+        const head = guest.snapshot(at, 8);
         const length = head[0] | head[1] << 8;
         const buffer = (head[4] | head[5] << 8 | head[6] << 16 | head[7] << 24) >>> 0;
-        const bytes = buffer === 0 ? new Uint8Array(0) : host.readMemory(buffer, length & ~1);
+        const bytes = buffer === 0 ? new Uint8Array(0) : guest.snapshot(buffer, length & ~1);
         let text = '';
         for (let index = 0; index + 1 < bytes.length; index += 2)
         {
@@ -233,9 +222,9 @@ export function createLsaFunctions(host){
         {
             return null;
         }
-        const head = host.readMemory(wholeAddress(at), 2);
+        const head = guest.snapshot(at, 2);
         return head[0] === 1 && head[1] <= 15
-            ? host.readMemory(wholeAddress(at), 8 + 4 * head[1]).slice() : null;
+            ? guest.snapshot(at, 8 + 4 * head[1]) : null;
     };
 
     /**
@@ -339,8 +328,8 @@ export function createLsaFunctions(host){
             }
             block.u32(entry + 8, list.index(found.domain, domainSid));
         }
-        writeDword(sidsOut, block.write(host));
-        writeDword(domainsOut, list.write());
+        guest.set32(sidsOut, block.write(host));
+        guest.set32(domainsOut, list.write());
         return lookupStatus(mapped, count >>> 0);
     };
 
@@ -366,7 +355,7 @@ export function createLsaFunctions(host){
                 }
                 const handle = host.allocate(4);
                 policies.add(handle >>> 0);
-                writeDword(out, handle);
+                guest.set32(out, handle);
                 return STATUS_SUCCESS;
             },
         },
@@ -410,11 +399,11 @@ export function createLsaFunctions(host){
                 {
                     return secrets.remove(name) ? STATUS_SUCCESS : STATUS_OBJECT_NAME_NOT_FOUND;
                 }
-                const head = host.readMemory(wholeAddress(data), 8);
+                const head = guest.snapshot(data, 8);
                 const length = head[0] | head[1] << 8;
                 const buffer = (head[4] | head[5] << 8 | head[6] << 16 | head[7] << 24) >>> 0;
                 secrets.set(name, buffer === 0 ? new Uint8Array(0)
-                    : host.readMemory(buffer, length).slice());
+                    : guest.snapshot(buffer, length));
                 return STATUS_SUCCESS;
             },
         },
@@ -451,8 +440,8 @@ export function createLsaFunctions(host){
                 view.setUint16(2, secret.length, true);
                 view.setUint32(4, block + 8, true);
                 bytes.set(secret, 8);
-                host.writeMemory(block, bytes);
-                writeDword(out, block);
+                guest.setBytes(block, bytes);
+                guest.set32(out, block);
                 return STATUS_SUCCESS;
             },
         },
@@ -534,7 +523,7 @@ export function createLsaFunctions(host){
                     default:
                         return STATUS_INVALID_PARAMETER;
                 }
-                writeDword(out, block.write(host));
+                guest.set32(out, block.write(host));
                 return STATUS_SUCCESS;
             },
         },
@@ -558,8 +547,8 @@ export function createLsaFunctions(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                writeDword(rights, 0);
-                writeDword(count, 0);
+                guest.set32(rights, 0);
+                guest.set32(count, 0);
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             },
         },
@@ -592,7 +581,7 @@ export function createLsaFunctions(host){
                 let mapped = 0;
                 for (let at = 0; at < (count >>> 0); at++)
                 {
-                    const sid = sidAt(readDword(wholeAddress(sids) + at * 4));
+                    const sid = sidAt(guest.u32(sids + at * 4));
                     const found = sid === null ? null : accountOfSid(sid);
                     const entry = at * 16;
                     if (found === null)
@@ -608,8 +597,8 @@ export function createLsaFunctions(host){
                     block.u32(entry + 12, list.index(found.domain,
                         domainSidOf(sidBytes(found.sid))));
                 }
-                writeDword(namesOut, block.write(host));
-                writeDword(domainsOut, list.write());
+                guest.set32(namesOut, block.write(host));
+                guest.set32(domainsOut, list.write());
                 return lookupStatus(mapped, count >>> 0);
             },
         },
@@ -630,17 +619,17 @@ export function createLsaFunctions(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                const low = readDword(luid);
-                const name = readDword(wholeAddress(luid) + 4) === 0
+                const low = guest.u32(luid);
+                const name = guest.u32(luid + 4) === 0
                     ? [...PRIVILEGES].find(([, value])=>value === low)?.[0] : undefined;
                 if (name === undefined)
                 {
-                    writeDword(out, 0);
+                    guest.set32(out, 0);
                     return STATUS_NO_SUCH_PRIVILEGE;
                 }
                 const block = new Block(8);
                 block.string(0, name);
-                writeDword(out, block.write(host));
+                guest.set32(out, block.write(host));
                 return STATUS_SUCCESS;
             },
         },
@@ -666,7 +655,7 @@ export function createLsaFunctions(host){
                     {
                         const block = new Block(8);
                         block.string(0, text);
-                        writeDword(out, block.write(host));
+                        guest.set32(out, block.write(host));
                     }
                 }
                 return STATUS_SUCCESS;

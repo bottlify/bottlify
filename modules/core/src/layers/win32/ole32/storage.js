@@ -286,8 +286,7 @@ export function createStorageFunctions(host){
      * @param {number} address @param {number} maxUnits
      * @returns {string | null}
      */
-    const oleName = (address, maxUnits)=>(address === 0 ? null
-        : guest.wstr(address, (maxUnits + 1) * 2));
+    const oleName = (address, maxUnits)=>guest.optionalText(address, true, (maxUnits + 1) * 2);
 
     /**
      * A string in task memory, terminated, for STATSTG.pwcsName; 0 when

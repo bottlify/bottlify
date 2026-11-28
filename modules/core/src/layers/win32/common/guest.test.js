@@ -266,3 +266,15 @@ test('bytes made to a length are written a chunk at a time, a fault before the r
     assert.deepEqual(offsets, [0], 'at the first chunk, the rest never made');
     assert.ok(grown < IN_PLACE, `${grown} bytes grown`);
 });
+
+test('a string a call may be passed as NULL reads as null, an empty one as empty', ()=>{
+    const bytes = new Uint8Array(0x100);
+    bytes.set([0x41, 0, 0x42, 0, 0, 0], 0x10);
+    bytes.set([0x61, 0x62, 0], 0x40);
+    const guest = guestOver(bytes, 4, [], 0x10);
+    assert.equal(guest.optionalText(0, true), null, 'NULL');
+    assert.equal(guest.optionalText(0x10, true), 'AB');
+    assert.equal(guest.optionalText(0x14, true), '', 'an empty string is no NULL');
+    assert.equal(guest.optionalText(0x40, false), 'ab');
+    assert.equal(guest.optionalText(0x10, true, 2), 'A', 'its limit is the text\'s');
+});

@@ -6451,11 +6451,7 @@ export function createWin32Module(){
 
                 'ADVAPI32.dll': ()=>({
                     ...createRegistryFunctions({
-                        pointerSize,
                         guest,
-                        readMemory,
-                        writeMemory,
-                        readCString,
                         hive,
                         setLastError: setError,
                         // The performance-data keys stamp their block with the
@@ -6492,13 +6488,9 @@ export function createWin32Module(){
                         allocate: bytes=>heap.allocate(bytes),
                     }),
                     ...createEventLogFunctions({
-                        pointerSize,
-                        readCString,
-                        readWideString,
+                        guest,
                         setLastError: setError,
                         handles,
-                        readMemory,
-                        writeMemory,
                         // A program's error event in the run's journal, as Event
                         // Viewer would show it: a runtime says there why it stops.
                         reportError: (source, id, strings)=>journal.write('error', 'eventlog',
@@ -6514,8 +6506,7 @@ export function createWin32Module(){
                         currentThread: ()=>kernel.currentThread(),
                     }),
                     ...createTokenFunctions({
-                        readMemory,
-                        pointerSize,
+                        guest,
                         // Impersonation is the thread's, not the process's.
                         currentThread: ()=>kernel.currentThread(),
                         // A pipe's client is the pipes' to know.
@@ -6526,17 +6517,12 @@ export function createWin32Module(){
                         /** @param {number} handle @param {number} wanted */
                         serviceSecurity: (handle, wanted)=>/** @type {any} */ (
                             libraries['ADVAPI32.dll'])[SERVICE_SECURITY]?.(handle, wanted) ?? null,
-                        writeMemory,
-                        readCString,
                         setLastError: setError,
                         handles,
                         allocate: bytes=>heap.allocate(bytes),
                     }),
                     ...createServiceFunctions({
-                        readCString,
-                        readMemory,
-                        writeMemory,
-                        pointerSize,
+                        guest,
                         hive,
                         setLastError: setError,
                         divergence: config?.divergence,
@@ -6563,9 +6549,7 @@ export function createWin32Module(){
                             thread: bridge.callerThread() }),
                     }),
                     ...createCryptoFunctions({
-                        readMemory,
-                        writeMemory,
-                        readCString,
+                        guest,
                         setLastError: setError,
                         divergence: config?.divergence,
                         // The providers are listed in the registry.

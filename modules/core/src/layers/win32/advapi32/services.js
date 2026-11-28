@@ -35,7 +35,7 @@ import { createPerfFunctions } from './perf.js';
 import {
     WELL_KNOWN_SIDS, aceBytes, aclBytes, selfRelativeDescriptor, sidBytes,
 } from './tokens.js';
-import { pointerArg, pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
+import { pointerArg, pointerWidth, wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
 const ERROR_SUCCESS = 0;
@@ -179,15 +179,10 @@ const HANDLE_STRIDE = 4;
 
 /**
  * @typedef {Object} ServiceHost
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {ReturnType<typeof import('./registry-service.js').createRegistryService>} hive
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {(address: number, length: number) => Uint8Array} [readMemory]
- *           What EnumServicesStatusEx reads a resume handle and a wide group
- *           name with. Absent, every enumeration starts at the first service,
- *           and a wide group name matches none.
  * @property {(bytes: number) => number} [allocate]
  *           What a credential, a performance instance and their kin are
  *           handed out in. Absent, those libraries are not offered.
@@ -210,8 +205,6 @@ const HANDLE_STRIDE = 4;
  * @property {(entry: number, args: (number | bigint)[]) => unknown} [call]
  *           The program's own code called, as a ServiceMain is: an argument past
  *           4 GiB a bigint, as the bridge takes a quadword.
- * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose service table,
- *           argv and every structure with a pointer in it are laid out in quadwords.
  */
 
 /**
@@ -223,7 +216,7 @@ const HANDLE_STRIDE = 4;
 const sz = text=>encodeAnsi(`${text}\0`);
 
 /** @param {number} value @returns {Uint8Array} */
-const dword = value=>{
+const le32 = value=>{
     const bytes = new Uint8Array(4);
     new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
     return bytes;
@@ -251,13 +244,9 @@ const mapAccess = (access, mapping)=>{
  * @param {ServiceHost} host
  */
 export function createServiceFunctions(host){
+    const { guest } = host;
     const { hive } = host;
-    const pointer = pointerWidth(host.pointerSize);
-    const { read: readPointer } = pointerIo({
-        readMemory: (address, length)=>Uint8Array.from(
-            host.readMemory?.(wholeAddress(address), length) ?? new Uint8Array(length)),
-        writeMemory: (address, bytes)=>host.writeMemory?.(wholeAddress(address), bytes),
-    }, pointer.size);
+    const pointer = pointerWidth(host.guest.pointerSize);
     /** A pointer handed to the program's own code: a quadword past 4 GiB goes whole. @param {number} value */
     const guestArgument = value=>(value >= 2 ** 32 ? BigInt(value) : value);
     /** Rounded up to the pointer's alignment, as a structure ending in dwords is padded. @param {number} size */
@@ -297,33 +286,10 @@ export function createServiceFunctions(host){
         return 0;
     };
 
-    /** @param {number} address @param {number} maxLength */
-    const ansiAt = (address, maxLength)=>((address >>> 0) === 0
-        ? null
-        : host.readCString(wholeAddress(address), maxLength));
-
-    /** @param {number} address @param {number} maxLength @returns {string | null} */
-    const wideAt = (address, maxLength)=>{
-        if ((address >>> 0) === 0 || !host.readMemory)
-        {
-            return null;
-        }
-        let text = '';
-        for (let at = wholeAddress(address); text.length < maxLength; at += 2)
-        {
-            const unit = host.readMemory(at, 2);
-            const code = unit[0] | unit[1] << 8;
-            if (code === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(code);
-        }
-        return text;
-    };
 
     /** @param {boolean} wide @returns {(address: number, maxLength: number) => string | null} */
-    const reader = wide=>(wide ? wideAt : ansiAt);
+    const reader = wide=>(/** @type {number} */ address, /** @type {number} */ maxLength)=>
+        guest.optionalText(address, wide, wide ? maxLength * 2 : maxLength);
 
     /**
      * A list of names, each terminated and the list by an empty one, as
@@ -394,15 +360,15 @@ export function createServiceFunctions(host){
     const configure = (key, config)=>{
         if (config.type !== undefined && config.type !== SERVICE_NO_CHANGE)
         {
-            hive.setValue(key, 'Type', REG_DWORD, dword(config.type));
+            hive.setValue(key, 'Type', REG_DWORD, le32(config.type));
         }
         if (config.start !== undefined && config.start !== SERVICE_NO_CHANGE)
         {
-            hive.setValue(key, 'Start', REG_DWORD, dword(config.start));
+            hive.setValue(key, 'Start', REG_DWORD, le32(config.start));
         }
         if (config.errorControl !== undefined && config.errorControl !== SERVICE_NO_CHANGE)
         {
-            hive.setValue(key, 'ErrorControl', REG_DWORD, dword(config.errorControl));
+            hive.setValue(key, 'ErrorControl', REG_DWORD, le32(config.errorControl));
         }
         if (config.imagePath)
         {
@@ -461,8 +427,6 @@ export function createServiceFunctions(host){
         return typeof object === 'number' ? null : object;
     };
 
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>host.writeMemory?.(address >>> 0, dword(value));
 
     /**
      * The security SetServiceObjectSecurity gave each service by name.
@@ -520,11 +484,11 @@ export function createServiceFunctions(host){
      * @returns {ServiceSecurity | null}
      */
     const descriptorParts = at=>{
-        if (at === 0 || !host.readMemory)
+        if (at === 0)
         {
             return null;
         }
-        const head = host.readMemory(at, SD_SIZE).slice();
+        const head = guest.snapshot(at, SD_SIZE);
         if (head[0] !== SECURITY_DESCRIPTOR_REVISION)
         {
             return null;
@@ -539,7 +503,7 @@ export function createServiceFunctions(host){
         };
         /** @param {number} sid */
         const sidAt = sid=>(sid === 0 ? undefined
-            : host.readMemory?.(sid, 8 + 4 * (host.readMemory?.(sid, 2)[1] ?? 0)).slice());
+            : guest.snapshot(sid, 8 + 4 * guest.u8(sid + 1)));
         /** @type {ServiceSecurity} */
         const parts = { owner: sidAt(part(4)), group: sidAt(part(8)) };
         if ((control & SE_DACL_PRESENT) !== 0)
@@ -547,16 +511,11 @@ export function createServiceFunctions(host){
             const dacl = part(16);
             // An ACL says its own size in its header's third and fourth bytes.
             parts.dacl = dacl === 0 ? null
-                : host.readMemory(dacl, readDword(dacl) >>> 16).slice();
+                : guest.snapshot(dacl, guest.u32(dacl) >>> 16);
         }
         return parts;
     };
 
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = host.readMemory?.(address >>> 0, 4);
-        return bytes ? new DataView(bytes.slice().buffer).getUint32(0, true) : 0;
-    };
 
     /** A value of a service's key as a number, or `fallback`. @param {number} key @param {string} name @param {number} fallback */
     const numberOf = (key, name, fallback)=>{
@@ -900,7 +859,7 @@ export function createServiceFunctions(host){
         handler: args=>{
             const table = pointerArg(args, 0);
             const name = host.service ?? null;
-            if (name === null || !host.call || !host.readMemory || !host.allocate)
+            if (name === null || !host.call || !host.allocate)
             {
                 return fail(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT);
             }
@@ -913,12 +872,13 @@ export function createServiceFunctions(host){
             // SERVICE_TABLE_ENTRY: two pointers, the table ended by a null name.
             for (let at = table; entries.length < 64; at += 2 * pointer.size)
             {
-                const [text, main] = [readPointer(at), readPointer(at + pointer.size)];
+                const [text, main] = [guest.ptr(at), guest.ptr(at + pointer.size)];
                 if (text === 0)
                 {
                     break;
                 }
-                entries.push({ name: (wide ? wideAt(text, 256) : ansiAt(text, 256)) ?? '', main });
+                entries.push({ main,
+                    name: guest.optionalText(text, wide, wide ? 256 * 2 : 256) ?? '' });
             }
             const key = serviceKey(name);
             const own = (key ? numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS)
@@ -935,8 +895,8 @@ export function createServiceFunctions(host){
             const text = wide ? utf16z(name) : sz(name);
             const list = 2 * pointer.size;
             const argv = wholeAddress(host.allocate(list + text.length));
-            host.writeMemory?.(argv, pointer.array([argv + list]));
-            host.writeMemory?.(argv + list, text);
+            guest.setBytes(argv, pointer.array([argv + list]));
+            guest.setBytes(argv + list, text);
             return Promise.resolve(host.call(entry.main, [1, guestArgument(argv)])).then(()=>1);
         },
     });
@@ -947,7 +907,7 @@ export function createServiceFunctions(host){
      * @param {number} address @param {boolean} wide
      */
     const register = (address, wide)=>{
-        const name = (wide ? wideAt(address, 256) : ansiAt(address, 256)) ?? '';
+        const name = guest.optionalText(address, wide, wide ? 256 * 2 : 256) ?? '';
         const key = running ? serviceKey(running.name) : null;
         const own = key && (numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS)
             & SERVICE_WIN32_OWN_PROCESS) !== 0;
@@ -998,7 +958,7 @@ export function createServiceFunctions(host){
                 encode(wide, textOf(key, 'DisplayName') ?? name),
             ];
             const total = strings.reduce((sum, bytes)=>sum + bytes.length, HEADER);
-            writeDword(needed, total);
+            guest.set32(needed, total);
             if ((size >>> 0) < total || (buffer >>> 0) === 0)
             {
                 return fail(ERROR_INSUFFICIENT_BUFFER);
@@ -1016,7 +976,7 @@ export function createServiceFunctions(host){
                 out.set(strings[index], at);
                 at += strings[index].length;
             }
-            host.writeMemory?.(buffer >>> 0, out);
+            guest.setBytes(buffer >>> 0, out);
             return 1;
         },
     });
@@ -1072,12 +1032,12 @@ export function createServiceFunctions(host){
             }
             else if (kind === SERVICE_CONFIG_PRESHUTDOWN_INFO)
             {
-                out = dword(numberOf(key, 'PreshutdownTimeout', PRESHUTDOWN_TIMEOUT));
+                out = le32(numberOf(key, 'PreshutdownTimeout', PRESHUTDOWN_TIMEOUT));
                 total = 4;
             }
             else if (kind === SERVICE_CONFIG_DELAYED_AUTO_START_INFO)
             {
-                out = dword(numberOf(key, 'DelayedAutostart', 0));
+                out = le32(numberOf(key, 'DelayedAutostart', 0));
                 total = 4;
             }
             else
@@ -1086,13 +1046,13 @@ export function createServiceFunctions(host){
                 out = new Uint8Array(FAILURE_ACTIONS_SIZE);
                 total = FAILURE_ACTIONS_SIZE;
             }
-            writeDword(needed, total);
+            guest.set32(needed, total);
             if ((buffer >>> 0) === 0 || (size >>> 0) < total)
             {
                 return fail((buffer >>> 0) === 0 && (size >>> 0) !== 0 ? ERROR_INVALID_ADDRESS
                     : ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory?.(wholeAddress(buffer), out);
+            guest.setBytes(wholeAddress(buffer), out);
             return 1;
         },
     });
@@ -1126,7 +1086,7 @@ export function createServiceFunctions(host){
             {
                 case SERVICE_CONFIG_DESCRIPTION:
                 {
-                    const description = reader(wide)(readPointer(info), MAX_TEXT);
+                    const description = reader(wide)(guest.ptr(info), MAX_TEXT);
                     if (description === '')
                     {
                         hive.deleteValue(key, 'Description');
@@ -1138,17 +1098,17 @@ export function createServiceFunctions(host){
                     return 1;
                 }
                 case SERVICE_CONFIG_PRESHUTDOWN_INFO:
-                    hive.setValue(key, 'PreshutdownTimeout', REG_DWORD, dword(readDword(info)));
+                    hive.setValue(key, 'PreshutdownTimeout', REG_DWORD, le32(guest.u32(info)));
                     return 1;
                 case SERVICE_CONFIG_DELAYED_AUTO_START_INFO:
                 {
                     // A BOOL, and only TRUE or FALSE.
-                    const delayed = readDword(info);
+                    const delayed = guest.u32(info);
                     if (delayed > 1)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
-                    hive.setValue(key, 'DelayedAutostart', REG_DWORD, dword(delayed));
+                    hive.setValue(key, 'DelayedAutostart', REG_DWORD, le32(delayed));
                     return 1;
                 }
                 case SERVICE_CONFIG_FAILURE_ACTIONS:
@@ -1181,12 +1141,12 @@ export function createServiceFunctions(host){
             {
                 return fail(ERROR_INVALID_ADDRESS);
             }
-            const size = readDword(sizeAddress);
+            const size = guest.u32(sizeAddress);
             // The A form answers a size of one -- the terminator of the empty
             // name it did not write -- whenever it has no buffer to write to.
             if (!wide && ((buffer >>> 0) === 0 || size === 0))
             {
-                writeDword(sizeAddress, 1);
+                guest.set32(sizeAddress, 1);
             }
             const asked = reader(wide)(nameAddress, MAX_TEXT);
             if (asked === null)
@@ -1199,11 +1159,11 @@ export function createServiceFunctions(host){
             {
                 if (wide && size < 2)
                 {
-                    writeDword(sizeAddress, 2);
+                    guest.set32(sizeAddress, 2);
                 }
                 else if ((buffer >>> 0) !== 0 && size !== 0)
                 {
-                    host.writeMemory?.(wholeAddress(buffer), new Uint8Array(wide ? 2 : 1));
+                    guest.setBytes(wholeAddress(buffer), new Uint8Array(wide ? 2 : 1));
                 }
                 return fail(ERROR_SERVICE_DOES_NOT_EXIST);
             }
@@ -1212,15 +1172,15 @@ export function createServiceFunctions(host){
             {
                 if ((buffer >>> 0) !== 0 && size > 0)
                 {
-                    host.writeMemory?.(wholeAddress(buffer), new Uint8Array(wide ? 2 : 1));
+                    guest.setBytes(wholeAddress(buffer), new Uint8Array(wide ? 2 : 1));
                 }
-                writeDword(sizeAddress, wide ? answer.length : answer.length * 2);
+                guest.set32(sizeAddress, wide ? answer.length : answer.length * 2);
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory?.(wholeAddress(buffer), encode(wide, answer));
+            guest.setBytes(wholeAddress(buffer), encode(wide, answer));
             if (wide)
             {
-                writeDword(sizeAddress, answer.length);
+                guest.set32(sizeAddress, answer.length);
             }
             return 1;
         },
@@ -1261,12 +1221,12 @@ export function createServiceFunctions(host){
                 || (types & ~(SERVICE_DRIVER | SERVICE_WIN32 | SERVICE_INTERACTIVE_PROCESS)) !== 0
                 || states === 0 || states > SERVICE_STATE_ALL)
             {
-                writeDword(needed, 0);
-                writeDword(returned, 0);
+                guest.set32(needed, 0);
+                guest.set32(returned, 0);
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            writeDword(needed, 0);
-            writeDword(returned, 0);
+            guest.set32(needed, 0);
+            guest.set32(returned, 0);
             if ((owner.access & SC_MANAGER_ENUMERATE_SERVICE) === 0)
             {
                 return fail(ERROR_ACCESS_DENIED);
@@ -1285,7 +1245,7 @@ export function createServiceFunctions(host){
             // ENUM_SERVICE_STATUS(_PROCESS): the two names' pointers, then the status.
             const record = padded(2 * pointer.size
                 + (extended ? SERVICE_STATUS_PROCESS_SIZE : SERVICE_STATUS_SIZE));
-            const first = (resume >>> 0) === 0 ? 0 : Math.min(readDword(resume), all.length);
+            const first = (resume >>> 0) === 0 ? 0 : Math.min(guest.u32(resume), all.length);
             const rest = all.slice(first);
             // The A form asks for as much as the W form does: the manager
             // answers in UTF-16, and the A side converts in the room it got.
@@ -1305,21 +1265,21 @@ export function createServiceFunctions(host){
                 const view = new DataView(out.buffer);
                 const name = encode(wide, entry.name);
                 const display = encode(wide, entry.display);
-                host.writeMemory?.(strings, name);
+                guest.setBytes(strings, name);
                 pointer.set(view, 0, strings);
                 strings += name.length;
-                host.writeMemory?.(strings, display);
+                guest.setBytes(strings, display);
                 pointer.set(view, pointer.size, strings);
                 strings += display.length;
                 out.set(statusOf(entry.name, extended), 2 * pointer.size);
-                host.writeMemory?.(base + at * record, out);
+                guest.setBytes(base + at * record, out);
             });
-            writeDword(returned, fitting);
+            guest.set32(returned, fitting);
             const left = rest.slice(fitting).reduce((sum, entry)=>sum + costOf(entry), 0);
-            writeDword(needed, left);
+            guest.set32(needed, left);
             if ((resume >>> 0) !== 0)
             {
-                writeDword(resume, fitting === rest.length ? 0 : first + fitting);
+                guest.set32(resume, fitting === rest.length ? 0 : first + fitting);
             }
             return fitting === rest.length ? 1 : fail(ERROR_MORE_DATA);
         },
@@ -1343,16 +1303,13 @@ export function createServiceFunctions(host){
 
     const extras = host.allocate ? {
         ...createCredFunctions({
-            readMemory: /** @type {any} */ (host.readMemory),
-            writeMemory: /** @type {any} */ (host.writeMemory),
-            readCString: host.readCString,
+            guest,
             setLastError: host.setLastError ?? (()=>{}),
             allocate: host.allocate,
             release: host.release,
         }),
         ...createPerfFunctions({
-            readMemory: /** @type {any} */ (host.readMemory),
-            writeMemory: /** @type {any} */ (host.writeMemory),
+            guest,
             allocate: host.allocate,
             release: host.release,
             setLastError: host.setLastError,
@@ -1463,7 +1420,7 @@ export function createServiceFunctions(host){
                 }
                 if (wholeAddress(status) !== 0)
                 {
-                    host.writeMemory?.(wholeAddress(status),
+                    guest.setBytes(wholeAddress(status),
                         statusOf(/** @type {string} */ (object.name), false));
                 }
                 return fail(ERROR_SERVICE_NOT_ACTIVE);
@@ -1493,7 +1450,7 @@ export function createServiceFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                host.writeMemory?.(wholeAddress(status), statusOf(/** @type {string} */ (object.name),
+                guest.setBytes(wholeAddress(status), statusOf(/** @type {string} */ (object.name),
                     false));
                 return 1;
             },
@@ -1520,7 +1477,7 @@ export function createServiceFunctions(host){
                     {
                         return fail(ERROR_INVALID_ADDRESS);
                     }
-                    writeDword(needed, SERVICE_STATUS_PROCESS_SIZE);
+                    guest.set32(needed, SERVICE_STATUS_PROCESS_SIZE);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
                 const object = holding(service, 'service', SERVICE_QUERY_STATUS);
@@ -1532,7 +1489,7 @@ export function createServiceFunctions(host){
                 {
                     return fail(ERROR_INVALID_ADDRESS);
                 }
-                host.writeMemory?.(wholeAddress(buffer), statusOf(/** @type {string} */ (object.name),
+                guest.setBytes(wholeAddress(buffer), statusOf(/** @type {string} */ (object.name),
                     true));
                 return 1;
             },
@@ -1558,13 +1515,13 @@ export function createServiceFunctions(host){
                 const bytes = describe(/** @type {string} */ (object.name), wanted >>> 0);
                 if (wholeAddress(needed) !== 0)
                 {
-                    writeDword(needed, bytes.length);
+                    guest.set32(needed, bytes.length);
                 }
                 if (wholeAddress(buffer) === 0 || (size >>> 0) < bytes.length)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory?.(wholeAddress(buffer), bytes);
+                guest.setBytes(wholeAddress(buffer), bytes);
                 return 1;
             },
         },
@@ -1774,9 +1731,7 @@ export function createServiceFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                running.state = new DataView(Uint8Array.from(
-                    host.readMemory?.(status, SERVICE_STATUS_SIZE) ?? []).buffer)
-                    .getUint32(4, true);
+                running.state = guest.u32(status + 4);
                 return 1;
             },
         },

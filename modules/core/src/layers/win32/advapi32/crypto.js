@@ -29,7 +29,6 @@ import { createRc4 } from '../crypto/rc4.js';
 import { createProviderRegistry } from './providers.js';
 import { bigIntToBe, bigIntToLe, beToBigInt, leToBigInt, modPow } from '../crypto/rsa.js';
 import { wholeAddress } from '../common/pointers.js';
-import { writeMade } from '../../../system/port.js';
 
 /** @typedef {import('../crypto/digest.js').Digest} Digest */
 /** @typedef {import('../crypto/rc4.js').StreamCipher} StreamCipher */
@@ -251,9 +250,7 @@ function createDigest(algid){
 
 /**
  * @typedef {Object} CryptoHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {ReturnType<typeof import('./registry-service.js').createRegistryService>} [hive]
@@ -272,6 +269,7 @@ function createDigest(algid){
  * @param {CryptoHost} host
  */
 export function createCryptoFunctions(host){
+    const { guest } = host;
     /** @type {Map<number, CryptoObject>} */
     const handles = new Map();
     /** Containers a CRYPT_NEWKEYSET acquire has created, by name. */
@@ -291,7 +289,7 @@ export function createCryptoFunctions(host){
         if (host.allocate)
         {
             handle = wholeAddress(host.allocate(8));
-            writeDword(handle, handle);
+            guest.set32(handle, handle);
         }
         else
         {
@@ -307,19 +305,6 @@ export function createCryptoFunctions(host){
         return 0;
     };
 
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(wholeAddress(address), new Uint8Array([
-            value & 0xff, (value >>> 8) & 0xff,
-            (value >>> 16) & 0xff, (value >>> 24) & 0xff,
-        ]));
-    };
-
-    /** @param {number} address */
-    const readDword = address=>readU32LE(host.readMemory(wholeAddress(address), 4), 0);
-
-    /** @param {number} address @param {number} length */
-    const readBytes = (address, length)=>host.readMemory(wholeAddress(address), length).slice();
 
     /** @param {number} handle */
     const asProvider = handle=>{
@@ -339,30 +324,6 @@ export function createCryptoFunctions(host){
         return object && object.kind === 'key' ? object : null;
     };
 
-    /** @param {number} pointer @param {number} max @returns {string | null} */
-    const readAnsi = (pointer, max)=>((pointer >>> 0) === 0
-        ? null
-        : host.readCString(wholeAddress(pointer), max));
-
-    /** @param {number} pointer @param {number} max @returns {string | null} */
-    const readWide = (pointer, max)=>{
-        if ((pointer >>> 0) === 0)
-        {
-            return null;
-        }
-        let text = '';
-        for (let at = 0; at < max; at++)
-        {
-            const pair = host.readMemory(wholeAddress(pointer) + at * 2, 2);
-            const code = pair[0] | (pair[1] << 8);
-            if (code === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(code);
-        }
-        return text;
-    };
 
     /**
      * Fills a caller buffer, honouring the size-query convention: a NULL
@@ -376,19 +337,19 @@ export function createCryptoFunctions(host){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const room = readDword(sizePointer);
+        const room = guest.u32(sizePointer);
         if ((buffer >>> 0) === 0)
         {
-            writeDword(sizePointer, data.length);
+            guest.set32(sizePointer, data.length);
             return 1;
         }
         if (room < data.length)
         {
-            writeDword(sizePointer, data.length);
+            guest.set32(sizePointer, data.length);
             return fail(ERROR_MORE_DATA);
         }
-        host.writeMemory(wholeAddress(buffer), data);
-        writeDword(sizePointer, data.length);
+        guest.setBytes(buffer, data);
+        guest.set32(sizePointer, data.length);
         return 1;
     };
 
@@ -574,8 +535,7 @@ export function createCryptoFunctions(host){
      * @param {number} flags @param {number} out
      */
     const registry = host.hive ? createProviderRegistry({
-        readMemory: host.readMemory, writeMemory: host.writeMemory,
-        readCString: host.readCString, setLastError: host.setLastError, hive: host.hive,
+        guest, setLastError: host.setLastError, hive: host.hive,
     }) : null;
 
     /**
@@ -629,7 +589,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(NTE_BAD_KEYSET);
                 }
-                writeDword(out, 0);
+                guest.set32(out, 0);
                 return 1;
             }
             if ((flags & CRYPT_NEWKEYSET) !== 0)
@@ -645,7 +605,7 @@ export function createCryptoFunctions(host){
                 return fail(NTE_BAD_KEYSET);
             }
         }
-        writeDword(out, alloc({ kind: 'provider', type: provType, container: keyset,
+        guest.set32(out, alloc({ kind: 'provider', type: provType, container: keyset,
             verify, children: new Set(), name, refs: 1 }));
         host.setLastError?.(0);
         return 1;
@@ -710,7 +670,7 @@ export function createCryptoFunctions(host){
                 return fail(ERROR_INVALID_PARAMETER);
             }
             const value = hashValue(hash);
-            const recovered = bigIntToBe(modPow(leToBigInt(readBytes(signature, len)),
+            const recovered = bigIntToBe(modPow(leToBigInt(guest.snapshot(signature, len)),
                 pub.rsa.e, pub.rsa.n), len);
             /** @param {boolean} noOid */
             const matches = noOid=>{
@@ -730,16 +690,16 @@ export function createCryptoFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([out, container, provider, provType, flags])=>
-                acquire(readAnsi(container, 512), readAnsi(provider, 512), provType >>> 0,
-                    flags >>> 0, out),
+                acquire(guest.optionalText(container, false, 512),
+                    guest.optionalText(provider, false, 512), provType >>> 0, flags >>> 0, out),
         },
 
         CryptAcquireContextW: {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([out, container, provider, provType, flags])=>
-                acquire(readWide(container, 512), readWide(provider, 512), provType >>> 0,
-                    flags >>> 0, out),
+                acquire(guest.optionalText(container, true, 512 * 2),
+                    guest.optionalText(provider, true, 512 * 2), provType >>> 0, flags >>> 0, out),
         },
 
         /**
@@ -896,7 +856,7 @@ export function createCryptoFunctions(host){
                         const descriptor = containerDescriptor(flags >>> 0);
                         if (wholeAddress(buffer) === 0)
                         {
-                            writeDword(size, descriptor.length);
+                            guest.set32(size, descriptor.length);
                             host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                             return 1;
                         }
@@ -1010,14 +970,14 @@ export function createCryptoFunctions(host){
                 switch (param >>> 0)
                 {
                     case KP_PERMISSIONS:
-                        key.permissions = readDword(data);
+                        key.permissions = guest.u32(data);
                         return 1;
                     case KP_SALT:
-                        key.salt = readBytes(data, 11);
+                        key.salt = guest.snapshot(data, 11);
                         return 1;
                     case KP_SALT_EX:
                         // CRYPT_DATA_BLOB: the size, then the bytes' pointer.
-                        key.salt = readBytes(readDword(data + 4), readDword(data));
+                        key.salt = guest.snapshot(guest.u32(data + 4), guest.u32(data));
                         return 1;
                     default:
                         return fail(NTE_BAD_TYPE);
@@ -1052,7 +1012,7 @@ export function createCryptoFunctions(host){
                 // The duplicate's cipher starts over from the key, as a key
                 // just made does.
                 const copy = { ...key, stream: key.stream ? createRc4(key.value) : null };
-                writeDword(out, prov ? track(prov, copy) : alloc(copy));
+                guest.set32(out, prov ? track(prov, copy) : alloc(copy));
                 return 1;
             },
         },
@@ -1127,7 +1087,7 @@ export function createCryptoFunctions(host){
                         `${(algid >>> 0).toString(16)}: keyed hash (HMAC) is not built`);
                     return fail(NTE_BAD_KEY);
                 }
-                writeDword(out, track(prov, { kind: 'hash', prov: provHandle >>> 0,
+                guest.set32(out, track(prov, { kind: 'hash', prov: provHandle >>> 0,
                     algid: algid >>> 0, digest, size, value: null }));
                 return 1;
             },
@@ -1154,7 +1114,7 @@ export function createCryptoFunctions(host){
                 const len = length >>> 0;
                 if (len > 0)
                 {
-                    hash.digest.update(readBytes(data, len));
+                    hash.digest.update(guest.snapshot(data, len));
                 }
                 return 1;
             },
@@ -1226,7 +1186,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(NTE_BAD_HASH_STATE);
                 }
-                hash.value = readBytes(data, hash.size);
+                hash.value = guest.snapshot(data, hash.size);
                 return 1;
             },
         },
@@ -1265,7 +1225,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail((flags >>> 0) !== 0 ? NTE_BAD_FLAGS : ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out, track(prov, { kind: 'hash', prov: hash.prov,
+                guest.set32(out, track(prov, { kind: 'hash', prov: hash.prov,
                     algid: hash.algid, digest: hash.digest.clone(), size: hash.size,
                     value: hash.value ? hash.value.slice() : null }));
                 return 1;
@@ -1308,7 +1268,7 @@ export function createCryptoFunctions(host){
                     (flags >>> 0 & CRYPT_EXPORTABLE) !== 0);
                 const handle = track(prov, key);
                 key.prov = provHandle >>> 0;
-                writeDword(out, handle);
+                guest.set32(out, handle);
                 return 1;
             },
         },
@@ -1352,7 +1312,7 @@ export function createCryptoFunctions(host){
                     (flags >>> 0 & CRYPT_EXPORTABLE) !== 0);
                 const handle = track(prov, key);
                 key.prov = provHandle >>> 0;
-                writeDword(out, handle);
+                guest.set32(out, handle);
                 return 1;
             },
         },
@@ -1427,10 +1387,10 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const len = readDword(sizePointer);
+                const len = guest.u32(sizePointer);
                 if ((bufLen >>> 0) < len)
                 {
-                    writeDword(sizePointer, len);
+                    guest.set32(sizePointer, len);
                     return fail(ERROR_MORE_DATA);
                 }
                 if ((hashHandle >>> 0) !== 0)
@@ -1446,15 +1406,14 @@ export function createCryptoFunctions(host){
                     }
                     if (len > 0)
                     {
-                        hash.digest.update(readBytes(data, len));
+                        hash.digest.update(guest.snapshot(data, len));
                     }
                 }
                 if (len > 0)
                 {
-                    host.writeMemory(wholeAddress(data), key.stream.transform(readBytes(data,
-                        len)));
+                    guest.setBytes(data, key.stream.transform(guest.snapshot(data, len)));
                 }
-                writeDword(sizePointer, len);
+                guest.set32(sizePointer, len);
                 if ((final >>> 0) !== 0)
                 {
                     key.stream.reset();
@@ -1486,7 +1445,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const len = readDword(sizePointer);
+                const len = guest.u32(sizePointer);
                 // A final block of nothing is a length error: there is no
                 // padding to take off an empty buffer.
                 if (len === 0 && (final >>> 0) !== 0)
@@ -1495,8 +1454,8 @@ export function createCryptoFunctions(host){
                 }
                 if (len > 0)
                 {
-                    const plain = key.stream.transform(readBytes(data, len));
-                    host.writeMemory(wholeAddress(data), plain);
+                    const plain = key.stream.transform(guest.snapshot(data, len));
+                    guest.setBytes(data, plain);
                     if ((hashHandle >>> 0) !== 0)
                     {
                         const hash = asHash(hashHandle);
@@ -1511,7 +1470,7 @@ export function createCryptoFunctions(host){
                         hash.digest.update(plain);
                     }
                 }
-                writeDword(sizePointer, len);
+                guest.set32(sizePointer, len);
                 if ((final >>> 0) !== 0)
                 {
                     key.stream.reset();
@@ -1544,7 +1503,7 @@ export function createCryptoFunctions(host){
                     host.setLastError?.(ERROR_NOACCESS);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(buffer), randomBytes(len));
+                guest.setBytes(buffer, randomBytes(len));
                 return 1;
             },
         },
@@ -1565,8 +1524,7 @@ export function createCryptoFunctions(host){
                 }
                 // Drawn as it is written: a length the buffer does not have
                 // faults where it ends, nothing drawn for the rest.
-                writeMade(host.writeMemory, wholeAddress(buffer), len,
-                    chunk=>void crypto.getRandomValues(chunk));
+                guest.setMade(buffer, len, chunk=>void crypto.getRandomValues(chunk));
                 return 1;
             },
         },
@@ -1598,7 +1556,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(NTE_BAD_DATA);
                 }
-                const blob = readBytes(data, len);
+                const blob = guest.snapshot(data, len);
                 const type = blob[0];
                 const version = blob[1];
                 const aiKeyAlg = readU32LE(blob, 4);
@@ -1635,7 +1593,7 @@ export function createCryptoFunctions(host){
                         rsa: { n: leToBigInt(modulus), e: BigInt(pubexp), bitlen } };
                     const handle = track(prov, key);
                     key.prov = provHandle >>> 0;
-                    writeDword(out, handle);
+                    guest.set32(out, handle);
                     return 1;
                 }
                 if (type === PLAINTEXTKEYBLOB)
@@ -1655,7 +1613,7 @@ export function createCryptoFunctions(host){
                         (flags >>> 0 & CRYPT_EXPORTABLE) !== 0);
                     const handle = track(prov, key);
                     key.prov = provHandle >>> 0;
-                    writeDword(out, handle);
+                    guest.set32(out, handle);
                     return 1;
                 }
                 if (type === SIMPLEBLOB)
@@ -1698,7 +1656,7 @@ export function createCryptoFunctions(host){
                             d: leToBigInt(blob.subarray(privAt, privAt + modBytes)) } };
                     const handle = track(prov, key);
                     key.prov = provHandle >>> 0;
-                    writeDword(out, handle);
+                    guest.set32(out, handle);
                     return 1;
                 }
                 return fail(NTE_BAD_TYPE);
