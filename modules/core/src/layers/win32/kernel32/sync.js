@@ -12,7 +12,7 @@ import { createSListFunctions } from './slist.js';
 import { FILE_OBJECT_KINDS, isStandardHandle, untagged } from './handle-tags.js';
 import { createChangeNotifications } from './changes.js';
 import { SELECTORS } from './seh.js';
-import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
+import { MAXIMUM_PROCESSORS } from './processor.js';
 import { createThreadInfoFunctions } from './thread-info.js';
 import { createProcessPolicyFunctions } from './process-policy.js';
 import { askChild, threadArg, threadEnd } from './cross-process.js';
@@ -174,9 +174,9 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {import('./changes.js').WatchedVolume} [volume]
  *           The volume, for the directories a change notification watches;
  *           without it FindFirstChangeNotification is refused.
- * @property {import('./processor.js').Processors} [processors]  The process's
+ * @property {import('./processor.js').Processors} processors  The process's
  *           processors and its affinity, which every other interface that
- *           counts or sets them shares. Absent, the kernel's alone.
+ *           counts or sets them shares.
  * @property {number} [processId]  This process's id, which a job's list names.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose critical
  *           sections are 40 bytes and taken by traps; absent, 4.
@@ -198,7 +198,7 @@ const FILETIME_EPOCH_MS = 11644473600000;
  */
 export function createSyncFunctions(host){
     const { kernel } = host;
-    const processors = host.processors ?? createProcessors(kernel);
+    const processors = host.processors;
     const cs = criticalLayout(host.pointerSize);
     // A HANDLE is a pointer: an array of them holds quadwords in a 64-bit
     // process, each a handle's dword in its low half.

@@ -12,6 +12,7 @@ import { createCriticalSections, enterCode, leaveCode, tryEnterCode } from './cr
 import { INTERLOCKED, INTERLOCKED_64 } from './interlocked.js';
 import { childThread } from './cross-process.js';
 import { kernelLayerAnswers } from '../kernel.fixture.js';
+import { createProcessors } from './processor.js';
 
 const CS_LOCK_COUNT = 0x04;
 const CS_RECURSION_COUNT = 0x08;
@@ -219,6 +220,9 @@ function fakeHost(base = 0){
     let current = threads.first;
 
     const host = {
+        // Made from the kernel as win32 makes them: a test that changes the
+        // kernel's count is answered with it.
+        processors: createProcessors(kernel),
         bytes,
         kernel,
         threads,

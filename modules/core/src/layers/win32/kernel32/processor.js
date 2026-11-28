@@ -145,15 +145,14 @@ export const processorCount = asked=>Math.min(MAXIMUM_PROCESSORS, Math.max(1, Ma
 export const processorMask = count=>(2 ** count - 1) >>> 0;
 
 /**
- * What of the kernel's API the processors are asked of. Each part is optional
- * so a kernel that has not learned it answers as one processor always has.
+ * What of the kernel's API the processors are asked of.
  *
  * @typedef {Object} ProcessorKernel
- * @property {() => number} [processors]  How many the machine has: the
+ * @property {() => number} processors  How many the machine has: the
  *           process's executors.
- * @property {(thread: any) => number} [processorOf]  The one a thread runs
+ * @property {(thread: any) => number} processorOf  The one a thread runs
  *           on now; 0 for one that runs nowhere.
- * @property {() => any[]} [threads]  The process's threads.
+ * @property {() => any[]} threads  The process's threads.
  */
 
 /**
@@ -164,9 +163,9 @@ export const processorMask = count=>(2 ** count - 1) >>> 0;
  * process, handed to every interface that reports or sets either -- two would
  * be two owners of the process's mask.
  *
- * @param {ProcessorKernel} [kernel]  Absent, a machine of one processor.
+ * @param {ProcessorKernel} kernel
  */
-export function createProcessors(kernel = {}){
+export function createProcessors(kernel){
     /**
      * The process's mask once a program has narrowed it; null while it is
      * the whole machine.
@@ -174,7 +173,7 @@ export function createProcessors(kernel = {}){
      * @type {number | null}
      */
     let narrowed = null;
-    const count = ()=>processorCount(kernel.processors?.() ?? 1);
+    const count = ()=>processorCount(kernel.processors());
     const systemMask = ()=>processorMask(count());
     const processMask = ()=>narrowed ?? systemMask();
 
@@ -187,7 +186,7 @@ export function createProcessors(kernel = {}){
         threadMask: thread=>(thread.affinityMask ?? processMask()) >>> 0,
 
         /** @param {any} thread */
-        processorOf: thread=>kernel.processorOf?.(thread) ?? 0,
+        processorOf: thread=>kernel.processorOf(thread),
 
         /**
          * SetProcessAffinityMask: the process, and every thread of it, on
@@ -204,7 +203,7 @@ export function createProcessors(kernel = {}){
                 return false;
             }
             narrowed = wanted === systemMask() ? null : wanted;
-            for (const thread of kernel.threads?.() ?? [])
+            for (const thread of kernel.threads())
             {
                 thread.affinityMask = wanted;
             }

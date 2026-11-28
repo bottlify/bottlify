@@ -725,7 +725,8 @@ export function createWin32Module(){
             // The processors this process is told of -- one for each executor
             // the kernel runs its threads on -- and its affinity: one record,
             // which every interface that counts or sets them asks at the call.
-            const processors = createProcessors(kernel);
+            const processors = createProcessors(
+                /** @type {import('./kernel32/processor.js').ProcessorKernel} */ (kernel));
             /**
              * A thread made here starts on its process's processors, and with a
              * block of its own, made by whoever owns the process's, which win32

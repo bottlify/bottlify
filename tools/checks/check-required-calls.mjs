@@ -52,9 +52,16 @@ const HANDED = {
     'modules/core/src/layers/win32/kernel32/slimsync.js': ['kernel'],
     'modules/core/src/layers/win32/kernel32/spawn.js': ['kernel'],
     'modules/core/src/layers/win32/kernel32/sync-natives.js': ['kernel'],
-    'modules/core/src/layers/win32/kernel32/sync.js': ['kernel'],
+    'modules/core/src/layers/win32/kernel32/sync.js': ['kernel', 'host.processors'],
     'modules/core/src/layers/win32/kernel32/thread-info.js': ['kernel'],
     'modules/core/src/layers/win32/kernel32/threading.js': ['kernel'],
+    // The process's processors, made once from the kernel (`processor.js`) and
+    // handed to every interface that counts or sets them.
+    'modules/core/src/layers/win32/kernel32/processor.js': ['kernel'],
+    'modules/core/src/layers/win32/kernel32/system.js': ['host.processors'],
+    'modules/core/src/layers/win32/kernel32/process.js': ['host.processors'],
+    'modules/core/src/layers/win32/ntdll/query.js': ['host.processors'],
+    'modules/core/src/layers/win32/ntdll/functions.js': ['host.processors'],
     // The shared user data's clocks, in the memory layer's words.
     'modules/core/src/layers/win32/kernel32/shared-data.js': ['memory'],
     // The bridge's dispatcher and callbacks, over the cpu and memory it is built with.

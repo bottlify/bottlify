@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { createProcessors } from './kernel32/processor.js';
+
 /**
  * What win32 asks of the kernel layer past its handles, clock and current
  * thread, for a test that builds win32 over a kernel of its own: answering as
@@ -27,3 +29,12 @@ export const kernelLayerAnswers = Object.freeze({
         finish: ()=>{},
     }),
 });
+
+/**
+ * The process's processors as win32 makes them from the kernel, over
+ * `kernelLayerAnswers` (one processor) or the kernel answers given: a fresh
+ * set each call, its own affinity mask.
+ *
+ * @param {Record<string, any>} [kernel]
+ */
+export const testProcessors = (kernel = {})=>createProcessors({ ...kernelLayerAnswers, ...kernel });

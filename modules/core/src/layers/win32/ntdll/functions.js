@@ -249,8 +249,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  * @property {Record<string | symbol, any>} [advapi32]
  *           The assembled ADVAPI32.dll table, whose registry NtUnloadKey
  *           unloads a hive from. Absent, NtUnloadKey stays unexported.
- * @property {import('../kernel32/processor.js').Processors} [processors]
- *           The process's processors, kernel32's own. Absent, one.
+ * @property {import('../kernel32/processor.js').Processors} processors
+ *           The process's processors, kernel32's own.
  * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
@@ -484,7 +484,7 @@ export function createNtdllFunctions(host){
         }
         if (kernel32.GetSystemTimes)
         {
-            const count = host.processors?.count() ?? 1;
+            const count = host.processors.count();
             classes[SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION] = { read: ()=>{
                 const times = new DataView(scratch(24, at=>
                     kernel32.GetSystemTimes.handler([at, at + 8, at + 16])).buffer);
