@@ -35,12 +35,19 @@ function random(seed){
 
 const HIGH = 2 ** 32 + 0x20000;
 
-/** The regions of a program, gaps between them: what is not there faults. */
+/**
+ * The regions of a program: what is not there faults, and an access across
+ * two regions side by side is one access, as on Windows - refused only where
+ * a byte of it is not there or not for this.
+ */
 const REGIONS = [
     { name: 'data', base: 0x10000, size: 0x2000, kind: 'heap', access: 'rw' },
-    { name: 'rdata', base: 0x14000, size: 0x1000, kind: 'image', access: 'r' },
+    { name: 'more', base: 0x12000, size: 0x1000, kind: 'heap', access: 'rw' },
+    { name: 'rdata', base: 0x13000, size: 0x1000, kind: 'image', access: 'r' },
+    { name: 'stub', base: 0x17000, size: 0x1000, kind: 'heap', access: 'rw' },
     { name: 'code', base: 0x18000, size: 0x1000, kind: 'image', access: 'rwx' },
-    { name: 'high', base: HIGH, size: 0x2000, kind: 'heap', access: 'rw' },
+    { name: 'high', base: HIGH, size: 0x1000, kind: 'heap', access: 'rw' },
+    { name: 'higher', base: HIGH + 0x1000, size: 0x1000, kind: 'heap', access: 'rw' },
 ];
 
 /**
@@ -310,12 +317,17 @@ for (const width of /** @type {(4 | 8)[]} */ ([4, 8]))
                 }
                 if (writing && typeof got !== 'string')
                 {
-                    // Code is written by the path the translator hears, all else by the data path.
-                    const code = REGIONS.find(region=>region.access === 'rwx'
-                        && at >= region.base && at < region.base + region.size);
+                    // A write over code, in part too, by the path the translator hears;
+                    // all else by the data path.
                     assert.ok(m.told.length > 0, `${label}: the machine was told`);
-                    assert.ok(m.told.every(said=>said.startsWith(code ? 'code' : 'data')),
-                        `${label}: ${m.told.join('; ')}`);
+                    for (const said of m.told)
+                    {
+                        const [path, from, bytes] = said.split(' ');
+                        const code = REGIONS.some(region=>region.access === 'rwx'
+                            && Number(from) < region.base + region.size
+                            && Number(from) + Number(bytes) > region.base);
+                        assert.equal(path, code ? 'code' : 'data', `${label}: ${said}`);
+                    }
                 }
             }
             for (const [address, byte] of reference.bytes)

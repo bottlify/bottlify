@@ -260,16 +260,16 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      *
      * A limit is how far the caller is willing to look, not a claim that all of
      * it is mapped -- a string at the end of a region is ordinary, and demanding
-     * the whole limit be readable fails on it. Clamped to the region, so the
-     * scan still cannot wander into whatever is next.
+     * the whole limit be readable fails on it. Clamped to where the readable
+     * regions from it end, so the scan still cannot wander past them.
      *
      * @param {number} address
      * @param {number} limit
      */
     const scannable = (address, limit)=>{
         address = unsigned(address);
-        const region = regions.find(address);
-        return region ? Math.min(limit, region.base + region.size - address) : limit;
+        const end = regions.extent(address, 'read');
+        return end > address ? Math.min(limit, end - address) : limit;
     };
 
     /**
@@ -300,7 +300,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         // Only a write the guest could execute has anything to tell the
         // translator. Everything else -- a structure field, an
         // out-parameter, a surface -- goes straight into memory.
-        if (raw.writeData && !regions.executable(address))
+        if (raw.writeData && !regions.executable(address, bytes.length))
         {
             raw.writeData(address, bytes);
             return;
@@ -336,7 +336,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         // write path is what tells it. That is a guest code page rather than a
         // heap block, so it is rare, and a buffer there costs nothing worth
         // saving.
-        if (!raw.fillData || regions.executable(address))
+        if (!raw.fillData || regions.executable(address, length))
         {
             write(address, new Uint8Array(length).fill(value & 0xff));
             return;
@@ -505,7 +505,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             // a field, a count: one word into the RAM, no bytes made for it.
             address = unsigned(address);
             regions.assert(address, 4, 'write');
-            if (!regions.executable(address))
+            if (!regions.executable(address, 4))
             {
                 if (charge)
                 {
@@ -550,11 +550,11 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             // Told, never written again: a copy read and written back would
             // undo another thread's store between the two, a guest's swap of
             // the same word on another executor among them.
-            if (raw.wrote && regions.executable(address))
+            if (raw.wrote && regions.executable(address, length))
             {
                 raw.wrote(address, length);
             }
-            else if (!raw.writeData || regions.executable(address))
+            else if (!raw.writeData || regions.executable(address, length))
             {
                 // The bytes written back where they lie: the write copies them
                 // over themselves.

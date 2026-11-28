@@ -114,7 +114,9 @@ value where it lies, `set8` to `setPtr` and `set32s` write one (a quadword in on
 that faults on its second half writes nothing of its first), `snapshot` copies a block into a
 buffer it is given or one it makes, `view` is the block in place until anything else runs,
 `setBytes`, `fill` and `copy` (as memmove) write one. An address not there, or not for this, is
-the memory layer's `GUEST_ACCESS` fault; an unaligned access answers as its bytes do, as x86
+the memory layer's `GUEST_ACCESS` fault, at the first such byte: an access across regions side by
+side that permit it is one access, as on Windows, and a write that runs on into code is told to
+the translator; an unaligned access answers as its bytes do, as x86
 does; `ptr` and `setPtr` are as wide as the process's pointers, and an address past 4 GiB is
 reached. The gate is [`memory/port.itest.js`](../../modules/core/src/layers/memory/port.itest.js):
 seeded accesses of every kind through the port and through a plain model of memory, answers,

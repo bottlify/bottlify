@@ -239,53 +239,80 @@ export function createRegionMap(){
         },
 
         /**
-         * Throws unless the whole span sits inside one region that permits `mode`.
-         *
-         * A span crossing two adjacent regions is rejected on purpose: adjacency
-         * is a coincidence of layout, not permission to treat them as one buffer.
+         * Throws unless every byte of the span is mapped and permits `mode`.
+         * A span across regions side by side is one access, as Windows takes
+         * it: refused only at the first byte not there or not for this, which
+         * the fault names. Answers the region the span starts in.
          *
          * @param {number} address
          * @param {number} length
          * @param {'read' | 'write' | 'execute'} mode
          */
         assert(address, length, mode){
-            const region = this.find(address);
-            if (!region)
+            const first = this.find(address);
+            const end = address + length;
+            for (let region = first, at = address; ; region = this.find(at))
             {
-                throw guestFault(
-                    `Unmapped ${mode} at 0x${address.toString(16)} (${length} bytes)`,
-                    address, length, mode);
+                if (!region)
+                {
+                    throw guestFault(`Unmapped ${mode} at 0x${at.toString(16)} (${length} bytes`
+                        + ` from 0x${address.toString(16)})`, at, length, mode);
+                }
+                if (!PERMITS[region.access][mode])
+                {
+                    throw guestFault(`Region "${region.name}" (${region.access}) does not permit`
+                        + ` ${mode} at 0x${at.toString(16)}`, at, length, mode);
+                }
+                at = region.base + region.size;
+                if (at >= end)
+                {
+                    return /** @type {Region} */ (first);
+                }
             }
-            if (address + length > region.base + region.size)
-            {
-                throw guestFault(
-                    `${mode} of ${length} bytes at 0x${address.toString(16)}`
-                    + ` runs past the end of region "${region.name}"`,
-                    region.base + region.size, length, mode);
-            }
-            if (!PERMITS[region.access][mode])
-            {
-                throw guestFault(
-                    `Region "${region.name}" (${region.access}) does not permit ${mode}`
-                    + ` at 0x${address.toString(16)}`, address, length, mode);
-            }
-            return region;
         },
 
         /**
-         * Whether anything at this address could ever be executed.
+         * Where the run of regions side by side from `address` that permit
+         * `mode` ends: how far a scan from it may read. `address` itself where
+         * it is not there or not for this.
+         *
+         * @param {number} address @param {'read' | 'write'} mode
+         */
+        extent(address, mode){
+            let at = address;
+            for (let region = this.find(at); region && PERMITS[region.access][mode];
+                region = this.find(at))
+            {
+                at = region.base + region.size;
+            }
+            return at;
+        },
+
+        /**
+         * Whether anything of a span could ever be executed.
          *
          * Asked by whoever writes on the host's behalf: a write into memory the
          * guest can execute may be changing code the translator has compiled,
-         * and has to say so. A write anywhere else cannot be, and paying the
-         * translator's invalidation for it is pure loss.
+         * and has to say so - one that runs on into code from data too. A
+         * write anywhere else cannot be, and paying the translator's
+         * invalidation for it is pure loss.
          *
          * @param {number} address
+         * @param {number} [length]
          * @returns {boolean} true when nothing is known, which is the safe answer.
          */
-        executable(address){
-            const region = this.find(address);
-            return region ? PERMITS[region.access].execute : true;
+        executable(address, length = 1){
+            const end = address + length;
+            for (let at = address; at < end;)
+            {
+                const region = this.find(at);
+                if (!region || PERMITS[region.access].execute)
+                {
+                    return true;
+                }
+                at = region.base + region.size;
+            }
+            return false;
         },
 
         /** @returns {Region[]} every region, lowest address first. */
