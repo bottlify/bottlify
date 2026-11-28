@@ -28,7 +28,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * putting it in guest memory.
  *
  * @typedef {Object} EnumeratorEnv
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(clsid: string, definition: import('./objects.js').ComClassDefinition)
  *     => import('./objects.js').ComObject | null} makeObject
  * @property {(object: import('./objects.js').ComObject, iid: string) => number} publish
@@ -82,12 +82,7 @@ export function publishEnumerator(env, kind, snapshot, out){
  * @returns {number}
  */
 function publishOver(env, kind, shared, start, out){
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        env.writeMemory(wholeAddress(address), bytes);
-    };
+    const { guest } = env;
     const { items } = shared.snapshot;
     let position = start;
     const object = env.makeObject(kind.clsid, {
@@ -113,7 +108,7 @@ function publishOver(env, kind, shared, start, out){
                             {
                                 if ((fetched >>> 0) !== 0)
                                 {
-                                    writeU32(fetched, count);
+                                    guest.set32(fetched, count);
                                 }
                                 return E_OUTOFMEMORY;
                             }
@@ -122,7 +117,7 @@ function publishOver(env, kind, shared, start, out){
                         }
                         if ((fetched >>> 0) !== 0)
                         {
-                            writeU32(fetched, count);
+                            guest.set32(fetched, count);
                         }
                         return count === wanted ? S_OK : S_FALSE;
                     },
@@ -154,7 +149,7 @@ function publishOver(env, kind, shared, start, out){
                         {
                             return E_INVALIDARG;
                         }
-                        writeU32(ppenum, 0);
+                        guest.set32(ppenum, 0);
                         return publishOver(env, kind, shared, position, ppenum >>> 0);
                     },
                 },
@@ -193,6 +188,6 @@ function publishOver(env, kind, shared, start, out){
         object.release();
         return E_OUTOFMEMORY;
     }
-    writeU32(out, pointer);
+    guest.set32(out, pointer);
     return S_OK;
 }

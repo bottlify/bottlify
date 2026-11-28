@@ -12,6 +12,7 @@
  * accelerator tables, key state, metafiles.
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import assert from 'node:assert/strict';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComRegistry } from './objects.js';
@@ -373,8 +374,7 @@ export function oleProcess(options = {}){
 
     /** @type {import('./ole2.js').Ole2Env} */
     const env = {
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         heap,
         // A 32-bit process: its arguments are dwords.
         callMethod: (pointer, slot, args)=>callMethod(pointer, slot, /** @type {number[]} */ (args)),
@@ -428,7 +428,10 @@ export function oleProcess(options = {}){
     };
 
     const storage = /** @type {any} */ (createStorageFunctions({
-        readMemory: env.readMemory, writeMemory: env.writeMemory,
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            bytes.slice(address, address + length),
+        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
+            bytes.set(data, address),
         fillMemory: (address, value, length)=>bytes.fill(value, address, address + length),
         heap, registry, vtables,
     }));

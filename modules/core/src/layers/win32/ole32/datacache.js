@@ -22,7 +22,7 @@
  * or drawn, through gdi32.
  */
 
-import { GUID_NULL, formatGuid, parseGuid } from '../../../system/guid.js';
+import { GUID_NULL, formatGuid } from '../../../system/guid.js';
 import { FORMATETC_SIZE, STGMEDIUM_SIZE, TYMED, DVASPECT_CONTENT } from './oleutil.js';
 import { publishEnumerator } from './enumerator.js';
 import { wholeAddress } from '../common/pointers.js';
@@ -191,9 +191,8 @@ const staticFormat = clsid=>({ [CLSID_PICTURE_DIB]: CF_DIB,
 /** @param {DataCacheEnv} context */
 export function createDataCaches(context){
     const { ole: env, util } = context;
-    const { readU32, writeU32, writeWords, release, system, sayOnce } = util;
-    /** @param {number} address */
-    const readI32 = address=>readU32(address) | 0;
+    const { release, system, sayOnce } = util;
+    const { guest } = env;
     /** @param {unknown} thread @param {string} library @param {string} name @param {number[]} args */
     const gdi = async(thread, library, name, args)=>
         (await system(library, name, args, thread)) ?? 0;
@@ -223,7 +222,7 @@ export function createDataCaches(context){
             {
                 return 0;
             }
-            writeWords(picture, [MM_ANISOTROPIC, entry.extent.x, entry.extent.y, metafile]);
+            guest.set32s(picture, [MM_ANISOTROPIC, entry.extent.x, entry.extent.y, metafile]);
             return picture;
         }
         if (entry.tymed === TYMED.ENHMF)
@@ -247,7 +246,7 @@ export function createDataCaches(context){
         const block = env.heap.allocate(Math.max(data.length, 1));
         if (block !== 0)
         {
-            env.writeMemory(block, entry.format === CF_DIB ? withResolution(data) : data);
+            guest.setBytes(block, entry.format === CF_DIB ? withResolution(data) : data);
         }
         return block;
     };
@@ -310,8 +309,8 @@ export function createDataCaches(context){
             freeScratch();
             return null;
         }
-        const width = readI32(about + 4);
-        const height = readI32(about + 8);
+        const width = guest.i32(about + 4);
+        const height = guest.i32(about + 8);
         const size = width * height * 4;
         const header = new Uint8Array(BITMAPINFOHEADER_BYTES);
         const view = new DataView(header.buffer);
@@ -328,8 +327,8 @@ export function createDataCaches(context){
             DIB_RGB_COLORS]);
         await gdi(thread, 'USER32.dll', 'ReleaseDC', [0, dc]);
         const dib = new Uint8Array(BITMAPINFOHEADER_BYTES + size);
-        dib.set(env.readMemory(info, BITMAPINFOHEADER_BYTES), 0);
-        dib.set(env.readMemory(buffer, size), BITMAPINFOHEADER_BYTES);
+        dib.set(guest.snapshot(info, BITMAPINFOHEADER_BYTES), 0);
+        dib.set(guest.snapshot(buffer, size), BITMAPINFOHEADER_BYTES);
         freeScratch();
         return dib;
     };
@@ -341,7 +340,7 @@ export function createDataCaches(context){
         const block = env.heap.allocate(Math.max(bytes.length, 4));
         if (block !== 0)
         {
-            env.writeMemory(block, bytes);
+            guest.setBytes(block, bytes);
             scratch.push(block);
         }
         return block;
@@ -361,8 +360,8 @@ export function createDataCaches(context){
      * @returns {Promise<{ data: Uint8Array, extent: { x: number, y: number } } | null>}
      */
     const bytesOf = async(entry, medium, thread)=>{
-        const tymed = readU32(medium);
-        const handle = readU32(medium + 4);
+        const tymed = guest.u32(medium);
+        const handle = guest.u32(medium + 4);
         if (entry.format === CF_DIB && tymed === TYMED.GDI && handle !== 0)
         {
             const dib = await dibOf(handle, thread);
@@ -380,8 +379,8 @@ export function createDataCaches(context){
             {
                 return null;
             }
-            const metafile = readU32(picture.at + 12);
-            const extent = { x: readI32(picture.at + 4), y: readI32(picture.at + 8) };
+            const metafile = guest.u32(picture.at + 12);
+            const extent = { x: guest.i32(picture.at + 4), y: guest.i32(picture.at + 8) };
             const size = await gdi(thread, 'GDI32.dll', 'GetMetaFileBitsEx', [metafile, 0, 0]);
             const block = size > 0 ? env.heap.allocate(size) : 0;
             if (block === 0)
@@ -389,7 +388,7 @@ export function createDataCaches(context){
                 return { data: new Uint8Array(0), extent };
             }
             await gdi(thread, 'GDI32.dll', 'GetMetaFileBitsEx', [metafile, size, block]);
-            const data = env.readMemory(block, size).slice();
+            const data = guest.snapshot(block, size);
             env.heap.free(block);
             return { data, extent };
         }
@@ -402,7 +401,7 @@ export function createDataCaches(context){
                 return { data: new Uint8Array(0), extent: { x: 0, y: 0 } };
             }
             await gdi(thread, 'GDI32.dll', 'GetEnhMetaFileBits', [handle, size, block]);
-            const data = env.readMemory(block, size).slice();
+            const data = guest.snapshot(block, size);
             env.heap.free(block);
             // The frame, in HIMETRIC hundredths of a millimetre already.
             const view = new DataView(data.buffer);
@@ -418,7 +417,7 @@ export function createDataCaches(context){
             return { data: new Uint8Array(0), extent: { x: 0, y: 0 } };
         }
         const bytes = util.globalBytes(handle);
-        const data = bytes && bytes.size !== 0 ? env.readMemory(bytes.at, bytes.size).slice()
+        const data = bytes && bytes.size !== 0 ? guest.snapshot(bytes.at, bytes.size)
             : new Uint8Array(0);
         return { data, extent: dibExtent(data, 0) };
     };
@@ -697,10 +696,10 @@ export function createDataCaches(context){
         }
         const sink = sinkFor(state);
         await util.withScratch(FORMATETC_SIZE + 4, async block=>{
-            writeWords(block, [entry.format, 0, entry.aspect, entry.lindex, entry.tymed, 0]);
+            guest.set32s(block, [entry.format, 0, entry.aspect, entry.lindex, entry.tymed, 0]);
             const hr = (await env.callMethod(state.running, SLOT.DADVISE,
                 [block, entry.advf, sink, block + FORMATETC_SIZE], thread)) | 0;
-            entry.sink = hr < 0 ? 0 : readU32(block + FORMATETC_SIZE) || -1;
+            entry.sink = hr < 0 ? 0 : guest.u32(block + FORMATETC_SIZE) || -1;
             return hr;
         });
     };
@@ -737,7 +736,7 @@ export function createDataCaches(context){
                 { name: 'OnDataChange', argBytes: 12, invoke: async(_self, [format, medium])=>{
                     const thread = env.callerThread();
                     const entry = (format >>> 0) === 0 ? undefined : findEntry(state,
-                        readU32(format) & 0xffff, readU32(format + 8), readI32(format + 12));
+                        guest.u32(format) & 0xffff, guest.u32(format + 8), guest.i32(format + 12));
                     if (entry && (medium >>> 0) !== 0)
                     {
                         const read = await bytesOf(entry, medium >>> 0, thread);
@@ -793,7 +792,7 @@ export function createDataCaches(context){
         {
             return entry.tymed === TYMED.GDI ? OLE_E_BLANK : E_OUTOFMEMORY;
         }
-        writeWords(medium, [entry.tymed, handle, 0]);
+        guest.set32s(medium, [entry.tymed, handle, 0]);
         return S_OK;
     };
 
@@ -824,11 +823,11 @@ export function createDataCaches(context){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out, 0);
-            const cf = readU32(format) & 0xffff;
-            const aspect = readU32(format + 8);
-            const lindex = readI32(format + 12);
-            const tymed = readU32(format + 16);
+            guest.set32(out, 0);
+            const cf = guest.u32(format) & 0xffff;
+            const aspect = guest.u32(format + 8);
+            const lindex = guest.i32(format + 12);
+            const tymed = guest.u32(format + 16);
             if (lindex !== -1)
             {
                 return DV_E_LINDEX;
@@ -841,12 +840,12 @@ export function createDataCaches(context){
             const existing = findEntry(state, accepted.format, aspect, lindex);
             if (existing)
             {
-                writeU32(out, existing.id);
+                guest.set32(out, existing.id);
                 return CACHE_S_SAMECACHE;
             }
             const entry = addEntry(state, accepted.format, aspect, lindex, accepted.tymed,
                 advf >>> 0);
-            writeU32(out, entry.id);
+            guest.set32(out, entry.id);
             await adviseRunning(state, entry, env.callerThread());
             return accepted.hr;
         } },
@@ -874,7 +873,7 @@ export function createDataCaches(context){
                 size: FORMATETC_SIZE + 12 }, {
                 items,
                 write: (at, entry)=>{
-                    writeWords(at, [entry.format, 0, entry.aspect, entry.lindex, entry.tymed,
+                    guest.set32s(at, [entry.format, 0, entry.aspect, entry.lindex, entry.tymed,
                         entry.advf, 0, entry.id]);
                     return true;
                 },
@@ -896,8 +895,8 @@ export function createDataCaches(context){
                 return E_INVALIDARG;
             }
             const thread = env.callerThread();
-            const entry = findEntry(state, readU32(format) & 0xffff, readU32(format + 8),
-                readI32(format + 12));
+            const entry = findEntry(state, guest.u32(format) & 0xffff, guest.u32(format + 8),
+                guest.i32(format + 12));
             if (!entry)
             {
                 return OLE_E_BLANK;
@@ -975,8 +974,8 @@ export function createDataCaches(context){
             }
             tried++;
             const hr = await util.withScratch(FORMATETC_SIZE + STGMEDIUM_SIZE, async block=>{
-                writeWords(block, [entry.format, 0, entry.aspect, entry.lindex, entry.tymed]);
-                env.writeMemory(block + FORMATETC_SIZE, new Uint8Array(STGMEDIUM_SIZE));
+                guest.set32s(block, [entry.format, 0, entry.aspect, entry.lindex, entry.tymed]);
+                guest.setBytes(block + FORMATETC_SIZE, new Uint8Array(STGMEDIUM_SIZE));
                 const got = (await env.callMethod(data, SLOT.GET_DATA,
                     [block, block + FORMATETC_SIZE], thread)) | 0;
                 if (got !== S_OK)
@@ -1040,20 +1039,20 @@ export function createDataCaches(context){
                 return E_INVALIDARG;
             }
             const thread = env.callerThread();
-            const entry = findEntry(state, readU32(format) & 0xffff, readU32(format + 8),
-                readI32(format + 12));
+            const entry = findEntry(state, guest.u32(format) & 0xffff, guest.u32(format + 8),
+                guest.i32(format + 12));
             if (!entry || !(await ensureData(state, entry, thread)))
             {
                 return OLE_E_BLANK;
             }
-            if (entry.format === CF_DIB && (readU32(format) & 0xffff) === CF_BITMAP)
+            if (entry.format === CF_DIB && (guest.u32(format) & 0xffff) === CF_BITMAP)
             {
                 const bitmap = await bitmapOf(/** @type {Uint8Array} */ (entry.data), thread);
                 if (bitmap === 0)
                 {
                     return E_OUTOFMEMORY;
                 }
-                writeWords(medium >>> 0, [TYMED.GDI, bitmap, 0]);
+                guest.set32s(medium >>> 0, [TYMED.GDI, bitmap, 0]);
                 return S_OK;
             }
             return answerMedium(entry, medium >>> 0, thread);
@@ -1065,8 +1064,8 @@ export function createDataCaches(context){
             {
                 return E_INVALIDARG;
             }
-            const entry = findEntry(state, readU32(format) & 0xffff, readU32(format + 8),
-                readI32(format + 12));
+            const entry = findEntry(state, guest.u32(format) & 0xffff, guest.u32(format + 8),
+                guest.i32(format + 12));
             return entry && await ensureData(state, entry, env.callerThread()) ? S_OK : S_FALSE;
         } },
         { name: 'GetCanonicalFormatEtc', argBytes: 12, invoke: ()=>E_NOTIMPL },
@@ -1108,7 +1107,7 @@ export function createDataCaches(context){
             }
         }
         const [left, top, right, bottom] = [0, 4, 8, 12]
-            .map(offset=>readI32(wholeAddress(bounds) + offset));
+            .map(offset=>guest.i32(bounds + offset));
         const data = /** @type {Uint8Array} */ (entry.data);
         try
         {
@@ -1182,7 +1181,7 @@ export function createDataCaches(context){
             const state = stateOf(object);
             if ((out >>> 0) !== 0)
             {
-                writeU32(out, 0);
+                guest.set32(out, 0);
             }
             return state.entries.some(entry=>entry.aspect === (aspect >>> 0)) ? S_OK : OLE_E_BLANK;
         } },
@@ -1210,15 +1209,15 @@ export function createDataCaches(context){
             const state = stateOf(object);
             if ((aspects >>> 0) !== 0)
             {
-                writeU32(aspects, state.view.aspects);
+                guest.set32(aspects, state.view.aspects);
             }
             if ((advf >>> 0) !== 0)
             {
-                writeU32(advf, state.view.advf);
+                guest.set32(advf, state.view.advf);
             }
             if ((sink >>> 0) !== 0)
             {
-                writeU32(sink, state.view.sink);
+                guest.set32(sink, state.view.sink);
                 if (state.view.sink !== 0)
                 {
                     await env.callMethod(state.view.sink, SLOT.ADD_REF, [], env.callerThread());
@@ -1239,7 +1238,7 @@ export function createDataCaches(context){
             {
                 return OLE_E_BLANK;
             }
-            writeWords(out, [entry.extent.x, entry.extent.y]);
+            guest.set32s(out, [entry.extent.x, entry.extent.y]);
             return S_OK;
         } },
     ];
@@ -1364,7 +1363,7 @@ export function createDataCaches(context){
             {
                 return E_POINTER;
             }
-            env.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(stateOf(object).clsid)));
+            guest.setGuid(out, stateOf(object).clsid);
             return S_OK;
         } },
         { name: 'IsDirty', argBytes: 4, invoke: object=>(stateOf(object).dirty ? S_OK : S_FALSE) },

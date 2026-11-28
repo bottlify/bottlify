@@ -17,7 +17,7 @@
  */
 
 import { GUID_SIZE, parseGuid } from '../../../system/guid.js';
-import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
 import { utf16z } from '../common/utf16.js';
 import { struct } from '../../../system/layout.js';
@@ -73,8 +73,7 @@ const READ_MAX = 1 << 20;
  * What the OLE functions are handed by the rest of ole32.
  *
  * @typedef {Object} OleEnv
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown,
  *              block: (address: number) => { size: number } | null }} heap
  *           Task memory and, being the same heap, a fixed HGLOBAL.
@@ -112,49 +111,7 @@ const READ_MAX = 1 << 20;
 export function createOleUtil(env){
     const STATSTG = statstgLayout(env.pointerSize);
     const PICTURE = METAFILEPICT.at(env.pointerSize);
-    /** A pointer-sized field, whole. */
-    const { write: writePointer } = pointerIo(env, env.pointerSize);
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = env.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-    };
-    /** @param {number} address */
-    const readU16 = address=>{
-        const bytes = env.readMemory(wholeAddress(address), 2);
-        return bytes[0] | (bytes[1] << 8);
-    };
-    /** @param {number} address @param {number[]} words */
-    const writeWords = (address, words)=>{
-        const bytes = new Uint8Array(words.length * 4);
-        const view = new DataView(bytes.buffer);
-        words.forEach((word, index)=>view.setUint32(index * 4, word >>> 0, true));
-        env.writeMemory(wholeAddress(address), bytes);
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>writeWords(address, [value]);
-    /** @param {number} address @param {number} value */
-    const writeU16 = (address, value)=>env.writeMemory(wholeAddress(address),
-        Uint8Array.of(value & 0xff, (value >>> 8) & 0xff));
-
-    /**
-     * A terminated UTF-16 string, read no further than `max` units.
-     *
-     * @param {number} address @param {number} [max]
-     */
-    const readWide = (address, max = 1024)=>{
-        let text = '';
-        for (let at = wholeAddress(address); text.length < max; at += 2)
-        {
-            const unit = readU16(at);
-            if (unit === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(unit);
-        }
-        return text;
-    };
+    const { guest } = env;
 
     /**
      * Bytes in a block of the heap: a string a callee reads, or a string the
@@ -166,7 +123,7 @@ export function createOleUtil(env){
         const block = wholeAddress(env.heap.allocate(Math.max(bytes.length, 4)));
         if (block !== 0)
         {
-            env.writeMemory(block, bytes);
+            guest.setBytes(block, bytes);
         }
         return block;
     };
@@ -241,7 +198,7 @@ export function createOleUtil(env){
         }
         const length = await system('USER32.dll', 'GetClipboardFormatNameW',
             [format, block, room], thread);
-        const name = length ? readWide(block, length) : null;
+        const name = length ? guest.wstr(block, length * 2) : null;
         env.heap.free(block);
         return name;
     };
@@ -260,7 +217,7 @@ export function createOleUtil(env){
         {
             return null;
         }
-        env.writeMemory(block, new Uint8Array(bytes));
+        guest.setBytes(block, new Uint8Array(bytes));
         try
         {
             return await use(block);
@@ -283,7 +240,7 @@ export function createOleUtil(env){
      */
     const storageClass = async(storage, thread)=>(await withScratch(STATSTG.SIZE_OF, async block=>{
         const hr = (await env.callMethod(storage, SLOT.STORAGE_STAT, [block, 1], thread)) | 0;
-        return { hr, clsid: env.readMemory(block + STATSTG.CLSID, GUID_SIZE).slice() };
+        return { hr, clsid: guest.snapshot(block + STATSTG.CLSID, GUID_SIZE) };
     })) ?? { hr: 0x8007000e | 0, clsid: new Uint8Array(GUID_SIZE) };
 
     /**
@@ -304,11 +261,11 @@ export function createOleUtil(env){
             }
             return { hr: 0x8007000e | 0, stream: 0 };
         }
-        writeU32(out, 0);
+        guest.set32(out, 0);
         const hr = (await env.callMethod(storage,
             create ? SLOT.STORAGE_CREATE_STREAM : SLOT.STORAGE_OPEN_STREAM,
             create ? [text, mode, 0, 0, out] : [text, 0, mode, 0, out], thread)) | 0;
-        const stream = hr < 0 ? 0 : readU32(out);
+        const stream = hr < 0 ? 0 : guest.u32(out);
         env.heap.free(text);
         env.heap.free(out);
         return { hr, stream };
@@ -332,11 +289,11 @@ export function createOleUtil(env){
         let hr = S_OK;
         while (total < READ_MAX)
         {
-            writeU32(block + READ_PIECE, 0);
+            guest.set32(block + READ_PIECE, 0);
             hr = (await env.callMethod(stream, SLOT.STREAM_READ,
                 [block, READ_PIECE, block + READ_PIECE], thread)) | 0;
-            const count = hr < 0 ? 0 : Math.min(readU32(block + READ_PIECE), READ_PIECE);
-            pieces.push(env.readMemory(block, count).slice());
+            const count = hr < 0 ? 0 : Math.min(guest.u32(block + READ_PIECE), READ_PIECE);
+            pieces.push(guest.snapshot(block, count));
             total += count;
             if (hr < 0 || count < READ_PIECE)
             {
@@ -374,12 +331,12 @@ export function createOleUtil(env){
 
     /** @param {number} at @returns {FormatEtc} */
     const readFormat = at=>({
-        format: readU16(at), aspect: readU32(at + 8), lindex: readU32(at + 12) | 0,
-        tymed: readU32(at + 16),
+        format: guest.u16(at), aspect: guest.u32(at + 8), lindex: guest.u32(at + 12) | 0,
+        tymed: guest.u32(at + 16),
     });
     /** @param {number} at @param {FormatEtc} format  Without a target device. */
     const writeFormat = (at, format)=>{
-        writeWords(at, [format.format & 0xffff, 0, format.aspect, format.lindex, format.tymed]);
+        guest.set32s(at, [format.format & 0xffff, 0, format.aspect, format.lindex, format.tymed]);
     };
 
     /**
@@ -393,7 +350,7 @@ export function createOleUtil(env){
         async block=>{
             const hr = (await env.callMethod(data, SLOT.DATA_ENUM_FORMATS, [DATADIR_GET, block],
                 thread)) | 0;
-            const enumerator = readU32(block);
+            const enumerator = guest.u32(block);
             if (hr < 0 || enumerator === 0)
             {
                 return [];
@@ -402,17 +359,17 @@ export function createOleUtil(env){
             const formats = [];
             while (formats.length < MAX_FORMATS)
             {
-                writeU32(block + 4, 0);
+                guest.set32(block + 4, 0);
                 const next = (await env.callMethod(enumerator, SLOT.ENUM_NEXT,
                     [1, block + 8, block + 4], thread)) | 0;
-                if (next !== S_OK || readU32(block + 4) !== 1)
+                if (next !== S_OK || guest.u32(block + 4) !== 1)
                 {
                     break;
                 }
                 formats.push(readFormat(block + 8));
                 // A target device is the callee's to have allocated and
                 // the caller's to free.
-                const device = readU32(block + 12);
+                const device = guest.u32(block + 12);
                 if (device !== 0)
                 {
                     env.heap.free(device);
@@ -476,7 +433,7 @@ export function createOleUtil(env){
         const copy = wholeAddress(env.heap.allocate(Math.max(bytes.size, 1)));
         if (copy !== 0 && bytes.size !== 0)
         {
-            env.writeMemory(copy, env.readMemory(bytes.at, bytes.size).slice());
+            guest.setBytes(copy, guest.snapshot(bytes.at, bytes.size));
         }
         return copy;
     };
@@ -516,7 +473,7 @@ export function createOleUtil(env){
                     return 0;
                 }
                 const metafile = await system('GDI32.dll', 'CopyMetaFileW',
-                    [readU32(picture.at + PICTURE.hMF), 0], thread);
+                    [guest.u32(picture.at + PICTURE.hMF), 0], thread);
                 if (!metafile)
                 {
                     if (metafile === null)
@@ -528,7 +485,7 @@ export function createOleUtil(env){
                 const copy = copyGlobal(handle);
                 if (copy !== 0)
                 {
-                    writePointer(copy + PICTURE.hMF, metafile >>> 0);
+                    guest.setPtr(copy + PICTURE.hMF, metafile >>> 0);
                 }
                 return copy;
             }
@@ -538,7 +495,7 @@ export function createOleUtil(env){
     };
 
     return {
-        readU32, readU16, writeU32, writeU16, writeWords, writePointer, utf16z, readWide, lend,
+        utf16z, lend,
         lendWide, lendGuid, system, sayOnce, registerFormat, formatName, withScratch, release,
         globalBytes, storageClass, openStream, readStream, writeStream, readFormat, writeFormat,
         formatsOf, tymedOf, copyGlobal, duplicate,

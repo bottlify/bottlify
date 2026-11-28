@@ -2904,8 +2904,7 @@ export function createOleFunctions(host){
      * @type {import('./ole2.js').Ole2Env}
      */
     const oleEnv = {
-        readMemory: host.readMemory,
-        writeMemory: host.writeMemory,
+        guest,
         heap: host.heap,
         globalMemory: host.globalMemory,
         pointerSize: width.size,

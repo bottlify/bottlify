@@ -17,7 +17,7 @@
 import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { ANSI_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { publishEnumerator } from './enumerator.js';
-import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
 import { utf16, utf16z } from '../common/utf16.js';
 
@@ -656,8 +656,7 @@ const SLOT = Object.freeze({
 /**
  * @typedef {Object} PropertySetEnv
  * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the STATSTG it is given is wider.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
  *     Task memory, as CoTaskMemAlloc hands it out.
  * @property {(object: number, slot: number, args: (number | bigint)[], thread?: unknown)
@@ -692,51 +691,13 @@ export function createPropertySetFunctions(env){
     const STATSTG = statstgLayout(env.pointerSize);
     const POINTER = env.pointerSize === 8 ? 8 : 4;
     const quad = pointerWidth(POINTER).quadword;
-    /** @param {number} address */
-    const readU32 = address=>new DataView(env.readMemory(wholeAddress(address), 4).slice().buffer)
-        .getUint32(0, true);
-    const readPointer = pointerIo(env, POINTER).read;
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>env.writeMemory(wholeAddress(address), u32(value));
-    /** @param {number} address @param {string} text */
-    const writeWideAt = (address, text)=>env.writeMemory(wholeAddress(address),
-        utf16z(text));
-    /** @param {number} address @returns {string} */
-    const readWideAt = address=>{
-        let text = '';
-        for (let at = wholeAddress(address); text.length < MAX_TEXT; at += 2)
-        {
-            const bytes = env.readMemory(at, 2);
-            const unit = bytes[0] | (bytes[1] << 8);
-            if (unit === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(unit);
-        }
-        return text;
-    };
-    /** @param {number} address @returns {string} */
-    const readAnsiAt = address=>{
-        /** @type {number[]} */
-        const bytes = [];
-        for (let at = wholeAddress(address); bytes.length < MAX_TEXT; at++)
-        {
-            const byte = env.readMemory(at, 1)[0];
-            if (byte === 0)
-            {
-                break;
-            }
-            bytes.push(byte);
-        }
-        return decodeAnsi(Uint8Array.from(bytes));
-    };
+    const { guest } = env;
     /** @param {Uint8Array} bytes @returns {number} task memory holding them, or 0 */
     const taskCopy = bytes=>{
         const block = env.heap.allocate(Math.max(bytes.length, 1));
         if (block !== 0)
         {
-            env.writeMemory(block, bytes);
+            guest.setBytes(block, bytes);
         }
         return block;
     };
@@ -761,7 +722,7 @@ export function createPropertySetFunctions(env){
         {
             return failed;
         }
-        env.writeMemory(block, new Uint8Array(Math.max(bytes, 4)));
+        guest.setBytes(block, new Uint8Array(Math.max(bytes, 4)));
         try
         {
             return await use(block);
@@ -783,11 +744,11 @@ export function createPropertySetFunctions(env){
         {
             return null;
         }
-        const size = Math.min(readU32(position), 1 << 24);
+        const size = Math.min(guest.u32(position), 1 << 24);
         await call(stream, SLOT.SEEK, [...quad(0), STREAM_SEEK_SET, 0], thread);
         return lend(size + 4, async buffer=>{
             const hr = await call(stream, SLOT.READ, [buffer, size, buffer + size], thread);
-            return hr < 0 ? null : env.readMemory(buffer, readU32(buffer + size)).slice();
+            return hr < 0 ? null : guest.snapshot(buffer, guest.u32(buffer + size));
         }, null);
     }, null);
 
@@ -804,7 +765,7 @@ export function createPropertySetFunctions(env){
             return sized;
         }
         return lend(bytes.length, async buffer=>{
-            env.writeMemory(buffer, bytes);
+            guest.setBytes(buffer, bytes);
             return call(stream, SLOT.WRITE, [buffer, bytes.length, 0], thread);
         }, E_OUTOFMEMORY);
     };
@@ -819,11 +780,11 @@ export function createPropertySetFunctions(env){
      * @param {Section} section @param {number} spec
      */
     const resolve = (section, spec)=>{
-        if (readU32(spec) === PRSPEC_PROPID)
+        if (guest.u32(spec) === PRSPEC_PROPID)
         {
-            return readU32(spec + 4);
+            return guest.u32(spec + 4);
         }
-        const name = readWideAt(readU32(spec + 4));
+        const name = guest.wstr(guest.u32(spec + 4), MAX_TEXT * 2);
         const folded = section.caseSensitive ? name : name.toLowerCase();
         for (const [id, known] of section.names)
         {
@@ -843,14 +804,14 @@ export function createPropertySetFunctions(env){
      * @returns {PropertyValue | null}
      */
     const readVariant = at=>{
-        const bytes = env.readMemory(at, PROPVARIANT_BYTES).slice();
+        const bytes = guest.snapshot(at, PROPVARIANT_BYTES);
         const view = new DataView(bytes.buffer);
         const vt = view.getUint16(0, true);
         const pointer = view.getUint32(8, true);
         const fixed = FIXED_SIZE.get(vt);
         if (vt === VT.CLSID)
         {
-            return pointer === 0 ? null : { vt, value: env.readMemory(pointer, 16).slice() };
+            return pointer === 0 ? null : { vt, value: guest.snapshot(pointer, 16) };
         }
         if (fixed !== undefined)
         {
@@ -863,24 +824,24 @@ export function createPropertySetFunctions(env){
             case VT.NULL:
                 return { vt, value: 0 };
             case VT.LPSTR:
-                return { vt, value: pointer === 0 ? '' : readAnsiAt(pointer) };
+                return { vt, value: pointer === 0 ? '' : guest.cstr(pointer, MAX_TEXT) };
             case VT.LPWSTR:
-                return { vt, value: pointer === 0 ? '' : readWideAt(pointer) };
+                return { vt, value: pointer === 0 ? '' : guest.wstr(pointer, MAX_TEXT * 2) };
             case VT.BSTR:
                 return { vt, value: pointer === 0 ? ''
-                    : decodeWide(env.readMemory(pointer, Math.min(readU32(pointer - 4), MAX_TEXT))
+                    : decodeWide(guest.snapshot(pointer, Math.min(guest.u32(pointer - 4), MAX_TEXT))
                         .slice()) };
             case VT.BLOB:
-                return { vt, value: env.readMemory(view.getUint32(12, true),
-                    view.getUint32(8, true)).slice() };
+                return { vt, value: guest.snapshot(view.getUint32(12, true),
+                    view.getUint32(8, true)) };
             case VT.CF: {
                 if (pointer === 0)
                 {
                     return null;
                 }
-                const size = readU32(pointer);
-                return { vt, value: { format: readU32(pointer + 4) | 0,
-                    data: size > 4 ? env.readMemory(readU32(pointer + 8), size - 4).slice()
+                const size = guest.u32(pointer);
+                return { vt, value: { format: guest.u32(pointer + 4) | 0,
+                    data: size > 4 ? guest.snapshot(guest.u32(pointer + 8), size - 4)
                         : new Uint8Array(0) } };
             }
             default:
@@ -938,7 +899,7 @@ export function createPropertySetFunctions(env){
             const clip = taskCopy(join([u32(value.data.length + 4), u32(value.format), u32(data)]));
             made = point(clip) && (value.data.length === 0 || data !== 0);
         }
-        env.writeMemory(at, record);
+        guest.setBytes(at, record);
         return made;
     };
 
@@ -992,7 +953,7 @@ export function createPropertySetFunctions(env){
                             : section.properties.get(id);
                 if (!property)
                 {
-                    env.writeMemory(at, new Uint8Array(PROPVARIANT_BYTES));
+                    guest.setBytes(at, new Uint8Array(PROPVARIANT_BYTES));
                     continue;
                 }
                 if (!writeVariant(at, property))
@@ -1029,7 +990,7 @@ export function createPropertySetFunctions(env){
                     return STG_E_INVALIDPARAMETER;
                 }
                 let id = resolve(section, spec);
-                if (readU32(spec) === PRSPEC_LPWSTR && id === null)
+                if (guest.u32(spec) === PRSPEC_LPWSTR && id === null)
                 {
                     // A new name takes the first free identifier from the
                     // one the caller names, which may not be a special one.
@@ -1042,7 +1003,7 @@ export function createPropertySetFunctions(env){
                     {
                         id++;
                     }
-                    section.names.set(id, readWideAt(readU32(spec + 4)));
+                    section.names.set(id, guest.wstr(guest.u32(spec + 4), MAX_TEXT * 2));
                 }
                 const hr = put(section, /** @type {number} */ (id), property);
                 if (hr < 0)
@@ -1080,7 +1041,7 @@ export function createPropertySetFunctions(env){
                     continue;
                 }
                 state.section.properties.delete(id);
-                if (readU32(spec) === PRSPEC_LPWSTR)
+                if (guest.u32(spec) === PRSPEC_LPWSTR)
                 {
                     state.section.names.delete(id);
                 }
@@ -1101,9 +1062,9 @@ export function createPropertySetFunctions(env){
             let found = false;
             for (let index = 0; index < (count >>> 0); index++)
             {
-                const name = section.names.get(readU32(wholeAddress(ids) + index * 4));
+                const name = section.names.get(guest.u32(ids + index * 4));
                 const block = name === undefined ? 0 : taskCopy(utf16z(name));
-                writeU32(wholeAddress(names) + index * 4, block);
+                guest.set32(names + index * 4, block);
                 found ||= block !== 0;
             }
             return found ? S_OK : S_FALSE;
@@ -1120,12 +1081,12 @@ export function createPropertySetFunctions(env){
             }
             for (let index = 0; index < (count >>> 0); index++)
             {
-                const id = readU32(wholeAddress(ids) + index * 4);
+                const id = guest.u32(ids + index * 4);
                 if (id === PID_DICTIONARY || id === PID_CODEPAGE)
                 {
                     return STG_E_INVALIDPARAMETER;
                 }
-                state.section.names.set(id, readWideAt(readU32(wholeAddress(names) + index * 4)));
+                state.section.names.set(id, guest.wstr(guest.u32(names + index * 4), MAX_TEXT * 2));
                 state.dirty = true;
             }
             return S_OK;
@@ -1142,7 +1103,7 @@ export function createPropertySetFunctions(env){
             }
             for (let index = 0; index < (count >>> 0); index++)
             {
-                state.dirty ||= state.section.names.delete(readU32(wholeAddress(ids) + index * 4));
+                state.dirty ||= state.section.names.delete(guest.u32(ids + index * 4));
             }
             return S_OK;
         } },
@@ -1175,7 +1136,7 @@ export function createPropertySetFunctions(env){
                     {
                         return false;
                     }
-                    env.writeMemory(at, join([u32(name), u32(item.id), u32(item.vt)]));
+                    guest.setBytes(at, join([u32(name), u32(item.id), u32(item.vt)]));
                     return true;
                 },
             }, out >>> 0);
@@ -1185,7 +1146,7 @@ export function createPropertySetFunctions(env){
             [modified, created, accessed].forEach((pointer, index)=>{
                 if ((pointer >>> 0) !== 0)
                 {
-                    times.set(env.readMemory(wholeAddress(pointer), 8), index * 8);
+                    times.set(guest.snapshot(pointer, 8), index * 8);
                 }
             });
             return S_OK;
@@ -1200,7 +1161,7 @@ export function createPropertySetFunctions(env){
             {
                 return STG_E_ACCESSDENIED;
             }
-            state.clsid = formatGuid(env.readMemory(wholeAddress(clsid), 16));
+            state.clsid = guest.guid(clsid);
             state.dirty = true;
             return S_OK;
         } },
@@ -1210,7 +1171,7 @@ export function createPropertySetFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            env.writeMemory(wholeAddress(out), join([
+            guest.setBytes(out, join([
                 /** @type {Uint8Array} */ (parseGuid(state.section.fmtid)),
                 /** @type {Uint8Array} */ (parseGuid(state.clsid)),
                 u32(state.flags), state.times, u32(state.set.osVersion)]));
@@ -1309,7 +1270,7 @@ export function createPropertySetFunctions(env){
             await release(state.stream, thread);
             return E_OUTOFMEMORY;
         }
-        writeU32(out, pointer);
+        guest.set32(out, pointer);
         return S_OK;
     };
 
@@ -1355,7 +1316,7 @@ export function createPropertySetFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            writeU32(wholeAddress(out), 0);
+            guest.set32(out, 0);
             if ((fmtid >>> 0) === 0)
             {
                 return E_INVALIDARG;
@@ -1374,9 +1335,9 @@ export function createPropertySetFunctions(env){
                 return STG_E_INVALIDFLAG;
             }
             const thread = env.callerThread();
-            const format = formatGuid(env.readMemory(wholeAddress(fmtid), 16));
+            const format = guest.guid(fmtid);
             const klass = (clsid >>> 0) === 0 ? GUID_NULL
-                : formatGuid(env.readMemory(wholeAddress(clsid), 16));
+                : guest.guid(clsid);
             const storage = storageOf(object);
             const name = nameOfFormat(format);
             let stream = 0;
@@ -1408,13 +1369,13 @@ export function createPropertySetFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            writeU32(wholeAddress(out), 0);
+            guest.set32(out, 0);
             if ((mode & STGM_CREATE) !== 0)
             {
                 return STG_E_INVALIDFLAG;
             }
             const thread = env.callerThread();
-            const format = formatGuid(env.readMemory(wholeAddress(fmtid), 16));
+            const format = guest.guid(fmtid);
             // A set is not transacted as a stream is: the flag is the set's.
             const stream = await openStream(storageOf(object), nameOfFormat(format),
                 mode & ~STGM_TRANSACTED, thread);
@@ -1429,7 +1390,7 @@ export function createPropertySetFunctions(env){
             {
                 return E_INVALIDARG;
             }
-            const name = nameOfFormat(formatGuid(env.readMemory(wholeAddress(fmtid), 16)));
+            const name = nameOfFormat(guest.guid(fmtid));
             const hr = await withName(name, at=>call(storageOf(object), SLOT.DESTROY_ELEMENT, [at],
                 env.callerThread()));
             return hr < 0 ? hr : S_OK;
@@ -1450,7 +1411,7 @@ export function createPropertySetFunctions(env){
                 write: (at, format)=>{
                     const record = new Uint8Array(STATPROPSETSTG_BYTES);
                     record.set(/** @type {Uint8Array} */ (parseGuid(format)), 0);
-                    env.writeMemory(at, record);
+                    guest.setBytes(at, record);
                     return true;
                 },
             }, out >>> 0);
@@ -1486,7 +1447,7 @@ export function createPropertySetFunctions(env){
      * @param {string} name @param {(at: number) => Promise<number>} use
      */
     const withName = (name, use)=>lend((name.length + 1) * 2, at=>{
-        writeWideAt(at, name);
+        guest.writeWide(at, name);
         return use(at);
     }, E_OUTOFMEMORY);
 
@@ -1496,7 +1457,7 @@ export function createPropertySetFunctions(env){
      */
     const openStream = (storage, name, mode, thread)=>withName(name, at=>lend(4, async slot=>{
         const hr = await call(storage, SLOT.OPEN_STREAM, [at, 0, mode, 0, slot], thread);
-        return hr < 0 ? 0 : readU32(slot);
+        return hr < 0 ? 0 : guest.u32(slot);
     }, 0));
 
     /**
@@ -1509,7 +1470,7 @@ export function createPropertySetFunctions(env){
         await withName(name, at=>lend(4, async slot=>{
             const hr = await call(storage, SLOT.CREATE_STREAM,
                 [at, STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE, 0, 0, slot], thread);
-            made = { hr, stream: hr < 0 ? 0 : readU32(slot) };
+            made = { hr, stream: hr < 0 ? 0 : guest.u32(slot) };
             return hr;
         }, E_OUTOFMEMORY));
         return made;
@@ -1527,20 +1488,20 @@ export function createPropertySetFunctions(env){
         {
             return null;
         }
-        const enumerator = readPointer(slot);
+        const enumerator = guest.ptr(slot);
         /** @type {string[]} */
         const formats = [];
         const item = slot + POINTER;
         const fetched = item + STATSTG.SIZE_OF;
         while (await call(enumerator, SLOT.NEXT, [1, item, fetched], thread) === S_OK)
         {
-            const name = readPointer(item + STATSTG.NAME);
-            const text = name === 0 ? '' : readWideAt(name);
+            const name = guest.ptr(item + STATSTG.NAME);
+            const text = name === 0 ? '' : guest.wstr(name, MAX_TEXT * 2);
             if (name !== 0)
             {
                 env.heap.free(name);
             }
-            const format = readU32(item + STATSTG.TYPE) === STGTY_STREAM
+            const format = guest.u32(item + STATSTG.TYPE) === STGTY_STREAM
                 && text.startsWith(PROPERTY_SET_MARK)
                 ? formatOfName(text) : null;
             if (format !== null)
@@ -1580,7 +1541,7 @@ export function createPropertySetFunctions(env){
                 {
                     return E_POINTER;
                 }
-                writeU32(wholeAddress(out), 0);
+                guest.set32(out, 0);
                 if (wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
@@ -1617,7 +1578,7 @@ export function createPropertySetFunctions(env){
                     await release(held, thread);
                     return E_OUTOFMEMORY;
                 }
-                writeU32(wholeAddress(out), pointer);
+                guest.set32(out, pointer);
                 return S_OK;
             },
         },
@@ -1636,7 +1597,7 @@ export function createPropertySetFunctions(env){
                 {
                     return E_POINTER;
                 }
-                writeU32(wholeAddress(out), 0);
+                guest.set32(out, 0);
                 if (wholeAddress(unknown) === 0 || (fmtid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -1653,9 +1614,9 @@ export function createPropertySetFunctions(env){
                 {
                     return E_NOINTERFACE;
                 }
-                const format = formatGuid(env.readMemory(wholeAddress(fmtid), 16));
+                const format = guest.guid(fmtid);
                 const klass = wholeAddress(clsid) === 0 ? GUID_NULL
-                    : formatGuid(env.readMemory(wholeAddress(clsid), 16));
+                    : guest.guid(clsid);
                 const { set, index } = newSet(format, klass, flags >>> 0, null);
                 return publishStorage({ stream, clsid: klass, flags: flags >>> 0, writable: true,
                     index, set, section: cloneSection(set.sections[index]), dirty: false,
@@ -1675,7 +1636,7 @@ export function createPropertySetFunctions(env){
                 {
                     return E_POINTER;
                 }
-                writeU32(wholeAddress(out), 0);
+                guest.set32(out, 0);
                 if (wholeAddress(unknown) === 0 || (fmtid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -1690,7 +1651,7 @@ export function createPropertySetFunctions(env){
                 {
                     return E_NOINTERFACE;
                 }
-                return openSet(stream, formatGuid(env.readMemory(wholeAddress(fmtid), 16)), true,
+                return openSet(stream, guest.guid(fmtid), true,
                     wholeAddress(out), thread);
             },
         },
@@ -1709,9 +1670,8 @@ export function createPropertySetFunctions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeWideAt(wholeAddress(out),
-                    nameOfFormat(formatGuid(env.readMemory(wholeAddress(fmtid),
-                        16))));
+                guest.writeWide(out,
+                    nameOfFormat(guest.guid(fmtid)));
                 return S_OK;
             },
         },
@@ -1731,14 +1691,14 @@ export function createPropertySetFunctions(env){
                 {
                     return E_INVALIDARG;
                 }
-                const text = wholeAddress(name) === 0 ? null : readWideAt(wholeAddress(name));
+                const text = wholeAddress(name) === 0 ? null : guest.wstr(name, MAX_TEXT * 2);
                 const fmtid = text === null || text.length > MAX_NAME_LENGTH ? null
                     : formatOfName(text);
                 if (fmtid === null)
                 {
                     return STG_E_INVALIDNAME;
                 }
-                env.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(fmtid)));
+                guest.setGuid(out, fmtid);
                 return S_OK;
             },
         },

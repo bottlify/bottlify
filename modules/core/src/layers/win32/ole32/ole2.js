@@ -350,14 +350,14 @@ export function decodeCompObj(bytes){
  */
 export function createOle2Functions(env){
     const util = createOleUtil(env);
-    const { readU32, writeU32, writeU16, withScratch, release } = util;
+    const { withScratch, release } = util;
+    const { guest } = env;
     const refuse = createRefusals({ divergence: env.divergence });
 
     /** @param {number} address */
-    const guidAt = address=>formatGuid(env.readMemory(wholeAddress(address), GUID_SIZE));
+    const guidAt = address=>guest.guid(address);
     /** @param {number} address @param {string} guid */
-    const writeGuid = (address, guid)=>env.writeMemory(wholeAddress(address),
-        /** @type {Uint8Array} */ (parseGuid(guid)));
+    const writeGuid = (address, guid)=>guest.setGuid(address, guid);
 
     /**
      * A key under HKEY_CLASSES_ROOT, or null.
@@ -560,7 +560,7 @@ export function createOle2Functions(env){
                 const status = await withScratch(4, async block=>{
                     const hr = (await env.callMethod(object, OLEOBJECT_GET_MISC_STATUS,
                         [DVASPECT_CONTENT, block], thread)) | 0;
-                    return hr < 0 ? 0 : readU32(block);
+                    return hr < 0 ? 0 : guest.u32(block);
                 });
                 first = ((status ?? 0) & OLEMISC_SETCLIENTSITEFIRST) !== 0;
                 if (first)
@@ -607,7 +607,7 @@ export function createOle2Functions(env){
         {
             util.sayOnce(api, `class ${clsid} has no server in this process`);
         }
-        return { hr, unknown: hr < 0 ? 0 : readU32(block) };
+        return { hr, unknown: hr < 0 ? 0 : guest.u32(block) };
     })) ?? { hr: E_OUTOFMEMORY, unknown: 0 };
 
     /**
@@ -627,7 +627,7 @@ export function createOle2Functions(env){
         await release(unknown, thread);
         if (answer < 0)
         {
-            writeU32(out, 0);
+            guest.set32(out, 0);
         }
         return answer;
     };
@@ -732,7 +732,7 @@ export function createOle2Functions(env){
         const handlers = /** @type {NonNullable<typeof env.defaultHandlers>} */ (env.defaultHandlers);
         return await withScratch(STGMEDIUM_SIZE + 8 + 16, async block=>{
             const medium = block;
-            env.writeMemory(medium, new Uint8Array(STGMEDIUM_SIZE));
+            guest.setBytes(medium, new Uint8Array(STGMEDIUM_SIZE));
             const got = (await env.callMethod(data, SLOT.DATA_GET, [formatEtc, medium],
                 thread)) | 0;
             if (got !== S_OK)
@@ -744,7 +744,7 @@ export function createOle2Functions(env){
             await env.callMethod(storage, SLOT.STORAGE_SET_CLASS, [classAt], thread);
             const slot = block + STGMEDIUM_SIZE;
             let hr = await handlers.create(clsid, 0, 0, 0, IID_IUNKNOWN, slot, thread);
-            const unknown = hr < 0 ? 0 : readU32(slot);
+            const unknown = hr < 0 ? 0 : guest.u32(slot);
             if (unknown !== 0)
             {
                 const persist = await env.queryPointer(unknown, IID_IPERSISTSTORAGE, thread);
@@ -837,14 +837,14 @@ export function createOle2Functions(env){
         {
             return null;
         }
-        const kind = readU32(message + 4);
+        const kind = guest.u32(message + 4);
         const keyMessage = kind === WM_KEYDOWN || kind === WM_SYSKEYDOWN;
         if (!keyMessage && kind !== WM_CHAR && kind !== WM_SYSCHAR)
         {
             return null;
         }
-        const key = readU32(message + 8) & 0xffff;
-        const alt = (readU32(message + 12) & KF_ALTDOWN_BIT) !== 0;
+        const key = guest.u32(message + 8) & 0xffff;
+        const alt = (guest.u32(message + 12) & KF_ALTDOWN_BIT) !== 0;
         const entries = await withScratch((count | 0) * ACCEL_SIZE, async block=>{
             const copied = await util.system('USER32.dll', 'CopyAcceleratorTableW',
                 [table, block, count | 0], thread);
@@ -852,7 +852,7 @@ export function createOle2Functions(env){
             {
                 util.sayOnce('IsAccelerator', 'no accelerator table can be read here');
             }
-            return env.readMemory(block, Math.max(copied ?? 0, 0) * ACCEL_SIZE).slice();
+            return guest.snapshot(block, Math.max(copied ?? 0, 0) * ACCEL_SIZE);
         });
         if (!entries || entries.length === 0)
         {
@@ -905,7 +905,7 @@ export function createOle2Functions(env){
             handler: args=>{
                 if (wholeAddress(args[out]) !== 0)
                 {
-                    util.writePointer(args[out], 0);
+                    guest.setPtr(args[out], 0);
                 }
                 return refusal.handler();
             },
@@ -983,9 +983,9 @@ export function createOle2Functions(env){
          * @param {number} at @param {number} slot @param {number[]} args
          */
         const ask = async(at, slot, args)=>{
-            writeU32(effectAt, allowed);
+            guest.set32(effectAt, allowed);
             const hr = await call(at, slot, [...args, effectAt]);
-            return { hr, effect: readU32(effectAt) >>> 0 };
+            return { hr, effect: guest.u32(effectAt) >>> 0 };
         };
         let target = 0;
         let entered = false;
@@ -1008,10 +1008,10 @@ export function createOle2Functions(env){
                     }
                     return { hr: going, effect: DROPEFFECT_NONE };
                 }
-                env.writeMemory(point, new Uint8Array(8));
+                guest.setBytes(point, new Uint8Array(8));
                 await user32('GetCursorPos', [point]);
-                const x = readU32(point) | 0;
-                const y = readU32(point + 4) | 0;
+                const x = guest.u32(point) | 0;
+                const y = guest.u32(point + 4) | 0;
                 const under = await targetAt(x, y);
                 if (under !== target)
                 {
@@ -1059,10 +1059,10 @@ export function createOle2Functions(env){
                 for (let taken = 0; taken < 100
                     && (await user32('PeekMessageW', [message, 0, 0, 0, PM_REMOVE])) !== 0; taken++)
                 {
-                    const kind = readU32(message + 4) >>> 0;
+                    const kind = guest.u32(message + 4) >>> 0;
                     if (kind === WM_QUIT)
                     {
-                        quit = readU32(message + 8) | 0;
+                        quit = guest.u32(message + 8) | 0;
                     }
                     else if (!(kind >= WM_KEYFIRST && kind <= WM_KEYLAST)
                         && !(kind >= WM_MOUSEFIRST && kind <= WM_MOUSELAST))
@@ -1226,7 +1226,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const render = wholeAddress(renderopt);
                 if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || wholeAddress(storage) === 0
                     || (render === OLERENDER.FORMAT && wholeAddress(formatEtc) === 0))
@@ -1255,7 +1255,7 @@ export function createOle2Functions(env){
                     if (cache !== 0)
                     {
                         hr = await withScratch(FORMATETC_SIZE + 4, async block=>{
-                            util.writeWords(block, [0, 0, DVASPECT_CONTENT, -1, 0]);
+                            guest.set32s(block, [0, 0, DVASPECT_CONTENT, -1, 0]);
                             const format =
                                 render === OLERENDER.FORMAT ? wholeAddress(formatEtc) : block;
                             return (await env.callMethod(cache, OLECACHE_CACHE,
@@ -1285,7 +1285,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (wholeAddress(storage) === 0 || (riid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -1306,7 +1306,7 @@ export function createOle2Functions(env){
                         const hr = await /** @type {NonNullable<typeof env.defaultHandlers>} */ (
                             env.defaultHandlers).create(clsid, 0, 0, 0, IID_IUNKNOWN, block,
                             thread);
-                        return { hr, unknown: hr < 0 ? 0 : readU32(block) };
+                        return { hr, unknown: hr < 0 ? 0 : guest.u32(block) };
                     }) ?? { hr: E_OUTOFMEMORY, unknown: 0 };
                 }
                 if (made.hr < 0)
@@ -1334,7 +1334,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const text = userTypeOf(guidAt(rclsid), form >>> 0);
                 if (text === null)
                 {
@@ -1345,7 +1345,7 @@ export function createOle2Functions(env){
                 {
                     return E_OUTOFMEMORY;
                 }
-                writeU32(out, block);
+                guest.set32(out, block);
                 return S_OK;
             },
         },
@@ -1364,7 +1364,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const clsid = guidAt(rclsid);
                 if (!classesKey(`CLSID\\${clsid}`))
                 {
@@ -1372,7 +1372,7 @@ export function createOle2Functions(env){
                 }
                 const text = stringOf(classesKey(`CLSID\\${clsid}\\MiscStatus\\${aspect >>> 0}`))
                     ?? stringOf(classesKey(`CLSID\\${clsid}\\MiscStatus`));
-                writeU32(out, Number.parseInt(text ?? '0', 10) || 0);
+                guest.set32(out, Number.parseInt(text ?? '0', 10) || 0);
                 return S_OK;
             },
         },
@@ -1392,7 +1392,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const clsid = guidAt(rclsid);
                 if (!classesKey(`CLSID\\${clsid}`))
                 {
@@ -1422,7 +1422,7 @@ export function createOle2Functions(env){
                             {
                                 return false;
                             }
-                            util.writeWords(at, [item.verb, name, item.flags, item.attributes]);
+                            guest.set32s(at, [item.verb, name, item.flags, item.attributes]);
                             return true;
                         },
                     }, wholeAddress(out));
@@ -1526,10 +1526,10 @@ export function createOle2Functions(env){
                 }
                 const cx = (await system('USER32.dll', 'GetSystemMetrics', [SM_CXICON])) || 32;
                 const cy = (await system('USER32.dll', 'GetSystemMetrics', [SM_CYICON])) || 32;
-                writeU32(at + picture.mm, MM_ANISOTROPIC);
-                writeU32(at + picture.xExt, Math.round(cx * HIMETRIC_PER_INCH / 96));
-                writeU32(at + picture.yExt, Math.round(cy * HIMETRIC_PER_INCH / 96));
-                util.writePointer(at + picture.hMF, metafile >>> 0);
+                guest.set32(at + picture.mm, MM_ANISOTROPIC);
+                guest.set32(at + picture.xExt, Math.round(cx * HIMETRIC_PER_INCH / 96));
+                guest.set32(at + picture.yExt, Math.round(cy * HIMETRIC_PER_INCH / 96));
+                guest.setPtr(at + picture.hMF, metafile >>> 0);
                 await system('KERNEL32.dll', 'GlobalUnlock', [block]);
                 util.sayOnce('OleMetafilePictFromIconAndLabel',
                     'the label is not drawn, and the extent is the icon\'s alone');
@@ -1565,7 +1565,7 @@ export function createOle2Functions(env){
                 {
                     return stat.hr;
                 }
-                env.writeMemory(wholeAddress(out), stat.clsid);
+                guest.setBytes(out, stat.clsid);
                 const target = autoConvertOf(formatGuid(stat.clsid));
                 if (target.hr < 0)
                 {
@@ -1620,7 +1620,7 @@ export function createOle2Functions(env){
                 /** @type {CompObjFormat} */
                 const format = id === 0 ? null : name !== null ? { name } : { id };
                 return writeCompObj(wholeAddress(storage), format,
-                    wholeAddress(userType) === 0 ? null : util.readWide(wholeAddress(userType)),
+                    wholeAddress(userType) === 0 ? null : guest.wstr(userType, 2048),
                     thread);
             },
         },
@@ -1638,11 +1638,11 @@ export function createOle2Functions(env){
             handler: async([storage, pcf, out])=>{
                 if (wholeAddress(pcf) !== 0)
                 {
-                    writeU16(pcf, 0);
+                    guest.set16(pcf, 0);
                 }
                 if (wholeAddress(out) !== 0)
                 {
-                    writeU32(out, 0);
+                    guest.set32(out, 0);
                 }
                 if (wholeAddress(storage) === 0)
                 {
@@ -1657,7 +1657,7 @@ export function createOle2Functions(env){
                 const { format, userType } = read.record;
                 if (wholeAddress(pcf) !== 0 && format !== null)
                 {
-                    writeU16(pcf, 'id' in format ? format.id
+                    guest.set16(pcf, 'id' in format ? format.id
                         : await util.registerFormat(format.name, thread));
                 }
                 if (wholeAddress(out) !== 0 && userType !== null)
@@ -1667,7 +1667,7 @@ export function createOle2Functions(env){
                     {
                         return E_OUTOFMEMORY;
                     }
-                    writeU32(out, block);
+                    guest.set32(out, block);
                 }
                 return S_OK;
             },
@@ -1737,7 +1737,7 @@ export function createOle2Functions(env){
                 }
                 if (wholeAddress(out) !== 0)
                 {
-                    writeU16(out, command);
+                    guest.set16(out, command);
                 }
                 return 1;
             },
@@ -1759,8 +1759,8 @@ export function createOle2Functions(env){
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
-                const command = await acceleratorFor(readU32(wholeAddress(info) + FRAMEINFO_ACCEL),
-                    readU32(wholeAddress(info)
+                const command = await acceleratorFor(guest.u32(info + FRAMEINFO_ACCEL),
+                    guest.u32(info
                         + FRAMEINFO_ACCEL_COUNT), wholeAddress(message), thread);
                 if (command === null || wholeAddress(frame) === 0)
                 {
@@ -1790,7 +1790,7 @@ export function createOle2Functions(env){
                 new DataView(bytes.buffer).setUint32(0, menu >>> 0, true);
                 if (wholeAddress(widths) !== 0)
                 {
-                    bytes.set(env.readMemory(wholeAddress(widths), MENU_WIDTHS_SIZE), 4);
+                    bytes.set(guest.snapshot(widths, MENU_WIDTHS_SIZE), 4);
                 }
                 return util.lend(bytes);
             },
@@ -1844,7 +1844,7 @@ export function createOle2Functions(env){
                 const thread = env.callerThread();
                 const answer = await dragAndDrop(wholeAddress(data), wholeAddress(source),
                     allowed >>> 0, thread);
-                writeU32(effect, answer.effect);
+                guest.set32(effect, answer.effect);
                 return answer.hr;
             },
         },
@@ -1887,7 +1887,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (wholeAddress(data) === 0 || wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
@@ -1922,7 +1922,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if (wholeAddress(data) === 0 || wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
@@ -1952,7 +1952,7 @@ export function createOle2Functions(env){
             handler: async([data, riid, renderopt, formatEtc, , storage, out])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    writeU32(out, 0);
+                    guest.set32(out, 0);
                 }
                 if (wholeAddress(out) === 0 || wholeAddress(storage) === 0
                     || wholeAddress(data) === 0
@@ -1966,7 +1966,7 @@ export function createOle2Functions(env){
                         'only a picture of the format named is made');
                     return wholeAddress(formatEtc) === 0 ? E_INVALIDARG : DV_E_FORMATETC;
                 }
-                const cf = util.readU16(wholeAddress(formatEtc));
+                const cf = guest.u16(formatEtc);
                 const clsid = STATIC_CLASSES.get(cf);
                 if (!clsid || !env.defaultHandlers)
                 {
@@ -2018,7 +2018,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 const iid = guidAt(riid);
                 if (wholeAddress(outer) !== 0 && iid !== IID_IUNKNOWN)
                 {
@@ -2036,7 +2036,7 @@ export function createOle2Functions(env){
                     object.release();
                     return E_NOINTERFACE;
                 }
-                writeU32(out, env.publish(object, caches.primary(object, iid)));
+                guest.set32(out, env.publish(object, caches.primary(object, iid)));
                 return S_OK;
             },
         },
@@ -2053,7 +2053,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || !env.defaultHandlers)
                 {
                     return E_INVALIDARG;
@@ -2079,7 +2079,7 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || !env.defaultHandlers)
                 {
                     return E_INVALIDARG;

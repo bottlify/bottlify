@@ -54,7 +54,8 @@ const STATDATA_SIZE = FORMATETC_SIZE + 12;
 /** @param {import('./oleutil.js').OleEnv} env */
 export function createAdviseFunctions(env){
     const util = createOleUtil(env);
-    const { writeU32, release } = util;
+    const { release } = util;
+    const { guest } = env;
 
     /**
      * IEnumSTATDATA over a holder's connections as they are now. The
@@ -75,8 +76,8 @@ export function createAdviseFunctions(env){
             {
                 items,
                 write: async(at, item, caller)=>{
-                    env.writeMemory(at, item.format);
-                    util.writeWords(at + FORMATETC_SIZE, [item.advf, item.sink, item.id]);
+                    guest.setBytes(at, item.format);
+                    guest.set32s(at + FORMATETC_SIZE, [item.advf, item.sink, item.id]);
                     await env.callMethod(item.sink, SLOT.ADD_REF, [], caller);
                     return true;
                 },
@@ -136,7 +137,7 @@ export function createAdviseFunctions(env){
      */
     const tell = async(data, connection, thread)=>{
         await util.withScratch(FORMATETC_SIZE + STGMEDIUM_SIZE, async block=>{
-            env.writeMemory(block, connection.format);
+            guest.setBytes(block, connection.format);
             const medium = block + FORMATETC_SIZE;
             let hr = -1;
             if ((connection.advf & ADVF_NODATA) === 0 && data !== 0)
@@ -164,7 +165,7 @@ export function createAdviseFunctions(env){
             object.release();
             return E_OUTOFMEMORY;
         }
-        writeU32(out, pointer);
+        guest.set32(out, pointer);
         return S_OK;
     };
 
@@ -184,7 +185,7 @@ export function createAdviseFunctions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 /** @type {Connection[]} */
                 const connections = [];
                 const sinks = book(connections);
@@ -213,13 +214,13 @@ export function createAdviseFunctions(env){
                                 invoke: async(_self, [data, format, advf, sink, out_])=>{
                                     if ((out_ >>> 0) !== 0)
                                     {
-                                        writeU32(out_, 0);
+                                        guest.set32(out_, 0);
                                     }
                                     if ((sink >>> 0) === 0 || (format >>> 0) === 0)
                                     {
                                         return E_INVALIDARG;
                                     }
-                                    const copy = env.readMemory(wholeAddress(format),
+                                    const copy = guest.snapshot(format,
                                         FORMATETC_SIZE)
                                         .slice();
                                     // The target device is the caller's; the copy keeps none.
@@ -228,7 +229,7 @@ export function createAdviseFunctions(env){
                                         copy);
                                     if ((out_ >>> 0) !== 0)
                                     {
-                                        writeU32(out_, connection.id);
+                                        guest.set32(out_, connection.id);
                                     }
                                     if ((advf & ADVF_PRIMEFIRST) !== 0 && (data >>> 0) !== 0)
                                     {
@@ -251,7 +252,7 @@ export function createAdviseFunctions(env){
                                     {
                                         return E_INVALIDARG;
                                     }
-                                    writeU32(out_, 0);
+                                    guest.set32(out_, 0);
                                     return enumerate(connections, out_ >>> 0);
                                 },
                             },
@@ -282,7 +283,7 @@ export function createAdviseFunctions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 /** @type {Connection[]} */
                 const connections = [];
                 const sinks = book(connections);
@@ -310,12 +311,12 @@ export function createAdviseFunctions(env){
                                     {
                                         if ((out_ >>> 0) !== 0)
                                         {
-                                            writeU32(out_, 0);
+                                            guest.set32(out_, 0);
                                         }
                                         return E_INVALIDARG;
                                     }
                                     const connection = await sinks.add(sink >>> 0, 0, noFormat);
-                                    writeU32(out_, connection.id);
+                                    guest.set32(out_, connection.id);
                                     return S_OK;
                                 },
                             },
@@ -328,7 +329,7 @@ export function createAdviseFunctions(env){
                                     {
                                         return E_INVALIDARG;
                                     }
-                                    writeU32(out_, 0);
+                                    guest.set32(out_, 0);
                                     return enumerate(connections, out_ >>> 0);
                                 },
                             },

@@ -760,19 +760,6 @@
    "accessor writeU64": 1,
    "copy readMemory().slice()": 3
   },
-  "win32/ole32/clipboard.js": {
-   "copy readMemory().slice()": 2
-  },
-  "win32/ole32/comcat.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 1,
-   "string readWide": 1
-  },
-  "win32/ole32/datacache.js": {
-   "accessor readI32": 1,
-   "copy readMemory().slice()": 3
-  },
   "win32/ole32/dxdiag.js": {
    "accessor i32": 1,
    "accessor u32": 1,
@@ -782,9 +769,6 @@
   },
   "win32/ole32/endpoint-volume.js": {
    "accessor writeFloat": 1,
-   "accessor writeU32": 1
-  },
-  "win32/ole32/enumerator.js": {
    "accessor writeU32": 1
   },
   "win32/ole32/functions.js": {
@@ -801,26 +785,10 @@
   },
   "win32/ole32/ole2.js": {
    "accessor word": 1,
-   "copy readMemory().slice()": 1,
    "string string": 1
   },
-  "win32/ole32/oleutil.js": {
-   "accessor readU16": 1,
-   "accessor readU32": 1,
-   "accessor writeU16": 1,
-   "accessor writeU32": 1,
-   "accessor writeWords": 1,
-   "copy readMemory().slice()": 3,
-   "string readWide": 1
-  },
   "win32/ole32/propset.js": {
-   "accessor readU32": 1,
-   "accessor u32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 7,
-   "string readAnsiAt": 1,
-   "string readWideAt": 1,
-   "string writeWideAt": 1
+   "accessor u32": 1
   },
   "win32/ole32/propvariant.js": {
    "accessor get32": 1,

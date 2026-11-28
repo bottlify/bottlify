@@ -68,7 +68,8 @@ const PRIVATE_ENTRY = 32;
 /** @param {import('./oleutil.js').OleEnv} env */
 export function createClipboardFunctions(env){
     const util = createOleUtil(env);
-    const { readU32, writeU32, release } = util;
+    const { release } = util;
+    const { guest } = env;
 
     /** @param {string} name @param {number[]} args @param {unknown} thread */
     const user32 = (name, args, thread)=>util.system('USER32.dll', name, args, thread);
@@ -147,14 +148,14 @@ export function createClipboardFunctions(env){
                     return;
                 }
                 let handle = 0;
-                if (readU32(medium) === TYMED.HGLOBAL)
+                if (guest.u32(medium) === TYMED.HGLOBAL)
                 {
                     // A medium someone else releases is theirs: the clipboard
                     // takes a copy.
-                    handle = readU32(medium + 8) === 0 ? readU32(medium + 4)
-                        : util.copyGlobal(readU32(medium + 4));
+                    handle = guest.u32(medium + 8) === 0 ? guest.u32(medium + 4)
+                        : util.copyGlobal(guest.u32(medium + 4));
                 }
-                if (readU32(medium + 8) !== 0 || handle === 0)
+                if (guest.u32(medium + 8) !== 0 || handle === 0)
                 {
                     await env.releaseMedium(medium);
                 }
@@ -311,7 +312,7 @@ export function createClipboardFunctions(env){
                             {
                                 return E_INVALIDARG;
                             }
-                            util.writeWords(medium, [0, 0, 0]);
+                            guest.set32s(medium, [0, 0, 0]);
                             const thread = env.callerThread();
                             const source_ = await delegate(thread);
                             if (source_ !== 0)
@@ -341,7 +342,7 @@ export function createClipboardFunctions(env){
                                 const tymed = util.tymedOf(wanted.format);
                                 return tymed === TYMED.HGLOBAL ? E_OUTOFMEMORY : DV_E_FORMATETC;
                             }
-                            util.writeWords(medium, [util.tymedOf(wanted.format), copy, 0]);
+                            guest.set32s(medium, [util.tymedOf(wanted.format), copy, 0]);
                             return S_OK;
                         },
                     },
@@ -364,8 +365,8 @@ export function createClipboardFunctions(env){
                             {
                                 return hr;
                             }
-                            const target = readU32(medium + 4);
-                            if (readU32(medium) !== TYMED.HGLOBAL
+                            const target = guest.u32(medium + 4);
+                            if (guest.u32(medium) !== TYMED.HGLOBAL
                                 || util.tymedOf(wanted.format) !== TYMED.HGLOBAL)
                             {
                                 return DV_E_TYMED;
@@ -383,7 +384,7 @@ export function createClipboardFunctions(env){
                             }
                             if (from && to && from.size !== 0)
                             {
-                                env.writeMemory(to.at, env.readMemory(from.at, from.size).slice());
+                                guest.setBytes(to.at, guest.snapshot(from.at, from.size));
                             }
                             return S_OK;
                         },
@@ -400,10 +401,10 @@ export function createClipboardFunctions(env){
                             {
                                 return E_INVALIDARG;
                             }
-                            const copy = env.readMemory(wholeAddress(format),
-                                FORMATETC_SIZE).slice();
+                            const copy = guest.snapshot(format,
+                                FORMATETC_SIZE);
                             copy.fill(0, 4, 8);
-                            env.writeMemory(wholeAddress(out), copy);
+                            guest.setBytes(out, copy);
                             return DATA_S_SAMEFORMATETC;
                         },
                     },
@@ -415,7 +416,7 @@ export function createClipboardFunctions(env){
                             {
                                 return E_INVALIDARG;
                             }
-                            writeU32(out, 0);
+                            guest.set32(out, 0);
                             if ((direction >>> 0) !== DATADIR_GET)
                             {
                                 return E_NOTIMPL;
@@ -521,7 +522,7 @@ export function createClipboardFunctions(env){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                guest.set32(out, 0);
                 let object = board.reader?.version === board.version
                     && !board.reader.object.destroyed ? board.reader.object : null;
                 if (object)
@@ -545,7 +546,7 @@ export function createClipboardFunctions(env){
                     object.release();
                     return E_OUTOFMEMORY;
                 }
-                writeU32(out, pointer);
+                guest.set32(out, pointer);
                 return S_OK;
             },
         },

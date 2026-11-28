@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
@@ -38,8 +39,7 @@ function setup(){
     const pointers = new Map();
     let nextPointer = 0x18000;
     registerComponentCategories({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         heap, registry, hive: /** @type {any} */ (hive),
         makeObject: (clsid, definition)=>createComObject(clsid, definition),
         publish: (object, iid)=>{

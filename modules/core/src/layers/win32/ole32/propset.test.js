@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
@@ -247,8 +248,7 @@ function world(){
     pointers.set(STORAGE, { slots: storageSlots });
 
     const fns = createPropertySetFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         heap,
         // A 32-bit process: its arguments are dwords.
         callMethod: (pointer, slot, args)=>callMethod(pointer, slot, /** @type {number[]} */ (args)),

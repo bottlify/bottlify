@@ -24,12 +24,10 @@
  * cache it holds, so the handler is one object to the program.
  */
 
-import { formatGuid, parseGuid } from '../../../system/guid.js';
 import {
     IID_IDATAOBJECT, IID_IOLECACHE, IID_IOLECACHE2, IID_IOLECACHECONTROL, IID_IPERSISTSTORAGE,
     IID_IVIEWOBJECT, IID_IVIEWOBJECT2,
 } from './datacache.js';
-import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;
@@ -119,7 +117,8 @@ const FORWARDED = Object.freeze({
 /** @param {HandlerEnv} context */
 export function createDefaultHandlers(context){
     const { ole: env, util, caches } = context;
-    const { readU32, writeU32, release } = util;
+    const { release } = util;
+    const { guest } = env;
 
     /** @param {number} pointer @param {number} slot @param {number[]} args @param {unknown} thread */
     const call = async(pointer, slot, args, thread)=>(await env.callMethod(pointer, slot, args,
@@ -216,12 +215,12 @@ export function createDefaultHandlers(context){
             {
                 await call(state.site, SLOT.ADD_REF, [], env.callerThread());
             }
-            writeU32(out, state.site);
+            guest.set32(out, state.site);
             return S_OK;
         } },
         oleMethod('SetHostNames', 12, SLOT.SET_HOST_NAMES, ()=>S_OK, (state, [app, object])=>{
-            state.hostNames = { app: (app >>> 0) === 0 ? null : util.readWide(wholeAddress(app)),
-                object: (object >>> 0) === 0 ? null : util.readWide(wholeAddress(object)) };
+            state.hostNames = { app: (app >>> 0) === 0 ? null : guest.wstr(app, 2048),
+                object: (object >>> 0) === 0 ? null : guest.wstr(object, 2048) };
         }),
         { name: 'Close', argBytes: 8, invoke: async(object, [option])=>{
             const state = stateOf(object);
@@ -233,7 +232,7 @@ export function createDefaultHandlers(context){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             // The site names the object's moniker; without one there is none.
             return state.site === 0 ? E_FAIL
                 : call(state.site, 4, [assign >>> 0, which >>> 0, out >>> 0], thread);
@@ -263,7 +262,7 @@ export function createDefaultHandlers(context){
             {
                 return call(state.server, 15, [out >>> 0], env.callerThread());
             }
-            env.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(state.clsid)));
+            guest.setGuid(out, state.clsid);
             return S_OK;
         } },
         oleMethod('GetUserType', 12, 16, (state, [form, out])=>context.callExport(
@@ -295,7 +294,7 @@ export function createDefaultHandlers(context){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             return state.oleAdvise === 0 ? S_OK
                 : call(state.oleAdvise, SLOT.ENUM_ADVISE, [out >>> 0], env.callerThread());
         } },
@@ -314,7 +313,7 @@ export function createDefaultHandlers(context){
         {
             state.oleAdvise = await util.withScratch(4, async slot=>{
                 const hr = await context.callExport('CreateOleAdviseHolder', [], ()=>[slot]);
-                return hr < 0 ? 0 : readU32(slot);
+                return hr < 0 ? 0 : guest.u32(slot);
             }) ?? 0;
         }
         return state.oleAdvise;
@@ -326,7 +325,7 @@ export function createDefaultHandlers(context){
         {
             state.dataAdvise = await util.withScratch(4, async slot=>{
                 const hr = await context.callExport('CreateDataAdviseHolder', [], ()=>[slot]);
-                return hr < 0 ? 0 : readU32(slot);
+                return hr < 0 ? 0 : guest.u32(slot);
             }) ?? 0;
         }
         return state.dataAdvise;
@@ -401,7 +400,7 @@ export function createDefaultHandlers(context){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             return state.dataAdvise === 0 ? S_OK : call(state.dataAdvise,
                 SLOT.DATA_ENUM_DADVISE, [out >>> 0], env.callerThread());
         } },
@@ -419,18 +418,18 @@ export function createDefaultHandlers(context){
             return S_OK;
         }
         const made = await util.withScratch(4, async slot=>{
-            writeU32(slot, 0);
+            guest.set32(slot, 0);
             let hr;
             if (state.serverUnknown !== 0)
             {
                 const own = await env.queryPointer(state.serverUnknown, IID_IOLEOBJECT, thread);
-                writeU32(slot, own);
+                guest.set32(slot, own);
                 hr = own === 0 ? E_NOINTERFACE : S_OK;
             }
             else if (state.factory !== 0)
             {
                 hr = await util.withScratch(16, async iid=>{
-                    env.writeMemory(iid, /** @type {Uint8Array} */ (parseGuid(IID_IOLEOBJECT)));
+                    guest.setGuid(iid, IID_IOLEOBJECT);
                     return call(state.factory, SLOT.CREATE_INSTANCE, [0, iid, slot], thread);
                 }) ?? E_OUTOFMEMORY;
             }
@@ -439,7 +438,7 @@ export function createDefaultHandlers(context){
                 hr = await env.createInstance(state.clsid, 0, CLSCTX_LOCAL_SERVER, IID_IOLEOBJECT,
                     slot);
             }
-            return { hr, pointer: hr < 0 ? 0 : readU32(slot) };
+            return { hr, pointer: hr < 0 ? 0 : guest.u32(slot) };
         }) ?? { hr: E_OUTOFMEMORY, pointer: 0 };
         if (made.hr < 0 || made.pointer === 0)
         {
@@ -502,7 +501,7 @@ export function createDefaultHandlers(context){
             {
                 return E_INVALIDARG;
             }
-            env.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(stateOf(object).clsid)));
+            guest.setGuid(out, stateOf(object).clsid);
             return S_OK;
         } },
         { name: 'Run', argBytes: 8, invoke: object=>run(stateOf(object), env.callerThread()) },
@@ -595,7 +594,7 @@ export function createDefaultHandlers(context){
             {
                 return E_POINTER;
             }
-            env.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(stateOf(object).clsid)));
+            guest.setGuid(out, stateOf(object).clsid);
             return S_OK;
         } },
         { name: 'IsDirty', argBytes: 4, invoke: object=>persistBoth(stateOf(object), SLOT.IS_DIRTY,
@@ -656,10 +655,10 @@ export function createDefaultHandlers(context){
             return { hr: E_NOINTERFACE, pointer: 0 };
         }
         return await util.withScratch(20, async block=>{
-            env.writeMemory(block, /** @type {Uint8Array} */ (parseGuid(iid)));
-            writeU32(block + 16, 0);
+            guest.setGuid(block, iid);
+            guest.set32(block + 16, 0);
             const hr = await call(target, SLOT.QUERY_INTERFACE, [block, block + 16], thread);
-            return { hr, pointer: readU32(block + 16) };
+            return { hr, pointer: guest.u32(block + 16) };
         }) ?? { hr: E_OUTOFMEMORY, pointer: 0 };
     };
 
@@ -675,21 +674,21 @@ export function createDefaultHandlers(context){
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            guest.set32(out, 0);
             if ((riid >>> 0) === 0)
             {
                 return E_INVALIDARG;
             }
-            const asked = formatGuid(env.readMemory(wholeAddress(riid), 16));
+            const asked = guest.guid(riid);
             if (object.interfaceFor(asked))
             {
                 const pointer = env.publish(object, asked);
                 object.addRef();
-                writeU32(out, pointer);
+                guest.set32(out, pointer);
                 return S_OK;
             }
             const passed = await delegated(stateOf(object), asked, env.callerThread());
-            writeU32(out, passed.pointer);
+            guest.set32(out, passed.pointer);
             return passed.pointer === 0 && passed.hr >= 0 ? E_NOINTERFACE : passed.hr;
         } };
 
@@ -717,7 +716,7 @@ export function createDefaultHandlers(context){
          * @returns {Promise<number>}
          */
         async create(clsid, outer, flags, factory, iid, out, thread){
-            writeU32(out, 0);
+            guest.set32(out, 0);
             if (outer !== 0)
             {
                 util.sayOnce('OleCreateDefaultHandler', 'an aggregated default handler is refused');
@@ -741,11 +740,11 @@ export function createDefaultHandlers(context){
                 if ((flags & EMBDHLP_INPROC_SERVER) !== 0 && (flags & EMBDHLP_DELAYCREATE) === 0)
                 {
                     const made = await util.withScratch(20, async block=>{
-                        env.writeMemory(block, /** @type {Uint8Array} */ (parseGuid(IID_IUNKNOWN)));
-                        writeU32(block + 16, 0);
+                        guest.setGuid(block, IID_IUNKNOWN);
+                        guest.set32(block + 16, 0);
                         const hr = await call(factory, SLOT.CREATE_INSTANCE, [0, block, block + 16],
                             thread);
-                        return hr < 0 ? 0 : readU32(block + 16);
+                        return hr < 0 ? 0 : guest.u32(block + 16);
                     }) ?? 0;
                     state.serverUnknown = made;
                 }
@@ -812,7 +811,7 @@ export function createDefaultHandlers(context){
                 }
                 return passed.hr < 0 ? passed.hr : E_NOINTERFACE;
             }
-            writeU32(out, env.publish(object, iid));
+            guest.set32(out, env.publish(object, iid));
             return S_OK;
         },
 

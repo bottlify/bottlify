@@ -8,6 +8,7 @@
 // ole2.c, compobj.c, storage32.c, dragdrop.c), its expectation is Windows'
 // answer as that test records it.
 
+import { guestOver } from '../common/guest.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
@@ -925,6 +926,7 @@ test('in a 64-bit process an out pointer is cleared whole, a METAFILEPICT has hM
     + ' an address another library answers past 4 GiB is kept whole', async()=>{
     const p = oleProcess();
     p.env.pointerSize = 8;
+    p.env.guest = guestOver(p.bytes, 8);
     /** @type {Record<string, (args: number[]) => number>} */
     const answers = {
         CreateMetaFileW: ()=>0x100, DrawIcon: ()=>1, CloseMetaFile: ()=>0x5000,

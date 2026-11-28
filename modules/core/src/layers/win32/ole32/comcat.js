@@ -16,10 +16,9 @@
  */
 
 import { HKEY_CLASSES_ROOT, REG_SZ } from '../advapi32/registry.js';
-import { canonicalGuid, formatGuid, parseGuid } from '../../../system/guid.js';
+import { canonicalGuid, parseGuid } from '../../../system/guid.js';
 import { publishEnumerator } from './enumerator.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
 export const CLSID_STD_COMPONENT_CATEGORIES_MGR = '{0002E005-0000-0000-C000-000000000046}';
@@ -52,8 +51,7 @@ const MAX_COUNT = 1 << 16;
 
 /**
  * @typedef {Object} CategoryEnv
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
  * @property {import('./objects.js').ComRegistry} registry
  * @property {(clsid: string, definition: import('./objects.js').ComClassDefinition)
@@ -71,36 +69,11 @@ const MAX_COUNT = 1 << 16;
 
 /** @param {CategoryEnv} env */
 export function registerComponentCategories(env){
-    /** @param {number} address */
-    const readU32 = address=>new DataView(env.readMemory(wholeAddress(address), 4).slice().buffer)
-        .getUint32(0, true);
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        env.writeMemory(wholeAddress(address), bytes);
-    };
-    /** @param {number} address */
-    const guidAt = address=>formatGuid(env.readMemory(wholeAddress(address), GUID_BYTES));
+    const { guest } = env;
     /** @param {Uint8Array} data  A REG_SZ's bytes, as the hive keeps them. */
     const text = data=>{
         const end = data.indexOf(0);
         return decodeAnsi(end < 0 ? data : data.subarray(0, end));
-    };
-    /** @param {number} address @param {number} units */
-    const readWide = (address, units)=>{
-        let result = '';
-        for (let index = 0; index < units; index++)
-        {
-            const bytes = env.readMemory(wholeAddress(address) + index * 2, 2);
-            const unit = bytes[0] | (bytes[1] << 8);
-            if (unit === 0)
-            {
-                break;
-            }
-            result += String.fromCharCode(unit);
-        }
-        return result;
     };
     const root = ()=>env.hive?.root(HKEY_CLASSES_ROOT) ?? null;
     /** @param {string} path */
@@ -127,7 +100,7 @@ export function registerComponentCategories(env){
         const ids = [];
         for (let index = 0; index < Math.min(count >>> 0, MAX_COUNT); index++)
         {
-            ids.push(guidAt((list >>> 0) + index * GUID_BYTES));
+            ids.push(guest.guid((list >>> 0) + index * GUID_BYTES));
         }
         return ids;
     };
@@ -146,7 +119,7 @@ export function registerComponentCategories(env){
         {
             return E_INVALIDARG;
         }
-        const base = `CLSID\\${guidAt(clsid)}\\${which}`;
+        const base = `CLSID\\${guest.guid(clsid)}\\${which}`;
         for (const catid of catids(count, list))
         {
             if (add)
@@ -190,7 +163,7 @@ export function registerComponentCategories(env){
         { clsid: CLSID_GUID_ENUMERATOR, iid: IID_IENUMGUID, size: GUID_BYTES }, {
             items: ids,
             write: (at, id)=>{
-                env.writeMemory(at, /** @type {Uint8Array} */ (parseGuid(id)));
+                guest.setGuid(at, id);
                 return true;
             },
         }, out >>> 0);
@@ -205,13 +178,13 @@ export function registerComponentCategories(env){
             for (let index = 0; index < Math.min(count >>> 0, MAX_COUNT); index++)
             {
                 const at = (infos >>> 0) + index * CATEGORYINFO_BYTES;
-                const key = create(`${CATEGORIES}\\${guidAt(at)}`);
+                const key = create(`${CATEGORIES}\\${guest.guid(at)}`);
                 if (!key || !env.hive?.setValue)
                 {
                     return REGDB_E_WRITEREGDB;
                 }
-                const description = readWide(at + 20, DESCRIPTION_UNITS);
-                env.hive.setValue(key, readU32(at + 16).toString(16), REG_SZ,
+                const description = guest.wstr(at + 20, (DESCRIPTION_UNITS) * 2);
+                env.hive.setValue(key, guest.u32(at + 16).toString(16), REG_SZ,
                     encodeAnsi(`${description}\0`));
             }
             return S_OK;
@@ -258,7 +231,7 @@ export function registerComponentCategories(env){
                     new DataView(record.buffer).setUint32(16, item.about?.lcid ?? lcid >>> 0, true);
                     record.set(utf16z((item.about?.text ?? '').slice(0, DESCRIPTION_UNITS - 1)),
                         20);
-                    env.writeMemory(at, record);
+                    guest.setBytes(at, record);
                     return true;
                 },
             }, out >>> 0);
@@ -268,7 +241,7 @@ export function registerComponentCategories(env){
             {
                 return E_INVALIDARG;
             }
-            const key = open(`${CATEGORIES}\\${guidAt(catid)}`);
+            const key = open(`${CATEGORIES}\\${guest.guid(catid)}`);
             if (!key)
             {
                 return CAT_E_CATIDNOEXIST;
@@ -284,8 +257,8 @@ export function registerComponentCategories(env){
             {
                 return E_OUTOFMEMORY;
             }
-            env.writeMemory(block, bytes);
-            writeU32(out, block);
+            guest.setBytes(block, bytes);
+            guest.set32(out, block);
             return S_OK;
         } },
         { name: 'EnumClassesOfCategories', argBytes: 24,
@@ -311,21 +284,21 @@ export function registerComponentCategories(env){
                 const wanted = (implementedCount | 0) === -1 ? null
                     : catids(implementedCount, implemented);
                 const needs = (requiredCount | 0) === -1 ? null : catids(requiredCount, required);
-                return matches(guidAt(clsid), wanted, needs) ? S_OK : S_FALSE;
+                return matches(guest.guid(clsid), wanted, needs) ? S_OK : S_FALSE;
             } },
         { name: 'EnumImplCategoriesOfClass', argBytes: 12, invoke: (_object, [clsid, out])=>{
             if ((clsid >>> 0) === 0 || (out >>> 0) === 0)
             {
                 return E_INVALIDARG;
             }
-            return publishGuids(listed(open(`CLSID\\${guidAt(clsid)}\\${IMPLEMENTED}`)), out);
+            return publishGuids(listed(open(`CLSID\\${guest.guid(clsid)}\\${IMPLEMENTED}`)), out);
         } },
         { name: 'EnumReqCategoriesOfClass', argBytes: 12, invoke: (_object, [clsid, out])=>{
             if ((clsid >>> 0) === 0 || (out >>> 0) === 0)
             {
                 return E_INVALIDARG;
             }
-            return publishGuids(listed(open(`CLSID\\${guidAt(clsid)}\\${REQUIRED}`)), out);
+            return publishGuids(listed(open(`CLSID\\${guest.guid(clsid)}\\${REQUIRED}`)), out);
         } },
     ];
 
