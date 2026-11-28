@@ -20,6 +20,8 @@ import { createIsoSource } from '../../filesystem/internal/iso/source.js';
 import { createVolume } from './vfs.js';
 import { createFileFunctions } from './files.js';
 import { createHandleTable } from '../../kernel/internal/handles.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const GENERIC_READ = 0x80000000;
@@ -54,7 +56,7 @@ async function setup(){
         },
         hidden: ['Hidden.dat'],
     });
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const iso = await openIso((offset, length)=>image.subarray(offset, offset + length));
     fs.mount('D', { source: createIsoSource(iso), readOnly: true,
         volume: { kind: 'cdrom', label: iso.volume.label } });
@@ -75,7 +77,7 @@ async function setup(){
             return text;
         },
         readWideString: ()=>'',
-        files: /** @type {any} */ (createVolume(fs)),
+        files: /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') })),
         setLastError: code=>{
             errors.push(code);
         },

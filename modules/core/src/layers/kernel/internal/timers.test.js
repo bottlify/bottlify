@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import { createScheduler } from './threads.js';
 import { createSwitcher } from './switch.js';
 import { createSyncObjects } from './sync.js';
+import { oneExecutorCpu } from './cpu.fixture.js';
 
 /**
  * A scheduler on a clock the test moves, with a cpu that runs no
@@ -29,6 +30,7 @@ import { createSyncObjects } from './sync.js';
 function harness(){
     let clock = 0;
     const cpu = {
+        ...oneExecutorCpu,
         captureContext: ()=>({}),
         restoreContext: ()=>{},
         resumeContextAt: ()=>{},

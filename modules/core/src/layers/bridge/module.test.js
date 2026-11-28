@@ -21,6 +21,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bridgeModule } from './module.js';
 import { withPointers } from '../memory/pointers.fixture.js';
+import { testLog } from '../log/testing.fixture.js';
 
 /** Where a held thread spins. */
 const PARK = 0x00900000;
@@ -59,6 +60,7 @@ async function bridge(){
     /** @type {any} */
     const apis = {
         cpu: {
+            bits: ()=>32,
             /** @param {string} which */
             readReg32: which=>regs[which] ?? 0,
             /** @param {string} which @param {number} value */
@@ -110,7 +112,7 @@ async function bridge(){
                 return bytes;
             },
         }),
-        log: { begin: ()=>{}, end: ()=>{} },
+        log: await testLog(),
     };
 
     const api = await bridgeModule.create({}, /** @type {any} */ ({

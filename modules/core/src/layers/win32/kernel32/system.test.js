@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MULDIV_CODE, createSystemFunctions, imageBits, mulDiv } from './system.js';
 import { createActivationContexts } from './actctx.js';
-import { createProcessors } from './processor.js';
+import { testProcessors } from '../kernel.fixture.js';
 import { childThread } from './cross-process.js';
 import { KEPT, random, runCode } from '../../../../scripts/guest-code/equivalence.mjs';
 
@@ -41,6 +41,7 @@ function fakeHost(size = 0x1000){
     const clock = { wallMs: 0 };
 
     return {
+        processors: testProcessors(),
         bytes,
         errors,
         exits,
@@ -110,7 +111,7 @@ test('GetSystemInfo counts a processor for each the kernel has, and masks all of
     for (const [count, mask] of [[4, 0xf], [32, 0xffffffff]])
     {
         const host = fakeHost();
-        const processors = createProcessors({ processors: ()=>count });
+        const processors = testProcessors({ processors: ()=>count });
         processors.setProcessMask(1);
         const fns = createSystemFunctions({ ...host, processors });
         fns.GetSystemInfo.handler([0x200]);
@@ -145,7 +146,7 @@ test('GetLogicalProcessorInformation lists a core and its caches for each proces
     {
         const host = fakeHost();
         const fns = createSystemFunctions({ ...host,
-            processors: createProcessors({ processors: ()=>count }) });
+            processors: testProcessors({ processors: ()=>count }) });
         const needed = (count * 5 + 2) * 24;
         host.view.setUint32(LENGTH, 0x400, true);
         assert.equal(fns.GetLogicalProcessorInformation.handler([BUFFER, LENGTH]), 1);
@@ -177,7 +178,7 @@ test('QueryIdleProcessorCycleTime: a ULONG64 a processor, without a buffer only 
     const LENGTH = 0x1fc;
     const host = fakeHost();
     const fns = createSystemFunctions({ ...host,
-        processors: createProcessors({ processors: ()=>4 }) });
+        processors: testProcessors({ processors: ()=>4 }) });
     host.view.setUint32(LENGTH, 0, true);
     assert.equal(fns.QueryIdleProcessorCycleTime.handler([LENGTH, 0]), 1);
     assert.equal(host.view.getUint32(LENGTH, true), 32);
@@ -220,7 +221,7 @@ test('GetLogicalProcessorInformation says what it needs of a buffer too small, '
     const LENGTH = 0x1fc;
     const host = fakeHost();
     const fns = createSystemFunctions({ ...host,
-        processors: createProcessors({ processors: ()=>4 }) });
+        processors: testProcessors({ processors: ()=>4 }) });
     host.view.setUint32(LENGTH, 0, true);
     assert.equal(fns.GetLogicalProcessorInformation.handler([0, LENGTH]), 0);
     assert.equal(host.view.getUint32(LENGTH, true), 22 * 24);
@@ -237,7 +238,7 @@ test('GetLogicalProcessorInformation says what it needs of a buffer too small, '
 
 test('GetCurrentProcessorNumber is the processor the kernel has the caller on', ()=>{
     const host = fakeHost();
-    const fns = createSystemFunctions({ ...host, processors: createProcessors({
+    const fns = createSystemFunctions({ ...host, processors: testProcessors({
         processors: ()=>4,
         processorOf: (/** @type {any} */ thread)=>(thread === host.self ? 3 : 0),
     }) });

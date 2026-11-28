@@ -41,7 +41,7 @@ const STATUS_ACCESS_VIOLATION = STATUS.ACCESS_VIOLATION;
 const STATUS_NOT_IMPLEMENTED = STATUS.NOT_IMPLEMENTED;
 import { HANDLE_STDERR, HANDLE_STDIN } from './console.js';
 import {
-    PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION, createProcessors,
+    PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
 
 /** Error codes this file can produce. */
@@ -298,9 +298,8 @@ const EXECUTION_STATES = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRES
  * @property {(child: any, code: number) => boolean} [terminateChild]
  *           Ends a child that is running beside this process, with the code:
  *           false where the run cannot reach it.
- * @property {import('./processor.js').Processors} [processors]  The process's
+ * @property {import('./processor.js').Processors} processors  The process's
  *           processors, which every other interface that counts them shares.
- *           Absent, one.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose SYSTEM_INFO
  *           is laid out for it and names the x64 processor; absent, 4.
  * @property {boolean} [machine64]  The machine is a 64-bit Windows (`roadmap/x64.md`,
@@ -349,7 +348,7 @@ const pick = (table, names)=>/** @type {Partial<T>} */ (
  * @param {SystemHost} host
  */
 export function createSystemFunctions(host){
-    const processors = host.processors ?? createProcessors();
+    const processors = host.processors;
 
     /**
      * What SetErrorMode last recorded. Nothing reads it but the next call, and

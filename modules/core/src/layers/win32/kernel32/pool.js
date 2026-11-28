@@ -1194,7 +1194,7 @@ export function createThreadPool(host){
         {
             return Number(-value / 10000n);
         }
-        const now = host.wallClock?.() ?? kernel.clock.wallClock?.() ?? 0;
+        const now = kernel.clock.wallClock();
         return Math.max(0, Number(value / 10000n) - FILETIME_EPOCH_MS - now);
     };
 

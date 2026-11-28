@@ -28,6 +28,7 @@ import { createMemoryStore } from './memory-store.fixture.js';
 import { createPageFile } from './page-file.js';
 import { pieceSpace } from './page-space.fixture.js';
 import { cacheSpace } from '../../cache/module.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const DIRECTORIES = ['Windows', 'Temp', 'System32', 'Game', 'Data'];
 const FILES = ['cpuz.sys', 'Save.DAT', 'a.txt'];
@@ -117,7 +118,7 @@ async function run(seed, pageFile){
     const volume = { drives: new Map(), volumes: new Map(), writables: new Map(),
         watchers: new Set(), pageFile };
     const layers = [createFilesystemModule(), createFilesystemModule()];
-    const first = await layers[0].create({ volume });
+    const first = await layers[0].create({ volume }, await logHost());
     // The machine's own directories and files, made before the bundle is
     // mounted over them, in a spelling of their own.
     for (let count = 1 + Math.floor(r.next() * 4); count > 0; count--)
@@ -130,7 +131,7 @@ async function run(seed, pageFile){
         tolerate(()=>first.apply([{ path: onC(at), bytes: r.bytes() }]));
     }
     first.mount('C', { source: createMemoryStore(source) });
-    const processes = [first, await layers[1].create({ volume })];
+    const processes = [first, await layers[1].create({ volume }, await logHost())];
     /** @type {{ fs: any, handle: any }[]} */
     const held = [];
     /** @type {string[]} */

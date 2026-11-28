@@ -13,10 +13,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { noCache } from '../../cache/module.js';
+import { roomy } from '../../cache/testing.fixture.js';
 import { CORK_TSC_MHZ, cacheShare, createCorkHost } from './cork-host.js';
 import { freshThreadFpu } from './context.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { testLog } from '../../log/testing.fixture.js';
 
 const MEMORY = 4 << 20;
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
@@ -664,9 +665,11 @@ test('code the host rewrites between two calls of it runs as written; a host wri
 
 test('newContext under cork positions eip and esp', async()=>{
     const { cpuModule } = await import('../module.js');
+    const log = await testLog();
     const api = await cpuModule.create({
         engineUrl: ENGINE_URL, memorySize: MEMORY,
-    }, /** @type {any} */ ({ requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {}), provide: ()=>{} }));
+    }, /** @type {any} */ ({ requireApi: (/** @type {string} */ name)=>(name === 'cache' ? roomy.api
+        : log), provide: ()=>{} }));
     try
     {
         await api.boot();

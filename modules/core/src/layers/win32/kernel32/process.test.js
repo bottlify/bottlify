@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { longMachine, callLong } from '../../../../scripts/guest-code/long.mjs';
 import assert from 'node:assert/strict';
 import { TEB, TEB64 } from './teb.js';
-import { createProcessors } from './processor.js';
+import { testProcessors } from '../kernel.fixture.js';
 import {
     CLOCK, TLS_SLOTS, createProcessFunctions, getCurrentThreadIdCode, getLastErrorCode,
     queryPerformanceCounterCode, queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode,
@@ -59,6 +59,7 @@ function fakeHost({ arena = 0 } = {}){
     let current = threads.first;
 
     const host = {
+        processors: testProcessors(),
         bytes,
         view,
         threads,
@@ -893,7 +894,7 @@ test('a process is put on the processors its mask names, and on none the machine
     // Wine's ntdll test_affinity: a mask past the processors, or of none, is
     // refused; one that is taken becomes every thread's.
     const threads = [{}, { affinityMask: 8 }];
-    const processors = createProcessors({ processors: ()=>4, threads: ()=>threads });
+    const processors = testProcessors({ processors: ()=>4, threads: ()=>threads });
     const { fns, host } = setup({ processors });
     assert.equal(fns.GetProcessAffinityMask.handler([0xffffffff, 0x200, 0x204]), 1);
     assert.deepEqual([host.view.getUint32(0x200, true), host.view.getUint32(0x204, true)],

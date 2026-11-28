@@ -99,10 +99,10 @@ export function createInputModule(){
                 // as a program then sees with GetRegisteredRawInputDevices.
                 rawInput: {
                     claim: (/** @type {number} */ usage, /** @type {number} */ flags)=>
-                        /** @type {any} */ (win32).claimRawInput?.(usage, flags,
+                        /** @type {any} */ (win32).claimRawInput(usage, flags,
                             bridge.callerThread()) ?? 0,
                     release: (/** @type {number} */ usage)=>
-                        /** @type {any} */ (win32).releaseRawInput?.(usage),
+                        /** @type {any} */ (win32).releaseRawInput(usage),
                 },
                 // Where a mouse in absolute mode starts when it is taken: the
                 // cursor, as the router keeps it. Made below; asked only later.
@@ -117,33 +117,16 @@ export function createInputModule(){
                         /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
                 callerThread: config?.callerThread ?? (()=>bridge.callerThread()),
                 // What a window handle names, for SetCooperativeLevel, which
-                // wants a top-level window. A build without win32 has no windows
-                // to tell apart, and any handle is then taken as one.
+                // wants a top-level window.
                 windowKind: config?.windowKind ?? ((/** @type {number} */ hwnd)=>{
-                    /** @type {{ hwnd: string, child: boolean }[]} */
-                    let listed;
-                    try
-                    {
-                        listed = win32.windows();
-                    }
-                    catch {
-                        return undefined;
-                    }
-                    const found = listed.find(entry=>Number(entry.hwnd) === hwnd);
+                    const found = /** @type {{ hwnd: string, child: boolean }[]} */ (
+                        win32.windows()).find(entry=>Number(entry.hwnd) === hwnd);
                     return found ? (found.child ? 'child' : 'top') : null;
                 }),
                 // The program's own foreground window, which a device that
                 // reads input only in the foreground needs to be acquired. Not
                 // the browser's focus: that never reaches the guest.
-                foreground: config?.foreground ?? (()=>{
-                    try
-                    {
-                        return win32.activeWindow?.();
-                    }
-                    catch {
-                        return undefined;
-                    }
-                }),
+                foreground: config?.foreground ?? (()=>win32.activeWindow()),
             });
 
             const xinput = createXInput();
@@ -151,20 +134,7 @@ export function createInputModule(){
             // The queue is win32's, and this is the seam it exists for: a keystroke
             // is not a window operation, so it arrives from outside and is posted
             // like any other message.
-            //
-            // Asked for inside a guard because a build can be assembled without
-            // win32, in which case this api is a stub whose every call throws. That
-            // build has no windows to post to, so input degrades to DirectInput
-            // alone -- which is what "degraded but not broken" means here.
-            const queue = (()=>{
-                try
-                {
-                    return win32.queue();
-                }
-                catch {
-                    return null;
-                }
-            })();
+            const queue = win32.queue();
 
             // Device input is shown to the low-level hooks before anything
             // has it (WH_MOUSE_LL, WH_KEYBOARD_LL, through user32's queue).
@@ -203,7 +173,7 @@ export function createInputModule(){
              * @param {import('./router.js').HostInputEvent} event
              */
             const sendDevice = event=>{
-                const seam = queue?.lowLevel ?? null;
+                const seam = queue.lowLevel;
                 const watched = seam !== null && event.injected !== true
                     && (seam.hooked('mouse') || seam.hooked('keyboard'));
                 if (!watched && behind === null)
@@ -253,9 +223,9 @@ export function createInputModule(){
 
             const router = createInputRouter({
                 /** @param {any} message */
-                post: message=>effect(()=>queue?.post(message), message),
+                post: message=>effect(()=>queue.post(message), message),
                 /** @param {number} character @param {number} lParam */
-                compose: (character, lParam)=>effect(()=>queue?.compose(character, lParam)),
+                compose: (character, lParam)=>effect(()=>queue.compose(character, lParam)),
                 /** @param {import('./dinput/devices.js').InputEvent} event */
                 device: event=>effect(()=>dinput.post(event)),
                 now: config?.now ?? (()=>Date.now()),
@@ -274,41 +244,16 @@ export function createInputModule(){
                 // screen, shows that window's picture alone -- a windowed
                 // program's back buffer -- so it is pointed into from where
                 // that client lies on the screen.
-                origin: (width, height)=>{
-                    try
-                    {
-                        return viewportOrigin(width, height, win32.screenSize?.() ?? null,
-                            win32.windows());
-                    }
-                    catch {
-                        return null;
-                    }
-                },
+                origin: (width, height)=>viewportOrigin(width, height,
+                    win32.screenSize() ?? null, win32.windows()),
                 // A device a program holds exclusively is read through
                 // DirectInput alone, and the window hears nothing of it.
                 exclusive: kind=>dinput.exclusive(kind),
                 // The device's own report, for a program that registered for raw
                 // input; whether one did, and which window hears it, is user32's.
-                rawInput: report=>effect(()=>{
-                    try
-                    {
-                        win32.rawInput?.(report);
-                    }
-                    catch {
-                        // No win32: no window to post WM_INPUT to.
-                    }
-                }),
-                // Pasted text is the clipboard's, which is win32's; a build
-                // without it has no clipboard to paste into.
-                paste: text=>effect(()=>{
-                    try
-                    {
-                        win32.paste(text);
-                    }
-                    catch {
-                        // No win32: nothing to paste into.
-                    }
-                }),
+                rawInput: report=>effect(()=>win32.rawInput(report)),
+                // Pasted text is the clipboard's, which is win32's.
+                paste: text=>effect(()=>win32.paste(text)),
             });
 
             /** @type {ReturnType<typeof createDomInput> | null} */

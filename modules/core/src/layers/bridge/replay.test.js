@@ -24,6 +24,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { replaySession } from './replay.js';
+import { testLog } from '../log/testing.fixture.js';
 
 const SESSIONS = join(dirname(fileURLToPath(import.meta.url)), 'sessions');
 
@@ -43,7 +44,7 @@ for (const file of sessions())
 {
     const session = JSON.parse(readFileSync(join(SESSIONS, file), 'utf8'));
     test(`recorded session: ${session.about ?? file}`, async()=>{
-        const played = await replaySession(session);
+        const played = await replaySession(session, await testLog());
         assert.equal(played.events, session.events.length, 'the whole session was replayed');
         assert.deepEqual(
             played.refusals.map((/** @type {string} */ said)=>said.replace(/0x[0-9a-f]+/g, '0x…')),
@@ -70,7 +71,7 @@ test('a session that calls the guest back without naming a thread is caught', as
             { t: 'park', name: 'KERNEL32.dll!ReadFile', thread: 'thread-3' },
             { t: 'guest', entry: 0x00402000, thread: 'main', named: false },
         ],
-    });
+    }, await testLog());
 
     assert.equal(played.refusals.length, 1);
     assert.match(played.refusals[0], /must name the thread whose call it answers/);
@@ -89,7 +90,7 @@ test('the same session with the thread named replays cleanly', async()=>{
             { t: 'park', name: 'KERNEL32.dll!ReadFile', thread: 'thread-3' },
             { t: 'guest', entry: 0x00402000, thread: 'main', named: true },
         ],
-    });
+    }, await testLog());
 
     assert.deepEqual(played.refusals, []);
     assert.deepEqual(played.startedGuest.map((/** @type {any} */ one)=>one.thread), ['main']);
@@ -103,7 +104,7 @@ test('a session that sends the guest to address zero names who sent it', async()
                 freeStack: 0x002ff000 },
             { t: 'guest', entry: 0, thread: 'main', named: true },
         ],
-    });
+    }, await testLog());
 
     assert.equal(played.refusals.length, 1);
     assert.match(played.refusals[0],

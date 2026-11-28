@@ -10,6 +10,8 @@ import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { CATALOG_STORE, SFC_ORDINALS, createSfcFunctions } from './functions.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_SERVICE_DISABLED = 1058;
@@ -17,8 +19,8 @@ const ERROR_SERVICE_DISABLED = 1058;
 async function machine(){
     const bytes = new Uint8Array(0x400);
     const view = new DataView(bytes.buffer);
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
-    const volume = /** @type {any} */ (createVolume(fs));
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
+    const volume = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     const fns = createSfcFunctions({
         writeMemory: (address, data)=>bytes.set(data, address),
         readCString: (address, maxLength)=>{

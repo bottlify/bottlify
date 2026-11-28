@@ -49,6 +49,7 @@ export function longMachine({ registers = {}, xmm = new Map(), words = new Map()
         readXmm: index=>Uint32Array.from(xmm.get(index) ?? [0, 0, 0, 0]),
     };
     const memory = {
+        writer: ()=>-1,
         /** @param {number} address */
         readU32: address=>words.get(address) ?? 0,
         writeU32: ()=>{},

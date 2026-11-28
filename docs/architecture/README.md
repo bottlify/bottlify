@@ -73,10 +73,10 @@ The repository has four `@bottlify/` packages:
 For debugging there is also **bottlify-ui**, a repository of its own: a React launcher and a local
 server that serves the application, the engine, the bundles and the relay from one address.
 
-The engine is split into layers, and any of them can be switched off without breaking the rest.
-Each layer has its own interface, configuration and tests, and talks to other layers only through
-what it declares in `requires`. A layer switched off that another needs is replaced by a stub:
-with `graphics: null`, for instance, a game runs with no picture. The module contract and the
+The engine is split into layers. Each layer has its own interface, configuration and tests, and
+talks to other layers only through what it declares in `requires`. A layer nothing requires can be
+switched off: with `graphics: null`, for instance, a game runs with no picture. Switching off a layer
+another requires is an error when the engine is built, naming both; nothing stands in for it. The module contract and the
 `npm run check:boundaries` check are in [`core/configuration.md`](../core/configuration.md#the-module-contract).
 
 | Layer | Responsible for | `requires` |

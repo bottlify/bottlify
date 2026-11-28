@@ -266,7 +266,7 @@ const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
  * @param {any} kernel @param {any} thread
  */
 const threadObjectLives = (kernel, thread)=>thread.state !== 'terminated'
-    || kernel.handles?.holds?.(thread) === true;
+    || kernel.handles.holds(thread);
 
 /**
  * The run's processes as a snapshot lists them: this one, its threads in the
@@ -280,13 +280,13 @@ const threadObjectLives = (kernel, thread)=>thread.state !== 'terminated'
  * @returns {import('../ntdll/query.js').SystemProcess[]}
  */
 export function listProcesses(kernel, self){
-    const own = kernel.processes?.all() ?? [];
+    const own = kernel.processes.all();
     // This process's children, then every other process of the run its
     // directory holds: a grandchild is in a snapshot of the run as on Windows.
-    const others = (kernel.processes?.run?.() ?? []).filter((/** @type {any} */ record)=>
+    const others = kernel.processes.run().filter((/** @type {any} */ record)=>
         (record.id >>> 0) !== (self.id >>> 0) && !own.includes(record));
     return [
-        { ...self, threads: (kernel.threads?.() ?? [])
+        { ...self, threads: kernel.threads()
             .filter((/** @type {any} */ thread)=>threadObjectLives(kernel, thread))
             .map((/** @type {any} */ thread)=>thread.id >>> 0)
             .sort((/** @type {number} */ a, /** @type {number} */ b)=>a - b) },
@@ -698,7 +698,7 @@ export function createThreadingFunctions(host){
      * @param {number} handle @param {number} right
      */
     const permitted = (handle, right)=>{
-        if (allows(kernel.handles.access?.(untagged(handle >>> 0)) ?? null, right))
+        if (allows(kernel.handles.access(untagged(handle >>> 0)), right))
         {
             return true;
         }
@@ -1140,7 +1140,7 @@ export function createThreadingFunctions(host){
             return kind === null && held ? STATUS.NOT_SUPPORTED : STATUS.INVALID_HANDLE;
         }
         const rights = duplicateAccess(kind, desired,
-            pseudo(source) ? null : kernel.handles.access?.(untagged(source >>> 0)) ?? null, same);
+            pseudo(source) ? null : kernel.handles.access(untagged(source >>> 0)), same);
         if ('error' in rights)
         {
             return STATUS_OF_RIGHTS[rights.error];
@@ -1261,7 +1261,7 @@ export function createThreadingFunctions(host){
             argBytes: 0,
             handler: ()=>{
                 const self = host.currentThread();
-                const ready = (kernel.threads?.() ?? []).filter((/** @type {any} */ thread)=>
+                const ready = kernel.threads().filter((/** @type {any} */ thread)=>
                     thread !== self && thread.state === 'ready' && !thread.awaitingHost);
                 if (ready.length === 0)
                 {
@@ -1980,7 +1980,7 @@ export function createThreadingFunctions(host){
                     return 0;
                 }
                 const all = [(host.processId ?? 0x1000) >>> 0,
-                    ...(kernel.processes?.all() ?? [])
+                    ...kernel.processes.all()
                         .filter((/** @type {any} */ child)=>!child.completed
                             && child.exitCode === kernel.processes.STILL_ACTIVE)
                         .map((/** @type {any} */ child)=>child.id >>> 0)];
@@ -2013,7 +2013,7 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([desired, inherit, id])=>{
                 const wanted = id >>> 0;
-                const own = (kernel.threads?.() ?? []).find((/** @type {any} */ thread)=>
+                const own = kernel.threads().find((/** @type {any} */ thread)=>
                     (thread.id >>> 0) === wanted && threadObjectLives(kernel, thread));
                 if (own)
                 {
@@ -2031,7 +2031,7 @@ export function createThreadingFunctions(host){
                 }
                 // A child's thread, or one of any process of the run (a
                 // grandchild's first thread, found in a snapshot of the run).
-                const child = [...kernel.processes?.all() ?? [], ...kernel.processes?.run?.() ?? []]
+                const child = [...kernel.processes.all(), ...kernel.processes.run()]
                     .find((/** @type {any} */ made)=>
                         (made.threadId >>> 0) === wanted || made.threads?.has(wanted));
                 if (child)

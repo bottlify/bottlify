@@ -37,9 +37,10 @@
  * specification says a colour or a normal is normalised and left alone where
  * it says a coordinate is not.
  *
- * ponytail: what is not implemented is answered with zero and counted, not
- * refused. Zero reads as failure under every convention a GL entry point uses
- * at once, and the count is what says which of them a program actually wanted.
+ * What is not implemented is answered with zero, and each call is a loss
+ * (`divergence(api, detail, 'loss')`): zero reads as failure under every
+ * convention a GL entry point uses at once, and the report counts which of
+ * them a program actually wanted.
  */
 
 import { GL, PFD, WGL, WIN32_ERROR } from './constants.js';
@@ -691,9 +692,6 @@ export function createOpengl(services){
         const hdc = wgl.wglGetCurrentDC();
         return current() && hdc !== 0 ? describeDrawable(hdc)?.key ?? null : null;
     };
-
-    /** @type {Map<string, number>} what a program called that is not implemented */
-    const unimplemented = new Map();
 
     /** @type {Set<number>} the handles whose pictures the presenter has been told are the device's */
     const claimed = new Set();
@@ -2601,7 +2599,8 @@ export function createOpengl(services){
             table[name] = {
                 argBytes: Number(words) * 4,
                 handler: ()=>{
-                    unimplemented.set(name, (unimplemented.get(name) ?? 0) + 1);
+                    services.divergence?.('OpenGL', `${name} is not implemented: answered 0`,
+                        'loss');
                     return 0;
                 },
             };
@@ -2751,9 +2750,6 @@ export function createOpengl(services){
             // timed to the moment it hands back its promise.
             ringMs: Math.round(timed.ringMs),
             callMs: Math.round(timed.callMs),
-            // What a program reached for and did not get is the most useful
-            // thing this layer can say about a run that drew nothing.
-            unimplemented: Object.fromEntries(unimplemented),
             gpu: onDevice && madeContext ? root.diagnostics() : null,
             held: heldTextureBytes(contexts.values()),
             compressed: `${compressedDigest.count}:${compressedDigest.bytes}:`

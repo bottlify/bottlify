@@ -128,32 +128,20 @@ export function createMemoryModule(){
             };
             state.regions = createRegionMap();
 
-            // Who wrote what into the guest, by name. Nothing published means no
-            // charge at all: the write path takes a branch rather than a call, and
-            // a build without the log's tables pays nothing for the account.
-            const writerTable = typeof log.metrics?.table === 'function'
-                ? log.metrics.table('memory', 'writers',
-                    { rows: WRITER_ROWS, columns: WRITER_COLUMNS })
-                : null;
-            const account = writerTable
-                ? createWriterAccount({ table: writerTable, intern: log.intern })
-                : null;
+            // Who wrote what into the guest, by name.
+            const account = createWriterAccount({ table: log.metrics.table('memory', 'writers',
+                { rows: WRITER_ROWS, columns: WRITER_COLUMNS }), intern: log.intern });
             state.writers = account;
-            if (account && typeof log.metrics?.counters === 'function')
-            {
-                const counters = log.metrics.counters('memory', MEMORY_COUNTERS);
-                log.metrics.onFrame(()=>{
-                    const busiest = account.publish();
-                    counters.set(0, 0, busiest.writer);
-                    counters.set(0, 1, busiest.bytes);
-                });
-            }
-            state.reader = typeof cpu.readU32 === 'function'
-                ? new DwordReader(state.regions,
-                    /** @type {import('./internal/reader.js').ReaderMachine} */ (cpu))
-                : null;
+            const counters = log.metrics.counters('memory', MEMORY_COUNTERS);
+            log.metrics.onFrame(()=>{
+                const busiest = account.publish();
+                counters.set(0, 0, busiest.writer);
+                counters.set(0, 1, busiest.bytes);
+            });
+            state.reader = new DwordReader(state.regions,
+                /** @type {import('./internal/reader.js').ReaderMachine} */ (cpu));
             state.accessors = createAccessors({
-                raw: cpu, regions: state.regions, charge: account?.charge ?? null,
+                raw: cpu, regions: state.regions, charge: account.charge,
                 reader: state.reader,
             });
 
@@ -161,15 +149,9 @@ export function createMemoryModule(){
             // one row per region, its name as a dictionary id. Written when a
             // region is registered or reprotected, which is rare, and never
             // walked on request.
-            const table = typeof log.metrics?.table === 'function'
-                ? log.metrics.table('memory', 'regions',
-                    { rows: REGION_ROWS, columns: REGION_COLUMNS })
-                : null;
+            const table = log.metrics.table('memory', 'regions',
+                { rows: REGION_ROWS, columns: REGION_COLUMNS });
             const publish = ()=>{
-                if (!table)
-                {
-                    return;
-                }
                 const mapped = state.regions.list();
                 const rows = Math.min(mapped.length, table.rows);
                 for (let row = 0; row < rows; row++)
@@ -200,7 +182,7 @@ export function createMemoryModule(){
                     let ram;
                     try
                     {
-                        ram = cpu.ramView?.() ?? null;
+                        ram = /** @type {any} */ (cpu).ramView();
                     }
                     catch {
                         // No machine yet: asked again next time.
@@ -233,7 +215,7 @@ export function createMemoryModule(){
             };
             // A memory that grows as the guest is given more: these views end where
             // it ended, and are taken again.
-            /** @type {any} */ (cpu).onGrow?.(()=>{
+            /** @type {any} */ (cpu).onGrow(()=>{
                 ramWords = undefined;
                 ramQuads = undefined;
             });
@@ -252,7 +234,7 @@ export function createMemoryModule(){
                     // An image mapped is the guest's to write: given, and counted
                     // against the machine's memory, refused where it has no room.
                     if (region?.kind === RegionKind.IMAGE
-                        && /** @type {any} */ (cpu).chargeGuest?.(region.size ?? 0) === false)
+                        && /** @type {any} */ (cpu).chargeGuest(region.size ?? 0) === false)
                     {
                         throw Object.assign(new Error(`memory: the machine's memory has no room`
                             + ` for ${region.name ?? 'an image'}`), { code: 'MACHINE_MEMORY' });
@@ -288,7 +270,7 @@ export function createMemoryModule(){
                  * @returns {boolean}
                  */
                 pageAccess: (address, length, open)=>live()
-                    && /** @type {any} */ (cpu).pageAccess?.(address, length, open) === true,
+                    && /** @type {any} */ (cpu).pageAccess(address, length, open) === true,
                 /**
                  * Where the process may reserve past 4 GiB (the cpu layer's far
                  * chunks), and the chunk a frame stands for: each chunk there the
@@ -298,7 +280,7 @@ export function createMemoryModule(){
                  * @returns {{ base: number, top: number, chunk: number, direct?: number,
                  *     table?: number } | null}
                  */
-                farSpace: ()=>(live() ? /** @type {any} */ (cpu).farSpace?.() ?? null : null),
+                farSpace: ()=>(live() ? /** @type {any} */ (cpu).farSpace() : null),
                 /**
                  * Gives the far chunk `address` lies in the window's frame `frame`,
                  * or takes its frame (-1).
@@ -321,7 +303,7 @@ export function createMemoryModule(){
                  * @param {number} end
                  * @returns {number}
                  */
-                reach: end=>(live() ? /** @type {any} */ (cpu).growTo?.(end) ?? Infinity : 0),
+                reach: end=>(live() ? /** @type {any} */ (cpu).growTo(end) : 0),
                 /**
                  * Bytes the guest is given -- a heap's reach past its highest, a
                  * commit, a stack -- taken from the machine's memory (the cpu
@@ -331,26 +313,26 @@ export function createMemoryModule(){
                  * @param {number} bytes
                  * @returns {boolean}
                  */
-                charge: bytes=>!live() || /** @type {any} */ (cpu).chargeGuest?.(bytes) !== false,
+                charge: bytes=>!live() || /** @type {any} */ (cpu).chargeGuest(bytes) !== false,
                 /** Bytes the guest was given back. @param {number} bytes */
                 uncharge: bytes=>{
                     if (live())
                     {
-                        /** @type {any} */ (cpu).giveGuest?.(bytes);
+                        /** @type {any} */ (cpu).giveGuest(bytes);
                     }
                 },
                 /** The RAM the guest's memory holds now. @returns {number} */
-                held: ()=>(live() ? /** @type {any} */ (cpu).ramHeld?.() ?? Infinity : 0),
+                held: ()=>(live() ? /** @type {any} */ (cpu).ramHeld() : 0),
                 /** Whether the guest's memory grows as the guest is given more. */
-                growing: ()=>live() && /** @type {any} */ (cpu).growing?.() === true,
+                growing: ()=>live() && /** @type {any} */ (cpu).growing() === true,
                 /**
                  * Called with the RAM held each time the guest's memory grows.
                  *
                  * @param {(held: number) => void} listener
                  */
-                onGrow: listener=>/** @type {any} */ (cpu).onGrow?.(listener),
+                onGrow: listener=>/** @type {any} */ (cpu).onGrow(listener),
                 /** The guest range the engine keeps for its tables; empty where none. */
-                engineRange: ()=>/** @type {any} */ (cpu).engineRange?.() ?? { from: 0, to: 0 },
+                engineRange: ()=>/** @type {any} */ (cpu).engineRange(),
                 /** @param {number} address */
                 find: address=>live() ? state.regions.find(address) : undefined,
                 /** @param {number} address */
@@ -422,8 +404,7 @@ export function createMemoryModule(){
                  * @returns {{ take: (address: number, length: number) => number[] } | null}
                  */
                 watchWrites: (/** @type {number} */ address, /** @type {number} */ length)=>
-                    (live() && typeof cpu.watchWrites === 'function'
-                        ? cpu.watchWrites(address, length) : null),
+                    (live() ? /** @type {any} */ (cpu).watchWrites(address, length) : null),
                 /**
                  * The RAM as a view over a SharedArrayBuffer, byte 0 at address
                  * 0, for a worker to read and write in place; null where the
@@ -436,7 +417,7 @@ export function createMemoryModule(){
                     let ram = null;
                     try
                     {
-                        ram = live() ? cpu.ramView?.() ?? null : null;
+                        ram = live() ? /** @type {any} */ (cpu).ramView() : null;
                     }
                     catch {
                         // No machine yet: nothing to share.

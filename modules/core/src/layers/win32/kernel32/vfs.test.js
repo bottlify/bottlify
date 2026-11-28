@@ -16,15 +16,16 @@ import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createSessionSource } from '../../filesystem/internal/session-source.js';
 import { PIECE_SIZE } from '../../filesystem/internal/memory-store.js';
-import { testCache } from '../../cache/testing.fixture.js';
+import { testCache, freshSpace } from '../../cache/testing.fixture.js';
 import { createVolume, FETCHED_PIECE_BYTES, KEPT_PART_BYTES, KEPT_READ_MIN,
     MISS_FETCHES } from './vfs.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 async function volume(){
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     // No bundle is mounted in these tests, so a read always answers with bytes;
     // the cast says so once rather than at every call site.
-    return { fs, volume: /** @type {any} */ (createVolume(fs)) };
+    return { fs, volume: /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') })) };
 }
 
 test('a missing file is an answer, not an exception', async()=>{
@@ -76,7 +77,7 @@ test('a write into a file whose blocks are not resident waits for them, as a rea
     // blocks under it: when they are absent the layer throws a miss naming
     // them. A launcher that writes into its game's executable must be parked
     // until they arrive, not stopped.
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const absent = [{ index: 7 }];
     let resident = false;
     /** @type {any[]} */
@@ -92,7 +93,7 @@ test('a write into a file whose blocks are not resident waits for them, as a rea
     const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
         fetched.push(...blocks);
         resident = true;
-    }));
+    }, { kept: freshSpace('reads') }));
     const node = vol.open('C:\\game.exe', { read: true, write: true, create: true });
     const bytes = new Uint8Array([1, 2, 3]);
 
@@ -112,7 +113,7 @@ test('a file whose blocks are not resident has its end set once they are, as a w
     // A game sets the end of its own data file (The Sims 2 Legacy Collection,
     // a lot template): the copy up reads the blocks under it, and absent ones
     // stopped the process where a write waits for them.
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const absent = [{ index: 3 }];
     let resident = false;
     /** @type {any[]} */
@@ -128,7 +129,7 @@ test('a file whose blocks are not resident has its end set once they are, as a w
     const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
         fetched.push(...blocks);
         resident = true;
-    }));
+    }, { kept: freshSpace('reads') }));
     const node = vol.open('C:\\lot.package', { read: true, write: true, create: true });
     vol.write(node, 0, new Uint8Array([1, 2, 3, 4]));
 
@@ -148,11 +149,11 @@ test('a read larger than the blocks kept at once arrives whole, a piece at a tim
     // that maps a 241 MiB archive whole needs more than that, and a read
     // that fetched every block before copying any found its first ones
     // evicted by its last.
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const BLOCK = 1 << 20;
     const KEPT = 12;
     const size = 3 * FETCHED_PIECE_BYTES + 12345;
-    const writer = createVolume(fs);
+    const writer = createVolume(fs, null, { kept: freshSpace('reads') });
     const made = writer.open('C:\\archive.ung', { read: true, write: true, create: true });
     const contents = new Uint8Array(size).map((unused, index)=>(index * 7 + (index >>> 20)) & 0xff);
     writer.write(made, 0, contents);
@@ -195,7 +196,7 @@ test('a read larger than the blocks kept at once arrives whole, a piece at a tim
                 resident.shift();
             }
         }
-    }));
+    }, { kept: freshSpace('reads') }));
     const node = vol.open('C:\\archive.ung', { read: true });
     const read = await vol.read(node, 0, size);
     assert.equal(read.length, size);
@@ -212,8 +213,8 @@ test('a read whose fetched blocks are gone again before it comes back fetches th
     // A cache in the heap is bounded: another thread's reads, landing between
     // a fetch and the read it was for, push the fetched blocks out, and a read
     // that waited on another read's request finds nothing when that failed.
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
-    const writer = createVolume(fs);
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
+    const writer = createVolume(fs, null, { kept: freshSpace('reads') });
     const made = writer.open('C:\\data.dat', { read: true, write: true, create: true });
     const contents = new Uint8Array(4096).map((unused, index)=>index * 13 & 0xff);
     writer.write(made, 0, contents);
@@ -236,7 +237,7 @@ test('a read whose fetched blocks are gone again before it comes back fetches th
         const vol = /** @type {any} */ (createVolume(bundled, async()=>{
             fetches++;
             resident = fetches > lost;
-        }));
+        }, { kept: freshSpace('reads') }));
         const node = vol.open('C:\\data.dat', { read: true });
         try
         {
@@ -330,7 +331,7 @@ test('a move that copies blocks not resident waits for them, its partial copy go
     // the copy meets an absent block, which the layer throws as a miss after
     // the destination was made. The move is undone, the blocks fetched, and
     // it is done again: twice here, a block missing on each of two tries.
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const node = fs.open('C:\\pkg.zip', { write: true, disposition: fs.Disposition.CREATE_NEW });
     fs.write(node, new Uint8Array([1, 2, 3]));
     fs.close(node);
@@ -351,7 +352,7 @@ test('a move that copies blocks not resident waits for them, its partial copy go
     const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
         fetched.push(...blocks);
         misses--;
-    }));
+    }, { kept: freshSpace('reads') }));
     const pending = vol.renameOrFetch('C:\\pkg.zip', 'C:\\moved.zip');
     assert.equal(typeof pending?.then, 'function', 'the move waits');
     assert.equal(await pending, true);
@@ -371,17 +372,17 @@ test('a move that copies blocks not resident waits for them, its partial copy go
  * @param {Record<string, Uint8Array>} contents  by path under C:
  */
 async function onSession(contents){
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const session = createSessionSource(Object.entries(contents).map(([path, bytes])=>({ path,
         file: { path: `C:\\${path}`, size: bytes.length,
             read: async(offset = 0, length = bytes.length - offset)=>
-                bytes.slice(offset, offset + length) } })));
+                bytes.slice(offset, offset + length) } })), { kept: freshSpace('session') });
     fs.mount('C', { source: session });
     const counted = { fetches: 0 };
     const vol = /** @type {any} */ (createVolume(fs, async blocks=>{
         counted.fetches++;
         await session.fetch(blocks);
-    }));
+    }, { kept: freshSpace('reads') }));
     return { vol, counted };
 }
 
@@ -655,8 +656,8 @@ async function runCache(){
  *
  * @param {number} size @param {any} [kept] @param {(at: number) => number} [byte]
  */
-async function countedVolume(size, kept = undefined, byte = ()=>1){
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
+async function countedVolume(size, kept = freshSpace('reads'), byte = ()=>1){
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
     const counted = { reads: 0, time: 1e9 };
     const reading = Object.create(fs);
     reading.read = (/** @type {any} */ node, /** @type {number} */ length)=>{
@@ -664,7 +665,7 @@ async function countedVolume(size, kept = undefined, byte = ()=>1){
         return fs.read(node, length);
     };
     const vol = /** @type {any} */ (createVolume(reading, null,
-        { now: ()=>counted.time, ...kept ? { kept } : {} }));
+        { now: ()=>counted.time, kept }));
     const path = 'C:\\game.exe';
     const node = vol.open(path, { read: true, write: true, create: true });
     vol.write(node, 0, Uint8Array.from({ length: size }, (_, at)=>byte(at)));
@@ -706,15 +707,10 @@ test('a large range read again is kept; a write makes the next one fresh', async
     vol.close(node);
 });
 
-test('without a cache a range read again is read again', async()=>{
-    const size = KEPT_READ_MIN * 2;
-    const { vol, node, counted } = await countedVolume(size);
-    for (let i = 0; i < 3; i++)
-    {
-        vol.read(node, 0, size);
-    }
-    assert.equal(counted.reads, 3);
-    vol.close(node);
+test('a volume is made over a space of the run\'s cache, and none is an error', async()=>{
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
+    assert.throws(()=>createVolume(fs, null, /** @type {any} */ ({})),
+        /no space of the run's cache/);
 });
 
 test('a file read through once in large pieces keeps none of them', async()=>{

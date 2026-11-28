@@ -108,7 +108,7 @@ export function createSharedUserData(options){
     });
     // Written while it may be, and read-only from then on, as the program
     // finds it on Windows; the clocks move through the RAM's own words.
-    const words = memory.wordsOver?.(place, KUSER.SIZE) ?? null;
+    const words = memory.wordsOver(place, KUSER.SIZE);
     try
     {
         region(memory.Access.READ_WRITE);

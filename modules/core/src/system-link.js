@@ -42,6 +42,9 @@ const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 're
 const PIPES = ['create', 'open', 'query', 'wait', 'read', 'write', 'peek', 'connect',
     'disconnect', 'flush', 'transact', 'state', 'setState', 'cancel', 'close'];
 
+/** What a process asks of the run's file-security store (`named-security.js`). */
+const FILE_SECURITY = ['get', 'set'];
+
 /** What a process answers about its own windows (`directory.js`'s `WindowEndpoint`). */
 const ENDPOINT = ['find', 'describe', 'post', 'send', 'answer', 'withdraw', 'lostForeground',
     'activate'];
@@ -95,7 +98,8 @@ const remoteRegistry = asked=>{
 /**
  * The link's handlers that answer for the run's system.
  *
- * @param {{ registry: any, ids: any, volume: any, windows: any, bundle?: any }} system
+ * @param {{ registry: any, ids: any, volume: any, windows: any, bundle?: any,
+ *     fileSecurity: Map<string, any> }} system
  * @param {(target: string, method: string, args: any[]) => any} [askBack]
  *     a blocking call to the process across the link, for its windows
  * @param {Set<number>} [attached]  where the ids of the processes whose
@@ -106,6 +110,11 @@ const remoteRegistry = asked=>{
 export function systemHandlers(system, askBack, attached){
     return {
         registry: answering(system.registry, REGISTRY),
+        // Answered without the map itself: `set` hands it back.
+        fileSecurity: { ...answering(system.fileSecurity, FILE_SECURITY),
+            set: (/** @type {string} */ key, /** @type {any} */ value)=>{
+                system.fileSecurity.set(key, value);
+            } },
         ids: { take: (/** @type {'thread' | 'process'} */ name, /** @type {number} */ step)=>
             takeId(system.ids, name, step) },
         ...volumeHandlers(system.volume),
@@ -171,6 +180,8 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
         // not consulted.
         namedObjects: new Map(),
         registry: remoteRegistry(asking('registry', REGISTRY)),
+        // The descriptors programs set on files, kept by the run (`named-security.js`).
+        fileSecurity: asking('fileSecurity', FILE_SECURITY),
         ids: { take: (/** @type {string} */ name, /** @type {number} */ step)=>
             ask('ids', 'take', [name, step]) },
         volume: remoteVolume((method, args)=>ask('volume', method, args), volume,

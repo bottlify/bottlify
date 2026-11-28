@@ -60,7 +60,7 @@ export function createProcessTarget({ kernel, processId }){
         {
             return { error: ERROR_INVALID_HANDLE };
         }
-        if (!allows(kernel.handles.access?.(value) ?? null, right))
+        if (!allows(kernel.handles.access(value), right))
         {
             return { error: ERROR_ACCESS_DENIED };
         }

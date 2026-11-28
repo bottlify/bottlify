@@ -10,7 +10,8 @@
  * byte access the stand-in already has, by the same rule the layer keeps - a
  * pointer of 4 or 8 bytes, whole, its upper dword the value's own. A seam
  * reads and writes every pointer through those two, so a test's memory needs
- * them as the product's facades have them.
+ * them as the product's facades have them. A stand-in that keeps no writer
+ * account is given the layer's answer for a name it does not attribute (-1).
  */
 
 /** @param {number} value */
@@ -20,7 +21,8 @@ const unsigned = value=>(value < 0 ? value >>> 0 : value);
  * @template {Record<string, any>} M
  * @param {M} memory  with readU32/writeU32, readMemory/writeMemory or readBytes/writeBytes
  * @returns {M & { readPointer: (address: number, bytes: 4 | 8) => number,
- *     writePointer: (address: number, value: number, bytes: 4 | 8) => void }}
+ *     writePointer: (address: number, value: number, bytes: 4 | 8) => void,
+ *     writer: (name: string) => number }}
  */
 export function withPointers(memory){
     /** @param {number} address @param {number} length */
@@ -45,6 +47,7 @@ export function withPointers(memory){
         write(address, bytes);
     };
     return Object.assign(memory, {
+        writer: memory.writer ?? (()=>-1),
         /** @param {number} address @param {4 | 8} bytes */
         readPointer: (address, bytes)=>(bytes === 8
             ? readDword(address) + readDword(address + 4) * 2 ** 32 : readDword(address)),

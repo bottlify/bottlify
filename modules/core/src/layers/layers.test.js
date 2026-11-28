@@ -26,29 +26,11 @@ const ALL_LAYERS = [
     'input',
 ];
 
-/** Layers with a real implementation; the rest are still stubs. */
-const IMPLEMENTED = [
-    'log', 'cache', 'cpu', 'memory', 'kernel', 'bridge', 'loader', 'filesystem', 'media', 'win32',
-    'graphics', 'audio', 'input',
-];
-
 test('a default build contains every layer, in dependency order', async()=>{
     const core = await assembleModules({ filesystem: { pageFile: await testPageFile() },
         cache: { reader: roomy.reader } });
     const diag = core.diagnostics();
     assert.deepEqual(diag.map(d=>d.name), ALL_LAYERS);
-
-    for (const entry of diag)
-    {
-        if (IMPLEMENTED.includes(entry.name))
-        {
-            assert.notEqual(entry.status, 'stub', `${entry.name} is implemented`);
-        }
-        else
-        {
-            assert.equal(entry.status, 'stub', `${entry.name} is not built yet`);
-        }
-    }
 });
 
 test('building the graph costs nothing: the engine is not started', async()=>{
@@ -62,19 +44,13 @@ test('building the graph costs nothing: the engine is not started', async()=>{
     assert.throws(()=>cpu.readReg32('eax'), /boot\(\) must be called/);
 });
 
-test('a layer that is not built refuses loudly', async()=>{
-    // What matters is that an interface nobody implements refuses rather than
-    // answering with a plausible nothing -- a silent zero from a layer that is
-    // not there is a defect that surfaces wherever the caller used it.
-    //
-    // Driven through a *disabled* module rather than an unbuilt one: every
-    // layer now has an implementation, and the stub is what a module something
-    // still requires is replaced by when it is switched off. That is the same
-    // mechanism and the one that will still exist in a finished engine.
-    const core = await assembleModules({ win32: false,
-        filesystem: { pageFile: await testPageFile() },
-        cache: { reader: roomy.reader } });
-    assert.throws(()=>core.api('win32').anything(), { code: 'NOT_IMPLEMENTED' });
+test('switching off a layer another requires fails the build, naming it', async()=>{
+    // A layer something needs is never stood in for: a build without it would
+    // answer its callers with refusals nobody learns of until they are met.
+    const pageFile = await testPageFile();
+    await assert.rejects(()=>assembleModules({ win32: false, filesystem: { pageFile },
+        cache: { reader: roomy.reader } }),
+    /Module "win32" is required by "(graphics|audio|input)" and is switched off/);
 });
 
 test('disabling a leaf nobody requires removes it from the build', async()=>{
@@ -84,17 +60,6 @@ test('disabling a leaf nobody requires removes it from the build', async()=>{
     const names = core.diagnostics().map(d=>d.name);
     assert.ok(!names.includes('graphics'));
     assert.throws(()=>core.api('graphics'), /not part of this build/);
-});
-
-test('disabling a required module installs a stub in its place', async()=>{
-    const core = await assembleModules({ win32: false,
-        filesystem: { pageFile: await testPageFile() },
-        cache: { reader: roomy.reader } });
-    const win32 = core.diagnostics().find(d=>d.name === 'win32');
-    assert.ok(win32);
-    assert.equal(win32.status, 'stub');
-    assert.ok(core.diagnostics().some(d=>d.name === 'graphics'),
-        'win32 stays because graphics requires it');
 });
 
 test('configuration errors propagate', async()=>{

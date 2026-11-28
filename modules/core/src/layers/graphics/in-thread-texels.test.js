@@ -19,18 +19,19 @@ import { createGraphicsModule } from './module.js';
 import { createCacheModule } from '../cache/module.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { openRunCache } from '../../process/run-cache.js';
+import { graphicsWin32 } from './win32.fixture.js';
+import { testLog } from '../log/testing.fixture.js';
 
-/** @param {any} cache @returns {any} a host that hands over what the module requires */
-function hostWith(cache){
+/** @param {any} cache @returns {Promise<any>} a host that hands over what the module requires */
+async function hostWith(cache){
     /** @type {Record<string, any>} */
     const apis = {
         memory: { readBytes: (/** @type {number} */ _at, /** @type {number} */ length)=>
             new Uint8Array(length), writeBytes: ()=>{} },
-        win32: { gdi: ()=>({ createSurfaceDc: ()=>0, deleteSurfaceDc: ()=>false,
-            describeDrawable: ()=>({ key: 'window', width: 4, height: 4 }) }),
-        heap: ()=>({ allocate: ()=>0 }) },
-        bridge: { callGuest: ()=>Promise.resolve(0) },
-        log: {},
+        win32: graphicsWin32({ gdi: ()=>({ createSurfaceDc: ()=>0, deleteSurfaceDc: ()=>false,
+            describeDrawable: ()=>({ key: 'window', width: 4, height: 4 }) }) }),
+        bridge: { callGuest: ()=>Promise.resolve(0), callerThread: ()=>null },
+        log: await testLog(),
         cache,
     };
     return { requireApi: (/** @type {string} */ name)=>apis[name] };
@@ -51,7 +52,7 @@ test('a root drawn on the process\'s thread holds names of its own in the run\'s
         const graphics = createGraphicsModule();
         const api = await graphics.create({
             device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
-        }, /** @type {any} */ (hostWith(cache)));
+        }, /** @type {any} */ (await hostWith(cache)));
         // The process's scratches are an owner already.
         assert.deepEqual(Object.keys(run.figures().ownersOut), ['scratch/1/']);
         const texelOwners = ()=>Object.keys(run.figures().ownersOut)

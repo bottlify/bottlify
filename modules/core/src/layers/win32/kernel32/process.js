@@ -6,7 +6,6 @@
 
 
 import { TEB, TEB64, blockLayouts } from './teb.js';
-import { createProcessors } from './processor.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { setCondition, verifyVersion, windowsVersion } from './versions.js';
 
@@ -219,9 +218,9 @@ const ERROR_NOACCESS = 998;
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Where an answer wider than EAX puts its high half. Absent, the
  *           functions that answer 64 bits are not exported.
- * @property {import('./processor.js').Processors} [processors]  The process's
+ * @property {import('./processor.js').Processors} processors  The process's
  *           processors and its affinity, which every other interface that
- *           counts or sets them shares. Absent, one processor.
+ *           counts or sets them shares.
  * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
@@ -890,7 +889,7 @@ export function createProcessFunctions(host){
     const blocks = blockLayouts(host.pointerSize);
     const { stateOf, setError, lastErrorOf } = host.threadState
         ?? createThreadState(host.currentThread, memory, blocks.teb);
-    const processors = host.processors ?? createProcessors();
+    const processors = host.processors;
 
     /** @param {number} group  A WORD: ALL_PROCESSOR_GROUPS or 0, the only one. */
     const processorsIn = group=>{

@@ -19,9 +19,11 @@ import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { D3DFMT, D3D_OK } from './d3d9/constants.js';
 import { D3DCLEAR } from './d3d8/constants.js';
 import { GL } from './opengl/constants.js';
+import { graphicsWin32 } from './win32.fixture.js';
+import { testLog } from '../log/testing.fixture.js';
 
 /** A host that hands over only what the module declares it requires. */
-function hostWith(){
+async function hostWith(){
     /** @type {Record<string, any>} */
     const apis = {
         memory: {
@@ -29,18 +31,17 @@ function hostWith(){
                 new Uint8Array(length),
             writeBytes: ()=>{},
         },
-        win32: {
+        win32: graphicsWin32({
             gdi: ()=>({
                 createSurfaceDc: ()=>0, deleteSurfaceDc: ()=>false,
                 // Every handle is one window's DC, the size of the back buffers.
                 describeDrawable: ()=>({ key: 'window', width: 4, height: 4 }),
             }),
-            heap: ()=>({ allocate: ()=>0 }),
-        },
-        bridge: { callGuest: ()=>Promise.resolve(0) },
+        }),
+        bridge: { callGuest: ()=>Promise.resolve(0), callerThread: ()=>null },
         cache: roomy.api,
-        // A log with nowhere to publish: the layer's figures are another test's.
-        log: {},
+        // A log of its own, as every layer is handed one.
+        log: await testLog(),
     };
     return /** @type {any} */ ({ requireApi: (/** @type {string} */ name)=>apis[name] });
 }
@@ -61,7 +62,7 @@ async function build(maxFrameLatency){
     const api = await graphicsModule.create({
         device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
         maxFrameLatency,
-    }, hostWith());
+    }, await hostWith());
     return {
         gpu,
         api,
@@ -235,7 +236,7 @@ test('a device without a way to say when work is done holds nothing', async()=>{
     gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
     const api = await graphicsModule.create({
         device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
-    }, hostWith());
+    }, await hostWith());
     const device = deviceOf(api, 'd3d8');
     for (let frame = 0; frame < 10; frame++)
     {

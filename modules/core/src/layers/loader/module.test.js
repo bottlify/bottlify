@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createLoaderModule, loaderModule } from './module.js';
 import { bridgeModule } from '../bridge/module.js';
 import { parseHexBytes } from './internal/hooks.js';
+import { testLog } from '../log/testing.fixture.js';
 
 const IMAGE = {
     name: 'program.exe', base: 0x400000, sizeOfImage: 0x271f000, timeDateStamp: 0x414221a3,
@@ -36,6 +37,7 @@ function machine(slotValue){
     /** @type {Map<number, number>} */
     const cells = new Map([[IMAGE.base + SLOT_RVA, slotValue]]);
     const memory = {
+        writer: ()=>-1,
         /** @param {number} address */
         readU32: address=>cells.get(address >>> 0) ?? 0,
         /** @param {number} address @param {number} value */
@@ -221,7 +223,7 @@ test('bindHooks wired to the real bridge.hook writes the address the bridge actu
             scheduleResume: ()=>{},
         },
         memory,
-        log: { begin: ()=>{}, end: ()=>{} },
+        log: await testLog(),
     };
     const bridge = await bridgeModule.create({}, /** @type {any} */ ({
         /** @param {string} name */ requireApi: name=>bridgeApis[name],
@@ -299,6 +301,7 @@ function siteMachine(corrupt = {}){
     /** @type {{ name: string, access: string }[]} */
     const protects = [];
     const memory = {
+        writer: ()=>-1,
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>Uint8Array.from(
             { length }, (_, i)=>bytes.get(address + i) ?? 0),
@@ -542,7 +545,7 @@ test('bindHooks wired to the real bridge.siteHook writes a stub address the brid
             scheduleResume: ()=>{},
         },
         memory,
-        log: { begin: ()=>{}, end: ()=>{} },
+        log: await testLog(),
     };
     const bridge = await bridgeModule.create({}, /** @type {any} */ ({
         /** @param {string} name */ requireApi: name=>bridgeApis[name],

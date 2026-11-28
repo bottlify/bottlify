@@ -20,6 +20,23 @@ const CURRENT_PROCESS = 0xffffffff;
 const WINEXEC_SUCCESS = 33;
 
 /**
+ * The kernel's process records as its api hands them: the table, a process
+ * of the run found by id and a child's exit recorded.
+ *
+ * @param {ReturnType<typeof createProcessTable>} table
+ */
+const processesOf = table=>({
+    ...table,
+    /** @param {number} id */
+    find: id=>table.all().find(record=>record.id === id) ?? null,
+    /** @param {any} record @param {number} code */
+    finish: (record, code)=>{
+        record.exitCode = code >>> 0;
+        record.completed = true;
+    },
+});
+
+/**
  * @param {Object} [options]
  * @param {string[]} [options.files]  Paths on the volume. Matched by fold, the
  *        way the real volume matches them.
@@ -53,7 +70,7 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\
         cwd,
         view: new DataView(bytes.buffer),
         kernel: {
-            processes: createProcessTable(),
+            processes: processesOf(createProcessTable()),
             handles: {
                 /** @param {string} type @param {any} object */
                 open(type, object){
@@ -73,6 +90,8 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\
                 },
                 /** @param {number} handle */
                 close: handle=>handles.delete(handle),
+                /** All rights, for every handle it holds. */
+                access: ()=>null,
             },
         },
         /** @param {number} address @param {number} length */

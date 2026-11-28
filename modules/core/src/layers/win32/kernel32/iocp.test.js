@@ -643,6 +643,19 @@ test('a packet one front door queues the other takes: native and Win32 over one 
         memory.dword(0x51c)], [0x11, 0x22, 0, 7], 'key, overlapped, status, bytes');
 });
 
+test('a native port call on a handle of another kind is a type mismatch, on none an invalid'
+    + ' handle', ()=>{
+    // NtRemoveIoCompletion on an event's handle: STATUS_OBJECT_TYPE_MISMATCH,
+    // which is how a caller tells a wrong object from a closed handle.
+    const { fns, kernel } = setup();
+    const natives = /** @type {any} */ (fns.CreateIoCompletionPort).natives;
+    const event = kernel.handles.open('event', {});
+    assert.equal(natives.NtRemoveIoCompletion.handler([event, 0x510, 0x514, 0x518, 0]) >>> 0,
+        0xc0000024, 'STATUS_OBJECT_TYPE_MISMATCH');
+    assert.equal(natives.NtRemoveIoCompletion.handler([0x7ff0, 0x510, 0x514, 0x518, 0]) >>> 0,
+        0xc0000008, 'STATUS_INVALID_HANDLE');
+});
+
 test('a port is signalled while a packet waits, and the last thread to wait is woken first', ()=>{
     const { fns, kernel, main, run } = setup();
     const port = makePort(fns);

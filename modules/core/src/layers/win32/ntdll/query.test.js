@@ -10,7 +10,7 @@ import { createQueryFunctions, systemProcessInformation } from './query.js';
 import { STATUS } from './status.js';
 import { LDR_DATA, LDR_ENTRY, PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from '../kernel32/versions.js';
-import { createProcessors } from '../kernel32/processor.js';
+import { testProcessors } from '../kernel.fixture.js';
 
 const TEB_AT = 0x1000;
 const PEB_AT = 0x2000;
@@ -40,6 +40,7 @@ function fakeHost({ blocks = true, arenaSize = 64 * 1024 * 1024 } = {}){
         view.setUint32(PEB_AT + PEB.OS_PLATFORM_ID, 2, true);
     }
     return {
+        processors: testProcessors(),
         bytes,
         view,
         /** @param {number} address @param {number} length */
@@ -119,6 +120,7 @@ test('RtlGetVersion answers each Windows the process block was built for', ()=>{
         });
         const { teb } = blocks.createThreadBlock({ id: 1, stackBase: 0x3000, stackLimit: 0x2000 });
         const fns = createQueryFunctions({
+            processors: testProcessors(),
             readMemory: (address, length)=>bytes.slice(address, address + length),
             writeMemory: (address, data)=>bytes.set(data, address),
             teb: ()=>teb,
@@ -266,7 +268,7 @@ test('the machine\'s processors are counted and masked, whatever the process is 
         // SystemBasicInformation is what GetProcessAffinityMask's system mask
         // and GetSystemInfo are made of; ProcessBasicInformation's mask is the
         // process's (Wine's ntdll test_affinity).
-        const processors = createProcessors({ processors: ()=>4 });
+        const processors = testProcessors({ processors: ()=>4 });
         const host = { ...fakeHost(), processors };
         const fns = createQueryFunctions(host);
         processors.setProcessMask(6);
@@ -424,6 +426,7 @@ test('RtlVerifyVersionInfo compares against the version the process block holds'
     });
     const { teb } = blocks.createThreadBlock({ id: 1, stackBase: 0x3000, stackLimit: 0x2000 });
     const fns = createQueryFunctions({
+        processors: testProcessors(),
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         teb: ()=>teb,

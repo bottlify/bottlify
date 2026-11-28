@@ -31,7 +31,7 @@ const CURRENT_THREAD = 0xfffffffe;
  *     namedObjects?: any, pointerSize?: number }} [given]
  */
 function machine(given = {}){
-    const { registers = {}, setRegisters, divergence, flushProcessWrites, processors,
+    const { registers = {}, setRegisters, divergence, flushProcessWrites = ()=>true, processors,
         namedObjects, pointerSize } = given;
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
@@ -70,7 +70,7 @@ function machine(given = {}){
             registers: ()=>({ eax: 1, ecx: 2, edx: 3, ebx: 4, esi: 5, edi: 6, eflags: 0x246,
                 ...registers }),
             threadOf: handle=>((handle >>> 0) === CURRENT_THREAD ? thread
-                : handles.has(handle) && handles.typeOf(handle) === 'thread'
+                : handles.typeOf(handle) === 'thread'
                     ? handles.resolve(handle) : null),
             objectOf: (handle, type)=>{
                 try

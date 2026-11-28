@@ -23,6 +23,7 @@ import { decodeValue, encodeValue } from '@bottlify/cellar';
 import { createMemoryStore } from './memory-store.fixture.js';
 import { createSharingMemory, openSharedSharing } from './shared-sharing.js';
 import { CHUNK, remoteVolume, volumeHandlers } from './volume-link.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 /** @param {number} seed */
 const random = seed=>{
@@ -67,7 +68,7 @@ async function world(seed, kept){
     let clock = 0;
     const here = await createFilesystemModule().create({ pageFile: await testPageFile(),
         volume: run, now: ()=>clock,
-        drives: { C: { source: createMemoryStore(seeded) } } });
+        drives: { C: { source: createMemoryStore(seeded) } } }, await logHost());
     const handlers = volumeHandlers(run).volume;
     /** @param {any} value */
     const across = value=>decodeValue(encodeValue(value));
@@ -96,7 +97,8 @@ async function world(seed, kept){
         const layer = createFilesystemModule();
         layers.push(layer);
         processes.push(await layer.create({
-            volume: remoteVolume(ask, kept ? memory : null, kept ? tell : null) }));
+            volume: remoteVolume(ask, kept ? memory : null, kept ? tell : null) },
+        await logHost()));
     }
     return { processes, tick: ()=>clock++,
         /** What the processes across kept: how often a read was answered here. */

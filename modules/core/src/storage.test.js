@@ -12,6 +12,7 @@ import {
     coalescedSaver, inflateRaw,
     normaliseSession, opfsSession, packSession, resolveStorage, unpackSession,
 } from './storage.js';
+import { logHost } from './layers/log/testing.fixture.js';
 
 /** @param {number} size @param {number} fill */
 const bytes = (size, fill)=>new Uint8Array(size).fill(fill);
@@ -158,7 +159,7 @@ function fakeDirectory(){
 
 test('a file the volume keeps in pieces is saved a piece at a time and read back whole', async()=>{
     const { filesystemModule } = await import('./layers/filesystem/module.js');
-    const volume = /** @type {any} */ (await filesystemModule.create({ pageFile: await testPageFile() }));
+    const volume = /** @type {any} */ (await filesystemModule.create({ pageFile: await testPageFile() }, await logHost()));
     const handle = volume.open('C:\\big.bin',
         { write: true, disposition: volume.Disposition.CREATE_NEW });
     // The first piece and the third written, the second never: zeros.

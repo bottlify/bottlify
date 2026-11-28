@@ -23,7 +23,6 @@
 
 import { blockLayouts } from '../kernel32/teb.js';
 import { STATUS } from './status.js';
-import { createProcessors } from '../kernel32/processor.js';
 import { verifyVersion, windowsVersion } from '../kernel32/versions.js';
 import { RTL_THREAD_ERROR_MODES } from '../kernel32/error-mode.js';
 import { wholeAddress } from '../common/pointers.js';
@@ -368,8 +367,8 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {() => SystemProcess[]} [processes]  The processes a Toolhelp
  *           snapshot lists, this one first. Without it SystemProcessInformation
  *           is an unknown class.
- * @property {import('../kernel32/processor.js').Processors} [processors]  The
- *           process's processors and its affinity, kernel32's own. Absent, one.
+ * @property {import('../kernel32/processor.js').Processors} processors  The
+ *           process's processors and its affinity, kernel32's own.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose thread and
  *           process blocks are the x64 ones; absent, 4.
  * @property {(handle: number) => any} [processOf]  The child's record a process
@@ -522,7 +521,7 @@ export function systemProcessInformation(processes, base){
  */
 export function createQueryFunctions(host){
     const machine = host.version ?? windowsVersion();
-    const processors = host.processors ?? createProcessors();
+    const processors = host.processors;
     const layout = blockLayouts(host.pointerSize);
     const { pointer: pointerBytes, teb: TEB, peb: PEB, entry: ENTRY } = layout;
 

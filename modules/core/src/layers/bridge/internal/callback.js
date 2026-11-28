@@ -345,7 +345,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         // register, or the return address of the procedure that made the
         // suspended call -- and the procedure returns into the park loop
         // once its call is answered, with nothing to say for itself.
-        const long = cpu.bits?.() === 64;
+        const long = cpu.bits() === 64;
         if (long && longCallAddress === 0)
         {
             longCallAddress = (longCallPlacer?.(Uint8Array.from(LONG_CALL_CODE)) ?? 0) >>> 0;
@@ -411,7 +411,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
      * @param {number} entry @param {Record<string, number>} [registers]
      * @returns {{ eip: number, registers?: Record<string, number> }}
      */
-    const startOf = (entry, registers)=>(cpu.bits?.() === 64
+    const startOf = (entry, registers)=>(cpu.bits() === 64
         ? { eip: longCallAddress, ...registers ? { registers } : {} }
         : { eip: entry, ...registers ? { registers } : {} });
 
@@ -677,7 +677,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             // A 64-bit routine's answer is RAX whole, which the sentinel's stub
             // kept in RCX: its high half goes beside the dword, for a caller
             // that hands the answer on (an LRESULT).
-            frame.settle(cpu.readReg32('ecx') | 0, cpu.bits?.() === 64 && cpu.readReg64
+            frame.settle(cpu.readReg32('ecx') | 0, cpu.bits() === 64 && cpu.readReg64
                 ? Number(BigInt.asUintN(32, cpu.readReg64('rcx') >> 32n)) : undefined);
             return true;
         },
@@ -742,7 +742,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 answered = null;
                 open();
             }
-            if (cpu.bits?.() === 64)
+            if (cpu.bits() === 64)
             {
                 cpu.writeReg64('rax', BigInt.asUintN(64, typeof returnValue === 'bigint'
                     ? returnValue : BigInt(returnValue | 0)));

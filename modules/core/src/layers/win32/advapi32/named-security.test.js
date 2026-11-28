@@ -83,6 +83,7 @@ function setup(){
             },
         },
         hive: createRegistryService(createHive()),
+        security: new Map(),
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push([api, detail]),
     };

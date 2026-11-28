@@ -191,7 +191,7 @@ export function createMailslots(host){
         }
     };
 
-    kernel.onTimeout?.((/** @type {any} */ thread)=>{
+    kernel.onTimeout((/** @type {any} */ thread)=>{
         // A reader whose wait ran out has gone; a message written later
         // stays in the slot for the next read.
         for (const slot of slots.values())
@@ -350,7 +350,7 @@ export function createMailslots(host){
         const io = /** @type {NonNullable<Reader['async']>} */ (reader.async);
         if (reader.timer)
         {
-            kernel.cancelTimer?.(reader.timer);
+            kernel.cancelTimer(reader.timer);
         }
         statusBlock(reader.out, status, count);
         if (io.event !== 0)
@@ -476,9 +476,9 @@ export function createMailslots(host){
             if (slot.timeout !== MAILSLOT_WAIT_FOREVER)
             {
                 // The read timeout ends it with STATUS_IO_TIMEOUT in its block.
-                reader.timer = kernel.createTimer?.({ manualReset: true,
+                reader.timer = kernel.createTimer({ manualReset: true,
                     name: `mailslot ${slot.key}` });
-                kernel.armTimer?.(reader.timer, kernel.clock.virtualTime() + slot.timeout, 0,
+                kernel.armTimer(reader.timer, kernel.clock.virtualTime() + slot.timeout, 0,
                     ()=>{
                         if (slot.readers.includes(reader))
                         {

@@ -25,6 +25,8 @@ import { createHandleTable } from '../../kernel/internal/handles.js';
 import { createMappingFunctions } from './mapping.js';
 import { createThreadingFunctions } from './threading.js';
 import { createNamedObjects } from './named-objects.js';
+import { freshSpace } from '../../cache/testing.fixture.js';
+import { logHost } from '../../log/testing.fixture.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const GENERIC_READ = 0x80000000;
@@ -42,8 +44,8 @@ const PATH = 'C:\\data.bin';
 const CONTENTS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 async function setup(){
-    const fs = await filesystemModule.create({ pageFile: await testPageFile() });
-    const volume = /** @type {any} */ (createVolume(fs));
+    const fs = await filesystemModule.create({ pageFile: await testPageFile() }, await logHost());
+    const volume = /** @type {any} */ (createVolume(fs, null, { kept: freshSpace('reads') }));
     const seeded = volume.open(PATH, { read: true, write: true, create: true });
     volume.write(seeded, 0, new Uint8Array(CONTENTS));
     volume.close(seeded);

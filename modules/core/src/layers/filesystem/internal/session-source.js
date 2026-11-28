@@ -54,20 +54,19 @@ const PIECES_PER_FILE = 2 ** 21;
  *     put: (key: string, bytes: Uint8Array) => boolean }} PieceSpace
  */
 
-/** A place that keeps nothing: every piece is held only from its fetch to the next. */
-const KEEP_NOTHING = Object.freeze(/** @type {PieceSpace} */ ({
-    look: ()=>null,
-    with: ()=>undefined,
-    put: ()=>false,
-}));
-
 /**
  * @param {{ path: string, file: LazyFile }[]} files  `path` relative to the
  *     drive's root; `file` handed back as it is by `kept`
- * @param {{ kept?: PieceSpace }} [options]  where the pieces read are kept,
- *     their keys this source's alone
+ * @param {{ kept: PieceSpace }} options  where the pieces read are kept, their
+ *     keys this source's alone: a space of the run's cache. A piece it has no
+ *     room for is held only from its fetch to the next, and said (`held`).
  */
-export function createSessionSource(files, { kept = KEEP_NOTHING } = {}){
+export function createSessionSource(files, options){
+    const kept = options?.kept;
+    if (!kept)
+    {
+        throw new Error('a session source with no space of the run\'s cache to keep its pieces in');
+    }
     /** @type {Map<string, { path: string, file: LazyFile, number: number }>} by folded path */
     const byPath = new Map();
     /** @type {Set<string>} folded */

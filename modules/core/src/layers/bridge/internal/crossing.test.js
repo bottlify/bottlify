@@ -31,6 +31,7 @@ function machine(){
     /** @type {Record<string, number>} */
     const registers = { esp: ESP, ecx: 0, eax: 0, edx: 0 };
     const cpu = {
+        bits: ()=>32,
         /** @param {string} name */
         readReg32: name=>registers[name],
         /** @param {string} name @param {number} value */

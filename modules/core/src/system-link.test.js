@@ -33,6 +33,7 @@ test('a process across a link writes the run\'s registry, takes the run\'s ids, 
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set() },
         windows,
+        fileSecurity: new Map(),
     };
     const { a, b } = createLinkMemory();
     const link = openLink(a, systemHandlers(system));
@@ -102,6 +103,7 @@ test('what a process across a link lays as the machine\'s is furnished and annou
             volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
                 watchers: new Set() },
             windows: createWindowDirectory(),
+            fileSecurity: new Map(),
         };
         let announced = 0;
         system.registry.onChanged(()=>announced++);
@@ -124,6 +126,30 @@ test('what a process across a link lays as the machine\'s is furnished and annou
         assert.equal(announced, 1, 'the program\'s write from a worker is');
     });
 
+test('the descriptors a process across a link sets on a file are the run\'s, read by any process',
+    ()=>{
+        // A setup writes a file's DACL in one process and a service reads it in
+        // another: each in a worker of its own keeps nothing of it there.
+        const system = {
+            registry: createRegistryService(createHive()),
+            ids: { thread: 1, process: 0x2008 },
+            volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
+                watchers: new Set() },
+            windows: createWindowDirectory(),
+            fileSecurity: new Map(),
+        };
+        const engine = /** @type {Record<string, any>} */ (systemHandlers(system));
+        const across = ()=>/** @type {any} */ (remoteSystem((target, method, args)=>
+            engine[target][method](...args), {}));
+        const setup = across();
+        const service = across();
+        const dacl = Uint8Array.of(2, 0, 8, 0);
+        setup.fileSecurity.set('c:\\app\\data', { dacl });
+        assert.deepEqual(system.fileSecurity.get('c:\\app\\data'), { dacl });
+        assert.deepEqual(service.fileSecurity.get('c:\\app\\data'), { dacl });
+        assert.equal(service.fileSecurity.get('c:\\other'), undefined);
+    });
+
 test('two processes on one link (a child beside its parent in a worker) each answer for their'
     + ' own windows', ()=>{
     const windows = createWindowDirectory();
@@ -133,6 +159,7 @@ test('two processes on one link (a child beside its parent in a worker) each ans
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set() },
         windows,
+        fileSecurity: new Map(),
     };
     /** @type {Record<string, any>} */
     const across = {};
@@ -171,6 +198,7 @@ test('the run keeps which processes answer for their windows across a link, to d
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set() },
         windows,
+        fileSecurity: new Map(),
     };
     /** @type {Set<number>} */
     const attached = new Set();

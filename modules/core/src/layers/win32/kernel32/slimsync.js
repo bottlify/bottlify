@@ -691,7 +691,7 @@ export function createSlimSync(host, enterCritical, enterSection){
 
     // A sleeper whose time ran out has stopped waiting: a wake that found it
     // still queued would be spent on nobody.
-    kernel.onTimeout?.((/** @type {any} */ thread)=>{
+    kernel.onTimeout((/** @type {any} */ thread)=>{
         for (const queue of conditions.values())
         {
             const at = queue.indexOf(thread);

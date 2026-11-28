@@ -24,6 +24,10 @@ import { certificates, NOW, signedCabinet } from './wintrust/fixtures.test.js';
 import { noCache } from '../cache/module.js';
 import { createHandleTable, FIRST_HANDLE } from '../kernel/internal/handles.js';
 import { createProcessTable } from '../kernel/internal/processes.js';
+import { memoryLayerAnswers } from './memory.fixture.js';
+import { kernelLayerAnswers } from './kernel.fixture.js';
+import { logHost, testLog } from '../log/testing.fixture.js';
+import { cpuForMemory } from '../memory/cpu.fixture.js';
 
 const ARENA = { base: 0x100000, size: 0x200000 };
 
@@ -39,6 +43,7 @@ function hostOver(replace = {}){
     /** @type {Record<string, any>} */
     const apis = {
         memory: {
+            ...memoryLayerAnswers,
             /** @param {number} at @param {number} length */
             readBytes: (at, length)=>bytes.slice(at, at + length),
             /** @param {number} at @param {Uint8Array} data */
@@ -81,12 +86,20 @@ function hostOver(replace = {}){
             scanCString: ()=>({ index: 0, byte: 0 }),
         },
         kernel: {
+            ...kernelLayerAnswers,
             handles: createHandleTable(),
             clock: { virtualTime: ()=>0 },
             currentThread: ()=>null,
             exitThread: ()=>{},
             setEvent: ()=>{},
             onTimeout: ()=>{},
+            // What win32 asks of the kernel for its stacks and its threads,
+            // answering as a kernel with none to lend does.
+            lendStacks: ()=>{},
+            allocateStack: ()=>null,
+            releaseStack: ()=>{},
+            forsake: ()=>{},
+            answeredElsewhere: ()=>{},
         },
         bridge: {
             register: ()=>0,
@@ -96,6 +109,8 @@ function hostOver(replace = {}){
             callGuest: ()=>Promise.resolve(0),
             callerThread: ()=>null,
             label: ()=>{},
+            onGuestFault: ()=>{},
+            callbackCaller: ()=>null,
         },
         filesystem: replace.filesystem ?? { drives: ()=>[], stat: ()=>null },
         // No run's cache: every read is a miss.
@@ -255,7 +270,8 @@ test('the synchronisation calls leave their failures as the thread\'s last error
 });
 
 test('a structure written to a profile is read from guest memory and read back', async()=>{
-    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+        await logHost());
     const thread = { id: 1 };
     const { bytes, libraries, lastError } = await build({
         filesystem,
@@ -284,7 +300,8 @@ test('msvcrt\'s descriptors and kernel32\'s file handles are handles in one tabl
     // _get_osfhandle gives a handle kernel32's calls take, at the descriptor's
     // position; _open_osfhandle takes CreateFile's; the descriptor closes
     // either through the CloseHandle a program calls.
-    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+        await logHost());
     /** @type {Map<number, { type: string, object: any }>} */
     const entries = new Map();
     let next = 0x100;
@@ -365,7 +382,8 @@ test('a file msvcrt opened to be deleted on close is gone once the process ends'
     ];
     for (const [how, end] of endings)
     {
-        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+            await logHost());
         const { bytes, libraries, exitCode } = await build({
             filesystem, kernel: { currentThread: ()=>({ id: 1 }) },
             modules: { processDetach: ()=>[] },
@@ -389,7 +407,8 @@ test('the process\'s end closes every handle it holds, one protected from close 
     const GENERIC_WRITE = 0x40000000;
     const CREATE_ALWAYS = 2;
     const FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
-    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+        await logHost());
     const thread = { id: 1 };
     const { bytes, libraries, lastError } = await build({
         filesystem, kernel: { currentThread: ()=>thread },
@@ -418,7 +437,8 @@ test('the process\'s end closes every handle it holds, one protected from close 
 });
 
 test('msvcrt\'s __int64 answers reach EDX through the processor\'s registers', async()=>{
-    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+        await logHost());
     /** @type {Record<string, number>} */
     const written = {};
     const { bytes, libraries } = await build({
@@ -667,7 +687,8 @@ test('MsgWaitForMultipleObjectsEx with MWMO_INPUTAVAILABLE wakes for a message s
 
 test('SETUPAPI finds an INF on the volume by bare name and registers into advapi32\'s hive',
     async()=>{
-        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+            await logHost());
         const thread = { id: 1 };
         const { bytes, view, libraries, lastError } = await build({
             filesystem,
@@ -755,6 +776,8 @@ function handleTable(){
             entries.delete(handle);
             return entry.object;
         },
+        /** All rights, for every handle it holds. */
+        access: ()=>null,
         /** @param {number} handle */
         typeOf: handle=>entries.get(handle)?.type ?? null,
     };
@@ -763,7 +786,8 @@ function handleTable(){
 test('mmio opens a file by the handle kernel32 gave the program, and closes it with its own',
     async()=>{
         // mmio.c test_mmioSeek: the file is read from where the handle stands.
-        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+            await logHost());
         const handles = handleTable();
         const thread = { id: 1 };
         const { bytes, view, libraries } = await build({
@@ -903,7 +927,8 @@ test('a PROPVARIANT\'s BSTR and SAFEARRAY are copied and freed by oleaut32\'s ow
 
 test('WINTRUST reads the file from the volume and judges it against the configured roots',
     async()=>{
-        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+            await logHost());
         const thread = { id: 1 };
         const chain = certificates();
         const { bytes, view, libraries, lastError } = await build({
@@ -943,7 +968,8 @@ test('WINTRUST reads the file from the volume and judges it against the configur
 test('a \\\\?\\ path reaches the volume\'s files as the plain path does', async()=>{
     // A program that builds its paths in the Win32 file namespace -- a profile folder under
     // My Documents, created a level at a time -- finds and makes what a plain path finds.
-    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+        await logHost());
     const thread = { id: 1 };
     const { bytes, libraries, lastError } = await build({
         filesystem,
@@ -985,12 +1011,13 @@ test('a string past the limit a handler reads is cut there; '
     // access violation the processor would take.
     const bytes = new Uint8Array(0x400000);
     const memoryModule = createMemoryModule();
+    const log = await testLog();
     const memory = await memoryModule.create({}, /** @type {any} */ ({ requireApi: (
-        /** @type {string} */ name)=>(name === 'cpu' ? {
+        /** @type {string} */ name)=>(name === 'cpu' ? cpuForMemory({
         readPhysical: (/** @type {number} */ at, /** @type {number} */ n)=>
             bytes.subarray(at, at + n),
         writePhysical: (/** @type {number} */ at, /** @type {Uint8Array} */ d)=>bytes.set(d, at),
-    } : {}) }));
+    }) : log) }));
     memory.register({ name: 'data', base: 0x1000, size: 0x3ff000,
         kind: memory.RegionKind.STACK, access: memory.Access.READ_WRITE });
     const thread = { id: 1 };
@@ -1015,7 +1042,8 @@ test('a closed handle\'s flags go with it: its number reused is neither inherite
         const thread = { id: 1 };
         /** @type {any[]} */
         const spawned = [];
-        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() },
+            await logHost());
         const { view, libraries, lastError } = await build({
             filesystem,
             kernel: { handles: createHandleTable({ limit: FIRST_HANDLE + 8 }),

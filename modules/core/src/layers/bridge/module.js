@@ -416,8 +416,7 @@ export function createBridgeModule(){
             // reader elsewhere (the log keeper): a handful of rows, and none at
             // all while no hook is bound.
             const log = /** @type {any} */ (host.requireApi('log'));
-            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false
-                && typeof log.metrics?.table === 'function')
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
             {
                 const table = log.metrics.table('bridge', 'hooks',
                     { rows: HOOK_ROWS, columns: ['name', 'calls', 'hookNs'] });
@@ -594,7 +593,7 @@ export function createBridgeModule(){
                  * @param {number} value
                  */
                 answerHigh(value){
-                    if (cpu.bits?.() === 64)
+                    if (cpu.bits() === 64)
                     {
                         state.dispatcher.answerHigh(value);
                         return;
@@ -1015,7 +1014,7 @@ export function createBridgeModule(){
                         memory,
                         heap,
                         unimplemented: comUnimplemented,
-                        long: ()=>cpu.bits?.() === 64,
+                        long: ()=>cpu.bits() === 64,
                         register: (/** @type {string} */ name, /** @type {any} */ fn)=>
                             this.register(name, fn),
                     });
