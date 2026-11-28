@@ -826,7 +826,7 @@ test('closing a file handle closes it once and for all', ()=>{
 
     assert.equal(fns.FlushFileBuffers.handler([handle]), 1);
     assert.equal(fns.CloseHandle.handler([handle]), 1);
-    assert.equal(handles.has(handle), false);
+    assert.equal(handles.typeOf(handle), null);
     assert.equal(fns.CloseHandle.handler([handle]), 0, 'closing twice is a failure');
     assert.equal(error.code, ERROR_INVALID_HANDLE);
     assert.equal(fns.ReadFile.handler([handle, BUFFER, 1, OUT_COUNT, 0]), 0);
@@ -839,7 +839,7 @@ test('CloseHandle closes what other tables opened, without telling the filesyste
 
     assert.equal(fns.CloseHandle.handler([event]), 1,
         'one handle space means one CloseHandle');
-    assert.equal(handles.has(event), false);
+    assert.equal(handles.typeOf(event), null);
 
     // A mapping over an open file carries the file's node; closing the
     // mapping leaves the file open for its own close.

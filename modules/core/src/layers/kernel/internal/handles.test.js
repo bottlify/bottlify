@@ -45,7 +45,7 @@ test('an invented handle is an error, not a wrong object', ()=>{
 
     assert.throws(()=>table.resolve(0x1234), /Invalid handle 0x1234/);
     assert.throws(()=>table.resolve(0), /Invalid handle/);
-    assert.equal(table.has(0x1234), false);
+    assert.equal(table.typeOf(0x1234), null);
 });
 
 test('use after close lands on nothing, not on the next object', ()=>{
@@ -138,7 +138,7 @@ test('a handle\'s flags are its own: set on it, read back, gone with it', ()=>{
     assert.equal(table.flags(0x7770), null);
 
     assert.throws(()=>table.close(marked), /protected from close/);
-    assert.equal(table.has(marked), true, 'a handle protected from close stays open');
+    assert.equal(table.typeOf(marked) !== null, true, 'a handle protected from close stays open');
     table.setFlags(marked, 2, 0);
     table.close(marked);
     const reused = table.open('event', {});

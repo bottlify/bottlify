@@ -664,7 +664,7 @@ export function createIoCompletionPorts(host){
 
     /** @param {number} handle @returns {any | number} the port, or the status for a handle that names none */
     const nativePort = handle=>portOf(handle)
-        ?? (kernel.handles.has?.(handle >>> 0) ? STATUS.OBJECT_TYPE_MISMATCH
+        ?? (kernel.handles.typeOf(handle >>> 0) !== null ? STATUS.OBJECT_TYPE_MISMATCH
             : STATUS.INVALID_HANDLE);
 
     /**
