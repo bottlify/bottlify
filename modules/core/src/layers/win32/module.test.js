@@ -24,6 +24,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { win32Module } from './module.js';
 import { noCache } from '../cache/module.js';
+import { memoryLayerAnswers } from './memory.fixture.js';
+import { kernelLayerAnswers } from './kernel.fixture.js';
 
 /** SM_CXSCREEN and SM_CYSCREEN, the two a program sizes itself from. */
 const SM_CXSCREEN = 0;
@@ -56,6 +58,7 @@ function stubHost(){
     /** @type {Record<string, any>} */
     const apis = {
         memory: {
+            ...memoryLayerAnswers,
             readBytes: ()=>new Uint8Array(0),
             writeBytes: ()=>{},
             readCString: ()=>'',
@@ -63,6 +66,7 @@ function stubHost(){
             readU32: ()=>0,
         },
         kernel: {
+            ...kernelLayerAnswers,
             handles: {
                 /** @param {string} type @param {any} object */
                 open: (type, object)=>{
@@ -82,16 +86,27 @@ function stubHost(){
             exitThread: ()=>{},
             setEvent: ()=>{},
             onTimeout: ()=>{},
+            // What win32 asks of the kernel for its stacks and its threads,
+            // answering as a kernel with none to lend does.
+            lendStacks: ()=>{},
+            allocateStack: ()=>null,
+            releaseStack: ()=>{},
+            forsake: ()=>{},
+            answeredElsewhere: ()=>{},
         },
         bridge: {
             register: ()=>0,
             park: ()=>0,
             useHeap: ()=>{},
             publishInterface: ()=>0,
+            onGuestFault: ()=>{},
+            callbackCaller: ()=>null,
         },
         filesystem: {
             drives: ()=>[],
             stat: ()=>null,
+            redirect: ()=>{},
+            volume: ()=>null,
         },
         // No run's cache: every read is a miss.
         cache: noCache,
@@ -388,6 +403,7 @@ test('comctl32\'s _TrackMouseEvent is user32\'s TrackMouseEvent', async()=>{
     const view = new DataView(bytes.buffer);
     const host = stubHost();
     const memory = {
+        ...memoryLayerAnswers,
         readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
             bytes.slice(at, at + length),
         writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>bytes.set(data, at),
@@ -432,6 +448,7 @@ function hostWithMemory(){
         return result;
     };
     const memory = {
+        ...memoryLayerAnswers,
         readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
             bytes.slice(at, at + length),
         writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>bytes.set(data, at),

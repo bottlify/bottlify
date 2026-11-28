@@ -94,7 +94,7 @@ function machine(given = {}){
                     return event;
                 },
             },
-            clock: { virtualTime: ()=>now },
+            clock: { virtualTime: ()=>now, wallClock: ()=>1_000_000 },
         },
         register: (name, fn)=>{
             traps[name] = fn;
@@ -109,7 +109,6 @@ function machine(given = {}){
         ...given.processHeap ? { processHeap: given.processHeap } : {},
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         readMemory: (address, length)=>memory.slice(address, address + length),
-        wallClock: ()=>1_000_000,
         threadBlock: thread=>{
             thread.block = true;
         },

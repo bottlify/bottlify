@@ -256,8 +256,8 @@ const DEVICE_CONTROLS = new Map([
  * @property {any} kernel  block, wake, onTimeout, clock
  * @property {{ open: (type: string, object: any, access?: number | null, flags?: number) => number,
  *     resolve: (handle: number, type?: string) => any,
- *     typeOf?: (handle: number) => string | null,
- *     access?: (handle: number) => number | null,
+ *     typeOf: (handle: number) => string | null,
+ *     access: (handle: number) => number | null,
  *     list: () => { handle: number, type: string }[] }} handles
  *     The process's handle table; a pipe handle's HANDLE_FLAG_INHERIT is its own there.
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -665,7 +665,7 @@ export function createNamedPipes(host){
     };
     /** @param {number} handle @returns {End | null} */
     const endOf = handle=>{
-        if ((host.handles.typeOf?.(handle >>> 0) ?? 'pipe') !== 'pipe')
+        if ((host.handles.typeOf(handle >>> 0) ?? 'pipe') !== 'pipe')
         {
             return null;
         }
@@ -686,7 +686,7 @@ export function createNamedPipes(host){
      * @returns {'device' | 'root' | null}
      */
     const deviceOf = handle=>{
-        if ((host.handles.typeOf?.(handle >>> 0) ?? 'pipe') !== 'pipe')
+        if ((host.handles.typeOf(handle >>> 0) ?? 'pipe') !== 'pipe')
         {
             return null;
         }
@@ -700,7 +700,7 @@ export function createNamedPipes(host){
     };
     /** @param {number} handle @returns {StandIn | null} */
     const standInOf = handle=>{
-        if (!host.across || (host.handles.typeOf?.(handle >>> 0) ?? 'pipe') !== 'pipe')
+        if (!host.across || (host.handles.typeOf(handle >>> 0) ?? 'pipe') !== 'pipe')
         {
             return null;
         }
@@ -754,7 +754,7 @@ export function createNamedPipes(host){
      * @type {Set<Pipe>}
      */
     const waitedOn = new Set();
-    kernel.onTimeout?.((/** @type {any} */ thread)=>{
+    kernel.onTimeout((/** @type {any} */ thread)=>{
         // A wait for an instance that ran out has stopped waiting.
         for (const pipe of waitedOn)
         {
@@ -991,7 +991,7 @@ export function createNamedPipes(host){
         if (end.signal && event === 0
             && ((ctx.modes.get(handle >>> 0) ?? 0) & FILE_SKIP_SET_EVENT_ON_HANDLE) === 0)
         {
-            kernel.setEvent?.(end.signal);
+            kernel.setEvent(end.signal);
         }
     };
 
@@ -1010,7 +1010,7 @@ export function createNamedPipes(host){
         if (op.end?.signal && !ownEvent(op)
             && ((op.ctx.modes.get(op.handle) ?? 0) & FILE_SKIP_SET_EVENT_ON_HANDLE) === 0)
         {
-            owner.kernel.setEvent?.(op.end.signal);
+            owner.kernel.setEvent(op.end.signal);
         }
         const error = toDosError(status);
         const succeeded = status === STATUS.SUCCESS;
@@ -1380,7 +1380,7 @@ export function createNamedPipes(host){
         instance.connects.push(op);
         if (end.signal)
         {
-            kernel.resetEvent?.(end.signal);
+            kernel.resetEvent(end.signal);
         }
         if (overlapped !== 0 || async)
         {
@@ -1512,7 +1512,7 @@ export function createNamedPipes(host){
                             }
                         },
                         kernel: {
-                            setEvent: (/** @type {any} */ event)=>kernel.setEvent?.(event),
+                            setEvent: (/** @type {any} */ event)=>kernel.setEvent(event),
                             wake: (/** @type {any} */ thread, /** @type {number} */ status)=>{
                                 void thread;
                                 waiting.delete(op);
@@ -1524,7 +1524,7 @@ export function createNamedPipes(host){
             place(op);
             if (end.signal)
             {
-                kernel.resetEvent?.(end.signal);
+                kernel.resetEvent(end.signal);
             }
         });
         /** @type {EndAcross} */
@@ -1970,7 +1970,7 @@ export function createNamedPipes(host){
         end.readers.push(op);
         if (end.signal)
         {
-            kernel.resetEvent?.(end.signal);
+            kernel.resetEvent(end.signal);
         }
         if (async)
         {
@@ -2097,7 +2097,7 @@ export function createNamedPipes(host){
             peer.waiting++;
             if (end.signal)
             {
-                kernel.resetEvent?.(end.signal);
+                kernel.resetEvent(end.signal);
             }
             if (async)
             {
@@ -2547,7 +2547,7 @@ export function createNamedPipes(host){
         // Pending, it holds the end's handle down as any request does.
         if (end.signal)
         {
-            kernel.resetEvent?.(end.signal);
+            kernel.resetEvent(end.signal);
         }
         kernel.block(op.thread, 'pipe flush');
         return { parked: host.park() };
@@ -3109,7 +3109,7 @@ export function createNamedPipes(host){
                 {
                     return 1;
                 }
-                if (!allows(host.handles.access?.(handle >>> 0) ?? null, FILE_WRITE_ATTRIBUTES))
+                if (!allows(host.handles.access(handle >>> 0) ?? null, FILE_WRITE_ATTRIBUTES))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -3216,7 +3216,7 @@ export function createNamedPipes(host){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        if ((host.handles.typeOf?.(handle >>> 0) ?? null) === null)
+        if ((host.handles.typeOf(handle >>> 0) ?? null) === null)
         {
             return ERROR_INVALID_HANDLE;
         }
@@ -3230,11 +3230,11 @@ export function createNamedPipes(host){
         {
             if ((modes & FILE_SKIP_SET_EVENT_ON_HANDLE) !== 0)
             {
-                kernel.resetEvent?.(end.signal);
+                kernel.resetEvent(end.signal);
             }
             else
             {
-                kernel.setEvent?.(end.signal);
+                kernel.setEvent(end.signal);
             }
         }
         return 0;
@@ -4000,7 +4000,7 @@ export function createNamedPipes(host){
                 }
                 return nameInformation(pipe.name);
             }
-            if (!allows(host.handles.access?.(handle >>> 0) ?? null, FILE_READ_ATTRIBUTES))
+            if (!allows(host.handles.access(handle >>> 0) ?? null, FILE_READ_ATTRIBUTES))
             {
                 return { status: STATUS.ACCESS_DENIED };
             }
@@ -4057,7 +4057,7 @@ export function createNamedPipes(host){
             {
                 return STATUS.INFO_LENGTH_MISMATCH;
             }
-            if (!allows(host.handles.access?.(handle >>> 0) ?? null, FILE_WRITE_ATTRIBUTES))
+            if (!allows(host.handles.access(handle >>> 0) ?? null, FILE_WRITE_ATTRIBUTES))
             {
                 return STATUS.ACCESS_DENIED;
             }

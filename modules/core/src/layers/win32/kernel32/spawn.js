@@ -982,7 +982,7 @@ export function createSpawnFunctions(host){
         {
             kernel.handles.close(made.handle);
             kernel.handles.close(made.threadHandle);
-            kernel.processes.finish?.(made, 0);
+            kernel.processes.finish(made, 0);
             host.setLastError(made.refused);
             return 0;
         }
@@ -1080,14 +1080,13 @@ export function createSpawnFunctions(host){
                     // parent holds is the one every process waits on; a
                     // process nobody started has none, and its own handle is
                     // the pseudo-handle's object.
-                    const self = kernel.processes.find?.(wanted)
+                    const self = kernel.processes.find(wanted)
                         ?? { kind: 'process', current: true, imagePath: host.imagePath?.() ?? '' };
                     return kept(self);
                 }
                 // A child, or any process of the run on this thread: a crash
                 // reporter opens the client that asked it for a dump.
-                const child = kernel.processes.find?.(wanted) ?? kernel.processes.all().find(
-                    (/** @type {any} */ made)=>made.id === wanted);
+                const child = kernel.processes.find(wanted);
                 if (!child)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);

@@ -119,7 +119,7 @@ export function createChangeNotifications(host){
         try
         {
             const plain = untagged(handle);
-            return kernel.handles.typeOf?.(plain) === CHANGE_NOTIFICATION
+            return kernel.handles.typeOf(plain) === CHANGE_NOTIFICATION
                 ? kernel.handles.resolve(plain) ?? null
                 : null;
         }
@@ -177,7 +177,7 @@ export function createChangeNotifications(host){
                 }
                 state.set = true;
                 kernel.setEvent(event);
-            }, ()=>kernel.handles.holds?.(event) ?? true);
+            }, ()=>kernel.handles.holds(event));
             watching.set(event, state);
             return kernel.handles.open(CHANGE_NOTIFICATION, event);
         },

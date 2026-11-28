@@ -212,7 +212,7 @@ export function createThreadInfoFunctions(host){
                 return read(at, TIMES_SIZE) ?? new Uint8Array(TIMES_SIZE);
             }
             case THREAD_INFO.AM_I_LAST_THREAD: {
-                const others = (kernel.threads?.() ?? [])
+                const others = kernel.threads()
                     .filter((/** @type {any} */ each)=>each !== thread && !ended(each));
                 return dword(others.length === 0 ? 1 : 0);
             }
@@ -267,7 +267,7 @@ export function createThreadInfoFunctions(host){
         // The limited right reads the classes anyone may read; the others
         // need THREAD_QUERY_INFORMATION - on this handle, whosever the thread.
         const granted = (handle >>> 0) === CURRENT_THREAD ? null
-            : kernel.handles.access?.(handle >>> 0) ?? null;
+            : kernel.handles.access(handle >>> 0);
         const right = LIMITED_CLASSES.has(infoClass >>> 0)
             ? THREAD_QUERY_LIMITED_INFORMATION : THREAD_QUERY_INFORMATION;
         const thread = threadOf(handle);

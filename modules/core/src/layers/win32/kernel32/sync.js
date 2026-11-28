@@ -1059,7 +1059,7 @@ export function createSyncFunctions(host){
                     }
                     // One opened without SYNCHRONIZE fails the whole wait.
                     if (!isStandardHandle(handle)
-                        && !allows(kernel.handles.access?.(untagged(handle)) ?? null, SYNCHRONIZE))
+                        && !allows(kernel.handles.access(untagged(handle)), SYNCHRONIZE))
                     {
                         host.setLastError?.(ERROR_ACCESS_DENIED);
                         return WAIT_FAILED;
@@ -1068,7 +1068,7 @@ export function createSyncFunctions(host){
                     // one already set for one the engine answered for; a
                     // child's thread as the one this process sets once the
                     // child says it has ended.
-                    const kind = kernel.handles.typeOf?.(untagged(handle));
+                    const kind = kernel.handles.typeOf(untagged(handle));
                     objects.push(kind === 'process' ? target.exited
                         : kind === 'process-thread'
                             ? threadEnd({ kernel, askChild: host.askChild }, target)
@@ -1203,8 +1203,8 @@ export function createSyncFunctions(host){
                 }
                 // A child's processor time is its own scheduler's, not known here.
                 return writeTimes([creation, exit, kernelTime, userTime], child !== null
-                    && (child.completed || child.exitCode !== kernel.processes?.STILL_ACTIVE),
-                child === null ? kernel.processCpuMs?.() ?? 0 : 0);
+                    && (child.completed || child.exitCode !== kernel.processes.STILL_ACTIVE),
+                child === null ? kernel.processCpuMs() : 0);
             },
         },
 
@@ -1222,7 +1222,7 @@ export function createSyncFunctions(host){
             /** @param {number[]} args */
             handler: ([idle, kernelTime, userTime])=>{
                 const total = kernel.clock.virtualTime() * processors.count();
-                const busy = Math.min(kernel.processCpuMs?.() ?? 0, total);
+                const busy = Math.min(kernel.processCpuMs(), total);
                 /** @param {number} address @param {number} ms */
                 const write = (address, ms)=>{
                     if ((address >>> 0) !== 0)
@@ -1413,7 +1413,7 @@ export function createSyncFunctions(host){
                 // parked: answered from where it was last placed, the registers
                 // name a stack the thread is still writing, which a collector
                 // that walks a suspended thread's stack reads as its frames.
-                if (!own && kernel.settleThread?.(thread) === false && kernel.settledThread)
+                if (!own && kernel.settleThread(thread) === false)
                 {
                     return kernel.settledThread(thread).then(answer);
                 }
@@ -1498,7 +1498,7 @@ export function createSyncFunctions(host){
                     }
                     return 1;
                 };
-                if (kernel.settleThread?.(thread) === false && kernel.settledThread)
+                if (kernel.settleThread(thread) === false)
                 {
                     return kernel.settledThread(thread).then(apply);
                 }
