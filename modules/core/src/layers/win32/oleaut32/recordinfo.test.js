@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRecordInfoObjects, IID_IRECORDINFO } from './recordinfo.js';
 import { createAdapter } from './objects.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const plain = (/** @type {number} */ vt)=>({ vt, element: null, hreftype: -1, array: null });
 
@@ -33,8 +34,7 @@ function fixture(){
     /** @type {any} */
     let published = null;
     const objects = createRecordInfoObjects({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         heap: { allocate: size=>{
             const at = next;
             next += size + 16;

@@ -120,26 +120,26 @@ function parseSltg(bytes){
         throw new Error('not an SLTG type library');
     }
     /** @param {number} at */
-    const u16 = at=>view.getUint16(at, true);
+    const at16 = at=>view.getUint16(at, true);
     /** @param {number} at */
-    const u32 = at=>view.getUint32(at, true);
+    const at32 = at=>view.getUint32(at, true);
     /** @param {number} at @param {number} length */
     const text = (at, length)=>decodeAnsi(bytes.subarray(at, at + length));
     /** A counted string: a length word, 0xffff for none, then the bytes. @param {number} at */
     const counted = at=>{
-        const length = u16(at);
+        const length = at16(at);
         return length === 0xffff
             ? { value: null, size: 2 }
             : { value: text(at + 2, length), size: length + 2 };
     };
 
-    const blockCount = u16(4);
-    const firstBlock = u16(10);
+    const blockCount = at16(4);
+    const firstBlock = at16(10);
     /** @type {{ length: number, index: number, next: number }[]} */
     const entries = [];
     for (let at = HEADER_BYTES, index = 0; index < blockCount - 1; index++, at += BLOCK_ENTRY_BYTES)
     {
-        entries.push({ length: u32(at), index: u16(at + 4), next: u16(at + 6) });
+        entries.push({ length: at32(at), index: at16(at + 4), next: at16(at + 6) });
     }
     const directory = HEADER_BYTES + (blockCount - 1) * BLOCK_ENTRY_BYTES;
     if (text(directory + 1, 7) !== 'CompObj')
@@ -166,16 +166,16 @@ function parseSltg(bytes){
         order = entries[order].next - 1;
     }
     const library = at;
-    if (u16(library) !== LIBRARY_MAGIC)
+    if (at16(library) !== LIBRARY_MAGIC)
     {
         throw new Error('SLTG type library: no library block where the chain ends');
     }
 
     // The library block's own fields.
     let cursor = library + 6;
-    if (u16(cursor) !== 0xffff)
+    if (at16(cursor) !== 0xffff)
     {
-        cursor += u16(cursor);
+        cursor += at16(cursor);
     }
     cursor += 2;
     const helpString = counted(cursor);
@@ -183,18 +183,18 @@ function parseSltg(bytes){
     const helpFile = counted(cursor);
     cursor += helpFile.size;
     cursor += 4;
-    const sysKind = u16(cursor);
-    const lcid = u16(cursor + 2);
-    const libraryFlags = u16(cursor + 8);
-    const majorVersion = u16(cursor + 10);
-    const minorVersion = u16(cursor + 12);
+    const sysKind = at16(cursor);
+    const lcid = at16(cursor + 2);
+    const libraryFlags = at16(cursor + 8);
+    const majorVersion = at16(cursor + 10);
+    const minorVersion = at16(cursor + 12);
     const libraryGuid = formatGuid(bytes.subarray(cursor + 14, cursor + 14 + GUID_SIZE));
     cursor += 14 + GUID_SIZE;
 
     // Sixty-four bytes of a table nothing reads, the count, then one record
     // per type: its index name, its name, its help, its GUID and its kind.
     cursor += 0x40;
-    const typeCount = u16(cursor);
+    const typeCount = at16(cursor);
     cursor += 2;
     /** @type {{ indexName: string | null, nameOffset: number, guid: string, kind: number }[]} */
     const others = [];
@@ -204,27 +204,27 @@ function parseSltg(bytes){
         const indexName = counted(cursor);
         if (indexName.value !== null)
         {
-            extra += u16(cursor);
+            extra += at16(cursor);
         }
-        const otherLength = u16(cursor + 2 + extra);
+        const otherLength = at16(cursor + 2 + extra);
         if (otherLength !== 0xffff)
         {
             extra += otherLength;
         }
-        const nameOffset = u16(cursor + 6 + extra);
-        const helpLength = u16(cursor + 8 + extra);
+        const nameOffset = at16(cursor + 6 + extra);
+        const helpLength = at16(cursor + 8 + extra);
         extra += helpLength;
         const guidAt = cursor + 18 + extra;
         others.push({
             indexName: indexName.value,
             nameOffset,
             guid: formatGuid(bytes.subarray(guidAt, guidAt + GUID_SIZE)),
-            kind: u16(guidAt + GUID_SIZE),
+            kind: at16(guidAt + GUID_SIZE),
         });
         cursor += OTHER_TYPE_BYTES + extra;
     }
-    let names = library + u32(cursor);
-    if (u16(names) === 0x0200)
+    let names = library + at32(cursor);
+    if (at16(names) === 0x0200)
     {
         names += 0x20;
     }
@@ -243,7 +243,7 @@ function parseSltg(bytes){
         }
         return text(start, end - start);
     };
-    const libraryName = nameAt(u16(library + 4)) ?? '';
+    const libraryName = nameAt(at16(library + 4)) ?? '';
 
     /** @type {import('./typelib.js').ImportedType[]} */
     const imports = [];
@@ -289,7 +289,7 @@ function parseSltg(bytes){
         {
             throw new Error('SLTG type library: a reference table without its magic');
         }
-        const number = u32(tableAt + 0x44);
+        const number = at32(tableAt + 0x44);
         let entry = tableAt + 0x4f + number;
         /** @type {number[]} */
         const hreftypes = [];
@@ -355,7 +355,7 @@ function parseSltg(bytes){
         let word = typeAt;
         for (let guard = 0; guard < 64; guard++)
         {
-            const code = u16(word);
+            const code = at16(word);
             if ((code & 0xe00) === 0xe00)
             {
                 deeper(VT_PTR);
@@ -374,19 +374,19 @@ function parseSltg(bytes){
             {
                 word += 2;
                 current.vt = VT_USERDEFINED;
-                current.hreftype = references[u16(word) >> 2] ?? -1;
+                current.hreftype = references[at16(word) >> 2] ?? -1;
                 return { type: top, end: word + 2 };
             }
             else if (vt === VT_CARRAY)
             {
                 word += 2;
-                const array = base + u16(word);
+                const array = base + at16(word);
                 const dimensions = view.getInt16(array, true);
                 const bounds = [];
                 for (let dimension = 0; dimension < dimensions; dimension++)
                 {
                     bounds.push({
-                        elements: u32(array + 16 + dimension * 8),
+                        elements: at32(array + 16 + dimension * 8),
                         lower: view.getInt32(array + 20 + dimension * 8, true),
                     });
                 }
@@ -453,21 +453,21 @@ function parseSltg(bytes){
             const options = bytes[record + 17];
             const parameterCount = nacc >> 3;
             const optional = (options & 0x7e) >> 1;
-            const returnAt = (options & 0x80) !== 0 ? record + 18 : base + u16(record + 18);
+            const returnAt = (options & 0x80) !== 0 ? record + 18 : base + at16(record + 18);
             const returns = typeFrom(returnAt, base, references).type;
             /** @type {import('./typelib.js').ParameterDescription[]} */
             const parameters = [];
-            let argument = base + u16(record + 14);
+            let argument = base + at16(record + 14);
             for (let parameter = 0; parameter < parameterCount; parameter++)
             {
-                const nameWord = u16(argument);
+                const nameWord = at16(argument);
                 const byOffset = (nameWord & 1) === 0;
                 const name = (nameWord & ~1) === 0xfffe ? null : nameAt(nameWord & ~1);
                 argument += 2;
-                const typeAt = byOffset ? base + u16(argument) : argument;
+                const typeAt = byOffset ? base + at16(argument) : argument;
                 const read = typeFrom(typeAt, base, references);
                 argument = byOffset ? argument + 2 : read.end;
-                let flags = flagsOf(u16(typeAt));
+                let flags = flagsOf(at16(typeAt));
                 if (parameterCount - parameter <= optional)
                 {
                     flags |= PARAMFLAG_FOPT;
@@ -476,18 +476,18 @@ function parseSltg(bytes){
             }
             functions.push({
                 memberId: view.getInt32(record + 6, true),
-                name: nameAt(u16(record + 4)),
+                name: nameAt(at16(record + 4)),
                 funcKind,
                 invokeKind: inv >> 4,
                 callingConvention: nacc & 7,
-                vtableOffset: funcKind === FUNC_DISPATCH ? 0 : u16(record + 20) & ~1,
-                flags: (bytes[record] & 0x20) !== 0 ? u16(record + 22) : 0,
+                vtableOffset: funcKind === FUNC_DISPATCH ? 0 : at16(record + 20) & ~1,
+                flags: (bytes[record] & 0x20) !== 0 ? at16(record + 22) : 0,
                 returns,
                 parameters,
                 optionalParameters: optional,
                 helpString: null,
             });
-            record = base + u16(record + 2);
+            record = base + at16(record + 2);
         }
         return functions;
     };
@@ -510,11 +510,11 @@ function parseSltg(bytes){
                 break;
             }
             const flags = bytes[record + 1];
-            const nameWord = u16(record + 4);
+            const nameWord = at16(record + 4);
             /** @type {string | null} */
             const name = nameWord === 0xfffe ? previous : nameAt(nameWord);
-            const where = u16(record + 6);
-            const typeAt = (flags & 0x02) !== 0 ? record + 8 : base + u16(record + 8);
+            const where = at16(record + 6);
+            const typeAt = (flags & 0x02) !== 0 ? record + 8 : base + at16(record + 8);
             const type = typeFrom(typeAt, base, references).type;
             let varKind = VAR_PERINSTANCE;
             /** @type {import('./typelib.js').ConstantValue | null} */
@@ -532,7 +532,7 @@ function parseSltg(bytes){
                 }
                 else if (type.vt === VT_BSTR || type.vt === 30 || type.vt === 31)
                 {
-                    const length = u16(base + where);
+                    const length = at16(base + where);
                     constant = {
                         vt: VT_BSTR,
                         value: length === 0xffff ? null : text(base + where + 2, length),
@@ -546,7 +546,7 @@ function parseSltg(bytes){
                     };
                 }
             }
-            let varFlags = magic === 0x2a ? u16(record + 18) : 0;
+            let varFlags = magic === 0x2a ? at16(record + 18) : 0;
             if ((flags & 0x80) !== 0)
             {
                 varFlags |= VARFLAG_FREADONLY;
@@ -561,7 +561,7 @@ function parseSltg(bytes){
                 constant,
             });
             previous = name;
-            record = base + u16(record + 2);
+            record = base + at16(record + 2);
         }
         return variables;
     };
@@ -574,12 +574,12 @@ function parseSltg(bytes){
         const list = [];
         for (let record = first, guard = 0; guard < 256; guard++)
         {
-            list.push({ hreftype: references[u16(record + 10)] ?? -1, flags: bytes[record + 6] });
-            if (u16(record + 2) === 0xffff)
+            list.push({ hreftype: references[at16(record + 10)] ?? -1, flags: bytes[record + 6] });
+            if (at16(record + 2) === 0xffff)
             {
                 break;
             }
-            record = base + u16(record + 2);
+            record = base + at16(record + 2);
         }
         return list;
     };
@@ -587,24 +587,24 @@ function parseSltg(bytes){
     /** @type {import('./typelib.js').TypeInfoDescription[]} */
     const typeInfos = typeBlocks.map(({ at: block }, index)=>{
         const other = others[index];
-        if (!other || u16(block) !== TYPE_HEADER_MAGIC)
+        if (!other || at16(block) !== TYPE_HEADER_MAGIC)
         {
             throw new Error(`SLTG type library: type ${index} has no header`);
         }
-        const hrefTable = u32(block + 2);
-        const members = block + u32(block + 0x0a);
+        const hrefTable = at32(block + 2);
+        const members = block + at32(block + 0x0a);
         const flags1 = bytes[block + 0x1a];
         const flags2 = bytes[block + 0x1b];
         const storedKind = bytes[block + 0x1d];
         const typeFlags = (flags1 >> 3) | (flags2 << 5);
         const base = members + MEMBER_HEADER_BYTES;
-        const tail = base + u32(members + 5);
+        const tail = base + at32(members + 5);
         const references = hrefTable === 0xffffffff ? [] : referencesAt(block + hrefTable);
-        const functionCount = u16(tail);
-        const variableCount = u16(tail + 2);
-        const functionsOffset = u16(tail + 8);
-        const variablesOffset = u16(tail + 10);
-        const implementedOffset = u16(tail + 12);
+        const functionCount = at16(tail);
+        const variableCount = at16(tail + 2);
+        const functionsOffset = at16(tail + 8);
+        const variablesOffset = at16(tail + 10);
+        const implementedOffset = at16(tail + 12);
         const functions = functionsOffset === 0xffff
             ? [] : functionsAt(base, base + functionsOffset, functionCount, references);
         const variables = variablesOffset === 0xffff
@@ -616,7 +616,7 @@ function parseSltg(bytes){
             implementedTypes = implementedAt(base, base + implementedOffset, references);
         }
         else if ((storedKind === TKIND_INTERFACE || storedKind === TKIND_COCLASS)
-            && u16(base) === IMPL_MAGIC)
+            && at16(base) === IMPL_MAGIC)
         {
             implementedTypes = implementedAt(base, base, references);
         }
@@ -624,9 +624,9 @@ function parseSltg(bytes){
         let alias = null;
         if (storedKind === TKIND_ALIAS)
         {
-            alias = u16(tail + 0x1c) !== 0
-                ? { vt: u16(tail + 0x14), element: null, hreftype: -1, array: null }
-                : typeFrom(base + u16(tail + 0x14), base, references).type;
+            alias = at16(tail + 0x1c) !== 0
+                ? { vt: at16(tail + 0x14), element: null, hreftype: -1, array: null }
+                : typeFrom(base + at16(tail + 0x14), base, references).type;
         }
         // A dual interface is a dispinterface to whoever asks its kind, as
         // the real ITypeInfo answers for one read from this format.
@@ -638,12 +638,12 @@ function parseSltg(bytes){
             kind,
             guid: other.guid,
             flags: typeFlags,
-            majorVersion: u16(block + 0x12),
-            minorVersion: u16(block + 0x14),
+            majorVersion: at16(block + 0x12),
+            minorVersion: at16(block + 0x14),
             helpString: null,
-            instanceSize: u16(tail + 0x20),
-            alignment: u16(tail + 0x22),
-            vtableSize: storedKind === TKIND_DISPATCH ? functions.length * 4 : u16(tail + 0x28),
+            instanceSize: at16(tail + 0x20),
+            alignment: at16(tail + 0x22),
+            vtableSize: storedKind === TKIND_DISPATCH ? functions.length * 4 : at16(tail + 0x28),
             functions,
             variables,
             implementedTypes,

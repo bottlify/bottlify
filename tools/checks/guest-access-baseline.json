@@ -540,15 +540,6 @@
   "win32/offline/functions.js": {
    "accessor u32": 1
   },
-  "win32/oleaut32/errorinfo.js": {
-   "accessor writeU32": 1,
-   "string readWide": 1
-  },
-  "win32/oleaut32/invoke.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 1
-  },
   "win32/oleaut32/marshal.js": {
    "accessor pointer": 1,
    "accessor put32": 1,
@@ -557,39 +548,6 @@
    "accessor word": 1,
    "copy readMemory().slice()": 2,
    "string readString": 1
-  },
-  "win32/oleaut32/objects.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "string readWide": 1
-  },
-  "win32/oleaut32/picture.js": {
-   "accessor readU32": 1,
-   "accessor writeU16": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 8,
-   "string readWide": 1
-  },
-  "win32/oleaut32/recordinfo.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "copy readMemory().slice()": 1,
-   "string readWide": 1
-  },
-  "win32/oleaut32/sltg.js": {
-   "accessor u16": 1,
-   "accessor u32": 1
-  },
-  "win32/oleaut32/stddispatch.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
-  "win32/oleaut32/stdole.js": {
-   "accessor pointer": 1
-  },
-  "win32/oleaut32/typelib.js": {
-   "accessor word": 1,
-   "string stringAt": 1
   },
   "win32/oledlg/functions.js": {
    "accessor readU32": 1,

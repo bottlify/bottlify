@@ -221,20 +221,20 @@ export function parseTypeLib(bytes){
         throw new Error('not an MSFT type library');
     }
     /** @param {number} at */
-    const word = at=>view.getInt32(at, true);
+    const int32At = at=>view.getInt32(at, true);
     /** @param {number} at */
     const half = at=>view.getInt16(at, true);
 
     const header = {
-        guid: word(0x08),
-        lcid: word(0x0c),
-        varFlags: word(0x14),
-        version: word(0x18),
-        flags: word(0x1c),
-        typeInfos: word(0x20),
-        helpString: word(0x24),
-        name: word(0x38),
-        helpFile: word(0x3c),
+        guid: int32At(0x08),
+        lcid: int32At(0x0c),
+        varFlags: int32At(0x14),
+        version: int32At(0x18),
+        flags: int32At(0x1c),
+        typeInfos: int32At(0x20),
+        helpString: int32At(0x24),
+        name: int32At(0x38),
+        helpFile: int32At(0x3c),
     };
     // The directory follows the header, the optional help-DLL word and one
     // word per type.
@@ -248,7 +248,7 @@ export function parseTypeLib(bytes){
     for (let index = 0; index < SEGMENTS; index++)
     {
         const entry = directory + index * SEGMENT_BYTES;
-        segments.push({ offset: word(entry), length: word(entry + 4) });
+        segments.push({ offset: int32At(entry), length: int32At(entry + 4) });
     }
     /**
      * @param {number} segment @param {number} offset
@@ -270,10 +270,10 @@ export function parseTypeLib(bytes){
             return null;
         }
         const at = inSegment(SEG_NAME, offset);
-        return pageText(at + 12, word(at + 8) & 0xff);
+        return pageText(at + 12, int32At(at + 8) & 0xff);
     };
     /** @param {number} offset @returns {string | null} */
-    const stringAt = offset=>{
+    const tableString = offset=>{
         if (offset < 0)
         {
             return null;
@@ -363,8 +363,8 @@ export function parseTypeLib(bytes){
         for (let index = 0; index < dimensions; index++)
         {
             bounds.push({
-                elements: word(at + 8 + index * 8),
-                lower: word(at + 12 + index * 8),
+                elements: int32At(at + 8 + index * 8),
+                lower: int32At(at + 12 + index * 8),
             });
         }
         return { element: elementIsInline ? inline(elementCode) : typeAt(elementCode), bounds };
@@ -387,7 +387,7 @@ export function parseTypeLib(bytes){
         switch (vt)
         {
             case VT_BSTR:
-                return { vt, value: pageText(at + 6, word(at + 2)) };
+                return { vt, value: pageText(at + 6, int32At(at + 2)) };
             case VT_I2:
             case VT_BOOL:
                 return { vt, value: half(at + 2) };
@@ -404,7 +404,7 @@ export function parseTypeLib(bytes){
             case VT_R8:
                 return { vt, value: view.getFloat64(at + 2, true) };
             default:
-                return { vt, value: vt === VT_I4 ? word(at + 2) : null };
+                return { vt, value: vt === VT_I4 ? int32At(at + 2) : null };
         }
     };
 
@@ -418,10 +418,10 @@ export function parseTypeLib(bytes){
      */
     const membersAt = (base, functionCount, variableCount)=>{
         const total = functionCount + variableCount;
-        const recordsLength = word(base);
+        const recordsLength = int32At(base);
         const tables = base + 4 + recordsLength;
         /** @param {number} table @param {number} index */
-        const entry = (table, index)=>word(tables + (table * total + index) * 4);
+        const entry = (table, index)=>int32At(tables + (table * total + index) * 4);
         /** @type {FunctionDescription[]} */
         const functions = [];
         /** @type {VariableDescription[]} */
@@ -429,14 +429,14 @@ export function parseTypeLib(bytes){
         for (let index = 0; index < total; index++)
         {
             const record = base + 4 + entry(2, index);
-            const size = word(record) & 0xffff;
+            const size = int32At(record) & 0xffff;
             const memberId = entry(0, index);
             const name = nameAt(entry(1, index));
-            const type = typeOf(word(record + 4));
-            const flags = word(record + 8) & 0xffff;
+            const type = typeOf(int32At(record + 4));
+            const flags = int32At(record + 8) & 0xffff;
             if (index < functionCount)
             {
-                const fkccic = word(record + 16);
+                const fkccic = int32At(record + 16);
                 const count = half(record + 20);
                 const parameters = [];
                 for (let parameter = 0; parameter < count; parameter++)
@@ -445,9 +445,9 @@ export function parseTypeLib(bytes){
                     // optional words sit between them and the fixed part.
                     const at = record + size - (count - parameter) * PARAM_BYTES;
                     parameters.push({
-                        type: typeOf(word(at)),
-                        name: nameAt(word(at + 4)),
-                        flags: word(at + 8) & 0xffff,
+                        type: typeOf(int32At(at)),
+                        name: nameAt(int32At(at + 4)),
+                        flags: int32At(at + 8) & 0xffff,
                     });
                 }
                 const optional = size - FUNC_FIXED - count * PARAM_BYTES;
@@ -463,13 +463,14 @@ export function parseTypeLib(bytes){
                     returns: type,
                     parameters,
                     optionalParameters: half(record + 22),
-                    helpString: optional >= 8 ? stringAt(word(record + FUNC_FIXED + 4)) : null,
+                    helpString: optional >= 8
+                        ? tableString(int32At(record + FUNC_FIXED + 4)) : null,
                 });
             }
             else
             {
                 const varKind = half(record + 12);
-                const value = word(record + 16);
+                const value = int32At(record + 16);
                 variables.push({
                     memberId,
                     name,
@@ -495,8 +496,8 @@ export function parseTypeLib(bytes){
         for (let offset = first; offset >= 0;)
         {
             const at = inSegment(SEG_REF, offset);
-            list.push({ hreftype: word(at), flags: word(at + 4) });
-            offset = word(at + 12);
+            list.push({ hreftype: int32At(at), flags: int32At(at + 4) });
+            offset = int32At(at + 12);
         }
         return list;
     };
@@ -507,16 +508,16 @@ export function parseTypeLib(bytes){
     {
         const hreftype = index * TYPEINFO_BYTES;
         const at = inSegment(SEG_TYPEINFO, hreftype);
-        const kindWord = word(at);
+        const kindWord = int32At(at);
         const kind = kindWord & 0xf;
-        const elements = word(at + 24);
+        const elements = int32At(at + 24);
         const functionCount = elements & 0xffff;
         const variableCount = elements >>> 16;
-        const version = word(at + 56);
+        const version = int32At(at + 56);
         const implTypeCount = half(at + 76);
-        const datatype1 = word(at + 84);
+        const datatype1 = int32At(at + 84);
         const members = functionCount + variableCount > 0
-            ? membersAt(word(at + 4), functionCount, variableCount)
+            ? membersAt(int32At(at + 4), functionCount, variableCount)
             : { functions: [], variables: [] };
         /** @type {{ hreftype: number, flags: number }[]} */
         let implementedTypes = [];
@@ -533,14 +534,14 @@ export function parseTypeLib(bytes){
         typeInfos.push({
             index,
             hreftype,
-            name: nameAt(word(at + 52)) ?? '',
+            name: nameAt(int32At(at + 52)) ?? '',
             kind,
-            guid: guidAtOffset(word(at + 44)),
-            flags: word(at + 48) & 0xffff,
+            guid: guidAtOffset(int32At(at + 44)),
+            flags: int32At(at + 48) & 0xffff,
             majorVersion: version & 0xffff,
             minorVersion: version >>> 16,
-            helpString: stringAt(word(at + 60)),
-            instanceSize: word(at + 80),
+            helpString: tableString(int32At(at + 60)),
+            instanceSize: int32At(at + 80),
             alignment: (kindWord >> 11) & 0x1f,
             vtableSize: half(at + 78),
             functions: members.functions,
@@ -565,8 +566,8 @@ export function parseTypeLib(bytes){
         const length = view.getUint16(at + 12, true) >> 2;
         /** @type {ImportedLibrary} */
         const library = {
-            guid: guidAtOffset(word(at)),
-            lcid: word(at + 4),
+            guid: guidAtOffset(int32At(at)),
+            lcid: int32At(at + 4),
             majorVersion: half(at + 8),
             minorVersion: half(at + 10),
             name: pageText(at + 14, length),
@@ -583,15 +584,15 @@ export function parseTypeLib(bytes){
     {
         const offset = index * IMPINFO_BYTES;
         const at = inSegment(SEG_IMPINFO, offset);
-        const flags = word(at);
+        const flags = int32At(at);
         const byGuid = (flags & IMPORT_GUID_FLAG) !== 0;
-        const third = word(at + 8);
+        const third = int32At(at + 8);
         imports.push({
             hreftype: offset | 1,
             kind: flags >>> 24,
             guid: byGuid ? guidAtOffset(third) : null,
             typeIndex: byGuid ? -1 : third,
-            library: libraryAt(word(at + 4)),
+            library: libraryAt(int32At(at + 4)),
         });
     }
 
@@ -603,8 +604,8 @@ export function parseTypeLib(bytes){
         majorVersion: header.version & 0xffff,
         minorVersion: header.version >>> 16,
         flags: header.flags & 0xffff,
-        helpString: stringAt(header.helpString),
-        helpFile: stringAt(header.helpFile),
+        helpString: tableString(header.helpString),
+        helpFile: tableString(header.helpFile),
         typeInfos,
         imports,
     };

@@ -19,7 +19,7 @@
  */
 
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { readGuid, GUID_NULL } from '../../../system/guid.js';
+import { GUID_NULL } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
@@ -40,8 +40,7 @@ const TYPEINFO_INVOKE = 11;
 
 /**
  * @typedef {Object} StdDispatchHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  the guest's memory at the process's width
  * @property {(object: any, interfaceId: string) => number} publish
  * @property {(entry: number, args: number[]) => Promise<number>} call  into guest code
  * @property {(state: any, interfaces: Readonly<Record<string, readonly any[]>>,
@@ -57,26 +56,17 @@ const TYPEINFO_INVOKE = 11;
 
 /** @param {StdDispatchHost} host */
 export function createStdDispatchObjects(host){
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-    };
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        host.writeMemory(address, Uint8Array.from([
-            value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff]));
-    };
+    const { guest } = host;
     /**
      * A method of a guest object, called through its vtable.
      *
      * @param {number} object @param {number} slot @param {number[]} args
      */
     const callMethod = (object, slot, args)=>
-        host.call(readU32(readU32(object) + slot * 4), [object, ...args]);
+        host.call(guest.ptr(guest.ptr(object) + slot * guest.pointerSize), [object, ...args]);
 
     /** @param {number} riid */
-    const isNull = riid=>riid !== 0 && readGuid(host, riid) === GUID_NULL;
+    const isNull = riid=>riid !== 0 && guest.guid(riid) === GUID_NULL;
 
     const DISPATCH_TAIL = Object.freeze([
         { name: 'GetTypeInfoCount', argBytes: 8,
@@ -86,7 +76,7 @@ export function createStdDispatchObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(wholeAddress(out), 1);
+                guest.set32(wholeAddress(out), 1);
                 return S_OK;
             } },
         { name: 'GetTypeInfo', argBytes: 16,
@@ -96,12 +86,12 @@ export function createStdDispatchObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(wholeAddress(out), 0);
+                guest.set32(wholeAddress(out), 0);
                 if ((index >>> 0) !== 0)
                 {
                     return DISP_E_BADINDEX;
                 }
-                writeU32(wholeAddress(out), state.typeInfo);
+                guest.set32(wholeAddress(out), state.typeInfo);
                 return callMethod(state.typeInfo, TYPEINFO_ADDREF, []).then(()=>S_OK);
             } },
         { name: 'GetIDsOfNames', argBytes: 24,
@@ -144,21 +134,21 @@ export function createStdDispatchObjects(host){
                 {
                     return E_POINTER;
                 }
-                const asked = (riid >>> 0) === 0 ? null : readGuid(host, riid >>> 0);
+                const asked = (riid >>> 0) === 0 ? null : guest.guid(riid);
                 if (asked === IID_IUNKNOWN)
                 {
                     adapter.addRef();
-                    writeU32(wholeAddress(out), host.publish(adapter, IID_IUNKNOWN));
+                    guest.set32(wholeAddress(out), host.publish(adapter, IID_IUNKNOWN));
                     return S_OK;
                 }
                 if (asked !== IID_IDISPATCH)
                 {
-                    writeU32(wholeAddress(out), 0);
+                    guest.set32(wholeAddress(out), 0);
                     return E_NOINTERFACE;
                 }
                 const pointer = host.publish(adapter, IID_IDISPATCH);
                 return callMethod(adapter.state.outer, 1, []).then(()=>{
-                    writeU32(wholeAddress(out), pointer);
+                    guest.set32(wholeAddress(out), pointer);
                     return S_OK;
                 });
             } },

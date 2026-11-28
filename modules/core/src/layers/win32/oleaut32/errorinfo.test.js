@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { IID_ICREATEERRORINFO, IID_IERRORINFO, createErrorInfoObjects } from './errorinfo.js';
 import { createAdapter } from './objects.js';
 import { IID_IUNKNOWN } from '../ole32/objects.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 test('an error object is filled through one interface and read through the other', ()=>{
     const bytes = new Uint8Array(0x1000);
@@ -17,8 +18,7 @@ test('an error object is filled through one interface and read through the other
     /** @type {any} */
     let published = null;
     const objects = createErrorInfoObjects({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
+        guest: guestOver(bytes),
         publish: object=>{
             published = object;
             return 0x5000;

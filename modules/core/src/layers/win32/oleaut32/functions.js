@@ -1312,8 +1312,7 @@ export function createAutomationFunctions(host){
     };
 
     const typeLibraries = host.vtables ? createTypeLibraryObjects({
-        readMemory: guest.snapshot,
-        writeMemory: guest.setBytes,
+        guest,
         // The task allocator's heap and the BSTR heap are one heap here, so
         // a descriptor is freed by the Release that matches it either way.
         heap: host.heap,
@@ -1337,8 +1336,7 @@ export function createAutomationFunctions(host){
     }) : null;
 
     const stdDispatches = host.vtables && host.call ? createStdDispatchObjects({
-        readMemory: guest.snapshot,
-        writeMemory: guest.setBytes,
+        guest,
         publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
         call: (entry, args)=>(host.call
             ? host.call(entry, args, host.callerThread?.())
@@ -1347,8 +1345,7 @@ export function createAutomationFunctions(host){
     }) : null;
 
     const recordInfos = host.vtables && host.call ? createRecordInfoObjects({
-        readMemory: guest.snapshot,
-        writeMemory: guest.setBytes,
+        guest,
         heap: host.heap,
         publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
         call: (entry, args, thread)=>(host.call
@@ -1372,8 +1369,7 @@ export function createAutomationFunctions(host){
     }) : null;
 
     const errorInfos = host.vtables ? createErrorInfoObjects({
-        readMemory: guest.snapshot,
-        writeMemory: guest.setBytes,
+        guest,
         publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
         allocateBstr: text=>allocateBstr(utf16(text)),
         adapt: (state, interfaces)=>createAdapter(state, interfaces),
@@ -1381,8 +1377,7 @@ export function createAutomationFunctions(host){
 
     // The standard picture (`picture.js`), over GDI and user32.
     const pictures = host.vtables && host.call ? createPictureObjects({
-        readMemory: guest.snapshot,
-        writeMemory: guest.setBytes,
+        guest,
         allocate: bytes=>host.heap.allocate(bytes),
         free: address=>host.heap.free(address),
         gdi32: (name, args)=>host.gdi32?.(name)?.handler(args) ?? 0,
@@ -3233,7 +3228,6 @@ export function createAutomationFunctions(host){
             },
         },
     });
-
 
     /**
      * A variant as VarFormat reads it: a reference followed, a string as
