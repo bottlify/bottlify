@@ -10,6 +10,7 @@ import { createMessageQueue } from './messages.js';
 import { createWindowFunctions } from './windows.js';
 import { messageBoxButtons, messageBoxDefault } from './msgbox.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 // Above 0xffff: a name pointer below that is an atom or a resource number.
 const TEXT = 0x11000;
@@ -51,16 +52,7 @@ function setup({ unattended, answer, loadString, faultReported, fatal } = {}){
     /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any }>} */
     const fns = /** @type {any} */ (
         /** @type {unknown} */ (createWindowFunctions({
-            readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>bytes.slice(a, a + n),
-            writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>bytes.set(d, a),
-            readCString: (/** @type {number} */ a, /** @type {number} */ n)=>{
-                let end = a;
-                while (end < bytes.length && end - a < n && bytes[end] !== 0)
-                {
-                    end++;
-                }
-                return decodeAnsi(bytes.subarray(a, end));
-            },
+            guest: guestOver(bytes),
             handles: {
                 open: (/** @type {string} */ type, /** @type {any} */ object)=>{
                     const handle = nextHandle;

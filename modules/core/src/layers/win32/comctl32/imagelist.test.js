@@ -12,6 +12,7 @@ import { IID_IIMAGELIST2 } from './imagelist-com.js';
 import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { surfaceForDdb, surfaceForDibSection } from '../../graphics/gdi/surface.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * Image lists over gdi32 and the drawing engine, wired as the win32 module
@@ -48,9 +49,7 @@ function machine(wired = {}){
     let next = 0x10000;
     let handle = 4;
     const gdi = createGdiFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: ()=>'',
+        guest: guestOver(bytes),
         handles: { open: ()=>(handle += 4), close: ()=>undefined },
         surfaces: {
             /** @param {number} size */

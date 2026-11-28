@@ -129,9 +129,7 @@ const TEXT_SHARE = 5 / 8;
 
 /**
  * @typedef {Object} MessageBoxHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [release]
  * @property {{ width: number, height: number }} [screen]
@@ -167,6 +165,7 @@ const TEXT_SHARE = 5 / 8;
  *        What a window's frame adds to its client area.
  */
 export function createMessageBoxFunctions({ host, call, procedure, measure, frame }){
+    const { guest } = host;
     /**
      * The boxes being made, by the key WM_INITDIALOG carries in its lParam.
      *
@@ -187,16 +186,11 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
      */
     const unitsOf = (hwnd, thread)=>{
         const rect = host.allocate?.(16) ?? 0;
-        const words = new Uint8Array(16);
-        const view = new DataView(words.buffer);
-        view.setInt32(8, 4000, true);
-        view.setInt32(12, 8000, true);
-        host.writeMemory(rect, words);
+        guest.set32s(rect, [0, 0, 4000, 8000]);
         call('MapDialogRect', [hwnd, rect], thread);
-        const mapped = new DataView(host.readMemory(rect, 16).slice().buffer);
+        const across = guest.i32(rect + 8) / 4000;
+        const down = guest.i32(rect + 12) / 8000;
         host.release?.(rect);
-        const across = mapped.getInt32(8, true) / 4000;
-        const down = mapped.getInt32(12, true) / 8000;
         return {
             /** @param {number} units */
             x: units=>Math.round(units * across),
@@ -413,7 +407,7 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
             host.divergence?.('MessageBox', 'no memory to make the box in; answered by default');
             return messageBoxDefault(type);
         }
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         boxProcedure ||= procedure('MessageBoxProc', dialogProcedure);
         const key = nextKey++;
         pending.set(key, { text, caption: title, type, buttons });
@@ -465,10 +459,8 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
      * @param {number} params @param {boolean} wide
      */
     const indirect = (params, wide)=>{
-        const bytes = host.readMemory(wholeAddress(params), 24);
         /** @param {number} at */
-        const field = at=>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
-            | bytes[at + 3] << 24) >>> 0;
+        const field = at=>guest.u32(wholeAddress(params) + at);
         const instance = field(8);
         return messageBox(field(4), paramText(instance, field(12), wide) ?? '',
             paramText(instance, field(16), wide) ?? 'Error', field(20), wide);

@@ -316,7 +316,7 @@ export function createTabProcedure(host, tk, images){
         }
         if ((mask & TCIF_IMAGE) !== 0)
         {
-            tk.writeU32(address + TCITEM.iImage, item ? item.image : 0);
+            host.guest.set32(wholeAddress(address + TCITEM.iImage), item ? item.image : 0);
         }
         if ((mask & TCIF_PARAM) !== 0)
         {
@@ -325,7 +325,7 @@ export function createTabProcedure(host, tk, images){
         }
         if ((mask & TCIF_STATE) !== 0)
         {
-            tk.writeU32(address + TCITEM.dwState,
+            host.guest.set32(wholeAddress(address + TCITEM.dwState),
                 item ? item.state & readU32(address + TCITEM.dwStateMask) : 0);
         }
     };
@@ -839,7 +839,7 @@ export function createTabProcedure(host, tk, images){
                     return 0;
                 }
                 [rect.left, rect.top, rect.right, rect.bottom].forEach((value, index)=>
-                    tk.writeU32(wholeAddress(message.lParam) + index * 4, value));
+                    host.guest.set32(wholeAddress(message.lParam) + index * 4, value));
                 return 1;
             }
             case TCM_HITTEST: {
@@ -850,7 +850,8 @@ export function createTabProcedure(host, tk, images){
                 }
                 const index = itemAt(record, readU32(at + TCHITTESTINFO.x) | 0,
                     readU32(at + TCHITTESTINFO.y) | 0);
-                tk.writeU32(at + TCHITTESTINFO.flags, index >= 0 ? TCHT_ONITEM : TCHT_NOWHERE);
+                host.guest.set32(wholeAddress(at + TCHITTESTINFO.flags),
+                    index >= 0 ? TCHT_ONITEM : TCHT_NOWHERE);
                 return index >>> 0;
             }
             case TCM_ADJUSTRECT: {
@@ -868,7 +869,7 @@ export function createTabProcedure(host, tk, images){
                 const sign = message.wParam !== 0 ? -1 : 1;
                 [left + sign * PANE_INSET, upper + sign * top, right - sign * PANE_INSET,
                     bottom - sign * PANE_INSET].forEach((value, index)=>
-                    tk.writeU32(at + index * 4, value));
+                    host.guest.set32(wholeAddress(at + index * 4), value));
                 return 0;
             }
             case TCM_SETITEMEXTRA:

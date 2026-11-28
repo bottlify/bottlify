@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { createThemeFunctions } from './functions.js';
 import { createMessageQueue } from '../user32/messages.js';
 import { createWindowFunctions } from '../user32/windows.js';
-import { decodeAnsi } from '../kernel32/locale.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const S_OK = 0;
 const E_HANDLE = 0x80070006;
@@ -90,6 +90,8 @@ function fakeMemory(size = 0x10000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -634,18 +636,7 @@ function overUser32(){
     };
     const user32 = /** @type {Record<string, Entry>} */ (/** @type {unknown} */ (
         createWindowFunctions({
-            readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>
-                memory.readMemory(a, n),
-            writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
-                memory.writeMemory(a, d),
-            readCString: (/** @type {number} */ address, /** @type {number} */ max)=>{
-                let end = address;
-                while (end - address < max && memory.bytes[end] !== 0)
-                {
-                    end++;
-                }
-                return decodeAnsi(memory.bytes.subarray(address, end));
-            },
+            guest: memory.guest,
             handles,
             queue: createMessageQueue(),
             screen: { width: 640, height: 480, bitsPerPixel: 32 },

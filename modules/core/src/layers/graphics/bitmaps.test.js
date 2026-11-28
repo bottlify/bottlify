@@ -24,6 +24,7 @@ import { createGdiFunctions } from '../win32/gdi32/functions.js';
 import { BITMAPINFOHEADER } from '../win32/gdi32/structs.js';
 import { graphicsWin32 } from './win32.fixture.js';
 import { testLog } from '../log/testing.fixture.js';
+import { guestOver } from '../win32/common/guest.fixture.js';
 
 const SRCCOPY = 0x00cc0020;
 const WHITENESS = 0x00ff0062;
@@ -100,9 +101,7 @@ async function assemble({ canvas = false } = {}){
     }));
     const drawing = graphics.gdiDrawing();
     const gdi = createGdiFunctions({
-        readMemory: (address, length)=>ram.subarray(address, address + length),
-        writeMemory: (address, bytes)=>ram.set(bytes, address),
-        readCString: ()=>'',
+        guest: guestOver(ram),
         handles: {
             open(type, object){
                 const handle = nextHandle;

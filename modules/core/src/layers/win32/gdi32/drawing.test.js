@@ -23,6 +23,7 @@ import {
 import { createGdiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { painted, pens } from './fixtures.test.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const HWND = 0x2000;
 const STRUCT = 0x30000;
@@ -42,10 +43,12 @@ const DIB_PAL_COLORS = 1;
 const SRCCOPY = 0x00cc0020;
 const FLOODFILLSURFACE = 1;
 
-function fakeMemory(size = 0x33000){
+function fakeMemory(size = 0x80000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -255,10 +258,7 @@ function setup(graphics, more = {}){
     const memory = fakeMemory();
     const fns = createGdiFunctions({
         ...more,
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
-            memory.writeMemory(a, d),
-        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         graphics,
@@ -410,11 +410,15 @@ test('StretchDIBits reads a DIB\'s bits and colours only when the drawing asks f
     };
     /** @type {any} */ (graphics.drawing).stretchDIBits = stretchDIBits;
     const { fns, hdc, memory } = setup(graphics.services);
-    const read = memory.readMemory;
+    const { snapshot, view } = memory.guest;
     let bitsRead = 0;
-    memory.readMemory = (address, length)=>{
+    memory.guest.snapshot = (address, length, into)=>{
         bitsRead += address === 0x2000 ? 1 : 0;
-        return read(address, length);
+        return snapshot(address, length, into);
+    };
+    memory.guest.view = (address, length)=>{
+        bitsRead += address === 0x2000 ? 1 : 0;
+        return view(address, length);
     };
     memory.putU32s(0x800, [40, 2, 2, 0x00080001]);
     assert.equal(fns.StretchDIBits.handler(
@@ -564,10 +568,7 @@ test('GetRandomRgn\'s SYSRGN is where on the screen a window\'s context draws', 
     const graphics = fakeDrawing();
     const memory = fakeMemory();
     const gdi = createGdiFunctions({
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
-            memory.writeMemory(a, d),
-        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         graphics: graphics.services,
@@ -1416,10 +1417,7 @@ test('the pixel-format calls on a handle that is no DC say why with the last err
     const graphics = fakeDrawing();
     const memory = fakeMemory();
     const fns = /** @type {any} */ (createGdiFunctions({
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
-            memory.writeMemory(a, d),
-        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         graphics: graphics.services,
@@ -1752,10 +1750,7 @@ test('SelectClipPath has no closed path to clip to, and says so', ()=>{
     /** @type {number[]} */
     const errors = [];
     const { table } = createGdiFunctions({
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
-            memory.writeMemory(a, d),
-        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         setLastError: code=>errors.push(code),
@@ -1800,10 +1795,7 @@ test('the part of its window a DC may draw in holds under any clip the program s
     const graphics = fakeDrawing();
     const memory = fakeMemory();
     const gdi = createGdiFunctions({
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
-            memory.writeMemory(a, d),
-        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         graphics: graphics.services,

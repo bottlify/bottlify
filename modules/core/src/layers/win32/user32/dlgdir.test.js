@@ -13,6 +13,7 @@ import {
 import { createMessageQueue } from './messages.js';
 import { createWindowFunctions } from './windows.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * A volume of a few files: C: with a games directory, and a D: with nothing
@@ -118,16 +119,7 @@ function dialogOver(){
     const handles = new Map();
     let next = 4;
     const fns = /** @type {any} */ (createWindowFunctions({
-        readMemory: (a, n)=>bytes.slice(a, a + n),
-        writeMemory: (a, d)=>bytes.set(d, a),
-        readCString: (a, n)=>{
-            let end = a;
-            while (bytes[end] !== 0 && end - a < n)
-            {
-                end++;
-            }
-            return decodeAnsi(bytes.subarray(a, end));
-        },
+        guest: guestOver(bytes),
         handles: {
             open: (type, object)=>{
                 handles.set(next, object);

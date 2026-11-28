@@ -13,6 +13,7 @@ import {
     UDM_SETUNICODEFORMAT, UDN_DELTAPOS, UDS_ALIGNRIGHT, UDS_ARROWKEYS, UDS_HORZ,
     UDS_SETBUDDYINT, createUpDownProcedure, formatPosition, parsePosition,
 } from './updown.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const WM_CREATE = 0x0001;
 const WM_SETTEXT = 0x000c;
@@ -69,6 +70,7 @@ function setup({ style = 0, refuse = false, subclass = false } = {}){
     const host = /** @type {any} */ ({
         live: (/** @type {number} */ hwnd)=>records[hwnd] ?? null,
         children: ()=>[records[EDIT], records[UPDOWN]],
+        guest: guestOver(memory),
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             memory.subarray(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>

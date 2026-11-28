@@ -50,7 +50,7 @@ import { readMessage, readRect, userLayouts, writeMessage, writeRect } from './s
 import { WS_CAPTION, WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
 import { readText, writeText } from './unicode.js';
-import { encodeAnsi } from '../kernel32/locale.js';
+import { WHOLE } from '../common/guest.js';
 import {
     DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_WANTALLKEYS,
     DLGC_WANTTAB, DLGWINDOWEXTRA, DWLP_DLGPROC, IDCANCEL, IDOK, WM_GETDLGCODE, WM_SETFONT,
@@ -279,9 +279,7 @@ const MAX_RESOURCE_NAME = 256;
  * @typedef {Object} DialogHost
  * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
  *     have their pointers, handles and message parameters eight bytes wide.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {{ open: (type: string, object: any) => number,
  *              close: (handle: number) => any }} handles
  * @property {ReturnType<typeof import('./messages.js').createMessageQueue>} queue
@@ -384,6 +382,7 @@ export function createDialogFunctions(options){
     const {
         host, live, windows, makeWindow, destroyWindow, deliver, classNamed, classKnown, announce,
     } = options;
+    const { guest } = host;
     /** @param {string} name */
     const classExists = name=>(classKnown ? classKnown(name) : classNamed(name) !== null)
         || STANDARD_CLASSES.has(name.toLowerCase());
@@ -396,10 +395,6 @@ export function createDialogFunctions(options){
      */
     const reader = base=>{
         let at = 0;
-        const u16 = (/** @type {number} */ offset)=>{
-            const bytes = host.readMemory(base + offset, 2);
-            return bytes[0] | bytes[1] << 8;
-        };
         return {
             get at(){
                 return at;
@@ -407,14 +402,12 @@ export function createDialogFunctions(options){
             set at(value){
                 at = value;
             },
-            u16,
             /** @param {number} offset */
-            i16: offset=>u16(offset) << 16 >> 16,
+            u16: offset=>guest.u16(base + offset),
             /** @param {number} offset */
-            u32: offset=>{
-                const bytes = host.readMemory(base + offset, 4);
-                return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-            },
+            i16: offset=>guest.i16(base + offset),
+            /** @param {number} offset */
+            u32: offset=>guest.u32(base + offset),
             /** Four-byte alignment, which every item template begins on. */
             align(){
                 at = (at + 3) & ~3;
@@ -427,7 +420,7 @@ export function createDialogFunctions(options){
              * @returns {{ name: string | null, ordinal: number | null }}
              */
             nameOrOrdinal(){
-                const first = u16(at);
+                const first = guest.u16(base + at);
                 if (first === 0)
                 {
                     at += 2;
@@ -435,17 +428,12 @@ export function createDialogFunctions(options){
                 }
                 if (first === ORDINAL_MARKER)
                 {
-                    const ordinal = u16(at + 2);
+                    const ordinal = guest.u16(base + at + 2);
                     at += 4;
                     return { name: null, ordinal };
                 }
-                let text = '';
-                for (let unit = u16(at); unit !== 0; unit = u16(at))
-                {
-                    text += String.fromCharCode(unit);
-                    at += 2;
-                }
-                at += 2;
+                const text = guest.wstr(base + at, WHOLE);
+                at += text.length * 2 + 2;
                 return { name: text, ordinal: null };
             },
         };
@@ -606,17 +594,6 @@ export function createDialogFunctions(options){
     const controlOf = (hwnd, id)=>{
         const dialog = live(hwnd);
         return dialog ? host.children(dialog).find(child=>child.id === (id >>> 0)) ?? null : null;
-    };
-
-    /**
-     * A control's text in the ANSI page, as a window's text goes back.
-     *
-     * @param {number} address @param {string} text @param {number} limit
-     */
-    const writeString = (address, text, limit)=>{
-        const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
-        host.writeMemory(address, encodeAnsi(`${clipped}\0`));
-        return clipped.length;
     };
 
     /**
@@ -940,7 +917,7 @@ export function createDialogFunctions(options){
             ? host.allocate?.(layouts.MSG.SIZE) ?? 0 : 0;
         if (lent !== 0)
         {
-            writeMessage(host, lent, { x: 0, y: 0, time: 0, ...message }, layouts);
+            writeMessage(guest, lent, { x: 0, y: 0, time: 0, ...message }, layouts);
         }
         const asked = focused !== 0 && within(focused, dialog)
             ? after(host.send(focused, WM_GETDLGCODE, key, lent, thread), code=>{
@@ -1569,8 +1546,8 @@ export function createDialogFunctions(options){
                 // by: a program placing a control by hand lands where the
                 // template would have put it.
                 const cell = unitsFor(dialog.dialogFont ?? 0);
-                const units = readRect(host, wholeAddress(rect));
-                writeRect(host, wholeAddress(rect), {
+                const units = readRect(guest, wholeAddress(rect));
+                writeRect(guest, wholeAddress(rect), {
                     left: acrossFor(units.left, cell),
                     top: downFor(units.top, cell),
                     right: acrossFor(units.right, cell),
@@ -1619,7 +1596,7 @@ export function createDialogFunctions(options){
                     return 0;
                 }
                 const control = controlOf(hwnd, id);
-                return writeString(wholeAddress(out), control?.title ?? '', room);
+                return guest.writeAnsi(wholeAddress(out), control?.title ?? '', room);
             },
         },
 
@@ -1658,7 +1635,7 @@ export function createDialogFunctions(options){
                     : null;
                 if (wholeAddress(translatedOut) !== 0)
                 {
-                    host.writeMemory(wholeAddress(translatedOut),
+                    guest.setBytes(wholeAddress(translatedOut),
                         Uint8Array.of(value === null ? 0 : 1,
                             0, 0, 0));
                 }
@@ -1688,7 +1665,7 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                writeString(address, text, text.length + 1);
+                guest.writeAnsi(address, text);
                 return after(programSend(control.hwnd, WM_SETTEXT, 0, address), ()=>{
                     host.release?.(address);
                     return 1;
@@ -1790,7 +1767,7 @@ export function createDialogFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
-                readMessage(host, wholeAddress(msg),
+                readMessage(guest, wholeAddress(msg),
                     userLayouts(host.pointerSize)), wholeAddress(msg)),
         },
 
@@ -1799,7 +1776,7 @@ export function createDialogFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
-                { ...readMessage(host, wholeAddress(msg), userLayouts(host.pointerSize)),
+                { ...readMessage(guest, wholeAddress(msg), userLayouts(host.pointerSize)),
                     unicode: true },
                 wholeAddress(msg)),
         },

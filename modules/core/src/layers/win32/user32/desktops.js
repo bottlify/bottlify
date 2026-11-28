@@ -70,9 +70,7 @@ const MAX_NAME = 256;
 
 /**
  * @param {Object} options
- * @param {{ readMemory: (address: number, length: number) => Uint8Array,
- *     writeMemory: (address: number, bytes: Uint8Array) => void,
- *     readCString: (address: number, maxLength: number) => string,
+ * @param {{ guest: import('../common/guest.js').Guest,
  *     handles: { open: (type: string, object: any) => number,
  *         close: (handle: number) => any,
  *         typeOf?: (handle: number) => string | null,
@@ -90,6 +88,7 @@ const MAX_NAME = 256;
  *        Puts a top-level window at the bottom of the stacking.
  */
 export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
+    const { guest } = host;
     /**
      * The interactive station, visible (WSF_VISIBLE), as the logged-on user's
      * WinSta0 is: .NET's UserInteractive reads this flag, and without it
@@ -146,7 +145,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
     const createStation = ([name, , , attributes], wide)=>{
         const text = (name >>> 0) === 0 ? null
             : wide ? readText(host, name >>> 0, true, MAX_NAME)
-                : host.readCString(wholeAddress(name), MAX_NAME);
+                : guest.cstr(wholeAddress(name), MAX_NAME);
         let made = text === null ? null : stationNamed(text);
         if (!made)
         {
@@ -155,8 +154,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
             stations.push(made);
         }
         const inherit = (attributes >>> 0) !== 0
-            && new DataView(host.readMemory(wholeAddress(attributes) + 8, 4).slice().buffer)
-                .getUint32(0, true) !== 0;
+            && guest.u32(wholeAddress(attributes) + 8) !== 0;
         return open(made, inherit);
     };
 
@@ -273,8 +271,8 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         switch (index | 0){
             case UOI_FLAGS:
                 bytes = new Uint8Array(USEROBJECTFLAGS_SIZE);
-                new DataView(bytes.buffer).setUint32(0, entry.inherit ? 1 : 0, true);
-                new DataView(bytes.buffer).setUint32(8, entry.object.flags, true);
+                bytes.set(new Uint8Array(Uint32Array.of(entry.inherit ? 1 : 0, 0,
+                    entry.object.flags).buffer));
                 break;
             case UOI_NAME:
                 bytes = textBytes(entry.object.name, unicode);
@@ -295,8 +293,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         }
         if ((needed >>> 0) !== 0)
         {
-            host.writeMemory(wholeAddress(needed),
-                new Uint8Array(new Uint32Array([bytes.length]).buffer));
+            guest.set32(wholeAddress(needed), bytes.length);
         }
         if ((length >>> 0) < bytes.length || ((into >>> 0) === 0 && bytes.length > 0))
         {
@@ -304,7 +301,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         }
         if (bytes.length > 0)
         {
-            host.writeMemory(wholeAddress(into), bytes);
+            guest.setBytes(wholeAddress(into), bytes);
         }
         return 1;
     };
@@ -334,7 +331,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                 {
                     return fail(ERROR_NOT_ENOUGH_MEMORY);
                 }
-                host.writeMemory(at, bytes);
+                guest.setBytes(at, bytes);
                 answer = await call(callback >>> 0, [at, lParam], thread) >>> 0;
                 host.release?.(at);
                 if (answer === 0)
@@ -379,10 +376,8 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const view = new DataView(host.readMemory(wholeAddress(from),
-            USEROBJECTFLAGS_SIZE).slice().buffer);
-        entry.inherit = view.getUint32(0, true) !== 0;
-        entry.object.flags = view.getUint32(8, true);
+        entry.inherit = guest.u32(wholeAddress(from)) !== 0;
+        entry.object.flags = guest.u32(wholeAddress(from) + 8);
         return 1;
     };
 
@@ -421,8 +416,6 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         return bytes;
     };
 
-    /** @param {number} at */
-    const readU32 = at=>new DataView(host.readMemory(at, 4).slice().buffer).getUint32(0, true);
     /** The messages each window was told to let in (ChangeWindowMessageFilterEx). */
     const allowedFor = new Map();
 
@@ -465,7 +458,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                 }
                 const at = wholeAddress(info);
                 if ((action >>> 0) > MSGFLT_DISALLOW
-                    || (at !== 0 && readU32(at) !== CHANGEFILTERSTRUCT_SIZE))
+                    || (at !== 0 && guest.u32(at) !== CHANGEFILTERSTRUCT_SIZE))
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -491,7 +484,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                 }
                 if (at !== 0)
                 {
-                    host.writeMemory(at + 4, new Uint8Array(new Uint32Array([status]).buffer));
+                    guest.set32(at + 4, status);
                 }
                 return 1;
             },
@@ -755,14 +748,13 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                 {
                     return fail(ERROR_NOACCESS);
                 }
-                const bytes = userObjectSecurity(readU32(wholeAddress(requested)));
-                host.writeMemory(wholeAddress(needed),
-                    new Uint8Array(new Uint32Array([bytes.length]).buffer));
+                const bytes = userObjectSecurity(guest.u32(wholeAddress(requested)));
+                guest.set32(wholeAddress(needed), bytes.length);
                 if ((length >>> 0) < bytes.length || wholeAddress(into) === 0)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(wholeAddress(into), bytes);
+                guest.setBytes(wholeAddress(into), bytes);
                 return 1;
             },
         },
@@ -811,7 +803,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
             /** @param {number[]} args */
             handler: ([name, inherit])=>{
                 const found = wholeAddress(name) === 0 ? null
-                    : stationNamed(host.readCString(wholeAddress(name), MAX_NAME));
+                    : stationNamed(guest.cstr(wholeAddress(name), MAX_NAME));
                 return found ? open(found, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND);
             },
         },

@@ -18,6 +18,7 @@ import {
     PBM_GETRANGE, PBM_GETPOS, PBM_SETBARCOLOR, PBM_SETBKCOLOR, PBS_SMOOTH, PBS_VERTICAL,
     createProgressProcedure,
 } from './progress.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * The window manager over the real drawing engine, with the common controls
@@ -48,6 +49,8 @@ function fakeMemory(size = 0x20000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -103,9 +106,7 @@ function setup(){
     let heapNext = HEAP;
 
     const gdi = createGdiFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: memory.readCString,
+        guest: memory.guest,
         handles,
         surfaces: {
             allocate: bytes=>{
@@ -130,9 +131,7 @@ function setup(){
     });
 
     const fns = createWindowFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: memory.readCString,
+        guest: memory.guest,
         handles,
         queue,
         screen: SCREEN,

@@ -8,7 +8,6 @@ import { createComObject } from '../ole32/objects.js';
 import { writeTextMetrics, writeTextMetricsW } from '../gdi32/structs.js';
 import { DEVICE, TEXTURE, createDeviceCalls } from './device.js';
 import { SPRITE } from './sprite.js';
-import { readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
 
 /**
@@ -54,6 +53,7 @@ const D3DPOOL_MANAGED = 1;
 
 /**
  * @typedef {Object} FontHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(api: string, detail: string) => void} [divergence]
@@ -191,7 +191,7 @@ export function createFonts(host, sprites){
                 line[x * 4 + 2] = 255;
                 line[x * 4 + 3] = glyph ? glyph.bytes[glyph.offset + y * glyph.width + x] : 0;
             }
-            host.writeMemory(bits + (write.y + y) * pitch + write.x * 4, line);
+            host.guest.setBytes(bits + (write.y + y) * pitch + write.x * 4, line);
         }
         return true;
     };
@@ -405,16 +405,18 @@ export function createFonts(host, sprites){
         return height;
     };
 
-    // A count of -1 is a string to its NUL, read a window at a time so one at the
-    // end of what the program allocated is not read past.
-    /** @param {number} at @param {number} count  -1: to the NUL. */
-    const ansi = (at, count)=>[...(count < 0 ? readToTerminator(host, at, 1, 4096).bytes
-        : host.readMemory(wholeAddress(at), count))];
-    /** @param {number} at @param {number} count */
-    const wide = (at, count)=>{
-        const bytes = count < 0 ? readToTerminator(host, at, 2, 2048).bytes
-            : host.readMemory(wholeAddress(at), count * 2).slice();
-        return [...new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length >> 1)];
+    /**
+     * A string's code units, a count of -1 to its NUL.
+     *
+     * @param {number} at @param {number} count @param {boolean} isWide
+     */
+    const units = (at, count, isWide)=>{
+        const unit = isWide ? 2 : 1;
+        const length = count < 0 ? host.guest.stringBytes(wholeAddress(at), isWide, 4096).length
+            : count * unit;
+        const bytes = host.guest.snapshot(wholeAddress(at), length);
+        return isWide ? [...new Uint16Array(bytes.buffer, bytes.byteOffset, length >> 1)]
+            : [...bytes];
     };
 
     /**
@@ -440,7 +442,7 @@ export function createFonts(host, sprites){
                 bytes[24 + i] = c.charCodeAt(0) & 0xff;
             }
         });
-        host.writeMemory(wholeAddress(at), bytes);
+        host.guest.setBytes(wholeAddress(at), bytes);
     };
 
     /** @param {any} state @param {number} at @param {boolean} isWide */
@@ -450,7 +452,7 @@ export function createFonts(host, sprites){
             digitizedAspectY: 96, firstChar: 32, lastChar: isWide ? 0xfffc : 255,
             defaultChar: 31, breakChar: 32, italic: state.desc.italic ? 1 : 0, underlined: 0,
             struckOut: 0, pitchAndFamily: state.desc.pitchAndFamily, charSet: state.desc.charSet };
-        (isWide ? writeTextMetricsW : writeTextMetrics)(host, at >>> 0, fields);
+        (isWide ? writeTextMetricsW : writeTextMetrics)(host.guest, at >>> 0, fields);
     };
 
     /**
@@ -548,13 +550,13 @@ export function createFonts(host, sprites){
             { name: 'PreloadGlyphs', argBytes: 12, invoke: ()=>D3D_OK },
             /** HRESULT PreloadTextA(LPCSTR pString, INT Count) */
             { name: 'PreloadTextA', argBytes: 12, invoke: (object, [text, count])=>{
-                ansi(text, count | 0).forEach(code=>glyphOf(object.state, code));
+                units(text, count | 0, false).forEach(code=>glyphOf(object.state, code));
                 const thread = host.currentThread?.();
                 return Promise.resolve().then(()=>upload(object.state, thread));
             } },
             /** HRESULT PreloadTextW(LPCWSTR pString, INT Count) */
             { name: 'PreloadTextW', argBytes: 12, invoke: (object, [text, count])=>{
-                wide(text, count | 0).forEach(code=>glyphOf(object.state, code));
+                units(text, count | 0, true).forEach(code=>glyphOf(object.state, code));
                 const thread = host.currentThread?.();
                 return Promise.resolve().then(()=>upload(object.state, thread));
             } },
@@ -562,9 +564,10 @@ export function createFonts(host, sprites){
              * INT DrawTextA(LPD3DXSPRITE pSprite, LPCSTR pString, INT Count, LPRECT pRect,
              *     DWORD Format, D3DCOLOR Color)
              */
-            { name: 'DrawTextA', argBytes: 28, invoke: drawText((_, [at, n])=>ansi(at, n)) },
+            { name: 'DrawTextA', argBytes: 28,
+                invoke: drawText((_, [at, n])=>units(at, n, false)) },
             /** INT DrawTextW(..., LPCWSTR pString, ...) */
-            { name: 'DrawTextW', argBytes: 28, invoke: drawText((_, [at, n])=>wide(at, n)) },
+            { name: 'DrawTextW', argBytes: 28, invoke: drawText((_, [at, n])=>units(at, n, true)) },
             /** HRESULT OnLostDevice() */
             { name: 'OnLostDevice', argBytes: 4, invoke: ()=>D3D_OK },
             /** HRESULT OnResetDevice() */

@@ -2273,10 +2273,7 @@ export function createWin32Module(){
                 // A packed DIB's HGLOBAL, read where kernel32's GlobalLock puts it.
                 lockGlobal: handle=>/** @type {any} */ (libraries['KERNEL32.dll'])
                     ?.[GLOBAL_MEMORY]?.pointer(handle) || handle,
-                readMemory,
-                writeMemory,
-                fillMemory,
-                readCString,
+                guest,
                 windowContextCurrent: hdc=>windowService.refreshContext?.(hdc),
                 canWrite,
                 divergence: config?.divergence,
@@ -2932,8 +2929,8 @@ export function createWin32Module(){
                     const size = layouts.WNDCLASSA.SIZE;
                     apartmentClass = /** @type {number} */ (lent(new Uint8Array(size + name.length),
                         at=>{
-                            writeMemory(at + size, name);
-                            writeWindowClass({ readMemory, writeMemory }, at, {
+                            guest.setBytes(at + size, name);
+                            writeWindowClass(guest, at, {
                                 style: 0, wndProc: procedure >>> 0, classExtra: 0, windowExtra: 0,
                                 instance: 0, icon: 0, cursor: 0, background: 0, menuName: 0,
                                 className: at + size, iconSm: 0,
@@ -5781,7 +5778,7 @@ export function createWin32Module(){
                 // since d3dx9 exports them undecorated though they are stdcall.
                 ...lazily((()=>{
                     /** @type {import('./d3dx9/functions.js').D3dxHost} */
-                    const d3dxHost = { readMemory, writeMemory, pointerSize,
+                    const d3dxHost = { guest, readMemory, writeMemory, pointerSize,
                         // A word read and written in place: an effect's commit reads
                         // a version word for every constant of its pass.
                         readU32: (/** @type {number} */ at)=>memory.readU32(at),
@@ -6092,12 +6089,10 @@ export function createWin32Module(){
                 }),
 
                 'USER32.dll': ()=>({ ...createWindowFunctions({
-                    readMemory,
+                    guest,
                     canWrite,
                     processId,
                     directory: windowDirectory,
-                    writeMemory,
-                    readCString,
                     // wvsprintfA reads a `va_list` window too, clamped the same way.
                     regionAt: address=>memory.find(address) ?? null,
                     handles,

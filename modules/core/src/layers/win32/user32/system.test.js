@@ -25,6 +25,7 @@ import { decodeAnsi } from '../kernel32/locale.js';
 import { displayModes } from './display.js';
 import { createHive } from '../advapi32/registry.js';
 import { createRegistryService } from '../advapi32/registry-service.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const CLASS_NAME = 0x10000;
 const CLASS_STRUCT = 0x10100;
@@ -65,6 +66,8 @@ function fakeMemory(size = 0x14000){
     const bytes = new Uint8Array(size);
     const memory = {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @type {((address: number) => { base: number, size: number } | null) | null} */
         regionAt: null,
         /** @param {number} address @param {number} length */
@@ -235,10 +238,7 @@ function setup(
     /** @type {any[]} */
     const sent = [];
     const fns = createWindowFunctions({
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
-            memory.writeMemory(a, d),
-        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        guest: memory.guest,
         regionAt: address=>memory.regionAt?.(address) ?? null,
         handles: fakeHandles(),
         queue,

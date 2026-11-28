@@ -21,6 +21,7 @@ import { createMessageQueue } from './messages.js';
 import { createWindowFunctions } from './windows.js';
 import { OBJECT_LAYOUT } from './objects.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const CLASS_NAME = 0x10000;
 const CLASS_STRUCT = 0x10100;
@@ -64,6 +65,8 @@ function fakeMemory(size = 0x14000){
     let next = 0x10000;
     return {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -154,10 +157,7 @@ function setup(extra = {}){
     const queue = createMessageQueue();
     const fns = createWindowFunctions({
         ...extra,
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
-            memory.writeMemory(a, d),
-        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        guest: memory.guest,
         handles: fakeHandles(),
         queue,
         dispatch: ()=>0,
@@ -1497,9 +1497,7 @@ function listening(){
     const memory = fakeMemory();
     const board = { text: /** @type {string | null} */ (null), version: 0 };
     const fns = /** @type {any} */ (createWindowFunctions({
-        readMemory: (a, n)=>memory.readMemory(a, n),
-        writeMemory: (a, d)=>memory.writeMemory(a, d),
-        readCString: (a, n)=>memory.readCString(a, n),
+        guest: memory.guest,
         handles: fakeHandles(),
         queue: createMessageQueue(),
         dispatch: (wndProc, message)=>{

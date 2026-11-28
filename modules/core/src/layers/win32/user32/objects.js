@@ -33,9 +33,9 @@ import { ddbToBgra, dibToBgra, planesToBgra } from './cursors.js';
 import {
     bitsFromPicture, blankBits, maskFromPixels, pictureFromBits, scaleBits,
 } from './icon-bits.js';
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { readText, readWideString, writeText } from './unicode.js';
-import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { encodeAnsi } from '../kernel32/locale.js';
+import { readText, writeText } from './unicode.js';
+import { charactersOf } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
 
 /** The resource directories a cursor and an icon are named in. */
@@ -63,9 +63,7 @@ const MAX_RESOURCE_NAME = 256;
  * of a resource it was built with.
  *
  * @param {{ handles: { open: (type: string, object: any) => number },
- *           readCString: (address: number, maxLength: number) => string,
- *           readMemory: (address: number, length: number) => Uint8Array,
- *           writeMemory: (address: number, bytes: Uint8Array) => void,
+ *           guest: import('../common/guest.js').Guest,
  *           findResource?: (instance: number, type: number,
  *               name: number | string) => unknown }} host
  * @param {string} kind    The handle type opened: 'cursor' or 'icon'.
@@ -432,9 +430,7 @@ const parseMenuExLevel = (bytes, start, depth)=>{
     {
         return null;
     }
-    /** @param {number} at */
-    const dword = at=>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
-        | bytes[at + 3] << 24) >>> 0;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     /** @type {ParsedMenuItem[]} */
     const items = [];
     let at = start;
@@ -444,9 +440,9 @@ const parseMenuExLevel = (bytes, start, depth)=>{
         {
             return null;
         }
-        const type = dword(at);
-        const state = dword(at + 4);
-        const id = dword(at + 8);
+        const type = view.getUint32(at, true);
+        const state = view.getUint32(at + 4, true);
+        const id = view.getUint32(at + 8, true);
         const flags = bytes[at + 12] | bytes[at + 13] << 8;
         const named = wideText(bytes, at + 14);
         if (named === null)
@@ -465,7 +461,7 @@ const parseMenuExLevel = (bytes, start, depth)=>{
             {
                 return null;
             }
-            item.help = dword(at);
+            item.help = view.getUint32(at, true);
             const inner = parseMenuExLevel(bytes, at + 4, depth + 1);
             if (inner === null)
             {
@@ -573,6 +569,7 @@ const ERROR_INVALID_CURSOR_HANDLE = 1402;
  */
 export function createObjectFunctions(options){
     const { host, live, clipboardService, menuChanged, send, menuBar } = options;
+    const { guest } = host;
     /** @type {Map<number, any>} */
     const menus = new Map();
     /** @type {Map<number, any>} */
@@ -680,7 +677,7 @@ export function createObjectFunctions(options){
             }
         }
         const address = host.allocate(bytes.length);
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
         return address;
     };
 
@@ -721,20 +718,6 @@ export function createObjectFunctions(options){
     ];
 
     /**
-     * A terminated string read a window at a time, so a short one does not
-     * cost the whole ceiling, a long one is not refused at a fixed limit, and
-     * one at the end of what the program allocated is not read past.
-     *
-     * @param {number} address @param {1 | 2} width Bytes per character.
-     */
-    const readTerminated = (address, width)=>charactersOf(
-        readToTerminator(host, address, width, MAX_CLIPBOARD_TEXT / width).bytes, width);
-
-    /** CF_TEXT's bytes, as the characters they are in the ANSI page. @param {number} address */
-    const readAnsiText = address=>decodeAnsi(Uint8Array.from(readTerminated(address, 1),
-        character=>character.charCodeAt(0)));
-
-    /**
      * The text the clipboard holds, if it holds any. Unicode is preferred
      * over the byte formats because it is the one that lost nothing; a null
      * handle is delayed rendering, which nothing here asks the owner for.
@@ -745,15 +728,15 @@ export function createObjectFunctions(options){
         const wide = clipboard.formats.get(CF_UNICODETEXT);
         if (wide)
         {
-            return readTerminated(wide, 2);
+            return guest.text(wide, true, MAX_CLIPBOARD_TEXT);
         }
         const ansi = clipboard.formats.get(CF_TEXT);
         if (ansi)
         {
-            return readAnsiText(ansi);
+            return guest.text(ansi, false, MAX_CLIPBOARD_TEXT);
         }
         const oem = clipboard.formats.get(CF_OEMTEXT);
-        return oem ? readTerminated(oem, 1) : null;
+        return oem ? charactersOf(guest.stringBytes(oem, false, MAX_CLIPBOARD_TEXT)) : null;
     };
 
     /**
@@ -813,29 +796,9 @@ export function createObjectFunctions(options){
             {
                 return 0;
             }
-            const clipped = text.slice(0, (room | 0) - 1);
-            if (!wide)
-            {
-                return writeString(wholeAddress(buffer), clipped, room | 0);
-            }
-            host.writeMemory(wholeAddress(buffer),
-                new Uint8Array(Uint16Array.from(`${clipped} `, c=>c.charCodeAt(0)).buffer));
-            return clipped.length;
+            return guest.setText(wholeAddress(buffer), text, wide, room | 0);
         },
     });
-
-    /** In the ANSI page. @param {number} address @param {string} text @param {number} limit */
-    const writeString = (address, text, limit)=>{
-        const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
-        host.writeMemory(address, encodeAnsi(`${clipped}\0`));
-        return clipped.length;
-    };
-
-    /** @param {number} address @returns {number} */
-    const readU32 = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
 
     /**
      * SetMenuInfo and GetMenuInfo, the structure's layout told by its cbSize:
@@ -853,14 +816,14 @@ export function createObjectFunctions(options){
                 host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
                 return 0;
             }
-            const size = (info >>> 0) === 0 ? 0 : readU32(wholeAddress(info));
+            const size = (info >>> 0) === 0 ? 0 : guest.u32(wholeAddress(info));
             const layout = MENUINFO_LAYOUTS.find(each=>each.SIZE === size);
             if (!layout)
             {
                 host.setLastError?.(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            const mask = readU32(wholeAddress(info) + 4);
+            const mask = guest.u32(wholeAddress(info) + 4);
             const fields = /** @type {const} */ ([[MIM_STYLE, 'style', layout.STYLE],
                 [MIM_MAXHEIGHT, 'maxHeight', layout.MAX_HEIGHT],
                 [MIM_BACKGROUND, 'background', layout.BACKGROUND],
@@ -873,7 +836,8 @@ export function createObjectFunctions(options){
                     {
                         if ((mask & bit) !== 0)
                         {
-                            each.info = { ...each.info, [name]: readU32(wholeAddress(info) + at) };
+                            each.info = { ...each.info,
+                                [name]: guest.u32(wholeAddress(info) + at) };
                         }
                     }
                 };
@@ -895,27 +859,12 @@ export function createObjectFunctions(options){
             {
                 if ((mask & bit) !== 0)
                 {
-                    writeU32s(wholeAddress(info) + at, [menu.info?.[name] ?? 0]);
+                    guest.set32s(wholeAddress(info) + at, [menu.info?.[name] ?? 0]);
                 }
             }
             return 1;
         },
     });
-
-    /** @param {number} address @param {number[]} values */
-    const writeU32s = (address, values)=>{
-        const bytes = new Uint8Array(values.length * 4);
-        for (let index = 0; index < values.length; index++)
-        {
-            const value = values[index] >>> 0;
-            const at = index * 4;
-            bytes[at] = value & 0xff;
-            bytes[at + 1] = value >>> 8 & 0xff;
-            bytes[at + 2] = value >>> 16 & 0xff;
-            bytes[at + 3] = value >>> 24 & 0xff;
-        }
-        host.writeMemory(address, bytes);
-    };
 
     /**
      * A property is named by a string or by an atom, and the two are told apart
@@ -929,8 +878,8 @@ export function createObjectFunctions(options){
      */
     const propertyKey = (value, wide = false)=>((value >>> 0) <= 0xffff
         ? value >>> 0
-        : (wide ? readWideString(host, value >>> 0, MAX_TEXT)
-            : host.readCString(wholeAddress(value), MAX_TEXT)).toUpperCase());
+        : (wide ? readText(host, value >>> 0, true, MAX_TEXT)
+            : guest.cstr(wholeAddress(value), MAX_TEXT)).toUpperCase());
 
     /**
      * SetProp, GetProp and RemoveProp, for either spelling.
@@ -1079,24 +1028,24 @@ export function createObjectFunctions(options){
      * @returns {any | null}
      */
     const readItemInfo = (address, wide)=>{
-        const declared = readU32(address + MENUITEMINFO.cbSize);
+        const declared = guest.u32(address + MENUITEMINFO.cbSize);
         if (declared !== MENUITEMINFO.SIZE && declared !== MENUITEMINFO.SIZE_LEGACY)
         {
             return null;
         }
-        const mask = readU32(address + MENUITEMINFO.fMask);
+        const mask = guest.u32(address + MENUITEMINFO.fMask);
         if ((mask & MIIM_TYPE) !== 0 && (mask & (MIIM_STRING | MIIM_FTYPE | MIIM_BITMAP)) !== 0)
         {
             return null;
         }
-        const type = readU32(address + MENUITEMINFO.fType);
+        const type = guest.u32(address + MENUITEMINFO.fType);
         // MFT_BITMAP is MIIM_TYPE's way of naming a bitmap; the newer
         // members name it with MIIM_BITMAP and refuse the type bit.
         if ((mask & MIIM_FTYPE) !== 0 && (type & MF_BITMAP) !== 0)
         {
             return null;
         }
-        const typeData = readU32(address + MENUITEMINFO.dwTypeData);
+        const typeData = guest.u32(address + MENUITEMINFO.dwTypeData);
         const notText = (mask & MIIM_TYPE) !== 0 && !isStringType(type);
         /** @type {string | null} null when the mask gives no text */
         let text = null;
@@ -1109,19 +1058,19 @@ export function createObjectFunctions(options){
         return {
             mask,
             type,
-            state: readU32(address + MENUITEMINFO.fState),
-            id: readU32(address + MENUITEMINFO.wID),
-            submenu: readU32(address + MENUITEMINFO.hSubMenu),
-            data: readU32(address + MENUITEMINFO.dwItemData),
+            state: guest.u32(address + MENUITEMINFO.fState),
+            id: guest.u32(address + MENUITEMINFO.wID),
+            submenu: guest.u32(address + MENUITEMINFO.hSubMenu),
+            data: guest.u32(address + MENUITEMINFO.dwItemData),
             text,
             noText,
             // What dwTypeData held in place of text, which MIIM_TYPE hands
             // back: a bitmap item's handle.
             typeData: notText && (type & MF_BITMAP) !== 0 ? typeData : 0,
             // hbmpItem, which a structure of the older size does not have.
-            bitmap: declared === MENUITEMINFO.SIZE ? readU32(address + MENUITEMINFO.hbmpItem) : 0,
-            checked: readU32(address + MENUITEMINFO.hbmpChecked),
-            unchecked: readU32(address + MENUITEMINFO.hbmpUnchecked),
+            bitmap: declared === MENUITEMINFO.SIZE ? guest.u32(address + MENUITEMINFO.hbmpItem) : 0,
+            checked: guest.u32(address + MENUITEMINFO.hbmpChecked),
+            unchecked: guest.u32(address + MENUITEMINFO.hbmpUnchecked),
         };
     };
 
@@ -1172,7 +1121,7 @@ export function createObjectFunctions(options){
             let bytes;
             try
             {
-                bytes = host.readMemory(wholeAddress(address), size);
+                bytes = guest.snapshot(wholeAddress(address), size);
             }
             catch {
                 return 0;
@@ -1204,7 +1153,7 @@ export function createObjectFunctions(options){
         const raw = wholeAddress(name);
         const key = raw < MAX_INTEGER_RESOURCE
             ? raw
-            : (wide ? readTerminated(raw, 2) : host.readCString(raw, MAX_RESOURCE_NAME));
+            : (wide ? guest.wstr(raw, MAX_CLIPBOARD_TEXT) : guest.cstr(raw, MAX_RESOURCE_NAME));
         const found = /** @type {{ rva: number, size: number } | null} */ (
             host.findResource?.(module, RT_MENU, key) ?? null);
         const base = host.moduleBase?.(module) ?? 0;
@@ -1213,7 +1162,7 @@ export function createObjectFunctions(options){
             return 0;
         }
         const parsed = parseMenuTemplate(
-            host.readMemory((base + found.rva) >>> 0, found.size));
+            guest.snapshot((base + found.rva) >>> 0, found.size));
         return parsed === null ? 0 : materializeMenu(parsed.items, false, parsed.help);
     };
 
@@ -1514,12 +1463,12 @@ export function createObjectFunctions(options){
             {
                 return 0;
             }
-            const declared = readU32(info + MENUITEMINFO.cbSize);
+            const declared = guest.u32(info + MENUITEMINFO.cbSize);
             if (declared !== MENUITEMINFO.SIZE && declared !== MENUITEMINFO.SIZE_LEGACY)
             {
                 return 0;
             }
-            const mask = readU32(info + MENUITEMINFO.fMask);
+            const mask = guest.u32(info + MENUITEMINFO.fMask);
             if ((mask & MIIM_TYPE) !== 0
                 && (mask & (MIIM_STRING | MIIM_FTYPE | MIIM_BITMAP)) !== 0)
             {
@@ -1551,7 +1500,7 @@ export function createObjectFunctions(options){
             {
                 if ((mask & bit) !== 0)
                 {
-                    writeU32s(info + offset, [value]);
+                    guest.set32s(info + offset, [value]);
                 }
             }
             const length = held.noText === true ? 0 : held.text.length;
@@ -1560,22 +1509,22 @@ export function createObjectFunctions(options){
                 // dwTypeData is not a buffer for an item that is no string:
                 // a bitmap item's is its handle, any other's nothing, and
                 // cch is the length of what text the item has.
-                writeU32s(info + MENUITEMINFO.dwTypeData,
+                guest.set32s(info + MENUITEMINFO.dwTypeData,
                     [bitmapped ? held.bitmap : held.typeData ?? 0]);
-                writeU32s(info + MENUITEMINFO.cch, [length]);
+                guest.set32s(info + MENUITEMINFO.cch, [length]);
             }
             else if ((mask & (MIIM_STRING | MIIM_TYPE)) !== 0)
             {
                 // cch is the buffer's size going in and the length coming
                 // out, and dwTypeData being null means the caller is asking
                 // for that length rather than for the text.
-                const buffer = readU32(info + MENUITEMINFO.dwTypeData);
-                const room = readU32(info + MENUITEMINFO.cch);
+                const buffer = guest.u32(info + MENUITEMINFO.dwTypeData);
+                const room = guest.u32(info + MENUITEMINFO.cch);
                 const text = held.noText === true ? '' : held.text;
                 const written = buffer === 0
                     ? text.length
                     : writeText(host, buffer, text, room, wide);
-                writeU32s(info + MENUITEMINFO.cch, [written]);
+                guest.set32s(info + MENUITEMINFO.cch, [written]);
             }
             return 1;
         },
@@ -1669,7 +1618,7 @@ export function createObjectFunctions(options){
             {
                 return 0;
             }
-            const bytes = host.readMemory((base + found.rva) >>> 0, found.size);
+            const bytes = guest.snapshot((base + found.rva) >>> 0, found.size);
             /** @type {AcceleratorEntry[]} */
             const entries = [];
             for (let at = 0; at + ACCEL_RESOURCE_SIZE <= bytes.length; at += ACCEL_RESOURCE_SIZE)
@@ -1719,7 +1668,7 @@ export function createObjectFunctions(options){
             bytes[at + 4] = entry.command & 0xff;
             bytes[at + 5] = entry.command >>> 8;
         }
-        host.writeMemory(wholeAddress(out), bytes);
+        guest.setBytes(wholeAddress(out), bytes);
         return count;
     };
 
@@ -1731,12 +1680,12 @@ export function createObjectFunctions(options){
         {
             return 0;
         }
-        const message = readU32(wholeAddress(msg) + 4);
+        const message = guest.u32(wholeAddress(msg) + 4);
         if (message !== WM_KEYDOWN && message !== WM_SYSKEYDOWN)
         {
             return 0;
         }
-        const key = readU32(wholeAddress(msg) + 8) & 0xffff;
+        const key = guest.u32(wholeAddress(msg) + 8) & 0xffff;
         const match = record.entries.find((/** @type {any} */ entry)=>
             entry.key === key
             && (entry.flags & FVIRTKEY) !== 0
@@ -1798,7 +1747,7 @@ export function createObjectFunctions(options){
             host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        const bytes = host.readMemory(at, Math.min(length, 0x100000));
+        const bytes = guest.snapshot(at, Math.min(length, 0x100000));
         const image = bytes.subarray(skip);
         const view = new DataView(image.buffer, image.byteOffset, image.byteLength);
         const png = image[0] === 0x89 && image[1] === 0x50 && image[2] === 0x4e
@@ -1827,7 +1776,7 @@ export function createObjectFunctions(options){
         {
             return 0;
         }
-        const bytes = host.readMemory(wholeAddress(table), entries * ACCEL_SIZE);
+        const bytes = guest.snapshot(wholeAddress(table), entries * ACCEL_SIZE);
         /** @type {AcceleratorEntry[]} */
         const read = [];
         for (let index = 0; index < entries; index++)
@@ -2369,7 +2318,7 @@ export function createObjectFunctions(options){
                 const layout = record && (record.menu >>> 0) === (handle >>> 0)
                     ? layOutBar(record, menu) : null;
                 const rect = layout?.rects[item >>> 0] ?? { left: 0, top: 0, right: 0, bottom: 0 };
-                writeU32s(out, [rect.left + origin.x, rect.top + origin.y,
+                guest.set32s(out, [rect.left + origin.x, rect.top + origin.y,
                     rect.right + origin.x, rect.bottom + origin.y]);
                 return 1;
             },
@@ -2409,7 +2358,7 @@ export function createObjectFunctions(options){
                 {
                     return 0;
                 }
-                if (wholeAddress(out) === 0 || readU32(out) !== MENUBARINFO_SIZE)
+                if (wholeAddress(out) === 0 || guest.u32(out) !== MENUBARINFO_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -2431,11 +2380,11 @@ export function createObjectFunctions(options){
                 {
                     rect = layout.rects[(item | 0) - 1];
                 }
-                writeU32s(out + 4, rect
+                guest.set32s(out + 4, rect
                     ? [rect.left + origin.x, rect.top + origin.y, rect.right + origin.x,
                         rect.bottom + origin.y]
                     : [0, 0, 0, 0]);
-                writeU32s(out + 20, [record.menu >>> 0, 0, 0]);
+                guest.set32s(out + 20, [record.menu >>> 0, 0, 0]);
                 return 1;
             },
         },
@@ -3043,7 +2992,7 @@ export function createObjectFunctions(options){
                 // A plane not given is a bitmap made without bits: all zero.
                 /** @param {number} plane */
                 const read = plane=>((plane >>> 0) === 0
-                    ? new Uint8Array(size) : host.readMemory(wholeAddress(plane), size));
+                    ? new Uint8Array(size) : guest.snapshot(wholeAddress(plane), size));
                 const hotSpot = { x: x | 0, y: y | 0 };
                 const andPlane = read(and);
                 const xorPlane = read(xor);
@@ -3080,7 +3029,7 @@ export function createObjectFunctions(options){
                 }
                 /** @param {number} plane @param {number} size */
                 const read = (plane, size)=>((plane >>> 0) === 0
-                    ? new Uint8Array(size) : host.readMemory(wholeAddress(plane), size));
+                    ? new Uint8Array(size) : guest.snapshot(wholeAddress(plane), size));
                 const mask = read(and, ((across + 15) >>> 4) * 2 * down);
                 const colour = read(xor, ((across * depth + 15) >>> 4) * 2 * down);
                 const hotSpot = { x: across >> 1, y: down >> 1 };
@@ -3154,11 +3103,11 @@ export function createObjectFunctions(options){
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const isIcon = readU32(info) !== 0;
-                const hotX = readU32(info + 4);
-                const hotY = readU32(info + 8);
-                const maskHandle = readU32(info + 12);
-                const colourHandle = readU32(info + 16);
+                const isIcon = guest.u32(info) !== 0;
+                const hotX = guest.u32(info + 4);
+                const hotY = guest.u32(info + 8);
+                const maskHandle = guest.u32(info + 12);
+                const colourHandle = guest.u32(info + 16);
                 const mono = colourHandle === 0;
                 // A build that cannot measure a bitmap takes the standard
                 // icon's size rather than refusing the icon.
@@ -3379,7 +3328,7 @@ export function createObjectFunctions(options){
                 view.setUint32(8, hotSpot.y >>> 0, true);
                 view.setUint32(12, maskBitmap >>> 0, true);
                 view.setUint32(16, colourBitmap >>> 0, true);
-                host.writeMemory(wholeAddress(out), bytes);
+                guest.setBytes(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -3414,27 +3363,27 @@ export function createObjectFunctions(options){
             handler: ([hwnd, bar, info])=>{
                 const record = live(hwnd);
                 if (!record || wholeAddress(info) === 0
-                    || readU32(info + SCROLLINFO.cbSize) !== SCROLLINFO.SIZE)
+                    || guest.u32(info + SCROLLINFO.cbSize) !== SCROLLINFO.SIZE)
                 {
                     return 0;
                 }
-                const mask = readU32(info + SCROLLINFO.fMask);
+                const mask = guest.u32(info + SCROLLINFO.fMask);
                 const held = scrollOf(record, bar);
                 if ((mask & SIF_RANGE) !== 0)
                 {
-                    writeU32s(info + SCROLLINFO.nMin, [held.min, held.max]);
+                    guest.set32s(info + SCROLLINFO.nMin, [held.min, held.max]);
                 }
                 if ((mask & SIF_PAGE) !== 0)
                 {
-                    writeU32s(info + SCROLLINFO.nPage, [held.page]);
+                    guest.set32s(info + SCROLLINFO.nPage, [held.page]);
                 }
                 if ((mask & SIF_POS) !== 0)
                 {
-                    writeU32s(info + SCROLLINFO.nPos, [held.pos]);
+                    guest.set32s(info + SCROLLINFO.nPos, [held.pos]);
                 }
                 if ((mask & SIF_TRACKPOS) !== 0)
                 {
-                    writeU32s(info + SCROLLINFO.nTrackPos, [held.trackPos]);
+                    guest.set32s(info + SCROLLINFO.nTrackPos, [held.trackPos]);
                 }
                 return 1;
             },
@@ -3454,24 +3403,24 @@ export function createObjectFunctions(options){
             handler: ([hwnd, bar, info])=>{
                 const record = live(hwnd);
                 if (!record || wholeAddress(info) === 0
-                    || readU32(info + SCROLLINFO.cbSize) !== SCROLLINFO.SIZE)
+                    || guest.u32(info + SCROLLINFO.cbSize) !== SCROLLINFO.SIZE)
                 {
                     return 0;
                 }
-                const mask = readU32(info + SCROLLINFO.fMask);
+                const mask = guest.u32(info + SCROLLINFO.fMask);
                 const held = scrollOf(record, bar);
                 if ((mask & SIF_RANGE) !== 0)
                 {
-                    held.min = readU32(info + SCROLLINFO.nMin) | 0;
-                    held.max = readU32(info + SCROLLINFO.nMax) | 0;
+                    held.min = guest.u32(info + SCROLLINFO.nMin) | 0;
+                    held.max = guest.u32(info + SCROLLINFO.nMax) | 0;
                 }
                 if ((mask & SIF_PAGE) !== 0)
                 {
-                    held.page = readU32(info + SCROLLINFO.nPage) | 0;
+                    held.page = guest.u32(info + SCROLLINFO.nPage) | 0;
                 }
                 if ((mask & SIF_POS) !== 0)
                 {
-                    held.pos = readU32(info + SCROLLINFO.nPos) | 0;
+                    held.pos = guest.u32(info + SCROLLINFO.nPos) | 0;
                 }
                 return clampScroll(held);
             },
@@ -3513,11 +3462,11 @@ export function createObjectFunctions(options){
                 const held = scrollOf(record, bar);
                 if (wholeAddress(minOut) !== 0)
                 {
-                    writeU32s(wholeAddress(minOut), [held.min]);
+                    guest.set32s(wholeAddress(minOut), [held.min]);
                 }
                 if (wholeAddress(maxOut) !== 0)
                 {
-                    writeU32s(wholeAddress(maxOut), [held.max]);
+                    guest.set32s(wholeAddress(maxOut), [held.max]);
                 }
                 return 1;
             },

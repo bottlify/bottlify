@@ -12,6 +12,7 @@
 import { createGdiFunctions } from './functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { surfaceForDdb, surfaceForDibSection } from '../../graphics/gdi/surface.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * gdi32 over the real drawing engine, wired as the win32 module wires it: a
@@ -34,9 +35,7 @@ export function painted(width, height, { answer = ()=>0, canWrite } = {}){
     /** @type {number[]} */
     const errors = [];
     const gdi = createGdiFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: ()=>'',
+        guest: guestOver(bytes),
         handles: { open: ()=>(handles += 4), close: ()=>undefined },
         surfaces: {
             /** @param {number} size */

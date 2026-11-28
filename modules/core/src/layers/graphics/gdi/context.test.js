@@ -29,6 +29,7 @@ import {
     DD_OK,
 } from '../ddraw/constants.js';
 import { createDirectDraw } from '../ddraw/objects.js';
+import { guestOver } from '../../win32/common/guest.fixture.js';
 
 const BACKGROUND = 0x00202020;
 const RED_COLOR = 0x000000ff;
@@ -478,10 +479,7 @@ function fakeGdiHost(){
     return {
         bytes,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: ()=>'',
+        guest: guestOver(bytes),
         handles: fakeHandles(),
         surfaces: {
             /** @param {number} size */
@@ -507,7 +505,7 @@ test('the bits CreateDIBSection allocated are a surface this layer can draw into
     view.setInt32(BITMAPINFOHEADER.biHeight, -3, true);
     view.setUint16(BITMAPINFOHEADER.biPlanes, 1, true);
     view.setUint16(BITMAPINFOHEADER.biBitCount, 32, true);
-    host.writeMemory(INFO, info);
+    host.guest.setBytes(INFO, info);
 
     const bitmap = gdi.CreateDIBSection.handler([0, INFO, 0, 0, 0, 0]);
     assert.notEqual(bitmap, 0, 'the section must have been created');
@@ -660,9 +658,7 @@ function wiredGdi(){
     const errors = [];
     const gdi = createGdiFunctions({
         setLastError: code=>errors.push(code),
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: ()=>'',
+        guest: guestOver(bytes),
         handles: fakeHandles(),
         surfaces: {
             /** @param {number} size */

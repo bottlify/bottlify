@@ -29,6 +29,7 @@ import {
     IDOK, IDCANCEL, IDHELP, IDC_APPLY_BUTTON, IDC_NEXT_BUTTON, IDC_BACK_BUTTON,
     IDC_HEADER_TITLE, IDC_HEADER_SUBTITLE, IDC_SUNKEN_LINEHEADER,
 } from './propsheet.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * The window manager over the real drawing engine with the common controls
@@ -100,6 +101,8 @@ function fakeMemory(size = 0x80000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -313,9 +316,7 @@ function setup({ modal = false, guest = false } = {}){
     }
 
     const gdi = createGdiFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: memory.readCString,
+        guest: memory.guest,
         handles,
         surfaces: { allocate, free: ()=>{} },
         screen: SCREEN,
@@ -333,9 +334,7 @@ function setup({ modal = false, guest = false } = {}){
     });
 
     const fns = createWindowFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: memory.readCString,
+        guest: memory.guest,
         handles,
         queue,
         screen: SCREEN,

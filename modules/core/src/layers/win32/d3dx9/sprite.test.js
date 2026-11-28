@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SPRITE, createSprites } from './sprite.js';
 import { createFonts } from './font.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * Guest memory, a heap, and a device whose methods are reached through the
@@ -114,6 +115,7 @@ function rig(){
     };
     let published = 0x90000000;
     const host = {
+        guest: guestOver(memory),
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             memory.subarray(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>

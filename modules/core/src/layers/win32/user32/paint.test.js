@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPaintFunctions, layoutText, tabbedWidth } from './paint.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const DT_CENTER = 0x0001;
 const DT_RIGHT = 0x0002;
@@ -73,9 +74,7 @@ test('DrawIcon puts the icon\'s picture down at its size, DrawIconEx at the size
     const ICON = 0x30;
     const { table } = createPaintFunctions({
         host: /** @type {any} */ ({
-            readMemory: ()=>new Uint8Array(0),
-            writeMemory: ()=>{},
-            readCString: ()=>'',
+            guest: guestOver(new Uint8Array(0x100)),
             picture: (/** @type {number} */ handle)=>(handle === ICON ? picture : null),
             draw: {
                 picture: (/** @type {any[]} */ ...args)=>drawn.push(['picture', ...args]) > 0,
@@ -130,12 +129,7 @@ const recording = ()=>{
     const said = [];
     const { table } = createPaintFunctions({
         host: /** @type {any} */ ({
-            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-                memory.slice(at, at + length),
-            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-                memory.set(bytes, at),
-            readCString: (/** @type {number} */ at)=>new TextDecoder()
-                .decode(memory.subarray(at, memory.indexOf(0, at))),
+            guest: guestOver(memory),
             draw: {
                 sysColor: (/** @type {number} */ index)=>0x100 + index,
                 fill: (/** @type {number} */ hdc, /** @type {any} */ rect, /** @type {number} */ color)=>
@@ -305,10 +299,7 @@ test('DrawFocusRect inverts the rectangle\'s one-pixel border through the gray b
     const inverted = [];
     const { table } = createPaintFunctions({
         host: /** @type {any} */ ({
-            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-                memory.slice(at, at + length),
-            writeMemory: ()=>{},
-            readCString: ()=>'',
+            guest: guestOver(memory),
             draw: {
                 invert: (/** @type {number} */ hdc, /** @type {any} */ rect,
                     /** @type {boolean} */ halftone)=>inverted.push([hdc, rect, halftone]) > 0,
@@ -337,16 +328,10 @@ test('DrawText on a handle that is no context answers zero and reads nothing', (
     // is zero with the last error untouched; the ANSI form says the handle.
     /** @type {number[]} */
     const errors = [];
-    /** @type {number[]} */
-    const read = [];
     const { table } = createPaintFunctions({
         host: /** @type {any} */ ({
-            readMemory: (/** @type {number} */ address)=>{
-                read.push(address);
-                return new Uint8Array(0);
-            },
-            writeMemory: ()=>{},
-            readCString: ()=>'',
+            // A byte of memory at 0: a read of the text would fault.
+            guest: guestOver(new Uint8Array(1)),
             setLastError: (/** @type {number} */ code)=>errors.push(code),
             draw: { isContext: (/** @type {number} */ hdc)=>hdc === 0x44 },
         }),
@@ -362,5 +347,4 @@ test('DrawText on a handle that is no context answers zero and reads nothing', (
     assert.deepEqual(errors, []);
     assert.equal(table.DrawTextExA.handler([0xdeadbeef, 0, -1, 0xdeadbeef, 0x400, 0]), 0);
     assert.deepEqual(errors, [6]);
-    assert.deepEqual(read, []);
 });

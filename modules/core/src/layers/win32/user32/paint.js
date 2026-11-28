@@ -32,7 +32,6 @@
  */
 
 import { PAINTSTRUCT, RECT, readRect, userLayouts, writeFields, writeRect } from './structs.js';
-import { decodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
 import { boundsOf, intersectArea, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
@@ -175,9 +174,7 @@ const DCX_INTERSECTRGN = 0x0080;
  * @typedef {Object} PaintHost
  * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
  *     have their pointers, handles and message parameters eight bytes wide.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} [setLastError]
  * @property {(region: number) => (Rect & { rects?: Rect[] }) | null} [regionBox]
  *           The rectangle a region object holds, and its rectangles when it is
@@ -496,6 +493,7 @@ export function tabbedWidth(text, widthOf, stops, interval){
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
+    const { guest } = host;
     /** The structures at the process's width (`structs.js`). */
     const layouts = userLayouts(host.pointerSize);
     const shown = options.shown ?? (()=>true);
@@ -1247,10 +1245,8 @@ export function createPaintFunctions(options){
      *
      * @param {number} address @param {number} count @param {boolean} wide
      */
-    const readCounted = (address, count, wide)=>(wide
-        ? String.fromCharCode(...new Uint16Array(
-            host.readMemory(wholeAddress(address), count * 2).slice().buffer))
-        : decodeAnsi(host.readMemory(wholeAddress(address), count)));
+    const readCounted = (address, count, wide)=>guest.text(wholeAddress(address), wide,
+        wide ? count * 2 : count, true);
 
     /**
      * DrawState of either kind of text: text, an icon or a bitmap at a
@@ -1378,7 +1374,7 @@ export function createPaintFunctions(options){
                 : readCounted(text, count | 0, wide);
         const bounds = (rect >>> 0) === 0
             ? { left: 0, top: 0, right: 0x7fff, bottom: 0x7fff }
-            : readRect(host, rect);
+            : readRect(guest, rect);
         const cell = cellOf(hdc);
         // Measured against an unbounded width when the rectangle is empty,
         // which is how a program asks how wide a string would be.
@@ -1393,7 +1389,7 @@ export function createPaintFunctions(options){
         {
             if ((rect >>> 0) !== 0)
             {
-                writeRect(host, rect, {
+                writeRect(guest, rect, {
                     left: bounds.left,
                     top: bounds.top,
                     right: (format & DT_WORDBREAK) !== 0 && !isEmpty(bounds)
@@ -1439,10 +1435,8 @@ export function createPaintFunctions(options){
         const cell = cellOf(hdc);
         const widthOf = cell.width ?? ((/** @type {string} */ piece)=>piece.length * cell.cellWidth);
         const given = (stops >>> 0) === 0 ? 0 : Math.min(Math.max(positions | 0, 0), MAX_TAB_STOPS);
-        const bytes = host.readMemory(wholeAddress(stops), given * 4);
         const list = Array.from({ length: given }, (_, index)=>
-            bytes[index * 4] | bytes[index * 4 + 1] << 8 | bytes[index * 4 + 2] << 16
-            | bytes[index * 4 + 3] << 24);
+            guest.i32(wholeAddress(stops) + index * 4));
         // An x is as wide as the font's average character, near enough.
         const width = tabbedWidth(string, widthOf, list, TAB_CHARACTERS * widthOf('x'));
         return ((cell.cellHeight & 0xffff) << 16 | width & 0xffff) >>> 0;
@@ -1506,9 +1500,9 @@ export function createPaintFunctions(options){
                 }
                 const layout = layouts.PAINTSTRUCT;
                 return after(beginPaint(record), ({ hdc, rect, erase })=>{
-                    writeFields(host, paintStruct, layout,
+                    writeFields(guest, paintStruct, layout,
                         { hdc, fErase: erase ? 1 : 0, fRestore: 0, fIncUpdate: 0 });
-                    writeRect(host, paintStruct + layout.rcPaint, rect);
+                    writeRect(guest, paintStruct + layout.rcPaint, rect);
                     return handedOut(record.hwnd, hdc);
                 });
             },
@@ -1520,8 +1514,7 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, paintStruct])=>{
                 const record = live(hwnd);
-                const hdc = host.readMemory(paintStruct + layouts.PAINTSTRUCT.hdc, 4);
-                const handle = (hdc[0] | hdc[1] << 8 | hdc[2] << 16 | hdc[3] << 24) >>> 0;
+                const handle = guest.u32(paintStruct + layouts.PAINTSTRUCT.hdc);
                 // A kept context is still its window's after the paint.
                 if ((held.get(handle)?.kind ?? 'cache') === 'cache')
                 {
@@ -1555,7 +1548,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 invalidate(record,
-                    wholeAddress(rect) === 0 ? clientArea(record) : ordered(readRect(host, rect)),
+                    wholeAddress(rect) === 0 ? clientArea(record) : ordered(readRect(guest, rect)),
                     (erase >>> 0) !== 0);
                 return 1;
             },
@@ -1604,7 +1597,7 @@ export function createPaintFunctions(options){
                 }
                 const whole = (region >>> 0) === 0 && wholeAddress(rect) === 0;
                 const area = (region >>> 0) !== 0 || whole
-                    ? regionArea(record, region) : [ordered(readRect(host, rect))];
+                    ? regionArea(record, region) : [ordered(readRect(guest, rect))];
                 const children = (flags & RDW_NOCHILDREN) !== 0 ? 'none'
                     : (flags & RDW_ALLCHILDREN) !== 0 ? 'all' : 'auto';
                 if ((flags & RDW_INVALIDATE) !== 0)
@@ -1703,7 +1696,7 @@ export function createPaintFunctions(options){
                 const answer = ()=>{
                     if (wholeAddress(rect) !== 0)
                     {
-                        writeRect(host, rect,
+                        writeRect(guest, rect,
                             record.updateRect ?? { left: 0, top: 0, right: 0, bottom: 0 });
                     }
                     return owesPaint(record) ? 1 : 0;
@@ -1815,7 +1808,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 const handle = wholeAddress(brush);
-                const area = readRect(host, rect);
+                const area = readRect(guest, rect);
                 if (handle >= 1 && handle <= SYS_COLOR_BRUSH_LIMIT)
                 {
                     return draw.fill(hdc >>> 0, area, draw.sysColor(handle - 1)) ? 1 : 0;
@@ -1828,14 +1821,14 @@ export function createPaintFunctions(options){
         InvertRect: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hdc, rect])=>(host.draw?.invert(hdc >>> 0, readRect(host, rect)) ? 1 : 0),
+            handler: ([hdc, rect])=>(host.draw?.invert(hdc >>> 0, readRect(guest, rect)) ? 1 : 0),
         },
 
         /** BOOL FrameRect(HDC hDC, const RECT *lprc, HBRUSH hbr) */
         FrameRect: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hdc, rect, brush])=>(host.draw?.frame(hdc >>> 0, readRect(host, rect),
+            handler: ([hdc, rect, brush])=>(host.draw?.frame(hdc >>> 0, readRect(guest, rect),
                 brush >>> 0) ? 1 : 0),
         },
 
@@ -1938,14 +1931,14 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const area = drawEdges(hdc >>> 0, readRect(host, rect), edge, flags);
+                const area = drawEdges(hdc >>> 0, readRect(guest, rect), edge, flags);
                 if ((flags & BF_MIDDLE) !== 0)
                 {
                     draw.fill(hdc >>> 0, area, draw.sysColor(COLOR_3DFACE));
                 }
                 if ((flags & BF_ADJUST) !== 0)
                 {
-                    writeRect(host, rect, area);
+                    writeRect(guest, rect, area);
                 }
                 return 1;
             },
@@ -1988,7 +1981,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 const h = wholeAddress(hdc);
-                const area = readRect(host, rect);
+                const area = readRect(guest, rect);
                 const pushed = (state & DFCS_PUSHED) !== 0;
                 const flat = (state & DFCS_FLAT) !== 0;
                 if (type === DFC_MENU || type === DFC_POPUPMENU)
@@ -2052,7 +2045,7 @@ export function createPaintFunctions(options){
                 }
                 if ((state & DFCS_ADJUSTRECT) !== 0)
                 {
-                    writeRect(host, rect, inside);
+                    writeRect(guest, rect, inside);
                 }
                 return 1;
             },
@@ -2150,7 +2143,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const area = readRect(host, rect);
+                const area = readRect(guest, rect);
                 const h = wholeAddress(hdc);
                 return draw.invert(h, { ...area, bottom: area.top + 1 }, true)
                     && draw.invert(h, { ...area, top: area.bottom - 1 }, true)
@@ -2177,7 +2170,8 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                validate(record, wholeAddress(rect) === 0 ? null : [ordered(readRect(host, rect))]);
+                validate(record,
+                    wholeAddress(rect) === 0 ? null : [ordered(readRect(guest, rect))]);
                 return 1;
             },
         },

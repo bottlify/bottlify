@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createCaret } from './caret.js';
 import { createMessageQueue } from './messages.js';
 import { createWindowFunctions } from './windows.js';
-import { decodeAnsi } from '../kernel32/locale.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_NOACCESS = 998;
@@ -50,7 +50,7 @@ function caretOver({ thread = { current: 'main' } } = {}){
             painted++;
         },
         bitmapSize: handle=>(handle === 0x500 ? { width: 3, height: 9 } : null),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestOver(memory),
         setLastError: code=>errors.push(code),
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),
     });
@@ -199,16 +199,7 @@ test('the window manager takes a window\'s caret off for BeginPaint and back at 
         const handles = new Map();
         let next = 4;
         const fns = /** @type {any} */ (createWindowFunctions({
-            readMemory: (a, n)=>bytes.slice(a, a + n),
-            writeMemory: (a, d)=>bytes.set(d, a),
-            readCString: (a, n)=>{
-                let end = a;
-                while (bytes[end] !== 0 && end - a < n)
-                {
-                    end++;
-                }
-                return decodeAnsi(bytes.subarray(a, end));
-            },
+            guest: guestOver(bytes),
             handles: {
                 open: (type, object)=>{
                     handles.set(next, object);

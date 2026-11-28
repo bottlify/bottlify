@@ -33,6 +33,7 @@ import {
     COLOR_3DFACE, COLOR_HIGHLIGHT, after,
 } from '../user32/controls.js';
 import { mulDiv } from '../kernel32/system.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WS_EX_WINDOWEDGE = 0x00000100;
 const WS_EX_CLIENTEDGE = 0x00000200;
@@ -248,8 +249,8 @@ export function createProgressProcedure(host, tk){
                 const out = message.lParam >>> 0;
                 if (out !== 0)
                 {
-                    tk.writeU32(out + PBRANGE.iLow, held.min);
-                    tk.writeU32(out + PBRANGE.iHigh, held.max);
+                    host.guest.set32(wholeAddress(out + PBRANGE.iLow), held.min);
+                    host.guest.set32(wholeAddress(out + PBRANGE.iHigh), held.max);
                 }
                 return held.pos;
             }

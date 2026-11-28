@@ -612,11 +612,11 @@ export function createUpDownProcedure(host, tk, subclassing){
             case UDM_GETRANGE32:
                 if ((message.wParam >>> 0) !== 0)
                 {
-                    tk.writeU32(message.wParam, held.lower);
+                    host.guest.set32(wholeAddress(message.wParam), held.lower);
                 }
                 if ((message.lParam >>> 0) !== 0)
                 {
-                    tk.writeU32(message.lParam, held.upper);
+                    host.guest.set32(wholeAddress(message.lParam), held.upper);
                 }
                 return 0;
             case UDM_SETPOS:
@@ -630,7 +630,7 @@ export function createUpDownProcedure(host, tk, subclassing){
                 return after(readBuddy(record, thread), read=>{
                     if ((message.lParam >>> 0) !== 0)
                     {
-                        tk.writeU32(message.lParam, read ? 0 : 1);
+                        host.guest.set32(wholeAddress(message.lParam), read ? 0 : 1);
                     }
                     return held.pos;
                 });
@@ -669,8 +669,8 @@ export function createUpDownProcedure(host, tk, subclassing){
                 const count = Math.min(message.wParam >>> 0, held.accel.length);
                 for (let index = 0; index < (at === 0 ? 0 : count); index++)
                 {
-                    tk.writeU32(at + index * 8, held.accel[index].sec);
-                    tk.writeU32(at + index * 8 + 4, held.accel[index].inc);
+                    host.guest.set32(wholeAddress(at + index * 8), held.accel[index].sec);
+                    host.guest.set32(wholeAddress(at + index * 8 + 4), held.accel[index].inc);
                 }
                 return held.accel.length;
             }

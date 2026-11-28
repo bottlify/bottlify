@@ -170,49 +170,17 @@ export function putFields(view, base, layout, values){
 export function writeFields(memory, address, layout, values){
     for (const [name, value] of Object.entries(values))
     {
-        const bytes = new Uint8Array(wideField(layout, name) ? 8 : 4);
-        putFields(new DataView(bytes.buffer), -layout[name], layout, { [name]: value });
-        memory.writeMemory(address + layout[name], bytes);
+        const at = address + layout[name];
+        memory.set32(at, value);
+        if (wideField(layout, name))
+        {
+            memory.set32(at + 4, highOf(value,
+                /** @type {'ptr' | 'handle'} */ (fieldOf(layout, name)?.kind)));
+        }
     }
 }
 
-/**
- * @typedef {Object} StructMemory
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- */
-
-/**
- * @param {StructMemory} memory
- * @param {number} address
- * @returns {number} the DWORD at that address, unsigned
- */
-export function readU32(memory, address){
-    const bytes = memory.readMemory(address, 4);
-    return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-}
-
-/**
- * Writes consecutive DWORDs. Every structure here is a run of them, so one
- * write covers a whole struct and no field can land on a stale neighbour.
- *
- * @param {StructMemory} memory
- * @param {number} address
- * @param {number[]} values
- */
-export function writeU32s(memory, address, values){
-    const bytes = new Uint8Array(values.length * 4);
-    for (let index = 0; index < values.length; index++)
-    {
-        const value = values[index] >>> 0;
-        const at = index * 4;
-        bytes[at] = value & 0xff;
-        bytes[at + 1] = (value >>> 8) & 0xff;
-        bytes[at + 2] = (value >>> 16) & 0xff;
-        bytes[at + 3] = (value >>> 24) & 0xff;
-    }
-    memory.writeMemory(address, bytes);
-}
+/** @typedef {import('../../../system/port.js').Port} StructMemory */
 
 /**
  * @typedef {Object} WindowClassFields
@@ -241,7 +209,7 @@ export function writeU32s(memory, address, values){
  */
 export function readWindowClass(memory, address, layout){
     /** @param {number} offset */
-    const field = offset=>readU32(memory, address + offset);
+    const field = offset=>memory.u32(address + offset);
     /**
      * An address field, whole in a 64-bit structure: a procedure or a name in
      * an image past 4 GiB is not its low dword.
@@ -249,7 +217,7 @@ export function readWindowClass(memory, address, layout){
      * @param {string} name
      */
     const address64 = name=>(wideField(layout, name)
-        ? field(layout[name]) + readU32(memory, address + layout[name] + 4) * 2 ** 32
+        ? field(layout[name]) + memory.u32(address + layout[name] + 4) * 2 ** 32
         : field(layout[name]));
     return {
         style: field(layout.style),
@@ -340,7 +308,7 @@ export function writeMessage(memory, address, message, layouts = userLayouts(4))
     }
     // The 32-bit MSG ends at the point; a 64-bit one's lPrivate after it is
     // the system's, and left as the caller had it.
-    memory.writeMemory(address, bytes.subarray(0, layout.ptY + 4));
+    memory.setBytes(address, bytes.subarray(0, layout.ptY + 4));
 }
 
 /**
@@ -360,19 +328,19 @@ export function writeMessage(memory, address, message, layouts = userLayouts(4))
  */
 export function readMessage(memory, address, layouts = userLayouts(4)){
     const layout = layouts.MSG;
-    const wParam = readU32(memory, address + layout.wParam);
-    const lParam = readU32(memory, address + layout.lParam);
+    const wParam = memory.u32(address + layout.wParam);
+    const lParam = memory.u32(address + layout.lParam);
     const wide = layouts.pointerSize === 8 ? wideParams(wParam,
-        readU32(memory, address + layout.wParam + 4), lParam,
-        readU32(memory, address + layout.lParam + 4)) : undefined;
+        memory.u32(address + layout.wParam + 4), lParam,
+        memory.u32(address + layout.lParam + 4)) : undefined;
     return {
-        hwnd: readU32(memory, address + layout.hwnd),
-        message: readU32(memory, address + layout.message),
+        hwnd: memory.u32(address + layout.hwnd),
+        message: memory.u32(address + layout.message),
         wParam,
         lParam,
         // What a TIMERPROC is handed as its tick count when DispatchMessage
         // calls it.
-        time: readU32(memory, address + layout.time),
+        time: memory.u32(address + layout.time),
         ...wide ? { wide } : {},
     };
 }
@@ -383,7 +351,7 @@ export function readMessage(memory, address, layouts = userLayouts(4)){
  * @param {{ left: number, top: number, right: number, bottom: number }} rect
  */
 export function writeRect(memory, address, rect){
-    writeU32s(memory, address, [rect.left, rect.top, rect.right, rect.bottom]);
+    memory.set32s(address, [rect.left, rect.top, rect.right, rect.bottom]);
 }
 
 /** MONITORINFO. cbSize is written by the caller and tells us which it wants. */
@@ -464,21 +432,9 @@ export const DM_DISPLAYFREQUENCY = 0x00400000;
  */
 export function readRect(memory, address){
     return {
-        left: readU32(memory, address + RECT.left) | 0,
-        top: readU32(memory, address + RECT.top) | 0,
-        right: readU32(memory, address + RECT.right) | 0,
-        bottom: readU32(memory, address + RECT.bottom) | 0,
+        left: memory.i32(address + RECT.left),
+        top: memory.i32(address + RECT.top),
+        right: memory.i32(address + RECT.right),
+        bottom: memory.i32(address + RECT.bottom),
     };
-}
-
-/**
- * Writes a WORD without disturbing the one beside it. Two of WINDOWINFO's
- * members share a DWORD, so the whole-DWORD writer cannot be used for them.
- *
- * @param {StructMemory} memory
- * @param {number} address
- * @param {number} value
- */
-export function writeU16(memory, address, value){
-    memory.writeMemory(address, new Uint8Array([value & 0xff, (value >>> 8) & 0xff]));
 }

@@ -21,6 +21,7 @@ import { createMessageQueue } from './messages.js';
 import { createWindowFunctions } from './windows.js';
 import { DIALOG_LAYOUT } from './dialogs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const TEMPLATE = 0x12000;
 const TEXT = 0x10400;
@@ -37,6 +38,8 @@ function fakeMemory(size = 0x14000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -88,18 +91,16 @@ function fakeHandles(){
  *           allocate?: (bytes: number) => number,
  *           call?: (entry: number, args: number[], thread?: unknown) => any,
  *           unattended?: boolean, answer?: (dialog: any) => number | Promise<number>,
- *           bitmapFromDib?: (info: number, bits: number) => number }} [options]
+ *           bitmapFromDib?: (info: number, bits: number) => number,
+ *           memorySize?: number }} [options]
  */
 function setup({ resources = {}, dispatch = ()=>0, allocate, call, unattended, answer,
-    bitmapFromDib } = {})
+    bitmapFromDib, memorySize } = {})
 {
-    const memory = fakeMemory();
+    const memory = fakeMemory(memorySize);
     const queue = createMessageQueue();
     const fns = createWindowFunctions({
-        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
-        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
-            memory.writeMemory(a, d),
-        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        guest: memory.guest,
         handles: fakeHandles(),
         queue,
         dispatch,
@@ -1204,7 +1205,9 @@ test("a static showing a bitmap loads it from its template's module by the name 
         const STM_GETIMAGE = 0x0173;
         /** @type {number[]} */
         const made = [];
+        // The module's resource is in memory: the bitmap's header is read there.
         const { memory, fns } = setup({
+            memorySize: MODULE_BASE + 0x1000,
             resources: { [`${RT_BITMAP}:104`]: 0x100 },
             bitmapFromDib: (/** @type {number} */ info)=>{
                 made.push(info);

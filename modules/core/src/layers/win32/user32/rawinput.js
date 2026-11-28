@@ -15,7 +15,6 @@
  * it was: it hands each event to `deliver`, and this decides who is told.
  */
 
-import { readU32, writeU32s } from './structs.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const WM_INPUT = 0x00ff;
@@ -114,8 +113,7 @@ const RIDI_DEVICEINFO = 0x2000000b;
 
 /**
  * @param {Object} options
- * @param {{ readMemory: (address: number, length: number) => Uint8Array,
- *     writeMemory: (address: number, bytes: Uint8Array) => void,
+ * @param {{ guest: import('../common/guest.js').Guest,
  *     queue: { post: (message: { hwnd: number, message: number, wParam: number,
  *         lParam: number }) => void,
  *         peek?: (filter: import('./messages.js').MessageFilter) => { lParam: number } | null },
@@ -129,6 +127,7 @@ const RIDI_DEVICEINFO = 0x2000000b;
  *        Whether a window's top-level window is the active one.
  */
 export function createRawInput({ host, isWindow, focus, foreground }){
+    const { guest } = host;
     /**
      * What is registered, by `page:usage`. A PAGEONLY registration is kept
      * under usage 0, which is what it names.
@@ -213,15 +212,15 @@ export function createRawInput({ host, isWindow, focus, foreground }){
             }
             if ((data >>> 0) === 0)
             {
-                writeU32s(host, sizeAt, [size]);
+                guest.set32s(sizeAt, [size]);
                 return 0;
             }
-            if (readU32(host, sizeAt) < size)
+            if (guest.u32(sizeAt) < size)
             {
-                writeU32s(host, sizeAt, [size]);
+                guest.set32s(sizeAt, [size]);
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory(wholeAddress(data), bytes);
+            guest.setBytes(wholeAddress(data), bytes);
             return size;
         },
     });
@@ -347,9 +346,9 @@ export function createRawInput({ host, isWindow, focus, foreground }){
         for (let index = 0; index < count; index++)
         {
             const at = array + index * RAWINPUTDEVICE_SIZE;
-            const pair = readU32(host, at);
+            const pair = guest.u32(at);
             const device = { page: pair & 0xffff, usage: pair >>> 16,
-                flags: readU32(host, at + 4), hwnd: readU32(host, at + 8) };
+                flags: guest.u32(at + 4), hwnd: guest.u32(at + 8) };
             const removing = (device.flags & RIDEV_REMOVE) !== 0;
             const sink = (device.flags & (RIDEV_INPUTSINK | RIDEV_EXINPUTSINK)) !== 0;
             const pageOnly = (device.flags & RIDEV_MODE_MASK) === RIDEV_PAGEONLY;
@@ -420,20 +419,20 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                     .sort((one, two)=>one.page - two.page || one.usage - two.usage);
                 if (wholeAddress(array) === 0)
                 {
-                    writeU32s(host, countAt, [devices.length]);
+                    guest.set32s(countAt, [devices.length]);
                     return 0;
                 }
-                const room = readU32(host, countAt);
+                const room = guest.u32(countAt);
                 if (room === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 if (room < devices.length)
                 {
-                    writeU32s(host, countAt, [devices.length]);
+                    guest.set32s(countAt, [devices.length]);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                devices.forEach((device, index)=>writeU32s(host,
+                devices.forEach((device, index)=>guest.set32s(
                     wholeAddress(array) + index * RAWINPUTDEVICE_SIZE,
                     [(device.usage << 16 | device.page) >>> 0, device.flags, device.hwnd]));
                 return devices.length;
@@ -457,15 +456,15 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                 }
                 if (wholeAddress(list) === 0)
                 {
-                    writeU32s(host, countAt, [DEVICES.length]);
+                    guest.set32s(countAt, [DEVICES.length]);
                     return 0;
                 }
-                if (readU32(host, countAt) < DEVICES.length)
+                if (guest.u32(countAt) < DEVICES.length)
                 {
-                    writeU32s(host, countAt, [DEVICES.length]);
+                    guest.set32s(countAt, [DEVICES.length]);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                DEVICES.forEach((device, index)=>writeU32s(host,
+                DEVICES.forEach((device, index)=>guest.set32s(
                     wholeAddress(list) + index * RAWINPUTDEVICELIST_SIZE, [device.handle,
                         device.type]));
                 return DEVICES.length;
@@ -520,18 +519,18 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                 const first = waiting ? reports.get(waiting.lParam >>> 0) : undefined;
                 if (wholeAddress(data) === 0)
                 {
-                    writeU32s(host, wholeAddress(sizeAt), [first ? first.length : 0]);
+                    guest.set32s(wholeAddress(sizeAt), [first ? first.length : 0]);
                     return 0;
                 }
-                const room = readU32(host, wholeAddress(sizeAt));
+                const room = guest.u32(wholeAddress(sizeAt));
                 if (!first)
                 {
-                    writeU32s(host, wholeAddress(sizeAt), [0]);
+                    guest.set32s(wholeAddress(sizeAt), [0]);
                     return 0;
                 }
                 if (first.length > room)
                 {
-                    writeU32s(host, wholeAddress(sizeAt), [first.length]);
+                    guest.set32s(wholeAddress(sizeAt), [first.length]);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
                 let used = 0;
@@ -544,7 +543,7 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                         break;
                     }
                     next(true);
-                    host.writeMemory(wholeAddress(data) + used, bytes);
+                    guest.setBytes(wholeAddress(data) + used, bytes);
                     used += bytes.length;
                     count++;
                 }
@@ -577,14 +576,14 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                 const size = whole ? bytes.length : RAWINPUTHEADER_SIZE;
                 if (wholeAddress(data) === 0)
                 {
-                    writeU32s(host, sizeAt, [size]);
+                    guest.set32s(sizeAt, [size]);
                     return 0;
                 }
-                if (readU32(host, sizeAt) < size)
+                if (guest.u32(sizeAt) < size)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(wholeAddress(data), bytes.subarray(0, size));
+                guest.setBytes(wholeAddress(data), bytes.subarray(0, size));
                 return size;
             },
         },

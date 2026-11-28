@@ -24,7 +24,6 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
@@ -117,25 +116,12 @@ const MAX_TEXT = 0x8000;
 
 /**
  * @typedef {Object} TextMemory
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [release]
  * @property {number} [pointerSize]  8 in a 64-bit process, whose CREATESTRUCT
  *     has its pointers eight bytes wide.
  */
-
-/**
- * A terminated UTF-16 string, read a window at a time: the text may end close
- * to the end of what is mapped, and reading past its terminator must not fault.
- *
- * @param {TextMemory} memory @param {number} address @param {number} [limit]  in characters
- * @returns {string}
- */
-export function readWideString(memory, address, limit = MAX_TEXT){
-    return charactersOf(readToTerminator(memory, address, 2, limit).bytes, 2);
-}
 
 /**
  * A string as the guest stores it, terminator included.
@@ -162,7 +148,7 @@ export function textBytes(text, unicode){
  * @returns {string}
  */
 export function readText(memory, address, unicode, limit = MAX_TEXT){
-    return unicode ? readWideString(memory, address, limit) : memory.readCString(address, limit);
+    return memory.guest.text(address, unicode, unicode ? limit * 2 : limit);
 }
 
 /**
@@ -179,7 +165,7 @@ export function writeText(memory, address, text, room, unicode){
         return 0;
     }
     const clipped = text.slice(0, room - 1);
-    memory.writeMemory(wholeAddress(address), textBytes(clipped, unicode));
+    memory.guest.setBytes(wholeAddress(address), textBytes(clipped, unicode));
     return clipped.length;
 }
 
@@ -297,8 +283,7 @@ export function translated(memory, message, toUnicode, call, style = undefined){
             // many of its characters, and copied over unterminated, as
             // EM_GETLINE leaves it; the answer counts what the caller's
             // buffer took.
-            const head = memory.readMemory(wholeAddress(message.lParam), 2);
-            const room = head[0] | head[1] << 8;
+            const room = memory.guest.u16(wholeAddress(message.lParam));
             const size = room * 2 + 2;
             return lending(memory, size, ()=>{
                 const bytes = new Uint8Array(size);
@@ -308,13 +293,10 @@ export function translated(memory, message, toUnicode, call, style = undefined){
                 return bytes;
             }, into=>andThen(call({ ...converted, lParam: into }), count=>{
                 const got = Math.max(0, count | 0);
-                const raw = memory.readMemory(into, toUnicode ? got * 2 : got);
-                const text = toUnicode
-                    ? String.fromCharCode(...new Uint16Array(raw.slice().buffer, 0, got))
-                    : decodeAnsi(raw);
+                const text = memory.guest.text(into, toUnicode, toUnicode ? got * 2 : got, true);
                 const bytes = textBytes(text.slice(0, room), fromUnicode);
                 const written = bytes.subarray(0, bytes.length - (fromUnicode ? 2 : 1));
-                memory.writeMemory(wholeAddress(message.lParam), written);
+                memory.guest.setBytes(wholeAddress(message.lParam), written);
                 return fromUnicode ? written.length / 2 : written.length;
             }));
         }
@@ -391,7 +373,7 @@ function createStruct(memory, address, fromUnicode, toUnicode){
     const { NAME: CREATESTRUCT_NAME, CLASS: CREATESTRUCT_CLASS, SIZE: CREATESTRUCT_SIZE,
         PARAMS: CREATESTRUCT_PARAMS, EXSTYLE: CREATESTRUCT_EXSTYLE }
         = wide ? CREATESTRUCT64 : CREATESTRUCT32;
-    const header = memory.readMemory(wholeAddress(address), CREATESTRUCT_SIZE);
+    const header = memory.guest.snapshot(wholeAddress(address), CREATESTRUCT_SIZE);
     const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
     const name = view.getUint32(CREATESTRUCT_NAME, true);
     const cls = view.getUint32(CREATESTRUCT_CLASS, true);
@@ -402,7 +384,7 @@ function createStruct(memory, address, fromUnicode, toUnicode){
     // An MDI child's MDICREATESTRUCT is copied at 32 bits only; at 64 its
     // names reach the procedure as they were given.
     const mdi = !wide && (view.getUint32(CREATESTRUCT_EXSTYLE, true) & WS_EX_MDICHILD) !== 0
-        && params !== 0 ? memory.readMemory(params, MDICREATESTRUCT_SIZE) : null;
+        && params !== 0 ? memory.guest.snapshot(params, MDICREATESTRUCT_SIZE) : null;
     const mdiView = mdi ? new DataView(mdi.buffer, mdi.byteOffset, mdi.byteLength) : null;
     const mdiClass = mdiView ? mdiView.getUint32(0, true) : 0;
     const mdiTitle = mdiView ? mdiView.getUint32(4, true) : 0;
@@ -460,7 +442,7 @@ function lending(memory, size, build, use){
     {
         return 0;
     }
-    memory.writeMemory(address, build(address));
+    memory.guest.setBytes(address, build(address));
     /** @param {any} answer */
     const done = answer=>{
         memory.release?.(address);

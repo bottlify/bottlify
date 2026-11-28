@@ -166,58 +166,7 @@ export function paletteEntryToPixel(entry){
     return ((value & 0xff) << 16 | value & 0xff00 | (value >>> 16) & 0xff) >>> 0;
 }
 
-/**
- * @typedef {Object} StructMemory
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- */
-
-/**
- * @param {StructMemory} memory
- * @param {number} address
- * @returns {number} the WORD at that address, unsigned
- */
-function readU16(memory, address){
-    const bytes = memory.readMemory(address, 2);
-    return (bytes[0] | (bytes[1] << 8)) & 0xffff;
-}
-
-/**
- * @param {StructMemory} memory
- * @param {number} address
- * @returns {number} the DWORD at that address, unsigned
- */
-export function readU32(memory, address){
-    const bytes = memory.readMemory(address, 4);
-    return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-}
-
-/**
- * The same DWORD read as a LONG. Half the fields here are signed -- a negative
- * lfHeight and a negative biHeight both mean something specific -- and reading
- * one unsigned turns it into four billion.
- *
- * @param {StructMemory} memory
- * @param {number} address
- */
-function readI32(memory, address){
-    return readU32(memory, address) | 0;
-}
-
-/**
- * @param {StructMemory} memory
- * @param {number} address
- * @param {number[]} values
- */
-export function writeU32s(memory, address, values){
-    const bytes = new Uint8Array(values.length * 4);
-    const view = new DataView(bytes.buffer);
-    for (let index = 0; index < values.length; index++)
-    {
-        view.setUint32(index * 4, values[index] >>> 0, true);
-    }
-    memory.writeMemory(address, bytes);
-}
+/** @typedef {import('../../../system/port.js').Port} StructMemory */
 
 /**
  * @typedef {Object} LogPenFields
@@ -233,9 +182,9 @@ export function writeU32s(memory, address, values){
  */
 export function readLogPen(memory, address){
     return {
-        style: readU32(memory, address + LOGPEN.lopnStyle),
-        width: readI32(memory, address + LOGPEN.lopnWidth),
-        color: readU32(memory, address + LOGPEN.lopnColor),
+        style: memory.u32(address + LOGPEN.lopnStyle),
+        width: memory.i32(address + LOGPEN.lopnWidth),
+        color: memory.u32(address + LOGPEN.lopnColor),
     };
 }
 
@@ -253,9 +202,9 @@ export function readLogPen(memory, address){
  */
 export function readLogBrush(memory, address){
     return {
-        style: readU32(memory, address + LOGBRUSH.lbStyle),
-        color: readU32(memory, address + LOGBRUSH.lbColor),
-        hatch: readU32(memory, address + LOGBRUSH.lbHatch),
+        style: memory.u32(address + LOGBRUSH.lbStyle),
+        color: memory.u32(address + LOGBRUSH.lbColor),
+        hatch: memory.u32(address + LOGBRUSH.lbHatch),
     };
 }
 
@@ -288,16 +237,10 @@ export function readLogFont(memory, address){
     // The face name is a fixed-width array, not a pointer: it is NUL-padded
     // rather than NUL-terminated, and a name that fills it has no terminator
     // at all.
-    const name = memory.readMemory(address + LOGFONTA.lfFaceName, LF_FACESIZE);
-    let end = 0;
-    while (end < LF_FACESIZE && name[end] !== 0)
-    {
-        end++;
-    }
-    return {
-        ...readLogFontFields(memory, address),
-        faceName: decodeAnsi(name.subarray(0, end)),
-    };
+    const fields = readLogFontFields(memory, address);
+    const name = memory.view(address + LOGFONTA.lfFaceName, LF_FACESIZE);
+    const end = name.indexOf(0);
+    return { ...fields, faceName: decodeAnsi(name.subarray(0, end < 0 ? LF_FACESIZE : end)) };
 }
 
 /**
@@ -308,11 +251,10 @@ export function readLogFont(memory, address){
  * @returns {LogFontFields}
  */
 export function readLogFontW(memory, address){
-    const name = memory.readMemory(address + LOGFONTA.lfFaceName, LF_FACESIZE * 2);
     let faceName = '';
     for (let at = 0; at < LF_FACESIZE; at++)
     {
-        const unit = name[at * 2] | name[at * 2 + 1] << 8;
+        const unit = memory.u16(address + LOGFONTA.lfFaceName + at * 2);
         if (unit === 0)
         {
             break;
@@ -362,21 +304,22 @@ export function logFontBytes(font, wide){
  * @param {number} address
  */
 function readLogFontFields(memory, address){
-    const bytes = memory.readMemory(address + LOGFONTA.lfItalic, 8);
+    /** @param {number} at */
+    const byte = at=>memory.u8(address + LOGFONTA.lfItalic + at);
     return {
-        height: readI32(memory, address + LOGFONTA.lfHeight),
-        width: readI32(memory, address + LOGFONTA.lfWidth),
-        escapement: readI32(memory, address + LOGFONTA.lfEscapement),
-        orientation: readI32(memory, address + LOGFONTA.lfOrientation),
-        weight: readI32(memory, address + LOGFONTA.lfWeight),
-        italic: bytes[0],
-        underline: bytes[1],
-        strikeOut: bytes[2],
-        charSet: bytes[3],
-        outPrecision: bytes[4],
-        clipPrecision: bytes[5],
-        quality: bytes[6],
-        pitchAndFamily: bytes[7],
+        height: memory.i32(address + LOGFONTA.lfHeight),
+        width: memory.i32(address + LOGFONTA.lfWidth),
+        escapement: memory.i32(address + LOGFONTA.lfEscapement),
+        orientation: memory.i32(address + LOGFONTA.lfOrientation),
+        weight: memory.i32(address + LOGFONTA.lfWeight),
+        italic: byte(0),
+        underline: byte(1),
+        strikeOut: byte(2),
+        charSet: byte(3),
+        outPrecision: byte(4),
+        clipPrecision: byte(5),
+        quality: byte(6),
+        pitchAndFamily: byte(7),
     };
 }
 
@@ -423,14 +366,14 @@ export const colorEntryBytes = header=>(header.size === BITMAPCOREHEADER.SIZE ? 
  * @returns {BitmapInfoHeaderFields}
  */
 export function readBitmapInfoHeader(memory, address){
-    if (readU32(memory, address) === BITMAPCOREHEADER.SIZE)
+    if (memory.u32(address) === BITMAPCOREHEADER.SIZE)
     {
         return {
             size: BITMAPCOREHEADER.SIZE,
-            width: readU16(memory, address + BITMAPCOREHEADER.bcWidth),
-            height: readU16(memory, address + BITMAPCOREHEADER.bcHeight),
-            planes: readU16(memory, address + BITMAPCOREHEADER.bcPlanes),
-            bitCount: readU16(memory, address + BITMAPCOREHEADER.bcBitCount),
+            width: memory.u16(address + BITMAPCOREHEADER.bcWidth),
+            height: memory.u16(address + BITMAPCOREHEADER.bcHeight),
+            planes: memory.u16(address + BITMAPCOREHEADER.bcPlanes),
+            bitCount: memory.u16(address + BITMAPCOREHEADER.bcBitCount),
             compression: 0,
             sizeImage: 0,
             xPelsPerMeter: 0,
@@ -439,16 +382,16 @@ export function readBitmapInfoHeader(memory, address){
         };
     }
     return {
-        size: readU32(memory, address + BITMAPINFOHEADER.biSize),
-        width: readI32(memory, address + BITMAPINFOHEADER.biWidth),
-        height: readI32(memory, address + BITMAPINFOHEADER.biHeight),
-        planes: readU16(memory, address + BITMAPINFOHEADER.biPlanes),
-        bitCount: readU16(memory, address + BITMAPINFOHEADER.biBitCount),
-        compression: readU32(memory, address + BITMAPINFOHEADER.biCompression),
-        sizeImage: readU32(memory, address + BITMAPINFOHEADER.biSizeImage),
-        xPelsPerMeter: readI32(memory, address + BITMAPINFOHEADER.biXPelsPerMeter),
-        yPelsPerMeter: readI32(memory, address + BITMAPINFOHEADER.biYPelsPerMeter),
-        clrUsed: readU32(memory, address + BITMAPINFOHEADER.biClrUsed),
+        size: memory.u32(address + BITMAPINFOHEADER.biSize),
+        width: memory.i32(address + BITMAPINFOHEADER.biWidth),
+        height: memory.i32(address + BITMAPINFOHEADER.biHeight),
+        planes: memory.u16(address + BITMAPINFOHEADER.biPlanes),
+        bitCount: memory.u16(address + BITMAPINFOHEADER.biBitCount),
+        compression: memory.u32(address + BITMAPINFOHEADER.biCompression),
+        sizeImage: memory.u32(address + BITMAPINFOHEADER.biSizeImage),
+        xPelsPerMeter: memory.i32(address + BITMAPINFOHEADER.biXPelsPerMeter),
+        yPelsPerMeter: memory.i32(address + BITMAPINFOHEADER.biYPelsPerMeter),
+        clrUsed: memory.u32(address + BITMAPINFOHEADER.biClrUsed),
     };
 }
 
@@ -460,15 +403,15 @@ export function readBitmapInfoHeader(memory, address){
  * @returns {{ version: number, entries: number[] }}
  */
 export function readLogPalette(memory, address){
-    const count = readU16(memory, address + LOGPALETTE.palNumEntries);
+    const count = memory.u16(address + LOGPALETTE.palNumEntries);
     /** @type {number[]} */
     const entries = [];
     for (let index = 0; index < count; index++)
     {
-        entries.push(readU32(memory, address + LOGPALETTE.palPalEntry
+        entries.push(memory.u32(address + LOGPALETTE.palPalEntry
             + (index * PALETTEENTRY_SIZE)));
     }
-    return { version: readU16(memory, address + LOGPALETTE.palVersion), entries };
+    return { version: memory.u16(address + LOGPALETTE.palVersion), entries };
 }
 
 /**
@@ -550,7 +493,7 @@ function writeTextMetricsAs(memory, address, metrics, wide){
     bytes[layout.tmStruckOut] = metrics.struckOut & 0xff;
     bytes[layout.tmPitchAndFamily] = metrics.pitchAndFamily & 0xff;
     bytes[layout.tmCharSet] = metrics.charSet & 0xff;
-    memory.writeMemory(address, bytes);
+    memory.setBytes(address, bytes);
 }
 
 /**
@@ -559,7 +502,7 @@ function writeTextMetricsAs(memory, address, metrics, wide){
  * @param {{ x: number, y: number }} point
  */
 export function writePoint(memory, address, point){
-    writeU32s(memory, address, [point.x, point.y]);
+    memory.set32s(address, [point.x, point.y]);
 }
 
 /**
@@ -568,5 +511,5 @@ export function writePoint(memory, address, point){
  * @param {{ cx: number, cy: number }} size
  */
 export function writeSize(memory, address, size){
-    writeU32s(memory, address, [size.cx, size.cy]);
+    memory.set32s(address, [size.cx, size.cy]);
 }

@@ -21,7 +21,6 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16z } from '../common/utf16.js';
 
 /** DlgDirList's and LB_DIR's kinds of entry. */
 export const DDL_READONLY = 0x0001;
@@ -203,9 +202,7 @@ export function selectedPath(item){
 
 /**
  * @param {Object} options
- * @param {{ readMemory: (address: number, length: number) => Uint8Array,
- *     writeMemory: (address: number, bytes: Uint8Array) => void,
- *     readCString: (address: number, maxLength: number) => string,
+ * @param {{ guest: import('../common/guest.js').Guest,
  *     files?: FileSystem, allocate?: (bytes: number) => number,
  *     release?: (address: number) => void,
  *     callerThread?: () => unknown,
@@ -214,6 +211,7 @@ export function selectedPath(item){
  *        One of user32's own entry points, called as a program calls it.
  */
 export function createDirectoryListFunctions({ host, call }){
+    const { guest } = host;
     /**
      * A string laid down in guest memory for as long as `use` runs, for a
      * message that carries a pointer to one.
@@ -227,7 +225,7 @@ export function createDirectoryListFunctions({ host, call }){
         {
             return 0;
         }
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         return after(use(at), answer=>{
             host.release?.(at);
             return answer;
@@ -245,10 +243,7 @@ export function createDirectoryListFunctions({ host, call }){
         {
             return;
         }
-        const cut = text.slice(0, room - 1);
-        host.writeMemory(wholeAddress(address), wide
-            ? utf16z(cut)
-            : encodeAnsi(`${cut}\0`));
+        guest.setText(wholeAddress(address), text, wide, room);
     };
 
     /**
@@ -355,7 +350,7 @@ export function createDirectoryListFunctions({ host, call }){
         /** @param {number} selected @param {number} length @param {number} at */
         const pick = (selected, length, at)=>after(
             ask(combo ? CB_GETLBTEXT : LB_GETTEXT, selected, at), ()=>{
-                const picked = selectedPath(host.readCString(at, length + 1));
+                const picked = selectedPath(guest.cstr(at, length + 1));
                 writeOut(out, picked.text, room | 0, wide);
                 return picked.directory ? 1 : 0;
             });

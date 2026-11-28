@@ -50,14 +50,13 @@ import {
     readLogFontW,
     readLogPalette,
     readLogPen,
-    readU32,
     paletteEntryToPixel,
     writePoint,
     writeSize,
     writeTextMetrics,
     writeTextMetricsW,
-    writeU32s,
 } from './structs.js';
+import { readRect } from '../user32/structs.js';
 import { floatBits } from '../../../system/floats.js';
 import { utf16z } from '../common/utf16.js';
 
@@ -400,11 +399,6 @@ const COLOR_ADJUSTMENT_RANGES = Object.freeze([
 ]);
 const DEFAULT_COLOR_ADJUSTMENT = Object.freeze(
     [COLORADJUSTMENT_SIZE, 0, 0, 10000, 10000, 10000, 0, 10000, 0, 0, 0, 0]);
-
-/** @param {any} memory @param {number} address @param {number} count @returns {number[]} */
-const readU32s = (memory, address, count)=>Array.from({ length: count },
-    (_, index)=>readU32(memory, (address >>> 0) + index * 4));
-
 /**
  * The D3DDDIFORMATs a DC can be made over, with the depth each is and the
  * masks a sixteen-bit one needs where it is not 5-5-5.
@@ -561,11 +555,7 @@ const RASTER_FONTTYPE = 0x0001;
  *     fixed one itself - as GlobalLock answers it.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
  *     have their pointers, handles and message parameters eight bytes wide.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, value: number, length: number) => void} [fillMemory]
- *     Bytes of one value, written without a buffer of that size.
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {{ open: (type: string, object: any) => number,
  *              close: (handle: number) => any }} handles
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => void }} surfaces
@@ -608,6 +598,7 @@ const RASTER_FONTTYPE = 0x0001;
  * @param {GdiHost} host
  */
 export function createGdiFunctions(host){
+    const { guest } = host;
     const objects = createGdiObjects(host.handles);
     const screen = host.screen ?? DEFAULT_SCREEN;
     /** The display mode GdiEntry13 saw last, and its count of changes. */
@@ -642,7 +633,7 @@ export function createGdiFunctions(host){
         {
             const record = objects.get(dc?.palette ?? 0);
             const entries = record?.attributes.entries ?? [];
-            const raw = usage === DIB_PAL_COLORS ? host.readMemory(at, count * 2) : null;
+            const raw = usage === DIB_PAL_COLORS ? guest.snapshot(at, count * 2) : null;
             /** @type {number[]} */
             const indices = [];
             for (let index = 0; index < count; index++)
@@ -664,7 +655,7 @@ export function createGdiFunctions(host){
             }
             return colors;
         }
-        const entries = host.readMemory(at, count * entryBytes);
+        const entries = guest.snapshot(at, count * entryBytes);
         for (let offset = 0; offset < count * entryBytes; offset += entryBytes)
         {
             colors.push((entries[offset] | entries[offset + 1] << 8
@@ -987,8 +978,7 @@ export function createGdiFunctions(host){
         {
             metafiles.startRecording(dc, {
                 frame: (frame >>> 0) === 0 ? null : (()=>{
-                    const [left, top, right, bottom] = readU32s(host, frame, 4)
-                        .map(value=>value | 0);
+                    const { left, top, right, bottom } = readRect(guest, frame >>> 0);
                     return { left: Math.min(left, right), top: Math.min(top, bottom),
                         right: Math.max(left, right), bottom: Math.max(top, bottom) };
                 })(),
@@ -1008,7 +998,7 @@ export function createGdiFunctions(host){
         let text = '';
         for (let at = 0, nuls = 0; nuls < 2 && text.length < 1024; at++)
         {
-            const bytes = host.readMemory(address + at * (wide ? 2 : 1), wide ? 2 : 1);
+            const bytes = guest.snapshot(address + at * (wide ? 2 : 1), wide ? 2 : 1);
             const unit = wide ? bytes[0] | bytes[1] << 8 : bytes[0];
             nuls = unit === 0 ? nuls + 1 : 0;
             text += wide ? String.fromCharCode(unit) : decodeAnsi(bytes);
@@ -1153,7 +1143,7 @@ export function createGdiFunctions(host){
         }
         if ((out >>> 0) !== 0)
         {
-            writePoint(host, out, dc[field]);
+            writePoint(guest, out, dc[field]);
         }
         dc[field] = { x: x | 0, y: y | 0 };
         return 1;
@@ -1172,7 +1162,7 @@ export function createGdiFunctions(host){
         {
             return 0;
         }
-        writePoint(host, out >>> 0, dc[field]);
+        writePoint(guest, out >>> 0, dc[field]);
         return 1;
     };
 
@@ -1223,7 +1213,7 @@ export function createGdiFunctions(host){
         }
         if ((out >>> 0) !== 0)
         {
-            writeSize(host, out, dc[field]);
+            writeSize(guest, out, dc[field]);
         }
         // Every other mapping mode fixes its own extents; the call still
         // succeeds and still reports the previous pair, it just changes nothing.
@@ -1283,7 +1273,7 @@ export function createGdiFunctions(host){
         }
         if ((out >>> 0) !== 0)
         {
-            writeSize(host, out >>> 0, dc[field]);
+            writeSize(guest, out >>> 0, dc[field]);
         }
         if (!SCALABLE_MAP_MODES.has(dc.mapMode))
         {
@@ -1308,7 +1298,7 @@ export function createGdiFunctions(host){
      * @param {number} address @param {number} count @param {boolean} [counted]
      */
     const wideText = (address, count, counted = false)=>{
-        const bytes = host.readMemory(wholeAddress(address), Math.max(0, count) * 2);
+        const bytes = guest.snapshot(wholeAddress(address), Math.max(0, count) * 2);
         let text = '';
         for (let at = 0; at * 2 + 1 < bytes.length; at++)
         {
@@ -1324,7 +1314,7 @@ export function createGdiFunctions(host){
 
     /** CreateDC's and CreateIC's names: NULL is none. @param {number} address */
     const ansiName = address=>((address >>> 0) === 0 ? ''
-        : host.readCString(wholeAddress(address), 32));
+        : guest.cstr(wholeAddress(address), 32));
     /** @param {number} address */
     const wideName = address=>((address >>> 0) === 0 ? '' : wideText(wholeAddress(address), 32));
 
@@ -1376,10 +1366,10 @@ export function createGdiFunctions(host){
         }
         const name = 'C:\\WINDOWS\\system32\\spool\\drivers\\color\\sRGB Color Space Profile.icm';
         const needed = name.length + 1;
-        const room = readU32s(host, sizeAt >>> 0, 1)[0];
+        const room = guest.u32(sizeAt >>> 0);
         if ((out >>> 0) === 0 || room < needed)
         {
-            writeU32s(host, sizeAt >>> 0, [needed]);
+            guest.set32s(sizeAt >>> 0, [needed]);
             host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
             return 0;
         }
@@ -1395,8 +1385,8 @@ export function createGdiFunctions(host){
                 bytes[at] = name.charCodeAt(at);
             }
         }
-        host.writeMemory(wholeAddress(out), bytes);
-        writeU32s(host, sizeAt >>> 0, [needed]);
+        guest.setBytes(wholeAddress(out), bytes);
+        guest.set32s(sizeAt >>> 0, [needed]);
         return 1;
     };
 
@@ -1437,7 +1427,7 @@ export function createGdiFunctions(host){
         {
             const character = mask === 0xff
                 ? decodeAnsi(Uint8Array.of(code & mask)) : String.fromCharCode(code & mask);
-            writeU32s(host, (out >>> 0) + (code - first) * stride,
+            guest.set32s((out >>> 0) + (code - first) * stride,
                 record(widthOf(dc, character)));
         }
         return 1;
@@ -1451,13 +1441,13 @@ export function createGdiFunctions(host){
             return 0;
         }
         const text = wide ? wideText(wholeAddress(string), count | 0, true)
-            : decodeAnsi(host.readMemory(wholeAddress(string), count | 0));
+            : decodeAnsi(guest.snapshot(wholeAddress(string), count | 0));
         const advances = Array.from(text, character=>widthOf(dc, character));
         const width = advances.reduce((sum, advance)=>sum + advance, 0);
         if ((results >>> 0) !== 0)
         {
             const [, outString, order, dx, caret, kind, glyphs, room] =
-                readU32s(host, results >>> 0, 8);
+                Array.from({ length: 8 }, (_, index)=>guest.u32((results >>> 0) + index * 4));
             const placed = Math.min(text.length, room >>> 0 || text.length);
             /** @param {number} at @param {number[]} values @param {number} size */
             const put = (at, values, size)=>{
@@ -1481,7 +1471,7 @@ export function createGdiFunctions(host){
                         view.setUint8(index, value);
                     }
                 });
-                host.writeMemory(at, bytes);
+                guest.setBytes(at, bytes);
             };
             const codes = Array.from(text, character=>character.charCodeAt(0)).slice(0, placed);
             put(outString, codes, wide ? 2 : 1);
@@ -1498,7 +1488,7 @@ export function createGdiFunctions(host){
                 fit = advances.findIndex(advance=>(sum += advance) > (maxExtent | 0));
                 fit = fit < 0 ? placed : fit;
             }
-            writeU32s(host, (results >>> 0) + 28, [placed, fit]);
+            guest.set32s((results >>> 0) + 28, [placed, fit]);
         }
         return (width & 0xffff | currentMetrics(dc).height << 16) >>> 0;
     };
@@ -1529,15 +1519,15 @@ export function createGdiFunctions(host){
         if ((fit >>> 0) !== 0)
         {
             const limit = maxExtent | 0;
-            writeU32s(host, fit >>> 0, [extents.filter(extent=>extent <= limit).length]);
+            guest.set32s(fit >>> 0, [extents.filter(extent=>extent <= limit).length]);
         }
         if ((dx >>> 0) !== 0 && extents.length > 0)
         {
-            writeU32s(host, dx >>> 0, extents);
+            guest.set32s(dx >>> 0, extents);
         }
         if ((size >>> 0) !== 0)
         {
-            writeSize(host, size, { cx: extents.at(-1) ?? 0, cy: currentMetrics(dc).height });
+            writeSize(guest, size, { cx: extents.at(-1) ?? 0, cy: currentMetrics(dc).height });
         }
         return 1;
     };
@@ -1554,12 +1544,12 @@ export function createGdiFunctions(host){
         {
             return 0;
         }
-        const list = (glyphs >>> 0) === 0 ? null : host.readMemory(wholeAddress(glyphs),
+        const list = (glyphs >>> 0) === 0 ? null : guest.snapshot(wholeAddress(glyphs),
             (count >>> 0) * 2);
         for (let index = 0; index < (count >>> 0); index++)
         {
             const glyph = list ? list[index * 2] | list[index * 2 + 1] << 8 : (first >>> 0) + index;
-            writeU32s(host, (out >>> 0) + index * stride,
+            guest.set32s((out >>> 0) + index * stride,
                 record(widthOf(dc, String.fromCharCode(glyph))));
         }
         return 1;
@@ -1638,7 +1628,7 @@ export function createGdiFunctions(host){
 
     /** @param {number} address @returns {number[]} an XFORM's six floats */
     const readXform = address=>{
-        const bytes = host.readMemory(address, 24);
+        const bytes = guest.snapshot(address, 24);
         const view = new DataView(bytes.buffer, bytes.byteOffset, 24);
         return Array.from({ length: 6 }, (_, index)=>view.getFloat32(index * 4, true));
     };
@@ -1648,7 +1638,7 @@ export function createGdiFunctions(host){
         const bytes = new Uint8Array(24);
         const view = new DataView(bytes.buffer);
         xform.forEach((value, index)=>view.setFloat32(index * 4, value, true));
-        host.writeMemory(address, bytes);
+        guest.setBytes(address, bytes);
     };
 
     /**
@@ -1689,14 +1679,14 @@ export function createGdiFunctions(host){
         {
             return 0;
         }
-        const bytes = host.readMemory(wholeAddress(points), (count | 0) * 8);
+        const bytes = guest.snapshot(wholeAddress(points), (count | 0) * 8);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         for (let index = 0; index < (count | 0); index++)
         {
             const point = transform(dc, {
                 x: view.getInt32(index * 8, true), y: view.getInt32(index * 8 + 4, true),
             }, toDevice);
-            writePoint(host, (points >>> 0) + index * 8, point);
+            writePoint(guest, (points >>> 0) + index * 8, point);
         }
         return 1;
     };
@@ -1913,7 +1903,7 @@ export function createGdiFunctions(host){
         }
         if (!wide)
         {
-            const text = host.readCString(wholeAddress(address), MAX_PATH_CHARS);
+            const text = guest.cstr(wholeAddress(address), MAX_PATH_CHARS);
             return decodeAnsi(Uint8Array.from(text, character=>character.charCodeAt(0)));
         }
         // A unit at a time: a name ends wherever its NUL is, maybe at the
@@ -1921,7 +1911,7 @@ export function createGdiFunctions(host){
         let text = '';
         for (let at = 0; at < MAX_PATH_CHARS; at++)
         {
-            const bytes = host.readMemory(wholeAddress(address) + at * 2, 2);
+            const bytes = guest.snapshot(wholeAddress(address) + at * 2, 2);
             const unit = bytes[0] | bytes[1] << 8;
             if (unit === 0)
             {
@@ -1946,7 +1936,7 @@ export function createGdiFunctions(host){
         host.divergence?.(wide ? 'GetGlyphIndicesW' : 'GetGlyphIndicesA',
             'a glyph index is the character code, not the index in the font');
         const { firstChar, lastChar, defaultChar } = currentMetrics(dc);
-        const bytes = host.readMemory(wholeAddress(text), (count | 0) * (wide ? 2 : 1));
+        const bytes = guest.snapshot(wholeAddress(text), (count | 0) * (wide ? 2 : 1));
         const indices = new Uint8Array((count | 0) * 2);
         const view = new DataView(indices.buffer);
         for (let index = 0; index < (count | 0); index++)
@@ -1956,7 +1946,7 @@ export function createGdiFunctions(host){
             view.setUint16(index * 2, inside ? code
                 : (flags & GGI_MARK_NONEXISTING_GLYPHS) !== 0 ? 0xffff : defaultChar, true);
         }
-        host.writeMemory(wholeAddress(out), indices);
+        guest.setBytes(wholeAddress(out), indices);
         return count | 0;
     };
 
@@ -1993,7 +1983,7 @@ export function createGdiFunctions(host){
         view.setInt32(12, ascent, true);
         view.setInt16(16, width, true);
         view.setInt16(18, 0, true);
-        host.writeMemory(wholeAddress(metrics), bytes);
+        guest.setBytes(wholeAddress(metrics), bytes);
         return 1;
     };
 
@@ -2040,7 +2030,7 @@ export function createGdiFunctions(host){
         view.setInt32(12, ascent - glyph.top, true);
         view.setInt16(16, glyph.advance, true);
         view.setInt16(18, 0, true);
-        host.writeMemory(metrics, fields);
+        guest.setBytes(metrics, fields);
         if (buffer === 0 || size === 0)
         {
             return needed;
@@ -2066,7 +2056,7 @@ export function createGdiFunctions(host){
                 }
             }
         }
-        host.writeMemory(buffer, bits);
+        guest.setBytes(buffer, bits);
         return needed;
     };
 
@@ -2367,14 +2357,14 @@ export function createGdiFunctions(host){
                 const bytes = new Uint8Array(size);
                 for (let y = 0; y < attributes.height; y++)
                 {
-                    bytes.set(host.readMemory(rowAt(y), stride), y * stride);
+                    bytes.set(guest.snapshot(rowAt(y), stride), y * stride);
                 }
                 return bytes;
             },
             write(bytes){
                 for (let y = 0; y * stride < bytes.length; y++)
                 {
-                    host.writeMemory(rowAt(y), bytes.subarray(y * stride, (y + 1) * stride));
+                    guest.setBytes(rowAt(y), bytes.subarray(y * stride, (y + 1) * stride));
                 }
             },
         };
@@ -2434,7 +2424,7 @@ export function createGdiFunctions(host){
         {
             return 0;
         }
-        const header = readBitmapInfoHeader(host, packed);
+        const header = readBitmapInfoHeader(guest, packed);
         const { width, bitCount, compression } = header;
         const height = Math.abs(header.height);
         const masked = compression === BI_BITFIELDS && (bitCount === 16 || bitCount === 32);
@@ -2458,13 +2448,13 @@ export function createGdiFunctions(host){
         for (let y = 0; y < height; y++)
         {
             const row = header.height < 0 ? y : height - 1 - y;
-            pixels.set(host.readMemory(bitsAt + row * pitch, stride), y * stride);
+            pixels.set(guest.snapshot(bitsAt + row * pitch, stride), y * stride);
         }
         /** @type {number[] | undefined} */
         let indices;
         if (indexed && usage === DIB_PAL_COLORS)
         {
-            const raw = host.readMemory(table, entries * 2);
+            const raw = guest.snapshot(table, entries * 2);
             indices = Array.from({ length: entries }, (_, index)=>raw[index * 2]
                 | (raw[index * 2 + 1] << 8));
         }
@@ -2489,7 +2479,7 @@ export function createGdiFunctions(host){
                 indices,
                 compression,
                 bitfields: masked
-                    ? [0, 4, 8].map(at=>readU32(host, packed + BITMAPINFOHEADER.SIZE + at))
+                    ? [0, 4, 8].map(at=>guest.u32(packed + BITMAPINFOHEADER.SIZE + at))
                     : [0, 0, 0],
             },
         });
@@ -2596,7 +2586,7 @@ export function createGdiFunctions(host){
             return 0;
         }
         const request = asked !== undefined ? asked : (logfont >>> 0) === 0 ? null
-            : (wide ? readLogFontW : readLogFont)(host, logfont >>> 0);
+            : (wide ? readLogFontW : readLogFont)(guest, logfont >>> 0);
         const charSet = request ? request.charSet : DEFAULT_CHARSET;
         const named = request && request.faceName !== '' ? knownFace(request.faceName) : null;
         const faces = charSet !== DEFAULT_CHARSET && charSet !== ANSI_CHARSET ? []
@@ -2638,9 +2628,9 @@ export function createGdiFunctions(host){
                     putText(bytes, logSize + LF_FULLFACESIZE * unit, 'Regular', wide);
                     putText(bytes, logSize + (LF_FULLFACESIZE + LF_FACESIZE) * unit, 'Western',
                         wide);
-                    host.writeMemory(block, bytes);
-                    host.writeMemory(block + enumSize, new Uint8Array(metricSize));
-                    (wide ? writeTextMetricsW : writeTextMetrics)(host, block + enumSize, metrics);
+                    guest.setBytes(block, bytes);
+                    guest.setBytes(block + enumSize, new Uint8Array(metricSize));
+                    (wide ? writeTextMetricsW : writeTextMetrics)(guest, block + enumSize, metrics);
                     answer = (await call(proc >>> 0,
                         [block, block + enumSize, strike ? RASTER_FONTTYPE : ENUMERATED_FONTTYPE,
                             /** @type {number} */ (lParam)], thread)) | 0;
@@ -2791,7 +2781,7 @@ export function createGdiFunctions(host){
                     return STATUS_INVALID_PARAMETER;
                 }
                 const [memory, format, width, height, pitch, device, colors] =
-                    readU32s(host, desc, 7);
+                    Array.from({ length: 7 }, (_, index)=>guest.u32((desc >>> 0) + index * 4));
                 const layout = KMT_FORMATS.get(format);
                 // The device DC the memory is to be compatible with is required.
                 if (!layout || !dcOf(device) || memory === 0 || width === 0 || height === 0
@@ -2801,7 +2791,8 @@ export function createGdiFunctions(host){
                     return STATUS_INVALID_PARAMETER;
                 }
                 const palette = layout.bitCount <= 8
-                    ? [...readU32s(host, colors, 1 << layout.bitCount)].map(paletteEntryToPixel)
+                    ? Array.from({ length: 1 << layout.bitCount },
+                        (_, index)=>paletteEntryToPixel(guest.u32((colors >>> 0) + index * 4)))
                     : undefined;
                 const bitmap = objects.create('bitmap', {
                     width, height, planes: 1, bitCount: layout.bitCount, topDown: true,
@@ -2812,7 +2803,7 @@ export function createGdiFunctions(host){
                 });
                 const dc = createContext(0, 'memory');
                 select(dc, bitmap);
-                writeU32s(host, desc + 28, [dc.hdc, bitmap]);
+                guest.set32s(desc + 28, [dc.hdc, bitmap]);
                 return 0;
             },
         },
@@ -2849,11 +2840,11 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                if (wholeAddress(desc) === 0 || readU32s(host, desc, 1)[0] === 0)
+                if (wholeAddress(desc) === 0 || guest.u32(desc >>> 0) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                writeU32s(host, desc + 4, [KMT_ADAPTER, KMT_ADAPTER_LUID, 0]);
+                guest.set32s(desc + 4, [KMT_ADAPTER, KMT_ADAPTER_LUID, 0]);
                 return 0;
             },
         },
@@ -2869,7 +2860,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                if (wholeAddress(desc) === 0 || readU32s(host, desc, 1)[0] !== KMT_ADAPTER)
+                if (wholeAddress(desc) === 0 || guest.u32(desc >>> 0) !== KMT_ADAPTER)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -2893,12 +2884,12 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                const dc = wholeAddress(desc) === 0 ? null : dcOf(readU32s(host, desc, 1)[0]);
+                const dc = wholeAddress(desc) === 0 ? null : dcOf(guest.u32(desc >>> 0));
                 if (!dc || dc.kind === 'memory')
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                writeU32s(host, desc + 4, [KMT_ADAPTER, KMT_ADAPTER_LUID, 0, 0]);
+                guest.set32s(desc + 4, [KMT_ADAPTER, KMT_ADAPTER_LUID, 0, 0]);
                 return 0;
             },
         },
@@ -2915,7 +2906,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                if (wholeAddress(desc) === 0 || readU32s(host, desc, 1)[0] !== KMT_ADAPTER)
+                if (wholeAddress(desc) === 0 || guest.u32(desc >>> 0) !== KMT_ADAPTER)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -2933,8 +2924,7 @@ export function createGdiFunctions(host){
         D3DKMTCloseAdapter: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([desc])=>(wholeAddress(desc) !== 0 && readU32s(host, desc,
-                1)[0] === KMT_ADAPTER
+            handler: ([desc])=>(wholeAddress(desc) !== 0 && guest.u32(desc >>> 0) === KMT_ADAPTER
                 ? 0 : STATUS_INVALID_PARAMETER),
         },
 
@@ -2947,7 +2937,7 @@ export function createGdiFunctions(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                const [hdc, bitmap] = readU32s(host, desc, 2);
+                const [hdc, bitmap] = [guest.u32(desc >>> 0), guest.u32((desc >>> 0) + 4)];
                 const dc = dcOf(hdc);
                 if (dc)
                 {
@@ -3262,7 +3252,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                const fields = readLogPen(host, logpen);
+                const fields = readLogPen(guest, logpen);
                 return cosmeticPen(fields.style >>> 0, fields.width | 0, fields.color >>> 0);
             },
         },
@@ -3297,7 +3287,8 @@ export function createGdiFunctions(host){
                 {
                     return stockObject(NULL_PEN);
                 }
-                const [brushStyle, color, hatch] = readU32s(host, wholeAddress(brush), 3);
+                const [brushStyle, color, hatch] = [0, 4, 8]
+                    .map(at=>guest.u32(wholeAddress(brush) + at));
                 // A cosmetic pen is drawn in a colour, so its brush is solid;
                 // a geometric one takes a solid, hatched, pattern or DIB
                 // pattern brush, and a hollow one is no pen at all (Wine's
@@ -3320,7 +3311,8 @@ export function createGdiFunctions(host){
                     brushStyle: (brushStyle >>> 0) === BS_DIBPATTERN ? BS_DIBPATTERNPT
                         : brushStyle >>> 0,
                     hatch: hatch >>> 0,
-                    entries: user ? readU32s(host, wholeAddress(dashes), count >>> 0) : [],
+                    entries: user ? Array.from({ length: count >>> 0 },
+                        (_, index)=>guest.u32(wholeAddress(dashes) + index * 4)) : [],
                 });
             },
         },
@@ -3339,7 +3331,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([logbrush])=>{
-                const fields = readLogBrush(host, logbrush);
+                const fields = readLogBrush(guest, logbrush);
                 if (!BRUSH_STYLES.has(fields.style))
                 {
                     return 0;
@@ -3443,7 +3435,7 @@ export function createGdiFunctions(host){
                 pitchAndFamily: args[12] & 0xff,
                 faceName: wholeAddress(args[13]) === 0
                     ? ''
-                    : host.readCString(args[13], MAX_FACE_NAME),
+                    : guest.cstr(args[13], MAX_FACE_NAME),
             })),
         },
 
@@ -3453,7 +3445,7 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([logfont])=>(wholeAddress(logfont) === 0
                 ? 0
-                : objects.create('font', readLogFont(host, logfont))),
+                : objects.create('font', readLogFont(guest, logfont))),
         },
 
         /**
@@ -3482,7 +3474,7 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([logfont])=>(wholeAddress(logfont) === 0
                 ? 0
-                : objects.create('font', readLogFontW(host, logfont))),
+                : objects.create('font', readLogFontW(guest, logfont))),
         },
 
         /** HFONT CreateFontW(..., LPCWSTR pszFaceName): CreateFontA with the face name wide. */
@@ -3599,7 +3591,7 @@ export function createGdiFunctions(host){
                 }
                 if (wholeAddress(bits) !== 0)
                 {
-                    attributes.pixels.set(host.readMemory(wholeAddress(bits),
+                    attributes.pixels.set(guest.snapshot(wholeAddress(bits),
                         attributes.pixels.length));
                 }
                 return objects.create('bitmap', attributes);
@@ -3617,17 +3609,17 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([bitmap])=>{
-                if (wholeAddress(bitmap) === 0 || readU32(host, bitmap + BITMAP.bmType) !== 0)
+                if (wholeAddress(bitmap) === 0 || guest.u32(bitmap + BITMAP.bmType) !== 0)
                 {
                     return 0;
                 }
-                const layout = readU32(host, bitmap + BITMAP.bmPlanes);
+                const layout = guest.u32(bitmap + BITMAP.bmPlanes);
                 return table.CreateBitmap.handler([
-                    readU32(host, bitmap + BITMAP.bmWidth),
-                    readU32(host, bitmap + BITMAP.bmHeight),
+                    guest.u32(bitmap + BITMAP.bmWidth),
+                    guest.u32(bitmap + BITMAP.bmHeight),
                     layout & 0xffff,
                     layout >>> 16,
-                    readU32(host, bitmap + BITMAP.bmBits),
+                    guest.u32(bitmap + BITMAP.bmBits),
                 ]);
             },
         },
@@ -3664,7 +3656,7 @@ export function createGdiFunctions(host){
                     return bits.size;
                 }
                 const wanted = (count | 0) < 0 ? bits.size : Math.min(count | 0, bits.size);
-                host.writeMemory(wholeAddress(out), bits.read().subarray(0, wanted));
+                guest.setBytes(wholeAddress(out), bits.read().subarray(0, wanted));
                 return wanted;
             },
         },
@@ -3679,7 +3671,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const wanted = Math.min(count >>> 0, bits.size);
-                bits.write(host.readMemory(wholeAddress(source), wanted).slice());
+                bits.write(guest.snapshot(wholeAddress(source), wanted));
                 return wanted;
             },
         },
@@ -3701,7 +3693,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                const header = readBitmapInfoHeader(host, info);
+                const header = readBitmapInfoHeader(guest, info);
                 if (!isDibHeaderSize(header.size))
                 {
                     return 0;
@@ -3727,7 +3719,7 @@ export function createGdiFunctions(host){
                 }
                 if (header.compression === BI_BITFIELDS && ((header.bitCount !== 16
                     && header.bitCount !== 32) || (usage >>> 0) === DIB_PAL_COLORS
-                    || [0, 4, 8].some(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at) === 0)))
+                    || [0, 4, 8].some(at=>guest.u32(info + BITMAPINFOHEADER.SIZE + at) === 0)))
                 {
                     // Every mask has to name some bits, though not necessarily
                     // the one run of them the documentation asks for.
@@ -3752,10 +3744,10 @@ export function createGdiFunctions(host){
                 // deleted comes back from the allocator with its pixels, and a
                 // program that draws text into a new section to read its glyphs
                 // read the last one's text under its own.
-                host.fillMemory?.(address, 0, bytes);
+                guest.fill(address, 0, bytes);
                 if (wholeAddress(bitsOut) !== 0)
                 {
-                    writeU32s(host, bitsOut, [address]);
+                    guest.set32s(bitsOut, [address]);
                 }
                 // An indexed section's colours are its own, read from the
                 // table behind the header and kept where SetDIBColorTable
@@ -3791,7 +3783,7 @@ export function createGdiFunctions(host){
                     // inside the header rather than after it.
                     compression: header.compression,
                     bitfields: header.compression === BI_BITFIELDS
-                        ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
+                        ? [0, 4, 8].map(at=>guest.u32(info + BITMAPINFOHEADER.SIZE + at))
                         : [0, 0, 0],
                     pelsPerMeter: [header.xPelsPerMeter ?? 0, header.yPelsPerMeter ?? 0],
                 });
@@ -3845,7 +3837,7 @@ export function createGdiFunctions(host){
                     bytes[index * 4 + 1] = (color >>> 8) & 0xff;
                     bytes[index * 4 + 2] = (color >>> 16) & 0xff;
                 }
-                host.writeMemory(wholeAddress(quads), bytes);
+                guest.setBytes(wholeAddress(quads), bytes);
                 return wanted;
             },
         },
@@ -3871,7 +3863,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                const header = readBitmapInfoHeader(host, infoHeader);
+                const header = readBitmapInfoHeader(guest, infoHeader);
                 const dc = (hdc >>> 0) === 0 ? null : dcOf(hdc);
                 if (!isDibHeaderSize(header.size)
                     || IMAGE_COMPRESSIONS.has(header.compression)
@@ -3897,7 +3889,7 @@ export function createGdiFunctions(host){
                     return bitmap;
                 }
                 // SetDIBits of the whole DIB the bits are described by.
-                const lines = Math.abs(readBitmapInfoHeader(host, wholeAddress(info)).height);
+                const lines = Math.abs(readBitmapInfoHeader(guest, wholeAddress(info)).height);
                 if (drawing.setDIBits(bitmap, 0, lines, wholeAddress(bits), wholeAddress(info),
                     usage >>> 0, dc)
                     > 0)
@@ -3914,7 +3906,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([logpalette])=>{
-                const palette = readLogPalette(host, logpalette);
+                const palette = readLogPalette(guest, logpalette);
                 return palette.entries.length === 0 ? 0 : objects.create('palette', palette);
             },
         },
@@ -4098,7 +4090,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(wholeAddress(given), COLORADJUSTMENT_SIZE);
+                const bytes = guest.snapshot(wholeAddress(given), COLORADJUSTMENT_SIZE);
                 const view = new DataView(bytes.buffer, bytes.byteOffset, COLORADJUSTMENT_SIZE);
                 const fields = Array.from({ length: 12 }, (_, index)=>(index < 8
                     ? view.getUint16(index * 2, true) : view.getInt16(index * 2, true)));
@@ -4126,7 +4118,7 @@ export function createGdiFunctions(host){
                 const view = new DataView(bytes.buffer);
                 dc.colorAdjustment.forEach((/** @type {number} */ value,
                     /** @type {number} */ index)=>view.setUint16(index * 2, value & 0xffff, true));
-                host.writeMemory(wholeAddress(out), bytes);
+                guest.setBytes(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -4332,7 +4324,7 @@ export function createGdiFunctions(host){
                 }
                 if (wholeAddress(out) !== 0)
                 {
-                    writePoint(host, out, dc.windowOrg);
+                    writePoint(guest, out, dc.windowOrg);
                 }
                 dc.windowOrg = {
                     x: (dc.windowOrg.x | 0) + (x | 0), y: (dc.windowOrg.y | 0) + (y | 0),
@@ -4419,7 +4411,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                writeSize(host, wholeAddress(out), dc.viewportExt);
+                writeSize(guest, wholeAddress(out), dc.viewportExt);
                 return 1;
             },
         },
@@ -4433,7 +4425,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                writeSize(host, wholeAddress(out), dc.windowExt);
+                writeSize(guest, wholeAddress(out), dc.windowExt);
                 return 1;
             },
         },
@@ -4537,7 +4529,7 @@ export function createGdiFunctions(host){
             handler: args=>enumerateFaces([args[0], 0, args[2]], false, {
                 charSet: DEFAULT_CHARSET,
                 faceName: wholeAddress(args[1]) === 0 ? ''
-                    : host.readCString(wholeAddress(args[1]), MAX_FACE_NAME),
+                    : guest.cstr(wholeAddress(args[1]), MAX_FACE_NAME),
             }, forwarded(args, 3, true)),
         },
 
@@ -4625,7 +4617,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(wholeAddress(view), size >>> 0).slice();
+                const bytes = guest.snapshot(wholeAddress(view), size >>> 0);
                 const families = fontFamilies(bytes);
                 if (families.length === 0)
                 {
@@ -4644,7 +4636,7 @@ export function createGdiFunctions(host){
                         }
                         const counted = new Uint8Array(4);
                         new DataView(counted.buffer).setUint32(0, families.length, true);
-                        host.writeMemory(wholeAddress(count), counted);
+                        guest.setBytes(wholeAddress(count), counted);
                         memoryFonts.add(++lastMemoryFont);
                         return lastMemoryFont;
                     });
@@ -4713,7 +4705,7 @@ export function createGdiFunctions(host){
                         {
                             break;
                         }
-                        const bits = readU32(host, value);
+                        const bits = guest.u32(value);
                         found = CHARSET_TABLE.find(entry=>(bits >>> entry.bit & 1) !== 0);
                         break;
                     }
@@ -4731,7 +4723,7 @@ export function createGdiFunctions(host){
                 view.setUint32(0, found.charSet, true);
                 view.setUint32(4, found.codePage, true);
                 view.setUint32(24, (1 << found.bit) >>> 0, true);
-                host.writeMemory(wholeAddress(out), bytes);
+                guest.setBytes(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -4756,7 +4748,7 @@ export function createGdiFunctions(host){
                 }
                 if ((signature >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(signature), new Uint8Array(FONTSIGNATURE_SIZE));
+                    guest.setBytes(wholeAddress(signature), new Uint8Array(FONTSIGNATURE_SIZE));
                 }
                 return currentMetrics(dc).charSet;
             },
@@ -4943,7 +4935,7 @@ export function createGdiFunctions(host){
                     ? [transform(dc, { x: held.left, y: held.top }, false),
                         transform(dc, { x: held.right, y: held.bottom }, false)]
                     : [{ x: 0, y: 0 }, { x: 0, y: 0 }];
-                writeU32s(host, wholeAddress(rect),
+                guest.set32s(wholeAddress(rect),
                     [corners[0].x, corners[0].y, corners[1].x, corners[1].y]);
                 return held ? DCB_SET : DCB_RESET;
             },
@@ -4977,8 +4969,7 @@ export function createGdiFunctions(host){
                 }
                 if ((flags & DCB_ACCUMULATE) !== 0 && wholeAddress(rect) !== 0)
                 {
-                    const [left, top, right, bottom] = readU32s(host, wholeAddress(rect), 4)
-                        .map(value=>value | 0);
+                    const { left, top, right, bottom } = readRect(guest, wholeAddress(rect));
                     const a = transform(dc, { x: left, y: top }, true);
                     const b = transform(dc, { x: right, y: bottom }, true);
                     const added = { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y),
@@ -5035,7 +5026,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                writeTextMetricsW(host, out, currentMetrics(dc));
+                writeTextMetricsW(guest, out, currentMetrics(dc));
                 return 1;
             },
         },
@@ -5051,7 +5042,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const text = wholeAddress(string) === 0 ? '' : wideText(string, count | 0, true);
-                writeSize(host, out, { cx: extentOf(dc, text), cy: currentMetrics(dc).height });
+                writeSize(guest, out, { cx: extentOf(dc, text), cy: currentMetrics(dc).height });
                 return 1;
             },
         },
@@ -5076,11 +5067,11 @@ export function createGdiFunctions(host){
                 const metrics = currentMetrics(dc);
                 if (wholeAddress(out) !== 0)
                 {
-                    writeTextMetricsW(host, wholeAddress(out), metrics);
+                    writeTextMetricsW(guest, wholeAddress(out), metrics);
                 }
                 if (wholeAddress(height) !== 0)
                 {
-                    host.writeMemory(wholeAddress(height), u32Bytes([metrics.height]));
+                    guest.setBytes(wholeAddress(height), u32Bytes([metrics.height]));
                 }
                 return averageWidthOf(dc);
             },
@@ -5125,7 +5116,7 @@ export function createGdiFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: args=>textExtentEx(args, (string, count)=>decodeAnsi(
-                host.readMemory(string, count))),
+                guest.snapshot(string, count))),
         },
         GetTextExtentExPointW: {
             argBytes: 28,
@@ -5190,7 +5181,7 @@ export function createGdiFunctions(host){
                 {
                     const { firstChar, lastChar } = currentMetrics(dc);
                     const glyphs = lastChar - firstChar + 1;
-                    writeU32s(host, wholeAddress(out), [size, 0, glyphs, 1,
+                    guest.set32s(wholeAddress(out), [size, 0, glyphs, 1,
                         (firstChar & 0xffff | glyphs << 16) >>> 0]);
                 }
                 return size;
@@ -5229,7 +5220,7 @@ export function createGdiFunctions(host){
                 }
                 const part = data.subarray(offset >>> 0,
                     Math.min(data.length, (offset >>> 0) + (size >>> 0)));
-                host.writeMemory(wholeAddress(out), part);
+                guest.setBytes(wholeAddress(out), part);
                 return part.length;
             },
         },
@@ -5405,7 +5396,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                writeTextMetrics(host, out, currentMetrics(dc));
+                writeTextMetrics(guest, out, currentMetrics(dc));
                 return 1;
             },
         },
@@ -5436,7 +5427,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const kept = name.subarray(0, (count | 0) - 1);
-                host.writeMemory(wholeAddress(out), Uint8Array.of(...kept, 0));
+                guest.setBytes(wholeAddress(out), Uint8Array.of(...kept, 0));
                 return kept.length;
             },
         },
@@ -5466,7 +5457,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const kept = name.slice(0, (count | 0) - 1);
-                host.writeMemory(wholeAddress(out), utf16z(kept));
+                guest.setBytes(wholeAddress(out), utf16z(kept));
                 return kept.length + 1;
             },
         },
@@ -5491,7 +5482,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                host.writeMemory(wholeAddress(out), u32Bytes([1, 1, realized]));
+                guest.setBytes(wholeAddress(out), u32Bytes([1, 1, realized]));
                 return 1;
             },
         },
@@ -5504,14 +5495,14 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                const size = readU32(host, wholeAddress(out));
+                const size = guest.u32(wholeAddress(out));
                 if (size !== 16 && size !== 24)
                 {
                     return 0;
                 }
                 // size, flags, cache_num, instance_id; then unique, face_index
                 // and simulations as two words.
-                host.writeMemory(wholeAddress(out),
+                guest.setBytes(wholeAddress(out),
                     u32Bytes([size, 1, 1, realized, 0, 0].slice(0, size / 4)));
                 return 1;
             },
@@ -5542,14 +5533,14 @@ export function createGdiFunctions(host){
                 const bytes = new Uint8Array(18);
                 if (wholeAddress(needed) !== 0)
                 {
-                    host.writeMemory(wholeAddress(needed), u32Bytes([bytes.length]));
+                    guest.setBytes(wholeAddress(needed), u32Bytes([bytes.length]));
                 }
                 if (wholeAddress(out) === 0 || (size >>> 0) < bytes.length)
                 {
                     host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(out), bytes);
+                guest.setBytes(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -5585,8 +5576,8 @@ export function createGdiFunctions(host){
                 }
                 const text = wholeAddress(string) === 0 || (count | 0) === 0
                     ? ''
-                    : decodeAnsi(host.readMemory(wholeAddress(string), count | 0));
-                writeSize(host, out, { cx: extentOf(dc, text), cy: currentMetrics(dc).height });
+                    : decodeAnsi(guest.snapshot(wholeAddress(string), count | 0));
+                writeSize(guest, out, { cx: extentOf(dc, text), cy: currentMetrics(dc).height });
                 return 1;
             },
         },
@@ -5756,7 +5747,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                host.fillMemory?.(address, 0, bytes);
+                guest.fill(address, 0, bytes);
                 // A device bitmap's colours are the display's: black and white
                 // for a monochrome one, none to copy for a deeper one.
                 const palette = source.palette ? [...source.palette]

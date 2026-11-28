@@ -30,7 +30,6 @@
  * child's caption and buttons moving into the frame's menu bar.
  */
 
-import { readU32, writeU32s } from './structs.js';
 import { frameOf } from './frame.js';
 import { wholeAddress } from '../common/pointers.js';
 
@@ -113,8 +112,7 @@ const inTurn = steps=>steps.reduce((before, step)=>then(before, ()=>step()), 0);
 
 /**
  * @param {{
- *     host: { readMemory: (address: number, length: number) => Uint8Array,
- *             writeMemory: (address: number, data: Uint8Array) => void,
+ *     host: { guest: import('../common/guest.js').Guest,
  *             keyState?: (key: number) => number },
  *     call: (name: string, args: number[]) => any,
  *     position: (args: number[], thread: unknown) => Answer,
@@ -133,6 +131,7 @@ const inTurn = steps=>steps.reduce((before, step)=>then(before, ()=>step()), 0);
 export function createMdi(options){
     const { host, call, position, send, create, show, focus, destroy, defWindowProc, sizeOf }
         = options;
+    const { guest } = host;
     /**
      * Each client's state, by its window: the Window menu, the first child's
      * id, the children by id, the active one, their stacking order (the
@@ -282,7 +281,7 @@ export function createMdi(options){
             return 0;
         }
         const [className, title, owner, x, y, width, height, style, lParam]
-            = [0, 4, 8, 12, 16, 20, 24, 28, 32].map(offset=>readU32(host, (params >>> 0) + offset));
+            = [0, 4, 8, 12, 16, 20, 24, 28, 32].map(offset=>guest.u32((params >>> 0) + offset));
         return create([WS_EX_MDICHILD, className, title, style, x, y, width, height, client, 0,
             owner, lParam], thread, unicode);
     };
@@ -338,10 +337,10 @@ export function createMdi(options){
             case WM_CREATE: {
                 // CREATESTRUCT.lpCreateParams, the CLIENTCREATESTRUCT -- or, with
                 // no structure handed to a procedure on this side, the record's.
-                const params = lParam !== 0 ? readU32(host, lParam) : record?.createParams ?? 0;
+                const params = lParam !== 0 ? guest.u32(lParam) : record?.createParams ?? 0;
                 clients.set(client, {
-                    windowMenu: params === 0 ? 0 : readU32(host, params),
-                    firstChild: params === 0 ? 0 : readU32(host, params + 4),
+                    windowMenu: params === 0 ? 0 : guest.u32(params),
+                    firstChild: params === 0 ? 0 : guest.u32(params + 4),
                     ids: new Map(), active: 0, order: [], maximized: false,
                 });
                 return 0;
@@ -359,7 +358,7 @@ export function createMdi(options){
             case WM_MDIGETACTIVE:
                 if (lParam !== 0)
                 {
-                    writeU32s(host, lParam, [state?.maximized && state.active !== 0 ? 1 : 0]);
+                    guest.set32s(lParam, [state?.maximized && state.active !== 0 ? 1 : 0]);
                 }
                 return state?.active ?? 0;
             case WM_MDINEXT: {
@@ -482,7 +481,7 @@ export function createMdi(options){
                 const room = sizeOf(client);
                 const frame = frameOf(call('GetWindowLongA', [child, GWL_STYLE]) >>> 0,
                     call('GetWindowLongA', [child, GWL_EXSTYLE]) >>> 0);
-                writeU32s(host, (lParam >>> 0) + 8, [room.width + 2 * frame.edge,
+                guest.set32s((lParam >>> 0) + 8, [room.width + 2 * frame.edge,
                     room.height + 2 * frame.edge + frame.caption, -frame.edge,
                     -(frame.edge + frame.caption)]);
                 return 0;
@@ -520,8 +519,8 @@ export function createMdi(options){
         {
             return 0;
         }
-        const message = readU32(host, (msg >>> 0) + 4);
-        const key = readU32(host, (msg >>> 0) + 8);
+        const message = guest.u32((msg >>> 0) + 4);
+        const key = guest.u32((msg >>> 0) + 8);
         const control = ((host.keyState?.(VK_CONTROL) ?? 0) & 0x8000) !== 0;
         if ((message !== WM_KEYDOWN && message !== WM_SYSKEYDOWN) || !control
             || (key !== VK_F4 && key !== VK_F6))

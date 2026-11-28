@@ -66,7 +66,7 @@ const GRAY_CARET = 1;
  * @property {() => void} [painted]  Told the screen changed outside a paint.
  * @property {(handle: number) => { width: number, height: number } | null} [bitmapSize]
  * @property {(index: number) => number} [metric]  GetSystemMetrics.
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
  */
@@ -338,11 +338,7 @@ export function createCaret(host){
                     return 0;
                 }
                 const state = mine();
-                const bytes = new Uint8Array(8);
-                const view = new DataView(bytes.buffer);
-                view.setInt32(0, state.x, true);
-                view.setInt32(4, state.y, true);
-                host.writeMemory(wholeAddress(point), bytes);
+                host.guest.set32s(wholeAddress(point), [state.x, state.y]);
                 return 1;
             },
         },

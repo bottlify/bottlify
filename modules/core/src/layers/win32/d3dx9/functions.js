@@ -149,6 +149,7 @@ withLongCode(QUATERNION, QUATERNION_LONG);
 
 /**
  * @typedef {Object} D3dxHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number) => number} [readU32]  A word read in place.

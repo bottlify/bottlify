@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeAnsi } from '../kernel32/locale.js';
-import { convertCharacter, readWideString, textBytes, translated, writeText } from './unicode.js';
+import { convertCharacter, readText, textBytes, translated, writeText } from './unicode.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const WM_CREATE = 0x0001;
 const WM_SETTEXT = 0x000c;
@@ -24,6 +25,8 @@ function memory(){
     return {
         bytes,
         lent,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -57,8 +60,8 @@ test('a wide string and an ANSI one are stored as the guest stores them', ()=>{
     assert.deepEqual([...textBytes('A€', false)], [0x41, 0x80, 0]);
     const m = memory();
     m.writeMemory(0x100, textBytes('wide text', true));
-    assert.equal(readWideString(m, 0x100), 'wide text');
-    assert.equal(readWideString(m, 0x100, 4), 'wide');
+    assert.equal(readText(m, 0x100, true), 'wide text');
+    assert.equal(readText(m, 0x100, true, 4), 'wide');
 });
 
 test('a wide string ending just short of the end of its memory is read without reading past it',
@@ -67,23 +70,18 @@ test('a wide string ending just short of the end of its memory is read without r
         // that runs into it, as the memory layer refuses one past a region's end.
         const m = memory();
         const end = m.bytes.length;
-        const read = m.readMemory;
-        m.readMemory = (address, length)=>{
-            assert.ok(address + length <= end, `read of ${length} bytes at`
-                + ` 0x${address.toString(16)} runs past the end of memory`);
-            return read(address, length);
-        };
+        // The guest is over the test's bytes alone: a read past their end faults.
         for (const at of [end - 8 - 20, end - 9 - 20])
         {
             m.writeMemory(at, textBytes('wide text', true));
-            assert.equal(readWideString(m, at), 'wide text', `at 0x${at.toString(16)}`);
+            assert.equal(readText(m, at, true), 'wide text', `at 0x${at.toString(16)}`);
         }
     });
 
 test('text written into a buffer is cut to its room, terminator counted', ()=>{
     const m = memory();
     assert.equal(writeText(m, 0x200, 'abcdef', 4, true), 3);
-    assert.equal(readWideString(m, 0x200), 'abc');
+    assert.equal(readText(m, 0x200, true), 'abc');
     assert.equal(writeText(m, 0x300, 'abcdef', 0, false), 0);
     assert.equal(m.bytes[0x300], 0);
 });
@@ -131,7 +129,7 @@ test('WM_GETTEXT answers the wide caller in its own buffer, in characters', ()=>
         return writeText(m, got.lParam, 'Title bar', got.wParam, false);
     });
     assert.equal(answer, 4);
-    assert.equal(readWideString(m, 0x400), 'Titl');
+    assert.equal(readText(m, 0x400, true), 'Titl');
     assert.equal(m.lent.size, 0);
 });
 
@@ -195,7 +193,7 @@ test('an edit\'s replacement text and the line it copies out cross converted', (
         return text.length;
     });
     assert.equal(answer, 4);
-    assert.equal(readWideString(m, 0x400, 4), 'Café');
+    assert.equal(readText(m, 0x400, true, 4), 'Café');
     assert.deepEqual([...m.bytes.subarray(0x408, 0x40a)], [0x77, 0x77], 'nothing past its room');
     assert.equal(m.lent.size, 0);
 });
@@ -326,5 +324,5 @@ test('a list or combo box\'s item string crosses converted where the box keeps s
     }, CBS_DROPDOWNLIST);
     assert.equal(got, 7);
     assert.deepEqual(asked, [CB_GETLBTEXTLEN, CB_GETLBTEXT]);
-    assert.equal(readWideString(m, 0x400), 'English');
+    assert.equal(readText(m, 0x400, true), 'English');
 });

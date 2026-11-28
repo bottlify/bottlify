@@ -90,9 +90,8 @@ const UNSIZED_KINDS = new Set([BS_3STATE, BS_AUTO3STATE, BS_GROUPBOX, BS_PUSHBOX
 
 /**
  * @typedef {Object} ButtonEnvironment
- * @property {(address: number, length: number) => Uint8Array} read
- * @property {(address: number, bytes: Uint8Array) => void} write
- * @property {number} pointerSize  8 in a 64-bit process: a handle's width in a structure.
+ * @property {import('../common/guest.js').Guest} guest
+ *           Its pointer width a handle's in a structure: 8 in a 64-bit process.
  * @property {(himl: number) => ({ cx: number, cy: number } | null)} imageListSize
  * @property {(image: number) => ({ width: number, height: number } | null)} imageSize
  *           A bitmap's or icon's size, for BM_SETIMAGE's image.
@@ -135,30 +134,15 @@ const sixOf = state=>{
  * @param {ButtonEnvironment} env
  */
 export function createButtonV6(env){
-    const handleSize = env.pointerSize === 8 ? 8 : 4;
-    /** @param {number} at @param {number} length */
-    const view = (at, length)=>new DataView(env.read(at >>> 0, length).slice().buffer);
-    /** @param {DataView} data @param {number} at */
-    const handleAt = (data, at)=>(handleSize === 8
-        ? data.getUint32(at, true) + data.getUint32(at + 4, true) * 2 ** 32
-        : data.getUint32(at, true));
-    /** @param {DataView} data @param {number} at @param {number} value */
-    const putHandle = (data, at, value)=>{
-        data.setUint32(at, value % 2 ** 32, true);
-        if (handleSize === 8)
-        {
-            data.setUint32(at + 4, Math.floor(value / 2 ** 32), true);
-        }
-    };
+    const { guest } = env;
+    const handleSize = guest.pointerSize;
     // BUTTON_IMAGELIST: the list, its margin (a RECT) and its alignment.
     const LIST_MARGIN = handleSize;
     const LIST_ALIGN = handleSize + 16;
-    const LIST_SIZE = handleSize === 8 ? 32 : 24;
     // BUTTON_SPLITINFO: mask, the glyph or list, its style and its SIZE.
     const SPLIT_GLYPH = handleSize;
     const SPLIT_STYLE = handleSize * 2;
     const SPLIT_SIZE = SPLIT_STYLE + 4;
-    const SPLIT_LENGTH = handleSize === 8 ? 32 : 20;
 
     /**
      * The split part's width when nothing set it: the glyph's, or the
@@ -177,28 +161,28 @@ export function createButtonV6(env){
         {
             return 1;
         }
-        const data = view(info, SPLIT_LENGTH);
-        const mask = data.getUint32(0, true);
+        const at = info >>> 0;
+        const mask = guest.u32(at);
         const split = six.split;
         if ((mask & BCSIF_GLYPH) !== 0)
         {
-            split.glyph = handleAt(data, SPLIT_GLYPH);
+            split.glyph = guest.ptr(at + SPLIT_GLYPH);
             split.style &= ~BCSS_IMAGE;
         }
         else if ((mask & BCSIF_IMAGE) !== 0)
         {
-            split.glyph = handleAt(data, SPLIT_GLYPH);
+            split.glyph = guest.ptr(at + SPLIT_GLYPH);
             split.style |= BCSS_IMAGE;
         }
         if ((mask & BCSIF_STYLE) !== 0)
         {
-            split.style = data.getUint32(SPLIT_STYLE, true);
+            split.style = guest.u32(at + SPLIT_STYLE);
         }
         if ((mask & BCSIF_SIZE) !== 0)
         {
-            const cx = data.getInt32(SPLIT_SIZE, true);
+            const cx = guest.i32(at + SPLIT_SIZE);
             split.cx = cx > 0 ? cx : splitWidth(split);
-            split.cy = data.getInt32(SPLIT_SIZE + 4, true);
+            split.cy = guest.i32(at + SPLIT_SIZE + 4);
         }
         else if ((mask & (BCSIF_GLYPH | BCSIF_IMAGE | BCSIF_STYLE)) !== 0)
         {
@@ -216,22 +200,20 @@ export function createButtonV6(env){
         {
             return 0;
         }
-        const data = view(info, SPLIT_LENGTH);
-        const mask = data.getUint32(0, true);
+        const at = info >>> 0;
+        const mask = guest.u32(at);
         if ((mask & (BCSIF_GLYPH | BCSIF_IMAGE)) !== 0)
         {
-            putHandle(data, SPLIT_GLYPH, six.split.glyph);
+            guest.setPtr(at + SPLIT_GLYPH, six.split.glyph);
         }
         if ((mask & BCSIF_STYLE) !== 0)
         {
-            data.setUint32(SPLIT_STYLE, six.split.style, true);
+            guest.set32(at + SPLIT_STYLE, six.split.style);
         }
         if ((mask & BCSIF_SIZE) !== 0)
         {
-            data.setInt32(SPLIT_SIZE, six.split.cx, true);
-            data.setInt32(SPLIT_SIZE + 4, six.split.cy, true);
+            guest.set32s(at + SPLIT_SIZE, [six.split.cx, six.split.cy]);
         }
-        env.write(info >>> 0, new Uint8Array(data.buffer));
         return 1;
     };
 
@@ -312,15 +294,12 @@ export function createButtonV6(env){
         const client = env.clientSize(record);
         /** @param {number} cx @param {number} cy */
         const answer = (cx, cy)=>{
-            const data = new DataView(new ArrayBuffer(8));
-            data.setInt32(0, cx, true);
-            data.setInt32(4, cy, true);
-            env.write(out >>> 0, new Uint8Array(data.buffer));
+            guest.set32s(out >>> 0, [cx, cy]);
             return 1;
         };
         if (LINK_KINDS.has(kind))
         {
-            const size = linkSize(record, state, view(out, 4).getInt32(0, true));
+            const size = linkSize(record, state, guest.i32(out >>> 0));
             return answer(size.cx, size.cy);
         }
         const title = record.title ?? '';
@@ -369,35 +348,8 @@ export function createButtonV6(env){
         return answer(width, height);
     };
 
-    /**
-     * @param {number} at @returns {number[]}
-     */
-    const readRect = at=>{
-        const data = view(at, 16);
-        return [0, 4, 8, 12].map(offset=>data.getInt32(offset, true));
-    };
-    /** @param {number} at @param {number[]} rect */
-    const writeRect = (at, rect)=>{
-        const data = new DataView(new ArrayBuffer(16));
-        rect.forEach((value, index)=>data.setInt32(index * 4, value, true));
-        env.write(at >>> 0, new Uint8Array(data.buffer));
-    };
-
-    /** @param {number} at */
-    const readWide = at=>{
-        const units = [];
-        for (let offset = wholeAddress(at); units.length < 0x10000; offset += 2)
-        {
-            const pair = env.read(offset, 2);
-            const unit = pair[0] | pair[1] << 8;
-            if (unit === 0)
-            {
-                break;
-            }
-            units.push(unit);
-        }
-        return String.fromCharCode(...units);
-    };
+    /** @param {number} at @returns {number[]} */
+    const rectAt = at=>[0, 4, 8, 12].map(offset=>guest.i32((at >>> 0) + offset));
 
     /** @param {number} code @returns {0} */
     const fail = code=>{
@@ -422,23 +374,12 @@ export function createButtonV6(env){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const room = view(size, 4).getUint32(0, true);
+        const room = guest.u32(size >>> 0);
         const needed = six.note.length + 1;
-        const kept = `${six.note.slice(0, Math.max(0, Math.min(needed, room) - 1))}\0`;
-        if (room > 0)
-        {
-            const bytes = new Uint8Array(kept.length * 2);
-            [...kept].forEach((unit, index)=>{
-                bytes[index * 2] = unit.charCodeAt(0) & 0xff;
-                bytes[index * 2 + 1] = unit.charCodeAt(0) >> 8;
-            });
-            env.write(buffer >>> 0, bytes);
-        }
+        guest.writeWide(buffer >>> 0, six.note, room);
         if (room < needed)
         {
-            const told = new DataView(new ArrayBuffer(4));
-            told.setUint32(0, needed, true);
-            env.write(size >>> 0, new Uint8Array(told.buffer));
+            guest.set32(size >>> 0, needed);
             return fail(ERROR_INSUFFICIENT_BUFFER);
         }
         env.setLastError?.(NO_ERROR);
@@ -469,10 +410,9 @@ export function createButtonV6(env){
                 {
                     return 0;
                 }
-                const data = view(lParam, LIST_SIZE);
-                six.imageList = { himl: handleAt(data, 0),
-                    margin: [0, 4, 8, 12].map(at=>data.getInt32(LIST_MARGIN + at, true)),
-                    align: data.getUint32(LIST_ALIGN, true) };
+                const at = lParam >>> 0;
+                six.imageList = { himl: guest.ptr(at), margin: rectAt(at + LIST_MARGIN),
+                    align: guest.u32(at + LIST_ALIGN) };
                 return 1;
             }
             case BCM_GETIMAGELIST: {
@@ -480,12 +420,10 @@ export function createButtonV6(env){
                 {
                     return 0;
                 }
-                const data = new DataView(new ArrayBuffer(LIST_SIZE));
-                putHandle(data, 0, six.imageList.himl);
-                six.imageList.margin.forEach((value, index)=>data.setInt32(LIST_MARGIN + index * 4,
-                    value, true));
-                data.setUint32(LIST_ALIGN, six.imageList.align >>> 0, true);
-                env.write(lParam >>> 0, new Uint8Array(data.buffer));
+                const at = lParam >>> 0;
+                guest.setPtr(at, six.imageList.himl);
+                guest.set32s(at + LIST_MARGIN, six.imageList.margin);
+                guest.set32(at + LIST_ALIGN, six.imageList.align);
                 return 1;
             }
             case BCM_SETTEXTMARGIN:
@@ -493,14 +431,14 @@ export function createButtonV6(env){
                 {
                     return 0;
                 }
-                six.textMargin = readRect(lParam);
+                six.textMargin = rectAt(lParam);
                 return 1;
             case BCM_GETTEXTMARGIN:
                 if (lParam === 0)
                 {
                     return 0;
                 }
-                writeRect(lParam, six.textMargin);
+                guest.set32s(lParam >>> 0, six.textMargin);
                 return 1;
             case BCM_SETSPLITINFO:
                 return setSplit(six, lParam);
@@ -516,7 +454,7 @@ export function createButtonV6(env){
                 {
                     return fail(ERROR_NOT_SUPPORTED);
                 }
-                six.note = lParam === 0 ? '' : readWide(lParam);
+                six.note = lParam === 0 ? '' : guest.wstr(wholeAddress(lParam), 0x20000);
                 env.setLastError?.(NO_ERROR);
                 return 1;
             case BCM_GETNOTELENGTH:

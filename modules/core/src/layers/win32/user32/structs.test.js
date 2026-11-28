@@ -20,42 +20,21 @@ import {
     WNDCLASSA,
     WNDCLASSEXA,
     readMessage,
-    readU32,
     readWindowClass,
     userLayouts,
     writeFields,
     writeMessage,
     writeRect,
-    writeU32s,
     writeWindowClass,
 } from './structs.js';
+import { guestOver } from '../common/guest.fixture.js';
+import { createPort } from '../../../system/port.js';
 
+/** A port over a test's bytes, the bytes beside it. */
 function fakeMemory(size = 0x200){
     const bytes = new Uint8Array(size);
-    return {
-        bytes,
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        /** @param {number} address @param {Uint8Array} data */
-        writeMemory: (address, data)=>bytes.set(data, address),
-    };
+    return Object.assign(guestOver(bytes), { bytes });
 }
-
-test('a DWORD is stored little-endian, the way the guest reads it', ()=>{
-    const memory = fakeMemory();
-    writeU32s(memory, 0x10, [0x12345678]);
-
-    assert.deepEqual([...memory.bytes.subarray(0x10, 0x14)], [0x78, 0x56, 0x34, 0x12]);
-    assert.equal(readU32(memory, 0x10), 0x12345678);
-});
-
-test('a DWORD comes back unsigned', ()=>{
-    const memory = fakeMemory();
-    writeU32s(memory, 0, [-1]);
-
-    assert.equal(readU32(memory, 0), 0xffffffff,
-        'a handle read as a negative number compares equal to nothing the guest passed');
-});
 
 test('every structure is exactly as long as its fields', ()=>{
     // A size that has drifted from the offsets is the failure that writes one
@@ -79,7 +58,7 @@ test('WNDCLASSEXA is WNDCLASSA shifted by the cbSize in front of it', ()=>{
 
 test('a class structure is read from the offsets its layout names', ()=>{
     const memory = fakeMemory();
-    writeU32s(memory, 0x20, [
+    memory.set32s(0x20, [
         WNDCLASSEXA.SIZE, 0x0003, 0x401000, 4, 8, 0x400000, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
     ]);
 
@@ -117,15 +96,15 @@ test('a MSG round-trips through the fields a dispatcher reads back', ()=>{
 
     assert.deepEqual(readMessage(memory, 0x80),
         { hwnd: 0x40, message: 0x0100, wParam: 0x41, lParam: 0x001e0001, time: 7 });
-    assert.equal(readU32(memory, 0x80 + MSG.ptX), 3);
-    assert.equal(readU32(memory, 0x80 + MSG.ptY), 4);
+    assert.equal(memory.u32(0x80 + MSG.ptX), 3);
+    assert.equal(memory.u32(0x80 + MSG.ptY), 4);
 });
 
 test('a RECT is written left, top, right, bottom and in that order', ()=>{
     const memory = fakeMemory();
     writeRect(memory, 0xc0, { left: 1, top: 2, right: 3, bottom: 4 });
 
-    const written = [0, 1, 2, 3].map(index=>readU32(memory, 0xc0 + (index * 4)));
+    const written = [0, 1, 2, 3].map(index=>memory.u32(0xc0 + (index * 4)));
     assert.deepEqual(written, [1, 2, 3, 4]);
 });
 
@@ -319,12 +298,14 @@ test('every structure has the SDK\'s size and offsets at both widths', ()=>{
 test('a structure past 4 GiB is written where it lies, not at its address cut to a dword', ()=>{
     /** @type {[number, number[]][]} */
     const writes = [];
-    const memory = { readMemory: ()=>new Uint8Array(0),
-        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
-            writes.push([address, [...bytes]]) };
+    const none = ()=>0;
+    const memory = createPort({ readU8: none, readU16: none, readU32: none,
+        writeU8: none, writeU16: none, readBytes: ()=>new Uint8Array(0),
+        window: ()=>new Uint8Array(0), writeBytes: none, fillBytes: none,
+        writeU32: (address, value)=>void writes.push([address, [value >>> 0]]) }, 8);
     const L = userLayouts(8);
     const base = 0x1_4000_6000;
     writeFields(memory, base, L.WINDOWPOS, { hwndInsertAfter: -1, flags: 4 });
-    assert.deepEqual(writes.map(([address])=>address),
-        [base + L.WINDOWPOS.hwndInsertAfter, base + L.WINDOWPOS.flags]);
+    assert.deepEqual(writes, [[base + L.WINDOWPOS.hwndInsertAfter, [0xffffffff]],
+        [base + L.WINDOWPOS.hwndInsertAfter + 4, [0xffffffff]], [base + L.WINDOWPOS.flags, [4]]]);
 });

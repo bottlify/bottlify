@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { freshSpace } from '../../cache/testing.fixture.js';
 import { evaluate, preprocess } from './preprocess.js';
 import { createD3dxFunctions } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 test('macros expand, with and without parameters, and the program\'s own are defined', async()=>{
     const result = await preprocess([
@@ -87,6 +88,7 @@ test('D3DXPreprocessShader answers the text in a buffer; D3DXCompileShader fails
         /** @type {string[]} */
         const said = [];
         const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
+            guest: guestOver(memory),
             readMemory: (address, length)=>memory.subarray(address, address + length),
             writeMemory: (address, bytes)=>memory.set(bytes, address),
             heap: { allocate: bytes=>{
@@ -134,6 +136,7 @@ test('an #include goes to the program\'s ID3DXInclude, Open then Close, on the c
         /** @type {{ entry: number, thread: any }[]} */
         const calls = [];
         const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
+            guest: guestOver(memory),
             readMemory: (address, length)=>memory.subarray(address, address + length),
             writeMemory: (address, bytes)=>memory.set(bytes, address),
             heap: { allocate: bytes=>{

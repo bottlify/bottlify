@@ -453,11 +453,6 @@
    "copy readMemory().slice()": 3,
    "string writeString": 1
   },
-  "win32/d3dx9/font.js": {
-   "copy readMemory().slice()": 1,
-   "string ansi": 1,
-   "string wide": 1
-  },
   "win32/d3dx9/functions.js": {
    "accessor putPointer": 1,
    "accessor putU32": 1,
@@ -549,10 +544,6 @@
    "accessor readU32": 1,
    "copy readMemory().slice()": 1
   },
-  "win32/gdi32/drawing.js": {
-   "accessor readI32s": 1,
-   "accessor readU32s": 1
-  },
   "win32/gdi32/emf.js": {
    "accessor word": 1
   },
@@ -560,21 +551,10 @@
    "accessor u16": 1,
    "accessor u32": 1
   },
-  "win32/gdi32/functions.js": {
-   "accessor readU32s": 1,
-   "copy readMemory().slice()": 2
-  },
   "win32/gdi32/metafiles.js": {
    "accessor dword": 1,
    "accessor i32": 2,
-   "accessor u32": 2,
-   "copy readMemory().slice()": 4
-  },
-  "win32/gdi32/structs.js": {
-   "accessor readI32": 1,
-   "accessor readU16": 1,
-   "accessor readU32": 1,
-   "accessor writeU32s": 1
+   "accessor u32": 2
   },
   "win32/gdiplus/codecs.js": {
    "accessor putPointer": 1
@@ -1150,60 +1130,9 @@
    "accessor writeU32": 1,
    "copy readMemory().slice()": 1
   },
-  "win32/user32/button-v6.js": {
-   "string readWide": 1
-  },
-  "win32/user32/controls.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "string writeString": 1
-  },
-  "win32/user32/desktops.js": {
-   "accessor readU32": 1,
-   "copy readMemory().slice()": 3
-  },
-  "win32/user32/dialogs.js": {
-   "accessor u16": 1,
-   "string writeString": 1
-  },
   "win32/user32/msgbox.js": {
    "accessor u16": 1,
-   "accessor u32": 1,
-   "copy readMemory().slice()": 1
-  },
-  "win32/user32/objects.js": {
-   "accessor dword": 1,
-   "accessor readU32": 1,
-   "accessor writeU32s": 1,
-   "string writeString": 1
-  },
-  "win32/user32/paint.js": {
-   "copy readMemory().slice()": 1
-  },
-  "win32/user32/structs.js": {
-   "accessor readU32": 1,
-   "accessor writeU16": 1,
-   "accessor writeU32s": 1
-  },
-  "win32/user32/system.js": {
-   "accessor readI32": 1,
-   "accessor readU16": 1,
-   "accessor readU32": 1,
-   "copy readMemory().slice()": 4,
-   "string readString": 4,
-   "string readWideString": 1,
-   "string writeString": 1,
-   "string writeWideString": 1
-  },
-  "win32/user32/unicode.js": {
-   "string readWideString": 1
-  },
-  "win32/user32/windows.js": {
-   "accessor readLong": 1,
-   "accessor setLong": 1,
-   "accessor writeLong": 1,
-   "copy readMemory().slice()": 7,
-   "string writeString": 1
+   "accessor u32": 1
   },
   "win32/uxtheme/functions.js": {
    "accessor readInts": 1,

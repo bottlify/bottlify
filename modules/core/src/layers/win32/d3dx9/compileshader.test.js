@@ -12,6 +12,7 @@ import { parseShader } from '../../graphics/d3d9/shader.js';
 import { translateShader } from '../../graphics/d3d9/wgsl.js';
 import { testCache } from '../../cache/testing.fixture.js';
 import { compileName } from './compile-cache.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const E_FAIL = 0x80004005;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -40,6 +41,7 @@ function guest(files = {}, disk = {}, compiles = freshSpace('d3dx-compiles')){
     /** @type {string[]} */
     const opened = [];
     const fns = /** @type {any} */ (createD3dxFunctions({ images: freshSpace('d3dx-images'),
+        guest: guestOver(memory),
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         compiles,

@@ -20,6 +20,7 @@ import { COMPILED as SETTERS_64 } from './effect-setters.x64.js';
 import { COMPILED as COMMIT_32 } from './effect-commit.x86.js';
 import * as commitSource from './effect-commit.js';
 import { execute } from './d3d9-machine.fixture.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const D3D_OK = 0;
 const S_FALSE = 1;
@@ -237,6 +238,7 @@ function guest(options = {}){
     const published = new Map();
     let nextPointer = 0x3000000;
     const host = { compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
+        guest: guestOver(memory),
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             memory.subarray(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>

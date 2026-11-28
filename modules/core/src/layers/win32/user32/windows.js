@@ -53,16 +53,13 @@ import {
     putFields,
     readMessage,
     readRect,
-    readU32,
     readWindowClass,
     userLayouts,
     writeMessage,
     writeRect,
-    writeU32s,
     writeWindowClass,
 } from './structs.js';
 import { convertCharacter, readText, translated, writeText } from './unicode.js';
-import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { createClassRegistry } from './classes.js';
 import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
@@ -836,12 +833,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           activation context: its versioned name and the major version of
  *           the assembly that registers it, or null when no context
  *           redirects it. Absent, no name is redirected.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, length: number) => boolean} [canWrite]
  *           Whether the guest may write there; without it every address is
  *           taken to be writable.
- * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number) => { base: number, size: number } | null} [regionAt]
  *           The region an address sits in, from the memory layer's map: the
  *           `va_list` window wvsprintfA reads stops at its end.
@@ -1078,6 +1073,7 @@ class WindowTable extends Map {
  * @param {WindowHost} host
  */
 export function createWindowFunctions(host){
+    const { guest } = host;
     /**
      * The structures a handler here reads and writes, at the process's
      * width: a 64-bit process's have their pointers, handles and message
@@ -1817,7 +1813,7 @@ export function createWindowFunctions(host){
      */
     const terminatedBytes = (address, wide)=>{
         const width = wide ? 2 : 1;
-        const { bytes } = readToTerminator(host, address, width, MAX_CARRIED_TEXT);
+        const bytes = guest.stringBytes(address, wide, MAX_CARRIED_TEXT * width);
         const whole = new Uint8Array(bytes.length + width);
         whole.set(bytes);
         return whole;
@@ -1835,8 +1831,8 @@ export function createWindowFunctions(host){
     const carriedOf = (message, wParam, lParam, unicode)=>{
         if (message === WM_COPYDATA && lParam !== 0)
         {
-            const [data, count, at] = [0, 4, 8].map(offset=>readU32(host, lParam + offset));
-            const bytes = count > 0 && at !== 0 ? host.readMemory(at, count).slice()
+            const [data, count, at] = [0, 4, 8].map(offset=>guest.u32(lParam + offset));
+            const bytes = count > 0 && at !== 0 ? guest.snapshot(at, count)
                 : new Uint8Array();
             return { kind: 'copydata', data, bytes };
         }
@@ -1893,7 +1889,7 @@ export function createWindowFunctions(host){
                 {
                     if (answer.bytes)
                     {
-                        host.writeMemory(wholeAddress(lParam), answer.bytes);
+                        guest.setBytes(wholeAddress(lParam), answer.bytes);
                     }
                     return answer.result ?? 0;
                 }
@@ -1973,17 +1969,17 @@ export function createWindowFunctions(host){
             }
             if (carried.kind === 'copydata')
             {
-                writeU32s(host, lent, [carried.data, carried.bytes.length,
+                guest.set32s(lent, [carried.data, carried.bytes.length,
                     carried.bytes.length > 0 ? lent + COPYDATASTRUCT_SIZE : 0]);
-                host.writeMemory(lent + COPYDATASTRUCT_SIZE, carried.bytes);
+                guest.setBytes(lent + COPYDATASTRUCT_SIZE, carried.bytes);
             }
             else if (carried.kind === 'text')
             {
-                host.writeMemory(lent, carried.bytes);
+                guest.setBytes(lent, carried.bytes);
             }
             else
             {
-                host.writeMemory(lent, new Uint8Array(carried.bytes));
+                guest.setBytes(lent, new Uint8Array(carried.bytes));
             }
             lParam = lent;
         }
@@ -2023,7 +2019,7 @@ export function createWindowFunctions(host){
             return null;
         }
         const bytes = entry.carried?.kind === 'room'
-            ? host.readMemory(entry.lent, entry.carried.bytes).slice() : undefined;
+            ? guest.snapshot(entry.lent, entry.carried.bytes) : undefined;
         settleElsewhere(id);
         return { replied: true, result: entry.sent.result, ...bytes ? { bytes } : {} };
     };
@@ -2055,9 +2051,7 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        // Read a window at a time, so a string at the end of what the program
-        // allocated is not read past.
-        const text = charactersOf(readToTerminator(host, wide, 2, 0x8000).bytes, 2);
+        const text = guest.wstr(wide, 0x10000);
         const bytes = new Uint8Array(text.length + 1);
         bytes.set(encodeAnsi(text));
         const ansi = host.allocate(bytes.length);
@@ -2065,7 +2059,7 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        host.writeMemory(ansi, bytes);
+        guest.setBytes(ansi, bytes);
         return andThen(use(ansi), result=>{
             host.release?.(ansi);
             return result;
@@ -2105,7 +2099,7 @@ export function createWindowFunctions(host){
         }
         for (let at = 0; at < total; at++)
         {
-            if (!POLLED_KINDS.has(typeOf(readU32(host, array + at * 4)) ?? ''))
+            if (!POLLED_KINDS.has(typeOf(guest.u32(array + at * 4)) ?? ''))
             {
                 return false;
             }
@@ -2805,7 +2799,7 @@ export function createWindowFunctions(host){
             const bytes = new Uint8Array(L.CBTACTIVATESTRUCT.SIZE);
             putFields(new DataView(bytes.buffer), 0, L.CBTACTIVATESTRUCT,
                 { fMouse: how === WA_CLICKACTIVE ? 1 : 0, hWndActive: active });
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
         }
         return andThen(callHook(WH_CBT, null, [HCBT_ACTIVATE, target, at], thread), answer=>{
             if (at !== 0)
@@ -3267,7 +3261,7 @@ export function createWindowFunctions(host){
         const reported = { ...procRead(cls, wide),
             instance: classes.reportedInstance(cls, instance),
             className: wholeAddress(className) };
-        writeWindowClass(host, out >>> 0, reported, L, extended ? L.WNDCLASSEXA : undefined);
+        writeWindowClass(guest, out >>> 0, reported, L, extended ? L.WNDCLASSEXA : undefined);
         return cls.atom || 1;
     };
 
@@ -3318,19 +3312,6 @@ export function createWindowFunctions(host){
             atoms.delete(cls.atom);
         }
         return 1;
-    };
-
-    /**
-     * A window's text back into the program's memory, NUL-terminated, in the
-     * ANSI page it was read in: a caption holds the euro sign where the
-     * program wrote 0x80, and 0x80 is what it reads back.
-     *
-     * @param {number} address @param {string} text
-     */
-    const writeString = (address, text)=>{
-        const bytes = new Uint8Array(text.length + 1);
-        bytes.set(encodeAnsi(text));
-        host.writeMemory(address, bytes);
     };
 
     /**
@@ -3512,7 +3493,7 @@ export function createWindowFunctions(host){
      * @param {any} record @param {number} index
      * @param {boolean} [unicode]  Read through GetWindowLongW.
      */
-    const readLong = (record, index, unicode = false)=>{
+    const windowLong = (record, index, unicode = false)=>{
         switch (index | 0){
             case GWL_WNDPROC:
                 return procOfWindow(record, unicode);
@@ -3556,16 +3537,16 @@ export function createWindowFunctions(host){
      *
      * @param {any} record @param {number} index
      * @param {boolean} [unicode]  Read through GetWindowLongPtrW: a procedure is
-     *     its address to a reader of its own encoding, as `readLong` answers.
+     *     its address to a reader of its own encoding, as `windowLong` answers.
      * @returns {bigint}
      */
-    const readLongPtr = (record, index, unicode = false)=>{
+    const windowLongPtr = (record, index, unicode = false)=>{
         const at = index | 0;
         if (at >= 0)
         {
             return at + 8 <= record.extra.byteLength ? record.extra.getBigUint64(at, true) : 0n;
         }
-        const value = readLong(record, index, unicode);
+        const value = windowLong(record, index, unicode);
         if (at === GWL_WNDPROC || at === GWL_HINSTANCE)
         {
             // Whole: an image a 64-bit program keeps at its own base past 4 GiB.
@@ -3585,13 +3566,13 @@ export function createWindowFunctions(host){
      * @param {boolean} unicode
      * @returns {bigint | Promise<bigint>}
      */
-    const setLongPtr = (hwnd, index, low, high, unicode)=>{
+    const changeWindowLongPtr = (hwnd, index, low, high, unicode)=>{
         const record = live(hwnd);
         if (!record)
         {
             return 0n;
         }
-        const previous = readLongPtr(record, index, unicode);
+        const previous = windowLongPtr(record, index, unicode);
         const at = index | 0;
         if (at < 0)
         {
@@ -3600,7 +3581,7 @@ export function createWindowFunctions(host){
             const high32 = high >>> 0;
             const value = (at === GWL_WNDPROC || at === GWL_HINSTANCE) && high32 !== 0
                 && high32 < 2 ** 21 ? high32 * 2 ** 32 + (low >>> 0) : low;
-            return andThen(setLong(record, index, value, unicode), done=>{
+            return andThen(changeWindowLong(record, index, value, unicode), done=>{
                 if (done === false)
                 {
                     return 0n;
@@ -3630,20 +3611,20 @@ export function createWindowFunctions(host){
      * @param {boolean} unicode
      * @returns {boolean | undefined | Promise<boolean | undefined>} false when refused
      */
-    const setLong = (record, index, value, unicode)=>{
+    const changeWindowLong = (record, index, value, unicode)=>{
         const at = (index | 0) === GWL_STYLE || (index | 0) === GWL_EXSTYLE
             ? host.allocate?.(8) ?? 0 : 0;
         if (at === 0)
         {
-            return writeLong(record, index, value, unicode);
+            return storeWindowLong(record, index, value, unicode);
         }
         const thread = host.callerThread?.();
-        const old = readLong(record, index) >>> 0;
-        writeU32s(host, at, [old, value >>> 0]);
+        const old = windowLong(record, index) >>> 0;
+        guest.set32s(at, [old, value >>> 0]);
         return andThen(send(record.hwnd, WM_STYLECHANGING, index, at, thread), ()=>{
-            const given = new DataView(host.readMemory(at, 8).slice().buffer).getUint32(4, true);
-            writeLong(record, index, given, unicode);
-            writeU32s(host, at, [old, readLong(record, index) >>> 0]);
+            const given = guest.u32(at + 4);
+            storeWindowLong(record, index, given, unicode);
+            guest.set32s(at, [old, windowLong(record, index) >>> 0]);
             return andThen(send(record.hwnd, WM_STYLECHANGED, index, at, thread), ()=>{
                 host.release?.(at);
                 return undefined;
@@ -3657,7 +3638,7 @@ export function createWindowFunctions(host){
      *     so reads wide text, and one set through the ANSI form reads bytes.
      * @returns {boolean | undefined} false when the change is refused
      */
-    const writeLong = (record, index, value, unicode = false)=>{
+    const storeWindowLong = (record, index, value, unicode = false)=>{
         switch (index | 0){
             case GWL_WNDPROC: {
                 // A handle sets the procedure behind it, reading what it
@@ -4034,7 +4015,7 @@ export function createWindowFunctions(host){
         /** @param {unknown} who */
         const run = who=>{
             const at = allocate(bytes.length);
-            host.writeMemory(at, bytes);
+            guest.setBytes(at, bytes);
             return andThen(call(hook.proc, [HC_ACTION, wParam >>> 0, at], who), answer=>{
                 host.release?.(at);
                 return answer;
@@ -4233,7 +4214,7 @@ export function createWindowFunctions(host){
         }
         try
         {
-            host.writeMemory(wholeAddress(out), new Uint8Array(width));
+            guest.setBytes(wholeAddress(out), new Uint8Array(width));
             return true;
         }
         catch {
@@ -4271,19 +4252,14 @@ export function createWindowFunctions(host){
             words.push(...old, old[0] + edges.left, old[1] + edges.top, old[2] - edges.right,
                 old[3] - edges.bottom);
         }
-        writeU32s(host, at, words);
+        guest.set32s(at, words);
         if (pos !== 0)
         {
             // The WINDOWPOS's address after the three rectangles, a pointer wide.
-            const pointer = new DataView(new ArrayBuffer(L.pointerSize));
-            putFields(pointer, -L.NCCALCSIZE_PARAMS.lppos, L.NCCALCSIZE_PARAMS,
-                { lppos: pos });
-            host.writeMemory(at + L.NCCALCSIZE_PARAMS.lppos, new Uint8Array(pointer.buffer));
+            guest.setPtr(at + L.NCCALCSIZE_PARAMS.lppos, pos);
         }
         return andThen(send(record.hwnd, WM_NCCALCSIZE, pos !== 0 ? 1 : 0, at, thread), ()=>{
-            const view = new DataView(host.readMemory(at, 16).slice().buffer);
-            const [left, top, right, bottom] = [0, 4, 8, 12]
-                .map(offset=>view.getInt32(offset, true));
+            const [left, top, right, bottom] = [0, 4, 8, 12].map(offset=>guest.i32(at + offset));
             host.release?.(at);
             const style = geometry.styleFrame(record);
             const inset = { left: left - window.left, top: top - window.top,
@@ -4351,7 +4327,7 @@ export function createWindowFunctions(host){
         const bounds = boundsOf(area);
         if ((updateRect >>> 0) !== 0)
         {
-            writeU32s(host, updateRect >>> 0, [bounds.left, bounds.top, bounds.right,
+            guest.set32s(updateRect >>> 0, [bounds.left, bounds.top, bounds.right,
                 bounds.bottom]);
         }
         if ((region >>> 0) !== 0)
@@ -4375,7 +4351,7 @@ export function createWindowFunctions(host){
         const asked = host.allocate?.(MDICREATESTRUCT_SIZE) ?? 0;
         if (asked !== 0)
         {
-            host.writeMemory(asked, new Uint8Array(new Uint32Array(child.asked
+            guest.setBytes(asked, new Uint8Array(new Uint32Array(child.asked
                 .map(value=>value >>> 0)).buffer));
         }
         const params = asked !== 0 ? asked : args[11] ?? 0;
@@ -4667,14 +4643,14 @@ export function createWindowFunctions(host){
         });
         putFields(view, CREATESTRUCTA.SIZE, CBT_CREATEWNDA,
             { lpcs: create, hwndInsertAfter: 0 });
-        host.writeMemory(create, bytes);
+        guest.setBytes(create, bytes);
         if (nameBytes !== null)
         {
-            host.writeMemory(create + nameAt, nameBytes);
+            guest.setBytes(create + nameAt, nameBytes);
         }
         if (classBytes !== null)
         {
-            host.writeMemory(create + classAt, classBytes);
+            guest.setBytes(create + classAt, classBytes);
         }
         void width;
         void height;
@@ -5992,19 +5968,19 @@ export function createWindowFunctions(host){
      */
     const trackMouseEvent = request=>{
         const at = wholeAddress(request);
-        if (at === 0 || readU32(host, at) !== TRACKMOUSEEVENT_SIZE)
+        if (at === 0 || guest.u32(at) !== TRACKMOUSEEVENT_SIZE)
         {
             host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        const flags = readU32(host, at + 4);
+        const flags = guest.u32(at + 4);
         if ((flags & TME_QUERY) !== 0)
         {
             const track = tracking && live(tracking.hwnd) ? tracking : null;
-            writeU32s(host, at + 4, track ? [track.flags, track.hwnd, track.hoverTime] : [0, 0, 0]);
+            guest.set32s(at + 4, track ? [track.flags, track.hwnd, track.hoverTime] : [0, 0, 0]);
             return 1;
         }
-        const record = live(readU32(host, at + 8));
+        const record = live(guest.u32(at + 8));
         if (!record || record === desktop)
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
@@ -6055,7 +6031,7 @@ export function createWindowFunctions(host){
         tracking.flags |= asked;
         if ((flags & TME_HOVER) !== 0)
         {
-            const time = readU32(host, at + 12);
+            const time = guest.u32(at + 12);
             tracking.hoverTime = time === 0 || time === HOVER_DEFAULT ? HOVER_TIME : time;
             armHover(pointer.x, pointer.y);
         }
@@ -6382,7 +6358,7 @@ export function createWindowFunctions(host){
             ptX: entry.x | 0, ptY: entry.y | 0, hwnd: entry.hwnd >>> 0,
             wHitTestCode: client ? HTCLIENT : entry.wParam & 0xffff, dwExtraInfo: 0,
         });
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         return andThen(callHook(WH_MOUSE, null, [code, kind, at], thread), answer=>{
             host.release?.(at);
             return answer;
@@ -6440,11 +6416,9 @@ export function createWindowFunctions(host){
                 const at = message.lParam >>> 0;
                 if (at !== 0)
                 {
-                    const view = new DataView(host.readMemory(at, 16).slice().buffer);
                     const edges = geometry.styleFrame(record);
-                    writeU32s(host, at, [view.getInt32(0, true) + edges.left,
-                        view.getInt32(4, true) + edges.top, view.getInt32(8, true) - edges.right,
-                        view.getInt32(12, true) - edges.bottom]);
+                    guest.set32s(at, [guest.i32(at) + edges.left, guest.i32(at + 4) + edges.top,
+                        guest.i32(at + 8) - edges.right, guest.i32(at + 12) - edges.bottom]);
                 }
                 return 0;
             }
@@ -6453,9 +6427,8 @@ export function createWindowFunctions(host){
                 // lays itself out by: the client area's corner -- on the
                 // screen, or in the parent's client area for a child -- if it
                 // moved, and its size if that or the window's state changed.
-                const word = (message.lParam >>> 0) === 0 ? null
-                    : host.readMemory(wholeAddress(message.lParam) + L.WINDOWPOS.flags, 4);
-                const flags = word ? (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) : 0;
+                const flags = (message.lParam >>> 0) === 0 ? 0
+                    : guest.i32(wholeAddress(message.lParam) + L.WINDOWPOS.flags);
                 const client = geometry.clientRect(record);
                 const parent = isChild(record) ? live(record.parent) : null;
                 const base = parent ? geometry.clientRect(parent) : { left: 0, top: 0 };
@@ -6583,7 +6556,7 @@ export function createWindowFunctions(host){
                     : 0;
             case WM_SETTEXT: {
                 const address = message.lParam >>> 0;
-                record.title = address === 0 ? '' : host.readCString(address, MAX_WINDOW_TEXT);
+                record.title = address === 0 ? '' : guest.cstr(address, MAX_WINDOW_TEXT);
                 tell(record);
                 // The caption is drawn again now, and no WM_PAINT is owed for it.
                 if (geometry.frame(record).caption > 0 && shown(record))
@@ -6600,9 +6573,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                const text = record.title.slice(0, room - 1);
-                writeString(out, text);
-                return text.length;
+                return guest.writeAnsi(out, record.title, room);
             }
             case WM_GETTEXTLENGTH:
                 return record.title.length;
@@ -6819,7 +6790,7 @@ export function createWindowFunctions(host){
         draw,
         painted,
         bitmapSize: host.bitmapSize,
-        writeMemory: host.writeMemory,
+        guest,
         setLastError: host.setLastError,
         divergence: host.divergence,
     });
@@ -6915,9 +6886,10 @@ export function createWindowFunctions(host){
             text: ()=>clipboardAccess?.text() ?? null,
             copy: text=>clipboardAccess?.copy(text) ?? false,
         },
-        readCString: host.readCString,
-        writeMemory: host.writeMemory,
-        readMemory: host.readMemory,
+        guest,
+        readCString: guest.cstr,
+        writeMemory: guest.setBytes,
+        readMemory: guest.snapshot,
         draw,
         picture: (/** @type {number} */ handle)=>pictureOf(handle),
         pointerSize: host.pointerSize === 8 ? 8 : 4,
@@ -6981,8 +6953,8 @@ export function createWindowFunctions(host){
             {
                 return 0;
             }
-            host.writeMemory(name, Uint8Array.from([...className].map(c=>c.charCodeAt(0))));
-            host.writeMemory(name + className.length, new Uint8Array(1));
+            guest.setBytes(name, Uint8Array.from([...className].map(c=>c.charCodeAt(0))));
+            guest.setBytes(name + className.length, new Uint8Array(1));
             const parent = owner === 0 && (style & (WS_CHILD | WS_POPUP)) === WS_CHILD
                 ? desktopWindow().hwnd : owner;
             return andThen(createWindow([exStyle, name, 0, style, rect.x, rect.y, rect.width,
@@ -7691,17 +7663,17 @@ export function createWindowFunctions(host){
         // ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize.
         const metric = (/** @type {number} */ index)=>table.GetSystemMetrics.handler([index]);
         const [SM_CXMINTRACK, SM_CYMINTRACK, SM_CXMAXTRACK, SM_CYMAXTRACK] = [34, 35, 59, 60];
-        writeU32s(host, at, [record.x, record.y, maximised.width, maximised.height,
+        guest.set32s(at, [record.x, record.y, maximised.width, maximised.height,
             maximised.x, maximised.y, metric(SM_CXMINTRACK), metric(SM_CYMINTRACK),
             metric(SM_CXMAXTRACK), metric(SM_CYMAXTRACK)]);
         return andThen(send(record.hwnd, WM_GETMINMAXINFO, 0, at, thread), ()=>{
-            const view = new DataView(host.readMemory(at + 8, 32).slice().buffer);
-            host.release?.(at);
             /** @param {number} offset */
-            const point = offset=>({ x: view.getInt32(offset, true),
-                y: view.getInt32(offset + 4, true) });
-            return { maxSize: point(0), maxPosition: point(8), minTrack: point(16),
+            const point = offset=>({ x: guest.i32(at + 8 + offset),
+                y: guest.i32(at + 12 + offset) });
+            const asked = { maxSize: point(0), maxPosition: point(8), minTrack: point(16),
                 maxTrack: point(24) };
+            host.release?.(at);
+            return asked;
         });
     };
 
@@ -7912,13 +7884,9 @@ export function createWindowFunctions(host){
         let asked = 0;
         if ((recipients >>> 0) !== 0)
         {
-            const bytes = host.readMemory(wholeAddress(recipients), 4);
-            asked = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-            const reached = asked === 0 ? BSM_APPLICATIONS
-                : asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS);
-            host.writeMemory(wholeAddress(recipients), Uint8Array.of(reached & 0xff,
-                reached >>> 8 & 0xff,
-                reached >>> 16 & 0xff, reached >>> 24 & 0xff));
+            asked = guest.u32(wholeAddress(recipients));
+            guest.set32(wholeAddress(recipients), asked === 0 ? BSM_APPLICATIONS
+                : asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS));
         }
         if (asked !== 0 && (asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS)) === 0)
         {
@@ -7976,7 +7944,7 @@ export function createWindowFunctions(host){
         return broadcastSystem(args, unicode, hwnd=>{
             const thread = (/** @type {any} */ (table)).GetWindowThreadProcessId.handler([hwnd, 0]);
             const desk = (/** @type {any} */ (table)).GetThreadDesktop.handler([thread]);
-            writeU32s(host, info + 4, [desk >>> 0, hwnd >>> 0]);
+            guest.set32s(info + 4, [desk >>> 0, hwnd >>> 0]);
         });
     };
 
@@ -8331,7 +8299,7 @@ export function createWindowFunctions(host){
             host.setLastError?.(ERROR_NOACCESS);
             return 0;
         }
-        writeMessage(host, out, retrieved(taken, unicode), L);
+        writeMessage(guest, out, retrieved(taken, unicode), L);
         return andThen(showGotMessage(out, remove, thread), ()=>1);
     };
 
@@ -8360,7 +8328,7 @@ export function createWindowFunctions(host){
         const next = ()=>andThen(receiveSent(thread), ()=>takeThrough(wanted, thread));
         /** @param {any} entry */
         const answer = entry=>{
-            writeMessage(host, out, retrieved(entry, unicode), L);
+            writeMessage(guest, out, retrieved(entry, unicode), L);
             return andThen(showGotMessage(out, true, thread),
                 ()=>(entry.message === WM_QUIT ? 0 : 1));
         };
@@ -8573,7 +8541,7 @@ export function createWindowFunctions(host){
         RegisterClassA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([wndClass])=>register(readWindowClass(host, wndClass, L.WNDCLASSA)),
+            handler: ([wndClass])=>register(readWindowClass(guest, wndClass, L.WNDCLASSA)),
         },
 
         /** ATOM RegisterClassExA(const WNDCLASSEXA *lpWndClass) */
@@ -8583,12 +8551,12 @@ export function createWindowFunctions(host){
             handler: ([wndClassEx])=>{
                 // cbSize is the only thing that says which structure the guest
                 // actually compiled; a mismatch means every offset below is wrong.
-                const declared = readU32(host, wndClassEx + L.WNDCLASSEXA.cbSize);
+                const declared = guest.u32(wndClassEx + L.WNDCLASSEXA.cbSize);
                 if (declared !== L.WNDCLASSEXA.SIZE)
                 {
                     return 0;
                 }
-                return register(readWindowClass(host, wndClassEx, L.WNDCLASSEXA));
+                return register(readWindowClass(guest, wndClassEx, L.WNDCLASSEXA));
             },
         },
 
@@ -8601,7 +8569,7 @@ export function createWindowFunctions(host){
         RegisterClassW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([wndClass])=>register(readWindowClass(host, wndClass, L.WNDCLASSA), true),
+            handler: ([wndClass])=>register(readWindowClass(guest, wndClass, L.WNDCLASSA), true),
         },
 
         /** ATOM RegisterClassExW(const WNDCLASSEXW *lpWndClass) */
@@ -8609,11 +8577,11 @@ export function createWindowFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([wndClassEx])=>{
-                if (readU32(host, wndClassEx + L.WNDCLASSEXA.cbSize) !== L.WNDCLASSEXA.SIZE)
+                if (guest.u32(wndClassEx + L.WNDCLASSEXA.cbSize) !== L.WNDCLASSEXA.SIZE)
                 {
                     return 0;
                 }
-                return register(readWindowClass(host, wndClassEx, L.WNDCLASSEXA), true);
+                return register(readWindowClass(guest, wndClassEx, L.WNDCLASSEXA), true);
             },
         },
 
@@ -8951,16 +8919,14 @@ export function createWindowFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([info])=>{
-                const view = wholeAddress(info) === 0 ? null
-                    : new DataView(host.readMemory(wholeAddress(info), 20).slice().buffer);
-                if (!view || view.getUint32(0, true) !== 20)
+                const at = wholeAddress(info);
+                if (at === 0 || guest.u32(at) !== 20)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const flags = view.getUint32(8, true);
-                const caption = (flags & FLASHW_CAPTION) !== 0;
-                return table.FlashWindow.handler([view.getUint32(4, true), caption ? 1 : 0]);
+                const caption = (guest.u32(at + 8) & FLASHW_CAPTION) !== 0;
+                return table.FlashWindow.handler([guest.u32(at + 4), caption ? 1 : 0]);
             },
         },
 
@@ -8982,7 +8948,7 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 const size = geometry.clientSize(record);
-                writeRect(host, out, { left: 0, top: 0, right: size.width, bottom: size.height });
+                writeRect(guest, out, { left: 0, top: 0, right: size.width, bottom: size.height });
                 return 1;
             },
         },
@@ -8997,7 +8963,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeRect(host, out, geometry.windowRect(record));
+                writeRect(guest, out, geometry.windowRect(record));
                 return 1;
             },
         },
@@ -9024,7 +8990,7 @@ export function createWindowFunctions(host){
                 }
                 const id = object | 0;
                 const control = id === OBJID_CLIENT;
-                if (wholeAddress(out) === 0 || readU32(host, out) !== SCROLLBARINFO_SIZE
+                if (wholeAddress(out) === 0 || guest.u32(out) !== SCROLLBARINFO_SIZE
                     || (!control && id !== OBJID_VSCROLL && id !== OBJID_HSCROLL)
                     || (control && String(record.className).toLowerCase() !== 'scrollbar'))
                 {
@@ -9051,7 +9017,7 @@ export function createWindowFunctions(host){
                     0,
                     (arrows & ESB_DISABLE_RTDN) !== 0 ? STATE_SYSTEM_UNAVAILABLE : 0,
                 ];
-                writeU32s(host, out + 4, [window.left + local.left, window.top + local.top,
+                guest.set32s(out + 4, [window.left + local.left, window.top + local.top,
                     window.left + local.right, window.top + local.bottom, arrow,
                     thumb?.start ?? 0, thumb ? thumb.start + thumb.length : 0, 0, ...states]);
                 return 1;
@@ -9207,7 +9173,7 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
                 const record = windowNamed(hwnd);
-                return record ? readLong(record, index) : 0;
+                return record ? windowLong(record, index) : 0;
             },
         },
 
@@ -9221,8 +9187,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                const previous = readLong(record, index);
-                return andThen(setLong(record, index, value, false),
+                const previous = windowLong(record, index);
+                return andThen(changeWindowLong(record, index, value, false),
                     done=>(done === false ? 0 : previous));
             },
         },
@@ -9237,7 +9203,7 @@ export function createWindowFunctions(host){
                 /** @param {number[]} args */
                 handler: ([hwnd, index])=>{
                     const record = live(hwnd);
-                    return record ? readLongPtr(record, index) : 0n;
+                    return record ? windowLongPtr(record, index) : 0n;
                 },
             },
             /** LONG_PTR GetWindowLongPtrW(HWND hWnd, int nIndex) */
@@ -9246,7 +9212,7 @@ export function createWindowFunctions(host){
                 /** @param {number[]} args */
                 handler: ([hwnd, index])=>{
                     const record = live(hwnd);
-                    return record ? readLongPtr(record, index, true) : 0n;
+                    return record ? windowLongPtr(record, index, true) : 0n;
                 },
             },
             /** LONG_PTR SetWindowLongPtrA(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
@@ -9254,14 +9220,16 @@ export function createWindowFunctions(host){
                 argBytes: 16,
                 quadwords: [2],
                 /** @param {number[]} args */
-                handler: ([hwnd, index, low, high])=>setLongPtr(hwnd, index, low, high, false),
+                handler: ([hwnd, index, low, high])=>changeWindowLongPtr(hwnd, index, low, high,
+                    false),
             },
             /** LONG_PTR SetWindowLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
             SetWindowLongPtrW: {
                 argBytes: 16,
                 quadwords: [2],
                 /** @param {number[]} args */
-                handler: ([hwnd, index, low, high])=>setLongPtr(hwnd, index, low, high, true),
+                handler: ([hwnd, index, low, high])=>changeWindowLongPtr(hwnd, index, low, high,
+                    true),
             },
         } : {},
 
@@ -9271,7 +9239,7 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
                 const record = windowNamed(hwnd);
-                return record ? readLong(record, index, true) : 0;
+                return record ? windowLong(record, index, true) : 0;
             },
         },
 
@@ -9285,8 +9253,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                const previous = readLong(record, index, true);
-                return andThen(setLong(record, index, value, true),
+                const previous = windowLong(record, index, true);
+                return andThen(changeWindowLong(record, index, value, true),
                     done=>(done === false ? 0 : previous));
             },
         },
@@ -9369,7 +9337,7 @@ export function createWindowFunctions(host){
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(wholeAddress(out),
+                guest.setBytes(wholeAddress(out),
                     new Uint8Array(Uint32Array.of(record.displayAffinity ?? 0).buffer));
                 return 1;
             },
@@ -9415,18 +9383,18 @@ export function createWindowFunctions(host){
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, layered?.key ?? 0, true);
-                    host.writeMemory(wholeAddress(key), bytes);
+                    guest.setBytes(wholeAddress(key), bytes);
                 }
                 if ((alpha >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(alpha),
+                    guest.setBytes(wholeAddress(alpha),
                         new Uint8Array([(layered?.alpha ?? 0) & 0xff]));
                 }
                 if ((flags >>> 0) !== 0)
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, layered?.flags ?? 0, true);
-                    host.writeMemory(wholeAddress(flags), bytes);
+                    guest.setBytes(wholeAddress(flags), bytes);
                 }
                 return 1;
             },
@@ -9470,9 +9438,9 @@ export function createWindowFunctions(host){
                         + ' key are drawn opaque: its surface shows nothing behind it');
                 }
                 const [x, y] = wholeAddress(at) === 0 ? [0, 0]
-                    : [readU32(host, at) | 0, readU32(host, at + 4) | 0];
+                    : [guest.u32(at) | 0, guest.u32(at + 4) | 0];
                 const [width, height] = wholeAddress(size) === 0 ? [0, 0]
-                    : [readU32(host, size) | 0, readU32(host, size + 4) | 0];
+                    : [guest.u32(size) | 0, guest.u32(size + 4) | 0];
                 const keep = (wholeAddress(at) === 0 ? SWP_NOMOVE : 0)
                     | (wholeAddress(size) === 0 ? SWP_NOSIZE : 0);
                 const placed = keep === (SWP_NOMOVE | SWP_NOSIZE) ? 1 : /** @type {any} */ (table)
@@ -9484,7 +9452,7 @@ export function createWindowFunctions(host){
                         return 1;
                     }
                     const [sx, sy] = wholeAddress(from) === 0 ? [0, 0]
-                        : [readU32(host, from) | 0, readU32(host, from + 4) | 0];
+                        : [guest.u32(from) | 0, guest.u32(from + 4) | 0];
                     const box = geometry.windowRect(record);
                     const t = /** @type {any} */ (table);
                     const hdc = t.GetWindowDC.handler([hwnd]);
@@ -10160,7 +10128,7 @@ export function createWindowFunctions(host){
         TranslateMessage: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([msg])=>translate(readMessage(host, msg, L)),
+            handler: ([msg])=>translate(readMessage(guest, msg, L)),
         },
 
         /**
@@ -10278,8 +10246,9 @@ export function createWindowFunctions(host){
                 const children = (flags & SW_SCROLLCHILDREN) !== 0;
                 const size = geometry.clientSize(record);
                 const client = { left: 0, top: 0, right: size.width, bottom: size.height };
-                const scroll = wholeAddress(scrollRect) === 0 ? client : readRect(host, scrollRect);
-                const clip = wholeAddress(clipRect) === 0 ? client : readRect(host, clipRect);
+                const scroll = wholeAddress(scrollRect) === 0 ? client
+                    : readRect(guest, scrollRect);
+                const clip = wholeAddress(clipRect) === 0 ? client : readRect(guest, clipRect);
                 const origin = geometry.clientRect(record);
                 const shownPart = geometry.visibleClientRect(record);
                 const visible = !shown(record) || frozen(record) || isEmpty(shownPart) ? []
@@ -10363,8 +10332,8 @@ export function createWindowFunctions(host){
                 }
                 const visible = draw?.area?.(hdc >>> 0) ?? [];
                 const all = boundsOf(visible);
-                const scroll = wholeAddress(scrollRect) === 0 ? all : readRect(host, scrollRect);
-                const clip = wholeAddress(clipRect) === 0 ? all : readRect(host, clipRect);
+                const scroll = wholeAddress(scrollRect) === 0 ? all : readRect(guest, scrollRect);
+                const clip = wholeAddress(clipRect) === 0 ? all : readRect(guest, clipRect);
                 const { uncovered } = scrollPixels(hdc >>> 0, visible, scroll, clip,
                     dx | 0, dy | 0);
                 handScrollBack(uncovered, region, updateRect);
@@ -10449,7 +10418,7 @@ export function createWindowFunctions(host){
         DispatchMessageA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([msg])=>deliver(readMessage(host, msg, L)),
+            handler: ([msg])=>deliver(readMessage(guest, msg, L)),
         },
 
         /**
@@ -10461,7 +10430,7 @@ export function createWindowFunctions(host){
         DispatchMessageW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([msg])=>deliver({ ...readMessage(host, msg, L), unicode: true }),
+            handler: ([msg])=>deliver({ ...readMessage(guest, msg, L), unicode: true }),
         },
 
         /**

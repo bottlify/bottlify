@@ -11,20 +11,23 @@ import {
     BCM_GETTEXTMARGIN, BCM_SETIMAGELIST, BCM_SETNOTE, BCM_SETSPLITINFO, BCM_SETTEXTMARGIN,
     BS_COMMANDLINK, BS_SPLITBUTTON, createButtonV6,
 } from './button-v6.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const IN = 0x100;
 const OUT = 0x200;
 
-/** A machine of 1 KiB, an image list 0x700 of 42x33 images, text 8 a character, 16 a line. */
+/**
+ * A machine of 1 KiB, an image list 0x700 of 42x33 images, text 8 a character, 16 a line.
+ *
+ * @param {4 | 8} [pointerSize]
+ */
 function machine(pointerSize = 4){
     const memory = new Uint8Array(0x400);
     const view = new DataView(memory.buffer);
     /** @type {number[]} */
     const errors = [];
     const v6 = createButtonV6({
-        read: (at, length)=>memory.slice(at, at + length),
-        write: (at, bytes)=>memory.set(bytes, at),
-        pointerSize,
+        guest: guestOver(memory, pointerSize),
         imageListSize: himl=>(himl === 0x700 ? { cx: 42, cy: 33 } : null),
         imageSize: image=>(image === 0x800 ? { width: 48, height: 48 } : null),
         textExtent: (_record, text)=>({ width: text.length * 8,
@@ -84,7 +87,7 @@ test('the split part: its glyph, style and size, set by mask and read back by ma
 });
 
 test('the image list and the text margin are kept as given; a null pointer is refused', ()=>{
-    for (const pointerSize of [4, 8])
+    for (const pointerSize of /** @type {const} */ ([4, 8]))
     {
         const m = machine(pointerSize);
         const b = m.button(0);

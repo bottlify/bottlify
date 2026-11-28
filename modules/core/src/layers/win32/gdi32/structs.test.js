@@ -11,6 +11,7 @@ import {
     LOGBRUSH, LOGBRUSH64, LOGFONTA, LOGFONTW_SIZE, LOGPALETTE, LOGPEN, PALETTEENTRY_SIZE, POINT,
     SIZE, TEXTMETRICA, readLogPen, writeTextMetricsW,
 } from './structs.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 // sizeof and offsetof of each under wingdi.h, by the compiler's rule for the
 // width it is used at: a ULONG_PTR, a pointer or a HANDLE is eight bytes on
@@ -51,12 +52,11 @@ test('the 64-bit structures move each pointer-sized field to eight', ()=>{
 test('a TEXTMETRICW puts its characters in WCHARs and everything after four bytes on', ()=>{
     /** @type {Uint8Array} */
     let written = new Uint8Array(0);
-    const memory = {
-        readMemory: ()=>new Uint8Array(0),
-        /** @param {number} address @param {Uint8Array} bytes */
-        writeMemory: (address, bytes)=>{
-            written = bytes.slice();
-        },
+    const memory = guestOver(new Uint8Array(60));
+    const setBytes = memory.setBytes;
+    memory.setBytes = (address, bytes)=>{
+        written = bytes.slice();
+        setBytes(address, bytes);
     };
     writeTextMetricsW(memory, 0, { height: 16, ascent: 13, descent: 3, internalLeading: 0,
         externalLeading: 0, aveCharWidth: 7, maxCharWidth: 14, weight: 400,
@@ -76,10 +76,5 @@ test('a LOGPEN\'s width is the x of its POINT', ()=>{
     view.setInt32(4, 3, true);
     view.setInt32(8, 99, true);
     view.setUint32(12, 0x00ff00, true);
-    const memory = {
-        /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
-        writeMemory: ()=>{},
-    };
-    assert.deepEqual(readLogPen(memory, 0), { style: 5, width: 3, color: 0x00ff00 });
+    assert.deepEqual(readLogPen(guestOver(bytes), 0), { style: 5, width: 3, color: 0x00ff00 });
 });

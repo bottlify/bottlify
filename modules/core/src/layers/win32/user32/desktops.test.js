@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDesktopFunctions } from './desktops.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const NAME = 0x1000;
 const OUT = 0x2000;
@@ -29,17 +30,7 @@ function setup(){
     const errors = [];
     const caller = { current: /** @type {unknown} */ ({ id: 1 }) };
     const host = {
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.slice(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>bytes.set(data, at),
-        readCString(/** @type {number} */ at){
-            let end = at;
-            while (bytes[end] !== 0)
-            {
-                end++;
-            }
-            return String.fromCharCode(...bytes.subarray(at, end));
-        },
+        guest: guestOver(bytes),
         handles: {
             open: (/** @type {string} */ type, /** @type {any} */ object)=>{
                 next += 4;
@@ -189,9 +180,7 @@ test('the message filter: accepted for the process; for a window, what was let i
 function setupWithCalls(seen, bytes){
     let free = 0x3c00;
     return createDesktopFunctions({ topLevel: ()=>[], host: {
-        readMemory: (at, length)=>bytes.slice(at, at + length),
-        writeMemory: (at, data)=>bytes.set(data, at),
-        readCString: ()=>'',
+        guest: guestOver(bytes),
         handles: { open: ()=>0x80, close: ()=>{} },
         allocate: size=>{
             const at = free;

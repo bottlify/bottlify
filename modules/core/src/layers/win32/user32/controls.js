@@ -30,11 +30,12 @@
  */
 
 import { CHECK_MARK, RADIO_DOT, RADIO_RING_DARK, RADIO_RING_LIGHT, layoutText } from './paint.js';
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
 import { directoryItems } from './dlgdir.js';
 import { createButtonV6 } from './button-v6.js';
 import { translated } from './unicode.js';
+import { readRect, writeRect } from './structs.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
@@ -655,6 +656,7 @@ export const imagePlace = (record, rect, shape)=>{
  * What the procedures need from the window manager around them.
  *
  * @typedef {Object} ControlHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -864,6 +866,7 @@ export function thumbValue(rect, vertical, held, start){
  *     toolkit: ControlToolkit }}
  */
 export function createControlProcedures(host){
+    const { guest } = host;
     /** @param {number} index */
     const color = index=>host.sysColor(index);
 
@@ -1150,10 +1153,7 @@ export function createControlProcedures(host){
         }
         const fields = [what.type, record.id, what.item ?? 0, what.action, what.state,
             record.hwnd, hdc, rect.left, rect.top, rect.right, rect.bottom, what.data ?? 0];
-        const bytes = new Uint8Array(DRAWITEMSTRUCT_SIZE);
-        const view = new DataView(bytes.buffer);
-        fields.forEach((value, index)=>view.setUint32(index * 4, value >>> 0, true));
-        host.writeMemory(at, bytes);
+        guest.set32s(at, fields);
         return after(host.send(record.parent, WM_DRAWITEM, record.id, at, thread), ()=>{
             host.release?.(at);
             return 0;
@@ -1445,7 +1445,7 @@ export function createControlProcedures(host){
         }
     };
     const buttonV6 = createButtonV6({
-        read: host.readMemory, write: host.writeMemory, pointerSize: host.pointerSize ?? 4,
+        guest,
         imageListSize: himl=>host.imageListSize?.(himl) ?? null,
         imageSize: image=>imageSize(image),
         textExtent: buttonTextExtent,
@@ -2424,26 +2424,7 @@ export function createControlProcedures(host){
         {
             return;
         }
-        const bytes = host.readMemory(state.handle, block.size);
-        if (record.unicode === true)
-        {
-            let text = '';
-            for (let at = 0; at + 1 < bytes.length; at += 2)
-            {
-                const unit = bytes[at] | bytes[at + 1] << 8;
-                if (unit === 0)
-                {
-                    break;
-                }
-                text += String.fromCharCode(unit);
-            }
-            record.title = text;
-        }
-        else
-        {
-            const end = bytes.indexOf(0);
-            record.title = decodeAnsi(bytes.subarray(0, end < 0 ? bytes.length : end));
-        }
+        record.title = guest.text(state.handle, record.unicode === true, block.size);
     };
     /** @param {any} record @param {string} text @returns {Uint8Array} */
     const encodeEditBuffer = (record, text)=>{
@@ -2466,7 +2447,7 @@ export function createControlProcedures(host){
         const block = host.block?.(state.handle);
         if (block && bytes.length <= block.capacity)
         {
-            host.writeMemory(state.handle, bytes);
+            guest.setBytes(state.handle, bytes);
             return;
         }
         const grown = host.allocate?.(bytes.length + EDIT_BUFFER_STEP) ?? 0;
@@ -2475,7 +2456,7 @@ export function createControlProcedures(host){
             host.divergence?.('Edit', 'no memory to grow the text buffer EM_GETHANDLE handed out');
             return;
         }
-        host.writeMemory(grown, bytes);
+        guest.setBytes(grown, bytes);
         if (block)
         {
             host.release?.(state.handle);
@@ -2664,7 +2645,7 @@ export function createControlProcedures(host){
             }
             case WM_SETTEXT: {
                 const address = message.lParam >>> 0;
-                record.title = address === 0 ? '' : host.readCString(address, MAX_TEXT);
+                record.title = address === 0 ? '' : guest.cstr(address, MAX_TEXT);
                 state.selStart = state.selEnd = 0;
                 state.firstLine = 0;
                 state.modified = false;
@@ -2680,11 +2661,11 @@ export function createControlProcedures(host){
                 const to = Math.max(state.selStart, state.selEnd);
                 if ((message.wParam >>> 0) !== 0)
                 {
-                    writeU32(message.wParam, from);
+                    guest.set32(wholeAddress(message.wParam), from);
                 }
                 if ((message.lParam >>> 0) !== 0)
                 {
-                    writeU32(message.lParam, to);
+                    guest.set32(wholeAddress(message.lParam), to);
                 }
                 return ((to & 0xffff) << 16 | from & 0xffff) >>> 0;
             }
@@ -2703,7 +2684,7 @@ export function createControlProcedures(host){
                     state.typingRun = false;
                 }
                 return replaceSelection(record,
-                    address === 0 ? '' : host.readCString(address, MAX_TEXT), thread);
+                    address === 0 ? '' : guest.cstr(address, MAX_TEXT), thread);
             }
             // The clipboard: a password is never copied out, and a read-only
             // edit gives nothing up and takes nothing in, though it copies.
@@ -2786,10 +2767,8 @@ export function createControlProcedures(host){
                 }
                 // The first word of the buffer says how many characters it
                 // holds; the line goes in over it, not terminated.
-                const room = host.readMemory(out, 2);
-                const limit = room[0] | room[1] << 8;
-                const text = line.text.slice(0, limit);
-                host.writeMemory(out, encodeAnsi(text));
+                const text = line.text.slice(0, guest.u16(out));
+                guest.setBytes(out, encodeAnsi(text));
                 return text.length;
             }
             case EM_GETFIRSTVISIBLELINE:
@@ -2830,7 +2809,7 @@ export function createControlProcedures(host){
                     {
                         return 0;
                     }
-                    host.writeMemory(at, bytes);
+                    guest.setBytes(at, bytes);
                     state.handle = at;
                 }
                 return state.handle;
@@ -2862,7 +2841,7 @@ export function createControlProcedures(host){
             case EM_GETRECT:
                 if ((message.lParam >>> 0) !== 0)
                 {
-                    writeRect(message.lParam >>> 0, formatRect(record));
+                    writeRect(guest, wholeAddress(message.lParam >>> 0), formatRect(record));
                 }
                 return 0;
             case EM_SETRECT:
@@ -2876,7 +2855,7 @@ export function createControlProcedures(host){
                 }
                 else
                 {
-                    const asked = readRect(wholeAddress(message.lParam));
+                    const asked = readRect(guest, wholeAddress(message.lParam));
                     const current = formatRect(record);
                     const margins = state.margins ?? { left: 0, right: 0 };
                     const rect = (message.wParam & 1) !== 0
@@ -2974,25 +2953,6 @@ export function createControlProcedures(host){
         }
     };
 
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), new Uint8Array([
-        value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
-    ]));
-
-    /** @param {number} address @returns {Rect} */
-    const readRect = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 16);
-        const at = (/** @type {number} */ offset)=>(bytes[offset] | bytes[offset + 1] << 8
-            | bytes[offset + 2] << 16 | bytes[offset + 3] << 24);
-        return { left: at(0), top: at(4), right: at(8), bottom: at(12) };
-    };
-    /** @param {number} address @param {Rect} rect */
-    const writeRect = (address, rect)=>{
-        writeU32(address, rect.left);
-        writeU32(address + 4, rect.top);
-        writeU32(address + 8, rect.right);
-        writeU32(address + 12, rect.bottom);
-    };
 
     /**
      * How far inside its client area an edit lays its text out: a pixel for
@@ -3083,16 +3043,6 @@ export function createControlProcedures(host){
             margins.right = right === EC_USEFONTINFO ? /** @type {any} */ (font).right : right;
         }
         state.margins = margins;
-    };
-
-    /**
-     * In the ANSI page, as the text was read.
-     *
-     * @param {number} address @param {string} text @returns {number} characters written
-     */
-    const writeString = (address, text)=>{
-        host.writeMemory(wholeAddress(address), encodeAnsi(`${text}\0`));
-        return text.length;
     };
 
     // --- ListBox and ComboBox -----------------------------------------------
@@ -3267,7 +3217,7 @@ export function createControlProcedures(host){
         const items = state.items;
         const strings = keepsStrings(record);
         const text = ()=>((message.lParam >>> 0) === 0
-            ? '' : host.readCString(wholeAddress(message.lParam), MAX_TEXT));
+            ? '' : guest.cstr(wholeAddress(message.lParam), MAX_TEXT));
         switch (message.message){
             case LB_ADDSTRING:
                 return strings ? addItem(record, sorted, text()) : addData(record, message.lParam);
@@ -3365,10 +3315,10 @@ export function createControlProcedures(host){
                 }
                 if (!strings)
                 {
-                    writeU32(message.lParam, item.data);
+                    guest.set32(wholeAddress(message.lParam), item.data);
                     return 4;
                 }
-                return writeString(message.lParam, item.text);
+                return guest.writeAnsi(wholeAddress(message.lParam), item.text);
             }
             case LB_GETTEXTLEN: {
                 const item = items[message.wParam | 0];
@@ -3694,7 +3644,7 @@ export function createControlProcedures(host){
                 }
                 const chosen = state.items.map((item, index)=>(item.selected ? index : -1))
                     .filter(index=>index >= 0).slice(0, message.wParam | 0);
-                chosen.forEach((index, slot)=>writeU32(wholeAddress(message.lParam) + slot * 4,
+                chosen.forEach((index, slot)=>guest.set32(wholeAddress(message.lParam) + slot * 4,
                     index));
                 return chosen.length;
             }
@@ -3720,7 +3670,7 @@ export function createControlProcedures(host){
                 const top = (at - state.top) * height;
                 const size = host.clientSize(record);
                 [0, top, size.width, top + height].forEach((value, slot)=>
-                    writeU32(wholeAddress(message.lParam) + slot * 4, value));
+                    guest.set32(wholeAddress(wholeAddress(message.lParam) + slot * 4), value));
                 return 1;
             }
             case LB_SETHORIZONTALEXTENT:
@@ -3863,7 +3813,7 @@ export function createControlProcedures(host){
             host.divergence?.('ComboBox', 'no memory to hand its edit the item\'s text');
             return 0;
         }
-        host.writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         const state = stateOf(combo);
         state.quiet = true;
         return after(host.send(edit.hwnd, WM_SETTEXT, 0, at, thread), ()=>{
@@ -4093,13 +4043,9 @@ export function createControlProcedures(host){
         {
             return rows;
         }
-        const bytes = new Uint8Array(size);
-        const view = new DataView(bytes.buffer);
-        [ODT_COMBOBOX, combo.id, item, 0, rows].forEach((value, index)=>
-            view.setUint32(index * 4, value >>> 0, true));
-        host.writeMemory(at, bytes);
+        guest.fill(guest.set32s(at, [ODT_COMBOBOX, combo.id, item, 0, rows]), 0, size - 20);
         return after(host.send(combo.parent, WM_MEASUREITEM, combo.id, at, thread), ()=>{
-            const height = readU32(at + 16);
+            const height = guest.u32(wholeAddress(at + 16));
             host.release?.(at);
             return height;
         });
@@ -4572,14 +4518,15 @@ export function createControlProcedures(host){
                 // leaves that as it was (Wine's combo test, test_changesize).
                 const pos = message.lParam >>> 0;
                 const pointer = host.pointerSize ?? 4;
-                if (!simple && pos !== 0 && (readU32(pos + 2 * pointer + 16) & SWP_NOSIZE) === 0)
+                if (!simple && pos !== 0
+                    && (guest.u32(wholeAddress(pos + 2 * pointer + 16)) & SWP_NOSIZE) === 0)
                 {
-                    const asked = readU32(pos + 2 * pointer + 12) | 0;
+                    const asked = guest.u32(wholeAddress(pos + 2 * pointer + 12)) | 0;
                     if (asked > record.height)
                     {
                         state.droppedHeight = asked;
                     }
-                    writeU32(pos + 2 * pointer + 12, record.height);
+                    guest.set32(wholeAddress(pos + 2 * pointer + 12), record.height);
                 }
                 return common(record, message, thread);
             }
@@ -4762,7 +4709,7 @@ export function createControlProcedures(host){
                 const origin = host.clientOrigin(record);
                 const height = simple ? record.height
                     : Math.max(record.height, state.droppedHeight ?? 0);
-                writeRect(message.lParam, { left: origin.x, top: origin.y,
+                writeRect(guest, wholeAddress(message.lParam), { left: origin.x, top: origin.y,
                     right: origin.x + Math.max(state.droppedWidth ?? 0, record.width),
                     bottom: origin.y + height });
                 return 1;
@@ -4994,11 +4941,11 @@ export function createControlProcedures(host){
             case SBM_GETRANGE:
                 if ((message.wParam >>> 0) !== 0)
                 {
-                    writeU32(message.wParam, held.min);
+                    guest.set32(wholeAddress(message.wParam), held.min);
                 }
                 if ((message.lParam >>> 0) !== 0)
                 {
-                    writeU32(message.lParam, held.max);
+                    guest.set32(wholeAddress(message.lParam), held.max);
                 }
                 return 0;
             case SBM_ENABLE_ARROWS:
@@ -5009,19 +4956,19 @@ export function createControlProcedures(host){
                 {
                     return 0;
                 }
-                const mask = readU32(info + SCROLLINFO.fMask);
+                const mask = guest.u32(wholeAddress(info + SCROLLINFO.fMask));
                 if ((mask & SIF_RANGE) !== 0)
                 {
-                    held.min = readU32(info + SCROLLINFO.nMin) | 0;
-                    held.max = readU32(info + SCROLLINFO.nMax) | 0;
+                    held.min = guest.u32(wholeAddress(info + SCROLLINFO.nMin)) | 0;
+                    held.max = guest.u32(wholeAddress(info + SCROLLINFO.nMax)) | 0;
                 }
                 if ((mask & SIF_PAGE) !== 0)
                 {
-                    held.page = readU32(info + SCROLLINFO.nPage) | 0;
+                    held.page = guest.u32(wholeAddress(info + SCROLLINFO.nPage)) | 0;
                 }
                 if ((mask & SIF_POS) !== 0)
                 {
-                    held.pos = readU32(info + SCROLLINFO.nPos) | 0;
+                    held.pos = guest.u32(wholeAddress(info + SCROLLINFO.nPos)) | 0;
                 }
                 clamp();
                 if ((message.wParam & 0xffff) !== 0)
@@ -5036,23 +4983,23 @@ export function createControlProcedures(host){
                 {
                     return 0;
                 }
-                const mask = readU32(info + SCROLLINFO.fMask);
+                const mask = guest.u32(wholeAddress(info + SCROLLINFO.fMask));
                 if ((mask & SIF_RANGE) !== 0)
                 {
-                    writeU32(info + SCROLLINFO.nMin, held.min);
-                    writeU32(info + SCROLLINFO.nMax, held.max);
+                    guest.set32(wholeAddress(info + SCROLLINFO.nMin), held.min);
+                    guest.set32(wholeAddress(info + SCROLLINFO.nMax), held.max);
                 }
                 if ((mask & SIF_PAGE) !== 0)
                 {
-                    writeU32(info + SCROLLINFO.nPage, held.page);
+                    guest.set32(wholeAddress(info + SCROLLINFO.nPage), held.page);
                 }
                 if ((mask & SIF_POS) !== 0)
                 {
-                    writeU32(info + SCROLLINFO.nPos, held.pos);
+                    guest.set32(wholeAddress(info + SCROLLINFO.nPos), held.pos);
                 }
                 if ((mask & SIF_TRACKPOS) !== 0)
                 {
-                    writeU32(info + SCROLLINFO.nTrackPos, held.pos);
+                    guest.set32(wholeAddress(info + SCROLLINFO.nTrackPos), held.pos);
                 }
                 return 1;
             }
@@ -5061,11 +5008,6 @@ export function createControlProcedures(host){
         }
     };
 
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
 
     // --- The dialog class ---------------------------------------------------
 
@@ -5381,7 +5323,7 @@ export function createControlProcedures(host){
         toolkit: {
             color, glyph, edge, buttonEdge, sunkenEdge, etchedFrame, drawText,
             clientRect, stateOf, notify, controlColor, background, painting,
-            common, disabled, writeU32, writeString, scrollOf, itemHeight,
+            common, disabled, scrollOf, itemHeight,
             paintScrollBar, scrollHit, shrink, contains, editProc,
         },
     };

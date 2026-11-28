@@ -19,6 +19,7 @@ import { createGdiFunctions } from '../gdi32/functions.js';
 import { createCommonControls } from './controls.js';
 import { createImageLists } from './imagelist.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 export const MSG_BUFFER = 0x13000;
 export const TEXT = 0x13100;
@@ -50,6 +51,8 @@ function fakeMemory(size = 0x40000){
     };
     return {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>{
             mapped(address, length);
@@ -189,9 +192,7 @@ export function setupBars(gdiEngine){
         void hdc;
     };
     const gdi = createGdiFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: memory.readCString,
+        guest: memory.guest,
         windowContextCurrent: hdc=>refreshContext(hdc),
         handles,
         surfaces: { allocate, free: ()=>{} },
@@ -222,9 +223,7 @@ export function setupBars(gdiEngine){
     });
 
     const fns = createWindowFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: memory.readCString,
+        guest: memory.guest,
         handles,
         queue,
         screen: SCREEN,

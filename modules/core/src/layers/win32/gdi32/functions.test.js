@@ -19,6 +19,7 @@ import {
     SIZE,
     TEXTMETRICA,
 } from './structs.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /** Guest addresses the fixtures use, far enough apart that nothing overlaps. */
 const STRUCT = 0x10000;
@@ -85,11 +86,13 @@ const BI_RLE8 = 1;
  * Guest memory as a flat array. The real memory layer hands back views onto the
  * same bytes, so this one does too.
  */
-function fakeMemory(size = 0x30000){
+function fakeMemory(size = 0x200000){
     const bytes = new Uint8Array(size);
     const view = new DataView(bytes.buffer);
     return {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
@@ -193,10 +196,7 @@ function setup(extra = {}){
     const surfaces = fakeSurfaces();
     const gdi = createGdiFunctions({
         ...extra,
-        readMemory: (address, length)=>memory.readMemory(address, length),
-        writeMemory: (address, data)=>memory.writeMemory(address, data),
-        fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        guest: memory.guest,
         handles,
         surfaces,
     });
@@ -757,9 +757,7 @@ test('CreateBitmap refuses a side past 0x7ffffff with ERROR_INVALID_PARAMETER', 
     /** @type {number[]} */
     const errors = [];
     const fns = createGdiFunctions({
-        readMemory: (address, length)=>memory.readMemory(address, length),
-        writeMemory: (address, data)=>memory.writeMemory(address, data),
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         setLastError: code=>errors.push(code),
@@ -974,6 +972,9 @@ test('CreateDIBSection refuses an image past 32 bits of bytes, or one there is n
         // Wine's test_dib_formats: 0x4000 square at one bit is made, and five
         // shapes whose rows come to more bytes than 32 bits count are not.
         const { fns, memory, surfaces, hdc } = withDC();
+        // The 32 MiB of the one section made are not laid in this test's
+        // memory: their zeroing is the memory layer's, not what is tested.
+        memory.guest.fill = ()=>{};
         /** @param {number} width @param {number} height @param {number} bitCount */
         const made = (width, height, bitCount)=>{
             putBitmapInfo(memory, { width, height, bitCount });
@@ -1509,9 +1510,7 @@ function withEngine(/** @type {Record<string, any>} */ more = {}){
     /** @type {import('./structs.js').LogFontFields[]} */
     const asked = [];
     const gdi = createGdiFunctions({
-        readMemory: (address, length)=>context.memory.readMemory(address, length),
-        writeMemory: (address, data)=>context.memory.writeMemory(address, data),
-        readCString: (address, maxLength)=>context.memory.readCString(address, maxLength),
+        guest: context.memory.guest,
         handles: context.handles,
         surfaces: context.surfaces,
         graphics: {
@@ -1579,9 +1578,7 @@ test('an ANSI string is measured, and its face named, as its bytes are in the AN
     /** @type {string[]} */
     const measured = [];
     const fns = createGdiFunctions({
-        readMemory: (address, length)=>context.memory.readMemory(address, length),
-        writeMemory: (address, data)=>context.memory.writeMemory(address, data),
-        readCString: (address, maxLength)=>context.memory.readCString(address, maxLength),
+        guest: context.memory.guest,
         handles: context.handles,
         surfaces: context.surfaces,
         graphics: {
@@ -1721,9 +1718,7 @@ function withEnumeration(wide, reply = ()=>1){
     const logFontSize = wide ? 92 : 60;
     const unit = wide ? 2 : 1;
     const gdi = createGdiFunctions({
-        readMemory: (address, length)=>memory.readMemory(address, length),
-        writeMemory: (address, data)=>memory.writeMemory(address, data),
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces,
         call: (entry, [logfont, metric, type, lParam], thread)=>{
@@ -1888,9 +1883,7 @@ test('a font file a program adds is read, drawn, counted and named', async()=>{
         ['C:\\GAME\\README.TXT', new TextEncoder().encode('not a font')],
     ]);
     const fns = createGdiFunctions({
-        readMemory: (address, length)=>context.memory.readMemory(address, length),
-        writeMemory: (address, data)=>context.memory.writeMemory(address, data),
-        readCString: (address, maxLength)=>context.memory.readCString(address, maxLength),
+        guest: context.memory.guest,
         handles: context.handles,
         surfaces: context.surfaces,
         readFile: async path=>files.get(path.toUpperCase()) ?? null,
@@ -2461,10 +2454,7 @@ test('a realized font answers its realization, and an empty file for a face that
     /** @type {number[]} */
     const errors = [];
     const fns = createGdiFunctions({
-        readMemory: (address, length)=>memory.readMemory(address, length),
-        writeMemory: (address, data)=>memory.writeMemory(address, data),
-        fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         setLastError: code=>errors.push(code),
@@ -2667,9 +2657,7 @@ test('an enhanced metafile DC closes into a metafile handle; a Windows 3 one rec
     /** @type {string[]} */
     const said = [];
     const { table: fns } = createGdiFunctions({
-        readMemory: (address, length)=>memory.readMemory(address, length),
-        writeMemory: (address, data)=>memory.writeMemory(address, data),
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),
@@ -2934,9 +2922,7 @@ function withErrors(){
     /** @type {string[]} */
     const said = [];
     const { table: fns } = createGdiFunctions({
-        readMemory: (address, length)=>memory.readMemory(address, length),
-        writeMemory: (address, data)=>memory.writeMemory(address, data),
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         setLastError: code=>errors.push(code),
@@ -3127,10 +3113,7 @@ test('GdiEntry13 (DdQueryDisplaySettingsUniqueness) moves when the display mode 
     const memory = fakeMemory();
     const screen = { width: 800, height: 600, bitsPerPixel: 32 };
     const { table } = createGdiFunctions({
-        readMemory: (address, length)=>memory.readMemory(address, length),
-        writeMemory: (address, data)=>memory.writeMemory(address, data),
-        fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        guest: memory.guest,
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         screen,

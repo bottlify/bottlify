@@ -14,6 +14,7 @@ import { createWindowFunctions, endEllipsis, lowLevelLayout, watchDispatch } fro
 import { createWindowDirectory } from './directory.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { intersectAreas } from './paint.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 /**
  * Guest addresses the fixtures use: far enough apart that nothing overlaps, and
@@ -89,6 +90,8 @@ function fakeMemory(size = 0x13000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
+        /** The handlers' guest, over the same bytes. */
+        guest: guestOver(bytes),
         /** @param {number} address @param {number} length */
         // A copy, like the real memory layer: a fake that hands out a window
         // onto its own bytes invents aliasing bugs rather than finding them.
@@ -319,9 +322,7 @@ function setup({
     /** @type {import('./windows.js').WindowService | null} */
     let service = null;
     const fns = createWindowFunctions({
-        readMemory: (address, length)=>memory.readMemory(address, length),
-        writeMemory: (address, data)=>memory.writeMemory(address, data),
-        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        guest: memory.guest,
         handles,
         queue,
         keyState: key=>keys.get(key) ?? 0,
@@ -5981,17 +5982,9 @@ test('text ending just short of the end of its memory is read without reading pa
     // Past the end lies another allocation, or nothing: memory refuses a read
     // that runs into it, as the memory layer refuses one past a region's end.
     const WM_SETTEXT = 0x000c;
+    // The guest is over the test's bytes alone: a read past their end faults.
     /** @param {ReturnType<typeof fakeMemory>} memory */
-    const ending = memory=>{
-        const end = memory.bytes.length;
-        const read = memory.readMemory;
-        memory.readMemory = (address, length)=>{
-            assert.ok(address + length <= end, `read of ${length} bytes at`
-                + ` 0x${address.toString(16)} runs past the end of memory`);
-            return read(address, length);
-        };
-        return end;
-    };
+    const ending = memory=>memory.bytes.length;
 
     // SetDlgItemTextW hands the control its text in the ANSI page.
     const context = setup({
@@ -7262,7 +7255,7 @@ for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
                 return (state >>> 0) % below;
             };
             const directory = createWindowDirectory();
-            const { memory, fns, service } = setup({ directory });
+            const { memory, fns, service } = setup({ directory, memorySize: 0x14000 });
             putClass(memory);
             fns.RegisterClassA.handler([CLASS_STRUCT]);
             const WS_POPUP = 0x80000000 | 0;
@@ -8273,10 +8266,10 @@ test('a 64-bit class whose name lies past 4 GiB is read where it lies, not at it
     memory.putString(CLASS_NAME, 'MainWnd');
     /** @type {number[]} */
     const asked = [];
-    const readCString = memory.readCString.bind(memory);
-    memory.readCString = (address, limit)=>{
+    const { text } = memory.guest;
+    memory.guest.text = (address, wide, limit, counted)=>{
         asked.push(address);
-        return readCString(address >= HIGH ? address - HIGH : address, limit);
+        return text(address >= HIGH ? address - HIGH : address, wide, limit, counted);
     };
     memory.putU32s(CLASS_STRUCT, [0x0003, 0, WNDPROC, 0, 0, 0, HINSTANCE, 0, 0x11, 0, 0x22, 0,
         0x33, 0, 0, 0, CLASS_NAME, 1]);
@@ -8298,10 +8291,10 @@ test('a 64-bit window made by a class name past 4 GiB reads that name where it l
     assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
     /** @type {number[]} */
     const asked = [];
-    const readCString = memory.readCString.bind(memory);
-    memory.readCString = (address, limit)=>{
+    const { text } = memory.guest;
+    memory.guest.text = (address, wide, limit, counted)=>{
         asked.push(address);
-        return readCString(address >= HIGH ? address - HIGH : address, limit);
+        return text(address >= HIGH ? address - HIGH : address, wide, limit, counted);
     };
     const hwnd = await createWindow(fns, memory, { className: HIGH + CLASS_NAME });
     assert.notEqual(hwnd, 0);

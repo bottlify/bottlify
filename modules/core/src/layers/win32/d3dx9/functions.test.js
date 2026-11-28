@@ -12,6 +12,7 @@ import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATRIX } from './inguest-matrix.x86.js';
 import { COMPILED as VECTOR } from './inguest-vector.x86.js';
 import { COMPILED as QUATERNION } from './inguest-quaternion.x86.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const E_NOTIMPL = 0x80004001;
 
@@ -21,6 +22,7 @@ function machine(){
     const diverged = [];
     const fns = createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'),
         images: freshSpace('d3dx-images'),
+        guest: guestOver(memory),
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         divergence: api=>diverged.push(api),
@@ -181,6 +183,7 @@ test('D3DXCreateBuffer hands over a zeroed block behind an ID3DXBuffer, freed wi
     /** @type {number[]} */
     const freed = [];
     const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
+        guest: guestOver(memory),
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         heap: { allocate: ()=>0x800, free: address=>freed.push(address) },
@@ -322,6 +325,7 @@ function endingMemory(ends){
     const opened = [];
     let free = 0x100;
     const fns = /** @type {any} */ (createD3dxFunctions({ compiles: freshSpace('d3dx-compiles'), images: freshSpace('d3dx-images'),
+        guest: guestOver(memory, 4, ends),
         readMemory: (address, length)=>{
             for (const end of ends)
             {

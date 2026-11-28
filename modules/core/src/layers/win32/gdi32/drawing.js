@@ -34,7 +34,7 @@
  *   a program checks before deciding to redraw.
  */
 
-import { readRect, writeU16, writeU32s } from '../user32/structs.js';
+import { readRect } from '../user32/structs.js';
 
 export { bezierPoints } from './paths.js';
 import { decodeAnsi } from '../kernel32/locale.js';
@@ -66,7 +66,6 @@ import {
     logFontBytes,
     paletteEntryToPixel,
     readBitmapInfoHeader,
-    readU32,
 } from './structs.js';
 
 /**
@@ -565,6 +564,7 @@ export function createDrawingFunctions(
     { host, objects, dcOf, surfaceOf, currentMetrics, lend, readColorTable, toDevice,
         toLogical = (dc, point)=>point, spacedAdvances = ()=>null })
 {
+    const { guest } = host;
     /** @type {DrawingServices} */
     const services = host.graphics ?? {};
     /** The display's ramp, when there is no graphics layer to hold it. @type {GammaRamp | null} */
@@ -614,25 +614,12 @@ export function createDrawingFunctions(
      * @returns {{ x: number, y: number }[]}
      */
     const pointsAt = (address, count)=>{
-        const bytes = host.readMemory(address, Math.max(0, count) * 8);
+        const bytes = guest.snapshot(address, Math.max(0, count) * 8);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         return Array.from({ length: Math.floor(bytes.byteLength / 8) }, (_, at)=>(
             { x: view.getInt32(at * 8, true), y: view.getInt32(at * 8 + 4, true) }));
     };
 
-    /**
-     * DWORDs out of guest memory, signed and not.
-     *
-     * @param {number} address @param {number} count
-     */
-    const readI32s = (address, count)=>{
-        const bytes = host.readMemory(address, Math.max(0, count) * 4);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        return Array.from({ length: Math.floor(bytes.byteLength / 4) }, (_, at)=>
-            view.getInt32(at * 4, true));
-    };
-    /** @param {number} address @param {number} count */
-    const readU32s = (address, count)=>readI32s(address, count).map(value=>value >>> 0);
 
     /**
      * Polygons laid one after another in a POINT array, each as long as its
@@ -650,7 +637,8 @@ export function createDrawingFunctions(
         {
             return null;
         }
-        const sizes = readU32s(wholeAddress(counts), many);
+        const sizes = Array.from({ length: many },
+            (_, index)=>guest.u32(wholeAddress(counts) + index * 4));
         if (sizes.some(size=>size < least || size > 0x100000))
         {
             return null;
@@ -1097,7 +1085,7 @@ export function createDrawingFunctions(
      *             colors: number[], masks: number[] } | null}
      */
     const readDib = (info, bits, usage, dc, lines, lazy = false)=>{
-        const header = readBitmapInfoHeader(host, info);
+        const header = readBitmapInfoHeader(guest, info);
         const masked = header.compression === BI_BITFIELDS
             && (header.bitCount === 16 || header.bitCount === 32);
         const rle = isRle(header);
@@ -1114,7 +1102,7 @@ export function createDrawingFunctions(
             return null;
         }
         const masks = masked
-            ? [0, 4, 8].map(at=>readU32(host, info + BITMAPINFOHEADER.SIZE + at))
+            ? [0, 4, 8].map(at=>guest.u32(info + BITMAPINFOHEADER.SIZE + at))
             : [];
         const stride = ((header.width * header.bitCount + 31) >> 5) * 4;
         const rows = lines ?? Math.abs(header.height);
@@ -1124,7 +1112,7 @@ export function createDrawingFunctions(
         const readColors = ()=>(header.bitCount <= 8
             ? readColorTable(info + header.size, count, usage, dc, colorEntryBytes(header))
             : []);
-        const readBits = ()=>host.readMemory(bits, rle ? header.sizeImage : stride * rows);
+        const readBits = ()=>guest.snapshot(bits, rle ? header.sizeImage : stride * rows);
         if (!lazy)
         {
             return { header, bits: readBits(), colors: readColors(), masks };
@@ -1241,7 +1229,7 @@ export function createDrawingFunctions(
      * @returns {TriVertex}
      */
     const readVertex = (dc, address)=>{
-        const bytes = host.readMemory(address, TRIVERTEX_SIZE);
+        const bytes = guest.snapshot(address, TRIVERTEX_SIZE);
         const view = new DataView(bytes.buffer, bytes.byteOffset, TRIVERTEX_SIZE);
         const point = toDevice(dc, { x: view.getInt32(0, true), y: view.getInt32(4, true) });
         return {
@@ -1960,7 +1948,7 @@ export function createDrawingFunctions(
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
                 const corners = (mode >>> 0) === GRADIENT_FILL_TRIANGLE ? 3 : 2;
-                const indices = host.readMemory(wholeAddress(mesh), (entries >>> 0) * corners * 4);
+                const indices = guest.snapshot(wholeAddress(mesh), (entries >>> 0) * corners * 4);
                 const view = new DataView(indices.buffer, indices.byteOffset, indices.byteLength);
                 const listed = Array.from({ length: entries >>> 0 }, (_, entry)=>
                     Array.from({ length: corners }, (__, corner)=>
@@ -2427,7 +2415,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const types = total === 0 ? new Uint8Array(0)
-                    : host.readMemory(wholeAddress(kinds), total);
+                    : guest.snapshot(wholeAddress(kinds), total);
                 const through = pointsAt(wholeAddress(points), total);
                 const began = { ...dc.position };
                 const path = dc.path?.open ? dc.path : null;
@@ -2874,11 +2862,11 @@ export function createDrawingFunctions(
                     refuse(ERROR_INVALID_PARAMETER);
                     return 0xffffffff;
                 }
-                writeU32s(host, points >>> 0, path.points.flatMap(point=>{
+                guest.set32s(points >>> 0, path.points.flatMap(point=>{
                     const logical = toLogical(dc, point);
                     return [logical.x, logical.y];
                 }));
-                host.writeMemory(wholeAddress(kinds), Uint8Array.from(path.types));
+                guest.setBytes(wholeAddress(kinds), Uint8Array.from(path.types));
                 return path.points.length;
             },
         },
@@ -3162,7 +3150,7 @@ export function createDrawingFunctions(
                 }
                 if (wholeAddress(old) !== 0)
                 {
-                    writeU32s(host, wholeAddress(old), [bitsOf(dc.miterLimit)]);
+                    guest.set32s(wholeAddress(old), [bitsOf(dc.miterLimit)]);
                 }
                 dc.miterLimit = value;
                 return 1;
@@ -3181,7 +3169,7 @@ export function createDrawingFunctions(
                 }
                 if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, wholeAddress(out), [bitsOf(dc.miterLimit)]);
+                    guest.set32s(wholeAddress(out), [bitsOf(dc.miterLimit)]);
                 }
                 return 1;
             },
@@ -3238,7 +3226,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const shape = record.attributes;
-                const header = readBitmapInfoHeader(host, info);
+                const header = readBitmapInfoHeader(guest, info);
                 if (!isDibHeaderSize(header.size))
                 {
                     return 0;
@@ -3258,13 +3246,13 @@ export function createDrawingFunctions(
                     if (core)
                     {
                         [shape.width, shape.height, 1, depth].forEach((value, index)=>
-                            writeU16(host, info + BITMAPCOREHEADER.bcWidth + index * 2, value));
+                            guest.set16(info + BITMAPCOREHEADER.bcWidth + index * 2, value));
                         return 1;
                     }
-                    writeU32s(host, info + BITMAPINFOHEADER.biWidth, [shape.width, shape.height]);
-                    writeU16(host, info + BITMAPINFOHEADER.biPlanes, 1);
-                    writeU16(host, info + BITMAPINFOHEADER.biBitCount, depth);
-                    writeU32s(host, info + BITMAPINFOHEADER.biCompression, [
+                    guest.set32s(info + BITMAPINFOHEADER.biWidth, [shape.width, shape.height]);
+                    guest.set16(info + BITMAPINFOHEADER.biPlanes, 1);
+                    guest.set16(info + BITMAPINFOHEADER.biBitCount, depth);
+                    guest.set32s(info + BITMAPINFOHEADER.biCompression, [
                         depth === 16 || depth === 32 ? BI_BITFIELDS : BI_RGB,
                         dibStride(shape.width, depth) * shape.height, 0, 0, 0, 0,
                     ]);
@@ -3284,14 +3272,14 @@ export function createDrawingFunctions(
                 }
                 if (!core && !rle)
                 {
-                    writeU32s(host, info + BITMAPINFOHEADER.biSizeImage,
+                    guest.set32s(info + BITMAPINFOHEADER.biSizeImage,
                         [dibStride(header.width, header.bitCount) * Math.abs(header.height)]);
-                    writeU32s(host, info + BITMAPINFOHEADER.biClrUsed, [0]);
+                    guest.set32s(info + BITMAPINFOHEADER.biClrUsed, [0]);
                 }
                 const masks = masked ? masksFor(shape, header.bitCount) : [];
                 if (masked)
                 {
-                    writeU32s(host, info + BITMAPINFOHEADER.SIZE, masks);
+                    guest.set32s(info + BITMAPINFOHEADER.SIZE, masks);
                 }
                 const colors = header.bitCount <= 8 ? colorTableFor(shape, header.bitCount) : [];
                 if ((usage >>> 0) === DIB_PAL_COLORS)
@@ -3299,16 +3287,16 @@ export function createDrawingFunctions(
                     // Indices into the DC's palette instead of colours, and
                     // the identity is the table that matches.
                     colors.forEach((_, index)=>
-                        writeU16(host, info + header.size + index * 2, index));
+                        guest.set16(info + header.size + index * 2, index));
                 }
                 else if (core)
                 {
-                    host.writeMemory(info + header.size, Uint8Array.from(colors.flatMap(color=>
+                    guest.setBytes(info + header.size, Uint8Array.from(colors.flatMap(color=>
                         [color & 0xff, (color >>> 8) & 0xff, (color >>> 16) & 0xff])));
                 }
                 else if (colors.length > 0)
                 {
-                    writeU32s(host, info + header.size, [...colors]);
+                    guest.set32s(info + header.size, [...colors]);
                 }
                 if (describing)
                 {
@@ -3347,7 +3335,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                host.writeMemory(wholeAddress(bits), buffer);
+                guest.setBytes(wholeAddress(bits), buffer);
                 return written;
             },
         },
@@ -3465,7 +3453,7 @@ export function createDrawingFunctions(
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>
-                wholeAddress(rect) === 0 ? 0 : newRegion(readRect(host, rect)),
+                wholeAddress(rect) === 0 ? 0 : newRegion(readRect(guest, rect)),
         },
 
         /**
@@ -3495,7 +3483,7 @@ export function createDrawingFunctions(
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                const { left, top, right, bottom } = readRect(host, wholeAddress(rect));
+                const { left, top, right, bottom } = readRect(guest, wholeAddress(rect));
                 return functions.CreateEllipticRgn.handler([left, top, right, bottom]);
             },
         },
@@ -3577,23 +3565,23 @@ export function createDrawingFunctions(
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                const header = readU32s(wholeAddress(data), 3);
-                const count = header[2];
-                if (header[0] !== RGNDATAHEADER_SIZE || (size >>> 0) < RGNDATAHEADER_SIZE
+                const count = guest.u32(wholeAddress(data) + 8);
+                if (guest.u32(wholeAddress(data)) !== RGNDATAHEADER_SIZE
+                    || (size >>> 0) < RGNDATAHEADER_SIZE
                     || count > ((size >>> 0) - RGNDATAHEADER_SIZE) / RECT_SIZE)
                 {
                     return 0;
                 }
-                const values = readI32s(wholeAddress(data) + RGNDATAHEADER_SIZE, count * 4);
                 const rects = Array.from({ length: count }, (_, index)=>{
-                    const [left, top, right, bottom] = values.slice(index * 4, index * 4 + 4);
+                    const { left, top, right, bottom } = readRect(guest,
+                        wholeAddress(data) + RGNDATAHEADER_SIZE + index * RECT_SIZE);
                     return orderedRect(left, top, right, bottom);
                 }).filter(rect=>!isEmpty(rect));
                 if (wholeAddress(xform) === 0)
                 {
                     return regionHolding(rects);
                 }
-                const bytes = host.readMemory(wholeAddress(xform), 24);
+                const bytes = guest.snapshot(wholeAddress(xform), 24);
                 const view = new DataView(bytes.buffer, bytes.byteOffset, 24);
                 const [m11, m12, m21, m22, dx, dy] = Array.from({ length: 6 }, (_, index)=>
                     view.getFloat32(index * 4, true));
@@ -3735,7 +3723,7 @@ export function createDrawingFunctions(
                 }
                 // An empty region has no position: Windows keeps it as zeros.
                 const box = areaBox(area);
-                writeU32s(host, wholeAddress(out), [box.left, box.top, box.right, box.bottom]);
+                guest.set32s(wholeAddress(out), [box.left, box.top, box.right, box.bottom]);
                 return areaKind(area);
             },
         },
@@ -3965,7 +3953,7 @@ export function createDrawingFunctions(
                 const previous = dc.brushOrg ?? { x: 0, y: 0 };
                 if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, wholeAddress(out), [previous.x, previous.y]);
+                    guest.set32s(wholeAddress(out), [previous.x, previous.y]);
                 }
                 dc.brushOrg = { x: x | 0, y: y | 0 };
                 if (dc.boundSurface)
@@ -3992,7 +3980,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const origin = dc.brushOrg ?? { x: 0, y: 0 };
-                writeU32s(host, wholeAddress(out), [origin.x, origin.y]);
+                guest.set32s(wholeAddress(out), [origin.x, origin.y]);
                 return 1;
             },
         },
@@ -4015,7 +4003,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const origin = dc.bounds ?? { left: 0, top: 0 };
-                writeU32s(host, wholeAddress(out), [origin.left, origin.top]);
+                guest.set32s(wholeAddress(out), [origin.left, origin.top]);
                 return 1;
             },
         },
@@ -4035,7 +4023,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const asked = readRect(host, wholeAddress(rect));
+                const asked = readRect(guest, wholeAddress(rect));
                 const area = deviceArea(dc, asked.left, asked.top, asked.right, asked.bottom);
                 return drawnAreaOf(dc).every(piece=>isEmpty(intersect(piece, area))) ? 0 : 1;
             },
@@ -4085,7 +4073,7 @@ export function createDrawingFunctions(
                     : { left: 0, top: 0, right: 0, bottom: 0 };
                 const a = toLogical(dc, { x: box.left, y: box.top });
                 const b = toLogical(dc, { x: box.right, y: box.bottom });
-                writeU32s(host, wholeAddress(rect), [Math.min(a.x, b.x), Math.min(a.y, b.y),
+                guest.set32s(wholeAddress(rect), [Math.min(a.x, b.x), Math.min(a.y, b.y),
                     Math.max(a.x, b.x), Math.max(a.y, b.y)]);
                 return areaKind(area);
             },
@@ -4248,7 +4236,7 @@ export function createDrawingFunctions(
                     return held.length;
                 }
                 const copied = held.slice(start >>> 0, (start >>> 0) + (count >>> 0));
-                writeU32s(host, wholeAddress(out), copied);
+                guest.set32s(wholeAddress(out), copied);
                 return copied.length;
             },
         },
@@ -4286,7 +4274,7 @@ export function createDrawingFunctions(
                     {
                         break;
                     }
-                    const bytes = host.readMemory(entries + index * PALETTEENTRY_SIZE, 4);
+                    const bytes = guest.snapshot(entries + index * PALETTEENTRY_SIZE, 4);
                     held[first + index] = (bytes[0] | bytes[1] << 8
                         | bytes[2] << 16 | bytes[3] << 24) >>> 0;
                     written++;
@@ -4331,7 +4319,7 @@ export function createDrawingFunctions(
                 }
                 if (total > 0)
                 {
-                    host.writeMemory(wholeAddress(out), bytes);
+                    guest.setBytes(wholeAddress(out), bytes);
                 }
                 return 0;
             },
@@ -4361,7 +4349,7 @@ export function createDrawingFunctions(
                     return needed;
                 }
                 const box = areaBox(area);
-                writeU32s(host, out, [
+                guest.set32s(out, [
                     RGNDATAHEADER_SIZE,
                     RDH_RECTANGLES,
                     area.length,
@@ -4391,7 +4379,7 @@ export function createDrawingFunctions(
                 // Any overlap at all, not containment: the question is whether
                 // the region has to be redrawn, and a single shared pixel says
                 // it does.
-                const asked = readRect(host, wholeAddress(rect));
+                const asked = readRect(guest, wholeAddress(rect));
                 const box = orderedRect(asked.left, asked.top, asked.right, asked.bottom);
                 return intersectArea(area, box).length > 0 ? 1 : 0;
             },
@@ -4480,12 +4468,12 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const last = Math.min(held.length, (start >>> 0) + (count >>> 0));
-                const given = readU32s(wholeAddress(entries), last - (start >>> 0));
                 for (let index = start >>> 0; index < last; index++)
                 {
                     if (((held[index] >>> 24) & PC_RESERVED) !== 0)
                     {
-                        held[index] = given[index - (start >>> 0)];
+                        held[index] = guest.u32(wholeAddress(entries)
+                            + (index - (start >>> 0)) * 4);
                     }
                 }
                 refreshDependents(record);
@@ -4535,7 +4523,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const filtered = ((dc.mapperFlags ?? 0) & ASPECT_FILTERING) !== 0;
-                writeU32s(host, wholeAddress(out), filtered ? [LOGICAL_DPI, LOGICAL_DPI] : [0, 0]);
+                guest.set32s(wholeAddress(out), filtered ? [LOGICAL_DPI, LOGICAL_DPI] : [0, 0]);
                 return 1;
             },
         },
@@ -4560,7 +4548,7 @@ export function createDrawingFunctions(
                 const previous = record.attributes.dimension ?? { cx: 0, cy: 0 };
                 if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, wholeAddress(out), [previous.cx, previous.cy]);
+                    guest.set32s(wholeAddress(out), [previous.cx, previous.cy]);
                 }
                 record.attributes.dimension = { cx: width | 0, cy: height | 0 };
                 return 1;
@@ -4576,7 +4564,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const dimension = record.attributes.dimension ?? { cx: 0, cy: 0 };
-                writeU32s(host, wholeAddress(out), [dimension.cx, dimension.cy]);
+                guest.set32s(wholeAddress(out), [dimension.cx, dimension.cy]);
                 return 1;
             },
         },
@@ -4627,7 +4615,7 @@ export function createDrawingFunctions(
                     {
                         for (const fields of offered)
                         {
-                            writeU32s(host, buffer, fields);
+                            guest.set32s(buffer, fields);
                             answer = (await call(proc >>> 0, [buffer, data], thread)) | 0;
                             if (answer === 0)
                             {
@@ -4787,7 +4775,7 @@ export function createDrawingFunctions(
                         view.setUint16(at, entries ? entries[index] : index * 257, true);
                     }
                 }
-                host.writeMemory(wholeAddress(ramp), bytes);
+                guest.setBytes(wholeAddress(ramp), bytes);
                 return 1;
             },
         },
@@ -4807,7 +4795,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const read = readGammaRamp(host.readMemory(wholeAddress(ramp), GAMMA_RAMP_BYTES));
+                const read = readGammaRamp(guest.snapshot(wholeAddress(ramp), GAMMA_RAMP_BYTES));
                 if (!read)
                 {
                     return 0;
@@ -4836,7 +4824,7 @@ export function createDrawingFunctions(
                 }
                 if (wholeAddress(point) !== 0)
                 {
-                    writeU32s(host, point, [dc.viewportOrg.x | 0, dc.viewportOrg.y | 0]);
+                    guest.set32s(point, [dc.viewportOrg.x | 0, dc.viewportOrg.y | 0]);
                 }
                 dc.viewportOrg = {
                     x: (dc.viewportOrg.x | 0) + (x | 0),
@@ -4860,7 +4848,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 return services.pixelFormat.choose(
-                    host.readMemory(wholeAddress(descriptor), services.pixelFormat.size())) | 0;
+                    guest.snapshot(wholeAddress(descriptor), services.pixelFormat.size())) | 0;
             },
         },
 
@@ -4893,7 +4881,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                host.writeMemory(wholeAddress(out), described);
+                guest.setBytes(wholeAddress(out), described);
                 return count;
             },
         },
@@ -4991,7 +4979,7 @@ export function createDrawingFunctions(
             host.setLastError?.(ERROR_NOACCESS);
             return 0;
         }
-        host.writeMemory(wholeAddress(out), shape);
+        guest.setBytes(wholeAddress(out), shape);
         return shape.length;
     };
 
@@ -5017,7 +5005,7 @@ export function createDrawingFunctions(
         const length = count >>> 0;
         const bytes = (string >>> 0) === 0 || length === 0
             ? new Uint8Array(0)
-            : host.readMemory(wholeAddress(string), wide ? length * 2 : length);
+            : guest.snapshot(wholeAddress(string), wide ? length * 2 : length);
         let text = '';
         if (!wide)
         {
@@ -5035,11 +5023,11 @@ export function createDrawingFunctions(
         const advances = (dx >>> 0) === 0 || length === 0
             ? spacedAdvances(dcOf(handle), text) ?? undefined
             : [...Array(length).keys()].map(index=>{
-                const word = host.readMemory(wholeAddress(dx) + index * 4, 4);
+                const word = guest.snapshot(wholeAddress(dx) + index * 4, 4);
                 return (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) | 0;
             });
         return interfaces.extTextOutA(handle >>> 0, x | 0, y | 0, options >>> 0,
-            (rect >>> 0) === 0 ? null : readRect(host, rect), text, advances) ? 1 : 0;
+            (rect >>> 0) === 0 ? null : readRect(guest, rect), text, advances) ? 1 : 0;
     };
     /**
      * Gives the drawing layer the clip the DC's record holds again: what

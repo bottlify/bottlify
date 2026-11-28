@@ -19,6 +19,7 @@ import { createComctlFunctions } from './functions.js';
 import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { surfaceForDdb, surfaceForDibSection } from '../../graphics/gdi/surface.js';
+import { guestOver } from '../common/guest.fixture.js';
 
 const ILC_MASK = 0x0001;
 const ILC_COLOR = 0x0000;
@@ -61,8 +62,7 @@ function machine(){
     const writeMemory = (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
         bytes.set(data, address);
     const gdi = createGdiFunctions({
-        readMemory, writeMemory,
-        readCString: ()=>'',
+        guest: guestOver(bytes),
         handles: { open: ()=>(handle += 4), close: ()=>undefined },
         surfaces: { allocate, free: ()=>undefined },
         graphics: {
